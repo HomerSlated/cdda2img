@@ -26,6 +26,10 @@
 *.sql
 *.sqlite
 
+# Private documentation #
+#########################
+*.pdf
+
 # OS generated files #
 ######################
 .DS_Store
