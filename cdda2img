@@ -1,8 +1,8 @@
 #!/bin/env python3
 # Name: cdda2img
-# Version: 0.1.0
+# Version: 0.1.1
 # Summary: Creates archive images of Red Book standard CD-DA Audio CDs
-# Requires: ffmpeg, sox
+# Requires: ffmpeg, ffmpeg-normalize, sox
 # Copyright: Copyright © 2025 HazenSparkle
 # License: GPLv3 or later
 
@@ -24,15 +24,17 @@ def sha256sum(path):
             h.update(chunk)
     return h.digest()
 
-def normalize_and_concat(tracklist, output_pcm):
+def normalize_and_concat(tracklist, output_pcm, pre_pcm):
     temp_files = []
     for i, track in enumerate(tracklist):
         temp = f'temp_track_{i}.wav'
         print(f'Processing track {i}')
         subprocess.run(['ffmpeg', '-hide_banner', '-loglevel', 'warning', '-y', '-guess_layout_max', '0', '-channel_layout', 'stereo', '-i', track, '-ar', '44100', '-ac', '2', '-sample_fmt', 's16', temp])
         temp_files.append(temp)
-    print(f'Normalising volume')
-    subprocess.run(['sox', '--norm=-3', '-V2'] + temp_files + [output_pcm])
+    print(f'Merging tracks')
+    subprocess.run(['sox', '-V2'] + temp_files + [pre_pcm])
+    print(f'Normalising merged tracks')
+    subprocess.run(['ffmpeg-normalize'] + [pre_pcm] + ['-o'] + [output_pcm] + ['-f', '-pr', '-t', '-5', '--auto-lower-loudness-target'])
     return temp_files
 
 def get_track_durations(temp_files):
@@ -46,13 +48,13 @@ def get_track_durations(temp_files):
             durations.append(frames_75)
     return durations
 
-def generate_toc(tracklist, durations):
+def generate_toc(tracklist, durations, output_pcm_name='extracted.wav'):
     toc = ['CD_DA\n']
     current_frame = 0
     for i, (track, frames) in enumerate(zip(tracklist, durations), start=1):
         title = os.path.splitext(os.path.basename(track))[0]
         timestamp = f'{current_frame // (75 * 60):02}:{(current_frame // 75) % 60:02}:{current_frame % 75:02}'
-        toc.append(f'TRACK AUDIO\n  CD_TEXT {{ TITLE "{title}" }}\n  FILE "{title}.wav" {timestamp}\n')
+        toc.append(f'TRACK AUDIO\n  CD_TEXT {{ TITLE "{title}" }}\n  FILE "{output_pcm_name}" {timestamp}\n')
         current_frame += frames
     return '\n'.join(toc).encode('utf-8')
 
@@ -60,8 +62,9 @@ def build_container(tracklist_file, output_file):
     with open(tracklist_file) as f:
         tracks = [line.strip() for line in f if line.strip()]
 
-    pcm_file = 'all_tracks.wav'
-    temp_files = normalize_and_concat(tracks, pcm_file)
+    pcm_file = '/tmp/all_tracks.wav'
+    pcm_pre = '/tmp/all_tracks_pre.wav'
+    temp_files = normalize_and_concat(tracks, pcm_pre, pcm_file)
     durations = get_track_durations(temp_files)
     toc_data = generate_toc(tracks, durations)
     toc_checksum = hashlib.sha256(toc_data).digest()
@@ -97,6 +100,7 @@ def build_container(tracklist_file, output_file):
     for f in temp_files:
         os.remove(f)
     os.remove(pcm_file)
+    os.remove(pcm_pre)
     print(f'✅ Container created: {output_file}')
 
 def read_header(file):
