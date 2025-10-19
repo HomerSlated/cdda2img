@@ -4,7 +4,7 @@
 
 ## Features
 
-- Create `.cdc` container files from WAV tracklists
+- Create `.rbi` container files from WAV tracklists
 - Extract TOC and PCM audio from containers
 - Built-in SHA-256 integrity checks
 - Unified CLI interface: `cdda2img c` to create, `cdda2img x` to extract

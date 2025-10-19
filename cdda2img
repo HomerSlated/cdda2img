@@ -154,9 +154,9 @@ if __name__ == "__main__":
 
     cmd = sys.argv[1]
     if cmd == "c":
-        build_container('tracklist.txt', 'Eliminator.cdc')
+        build_container('tracklist.txt', 'Eliminator.rbi')
     elif cmd == "x":
-        extract_data('Eliminator.cdc')
+        extract_data('Eliminator.rbi')
     else:
         print(f"Unknown command: {cmd}")
         sys.exit(1)
