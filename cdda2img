@@ -1,0 +1,162 @@
+#!/bin/env python3
+# Name: cdda2img
+# Version: 0.1.0
+# Summary: Creates archive images of Red Book standard CD-DA Audio CDs
+# Requires: ffmpeg, sox
+# Copyright: Copyright © 2025 HazenSparkle
+# License: GPLv3 or later
+
+import os
+import sys
+import struct
+import hashlib
+import datetime
+import subprocess
+import wave
+
+MAGIC = b'CDDAIMG'
+VERSION = 0x0100
+
+def sha256sum(path):
+    h = hashlib.sha256()
+    with open(path, 'rb') as f:
+        while chunk := f.read(8192):
+            h.update(chunk)
+    return h.digest()
+
+def normalize_and_concat(tracklist, output_pcm):
+    temp_files = []
+    for i, track in enumerate(tracklist):
+        temp = f'temp_track_{i}.wav'
+        print(f'Processing track {i}')
+        subprocess.run(['ffmpeg', '-hide_banner', '-loglevel', 'warning', '-y', '-guess_layout_max', '0', '-channel_layout', 'stereo', '-i', track, '-ar', '44100', '-ac', '2', '-sample_fmt', 's16', temp])
+        temp_files.append(temp)
+    print(f'Normalising volume')
+    subprocess.run(['sox', '--norm=-3', '-V2'] + temp_files + [output_pcm])
+    return temp_files
+
+def get_track_durations(temp_files):
+    durations = []
+    for track in temp_files:
+        with wave.open(track, 'rb') as w:
+            frames = w.getnframes()
+            rate = w.getframerate()
+            seconds = frames / rate
+            frames_75 = int(seconds * 75)
+            durations.append(frames_75)
+    return durations
+
+def generate_toc(tracklist, durations):
+    toc = ['CD_DA\n']
+    current_frame = 0
+    for i, (track, frames) in enumerate(zip(tracklist, durations), start=1):
+        title = os.path.splitext(os.path.basename(track))[0]
+        timestamp = f'{current_frame // (75 * 60):02}:{(current_frame // 75) % 60:02}:{current_frame % 75:02}'
+        toc.append(f'TRACK AUDIO\n  CD_TEXT {{ TITLE "{title}" }}\n  FILE "{title}.wav" {timestamp}\n')
+        current_frame += frames
+    return '\n'.join(toc).encode('utf-8')
+
+def build_container(tracklist_file, output_file):
+    with open(tracklist_file) as f:
+        tracks = [line.strip() for line in f if line.strip()]
+
+    pcm_file = 'all_tracks.wav'
+    temp_files = normalize_and_concat(tracks, pcm_file)
+    durations = get_track_durations(temp_files)
+    toc_data = generate_toc(tracks, durations)
+    toc_checksum = hashlib.sha256(toc_data).digest()
+    pcm_checksum = sha256sum(pcm_file)
+
+    created_str = f'Created by cdda2img v0.1 on {datetime.datetime.now().isoformat()}'
+    created_bytes = created_str.encode('utf-8')
+    metadata_len = len(created_bytes)
+
+    header = bytearray()
+    header += MAGIC
+    header += struct.pack('<H', VERSION)
+    header += struct.pack('<IIII', 0, 0, 0, 0)
+    header += toc_checksum
+    header += pcm_checksum
+    header += struct.pack('<H', metadata_len)
+    header += created_bytes
+
+    header_size = len(header)
+    toc_start = header_size
+    toc_end = toc_start + len(toc_data)
+    pcm_start = toc_end
+    pcm_end = pcm_start + os.path.getsize(pcm_file)
+
+    header[9:25] = struct.pack('<IIII', toc_start, toc_end, pcm_start, pcm_end)
+
+    with open(output_file, 'wb') as out:
+        out.write(header)
+        out.write(toc_data)
+        with open(pcm_file, 'rb') as pcm:
+            out.write(pcm.read())
+
+    for f in temp_files:
+        os.remove(f)
+    os.remove(pcm_file)
+    print(f'✅ Container created: {output_file}')
+
+def read_header(file):
+    with open(file, 'rb') as f:
+        fixed = f.read(91)
+        magic, version = struct.unpack('<7sH', fixed[:9])
+        if magic != b'CDDAIMG':
+            raise ValueError('Invalid container format')
+
+        toc_start, toc_end, pcm_start, pcm_end = struct.unpack('<IIII', fixed[9:25])
+        toc_checksum = fixed[25:57]
+        pcm_checksum = fixed[57:89]
+        metadata_len = struct.unpack('<H', fixed[89:91])[0]
+        created_by = f.read(metadata_len).decode('utf-8')
+
+        return {
+            'toc_start': toc_start,
+            'toc_end': toc_end,
+            'pcm_start': pcm_start,
+            'pcm_end': pcm_end,
+            'toc_checksum': toc_checksum,
+            'pcm_checksum': pcm_checksum,
+            'created_by': created_by
+        }
+
+def extract_data(container_file):
+    header = read_header(container_file)
+
+    with open(container_file, 'rb') as f:
+        f.seek(header['toc_start'])
+        toc_data = f.read(header['toc_end'] - header['toc_start'])
+
+        f.seek(header['pcm_start'])
+        pcm_data = f.read(header['pcm_end'] - header['pcm_start'])
+
+    if hashlib.sha256(toc_data).digest() != header['toc_checksum']:
+        print('⚠️ TOC checksum mismatch!')
+    if hashlib.sha256(pcm_data).digest() != header['pcm_checksum']:
+        print('⚠️ PCM checksum mismatch!')
+
+    with open('extracted.toc', 'wb') as f:
+        f.write(toc_data)
+    with open('extracted.wav', 'wb') as f:
+        f.write(pcm_data)
+
+    print(f'✅ Extracted TOC and PCM from {container_file}')
+    print(f'📄 TOC saved as extracted.toc')
+    print(f'🎵 PCM saved as extracted.wav')
+    print(f'🧾 Metadata: {header["created_by"]}')
+
+if __name__ == "__main__":
+    if len(sys.argv) < 2:
+        print("Usage: cdda2img <c|x>")
+        sys.exit(1)
+
+    cmd = sys.argv[1]
+    if cmd == "c":
+        build_container('tracklist.txt', 'Eliminator.cdc')
+    elif cmd == "x":
+        extract_data('Eliminator.cdc')
+    else:
+        print(f"Unknown command: {cmd}")
+        sys.exit(1)
