@@ -13,9 +13,41 @@ import hashlib
 import datetime
 import subprocess
 import wave
+import shutil
 
 MAGIC = b'CDDAIMG'
-VERSION = 0x0100
+VERSION_TUPLE = (0, 1, 1)
+VERSION_STR = '.'.join(map(str, VERSION_TUPLE))
+VERSION_HEX = (VERSION_TUPLE[0] << 8) | (VERSION_TUPLE[1] << 4) | VERSION_TUPLE[2]
+
+def resolve_temp_dir(min_required_bytes=100_000_000):
+    candidates = [os.getenv('TMP'), os.getenv('TEMP'), os.getenv('TMPDIR'), '/tmp']
+    for path in candidates:
+        if path and os.path.isdir(path) and os.access(path, os.R_OK | os.W_OK):
+            stat = shutil.disk_usage(path)
+            if stat.free >= min_required_bytes:
+                return path
+    raise RuntimeError("No suitable temporary directory found with enough space.")
+
+class TempFiles:
+    def __init__(self, base_dir):
+        self.base = base_dir
+        self.pcm_file = os.path.join(base_dir, "all_tracks.wav")
+        self.pcm_pre = os.path.join(base_dir, "all_tracks_pre.wav")
+        self._temp_tracks = []
+
+    def temp_track(self, i):
+        path = os.path.join(self.base, f"temp_track_{i}.wav")
+        self._temp_tracks.append(path)
+        return path
+
+    def cleanup(self):
+        for path in [self.pcm_file, self.pcm_pre] + self._temp_tracks:
+            try:
+                if os.path.exists(path):
+                    os.remove(path)
+            except Exception:
+                pass
 
 def sha256sum(path):
     h = hashlib.sha256()
@@ -24,17 +56,24 @@ def sha256sum(path):
             h.update(chunk)
     return h.digest()
 
-def normalize_and_concat(tracklist, output_pcm, pre_pcm):
+def normalize_and_concat(tracklist, output_pcm, pre_pcm, temp_mgr):
     temp_files = []
     for i, track in enumerate(tracklist):
-        temp = f'temp_track_{i}.wav'
+        temp = temp_mgr.temp_track(i)
         print(f'Processing track {i}')
-        subprocess.run(['ffmpeg', '-hide_banner', '-loglevel', 'warning', '-y', '-guess_layout_max', '0', '-channel_layout', 'stereo', '-i', track, '-ar', '44100', '-ac', '2', '-sample_fmt', 's16', temp])
+        subprocess.run([
+            'ffmpeg', '-hide_banner', '-loglevel', 'warning', '-y',
+            '-guess_layout_max', '0', '-channel_layout', 'stereo',
+            '-i', track, '-ar', '44100', '-ac', '2', '-sample_fmt', 's16', temp
+        ])
         temp_files.append(temp)
-    print(f'Merging tracks')
+    print('Merging tracks')
     subprocess.run(['sox', '-V2'] + temp_files + [pre_pcm])
-    print(f'Normalising merged tracks')
-    subprocess.run(['ffmpeg-normalize'] + [pre_pcm] + ['-o'] + [output_pcm] + ['-f', '-pr', '-t', '-5', '--auto-lower-loudness-target'])
+    print('Normalising merged tracks')
+    subprocess.run([
+        'ffmpeg-normalize', pre_pcm, '-o', output_pcm,
+        '-f', '-pr', '-t', '-5', '--auto-lower-loudness-target'
+    ])
     return temp_files
 
 def get_track_durations(temp_files):
@@ -59,24 +98,21 @@ def generate_toc(tracklist, durations, output_pcm_name='extracted.wav'):
     return '\n'.join(toc).encode('utf-8')
 
 def build_container(tracklist_file, output_file):
+    TEMP = TempFiles(resolve_temp_dir())
     with open(tracklist_file) as f:
         tracks = [line.strip() for line in f if line.strip()]
-
-    pcm_file = '/tmp/all_tracks.wav'
-    pcm_pre = '/tmp/all_tracks_pre.wav'
-    temp_files = normalize_and_concat(tracks, pcm_pre, pcm_file)
+    temp_files = normalize_and_concat(tracks, TEMP.pcm_file, TEMP.pcm_pre, TEMP)
     durations = get_track_durations(temp_files)
     toc_data = generate_toc(tracks, durations)
     toc_checksum = hashlib.sha256(toc_data).digest()
-    pcm_checksum = sha256sum(pcm_file)
-
-    created_str = f'Created by cdda2img v0.1 on {datetime.datetime.now().isoformat()}'
+    pcm_checksum = sha256sum(TEMP.pcm_file)
+    created_str = f"Created by cdda2img v{VERSION_STR} on {datetime.datetime.now().isoformat()}"
     created_bytes = created_str.encode('utf-8')
     metadata_len = len(created_bytes)
 
     header = bytearray()
     header += MAGIC
-    header += struct.pack('<H', VERSION)
+    header += struct.pack('<H', VERSION_HEX)
     header += struct.pack('<IIII', 0, 0, 0, 0)
     header += toc_checksum
     header += pcm_checksum
@@ -87,20 +123,16 @@ def build_container(tracklist_file, output_file):
     toc_start = header_size
     toc_end = toc_start + len(toc_data)
     pcm_start = toc_end
-    pcm_end = pcm_start + os.path.getsize(pcm_file)
-
+    pcm_end = pcm_start + os.path.getsize(TEMP.pcm_file)
     header[9:25] = struct.pack('<IIII', toc_start, toc_end, pcm_start, pcm_end)
 
     with open(output_file, 'wb') as out:
         out.write(header)
         out.write(toc_data)
-        with open(pcm_file, 'rb') as pcm:
+        with open(TEMP.pcm_file, 'rb') as pcm:
             out.write(pcm.read())
 
-    for f in temp_files:
-        os.remove(f)
-    os.remove(pcm_file)
-    os.remove(pcm_pre)
+    TEMP.cleanup()
     print(f'✅ Container created: {output_file}')
 
 def read_header(file):
@@ -109,30 +141,26 @@ def read_header(file):
         magic, version = struct.unpack('<7sH', fixed[:9])
         if magic != b'CDDAIMG':
             raise ValueError('Invalid container format')
-
         toc_start, toc_end, pcm_start, pcm_end = struct.unpack('<IIII', fixed[9:25])
         toc_checksum = fixed[25:57]
         pcm_checksum = fixed[57:89]
         metadata_len = struct.unpack('<H', fixed[89:91])[0]
         created_by = f.read(metadata_len).decode('utf-8')
-
-        return {
-            'toc_start': toc_start,
-            'toc_end': toc_end,
-            'pcm_start': pcm_start,
-            'pcm_end': pcm_end,
-            'toc_checksum': toc_checksum,
-            'pcm_checksum': pcm_checksum,
-            'created_by': created_by
-        }
+    return {
+        'toc_start': toc_start,
+        'toc_end': toc_end,
+        'pcm_start': pcm_start,
+        'pcm_end': pcm_end,
+        'toc_checksum': toc_checksum,
+        'pcm_checksum': pcm_checksum,
+        'created_by': created_by
+    }
 
 def extract_data(container_file):
     header = read_header(container_file)
-
     with open(container_file, 'rb') as f:
         f.seek(header['toc_start'])
         toc_data = f.read(header['toc_end'] - header['toc_start'])
-
         f.seek(header['pcm_start'])
         pcm_data = f.read(header['pcm_end'] - header['pcm_start'])
 
@@ -149,13 +177,12 @@ def extract_data(container_file):
     print(f'✅ Extracted TOC and PCM from {container_file}')
     print(f'📄 TOC saved as extracted.toc')
     print(f'🎵 PCM saved as extracted.wav')
-    print(f'🧾 Metadata: {header["created_by"]}')
+    print(f'🗞️ Metadata: {header["created_by"]}')
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:
         print("Usage: cdda2img <c|x>")
         sys.exit(1)
-
     cmd = sys.argv[1]
     if cmd == "c":
         build_container('tracklist.txt', 'Eliminator.rbi')
@@ -164,3 +191,4 @@ if __name__ == "__main__":
     else:
         print(f"Unknown command: {cmd}")
         sys.exit(1)
+
