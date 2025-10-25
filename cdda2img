@@ -6,6 +6,7 @@
 # Copyright: Copyright © 2025 HazenSparkle
 # License: GPLv3 or later
 
+import re
 import os
 import sys
 import struct
@@ -58,9 +59,17 @@ def sha256sum(path):
 
 def normalize_and_concat(tracklist, output_pcm, pre_pcm, temp_mgr):
     temp_files = []
-    for i, track in enumerate(tracklist):
+
+    for i, track in enumerate(tracklist, start=1):
         temp = temp_mgr.temp_track(i)
-        print(f'Processing track {i}')
+        # Extract base filename (no path)
+        basename = os.path.basename(track)
+        # Remove leading "NN " pattern (e.g., "01 ")
+        title = re.sub(r'^\d{2} ', '', basename)
+        # Remove file extension
+        title = os.path.splitext(title)[0]
+        # Print with padded track number
+        print(f"Processing track {i:2}: {title}")
         subprocess.run([
             'ffmpeg', '-hide_banner', '-loglevel', 'warning', '-y',
             '-guess_layout_max', '0', '-channel_layout', 'stereo',
