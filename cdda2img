@@ -1,6 +1,6 @@
 #!/bin/env python3
 # Name: cdda2img
-# Version: 0.1.1
+# Version: 0.1.2
 # Summary: Creates archive images of Red Book standard CD-DA Audio CDs
 # Requires: ffmpeg, ffmpeg-normalize, sox
 # Copyright: Copyright © 2025 HazenSparkle
@@ -16,8 +16,11 @@ import subprocess
 import wave
 import shutil
 
+STRICT_MODE = False  # Set to True for dev/debug mode
+USE_NORMALIZATION = True  # Set to False to disable ffmpeg-normalize
+
 MAGIC = b'CDDAIMG'
-VERSION_TUPLE = (0, 1, 1)
+VERSION_TUPLE = (0, 1, 2)
 VERSION_STR = '.'.join(map(str, VERSION_TUPLE))
 VERSION_HEX = (VERSION_TUPLE[0] << 8) | (VERSION_TUPLE[1] << 4) | VERSION_TUPLE[2]
 
@@ -50,12 +53,48 @@ class TempFiles:
             except Exception:
                 pass
 
-def sha256sum(path):
-    h = hashlib.sha256()
-    with open(path, 'rb') as f:
-        while chunk := f.read(8192):
-            h.update(chunk)
-    return h.digest()
+def sha256sum(source):
+    try:
+        if isinstance(source, str):
+            with open(source, 'rb') as f:
+                return hashlib.sha256(f.read()).digest()
+        elif isinstance(source, bytes):
+            return hashlib.sha256(source).digest()
+        else:
+            msg = "sha256sum expects a file path or bytes"
+            if STRICT_MODE:
+                raise TypeError(msg)
+            else:
+                print(f"\n❌ {msg}")
+                return False
+    except Exception as e:
+        if STRICT_MODE:
+            raise
+        else:
+            print(f"\n❌ Error in sha256sum: {e}")
+            return False
+
+def write_with_progress(filename, data, chunk_size=65536):
+    try:
+        total = len(data)
+        written = 0
+        with open(filename, "wb") as f:
+            while written < total:
+                chunk = data[written:written + chunk_size]
+                f.write(chunk)
+                written += len(chunk)
+
+                percent = (written / total) * 100
+                sys.stdout.write(f"\rExtracting PCM data: {percent:5.1f}%")
+                sys.stdout.flush()
+        print()  # newline after progress bar
+        return True
+    except Exception as e:
+        if STRICT_MODE:
+            raise
+        else:
+            print(f"\n❌ Error writing {filename}: {e}")
+            return False
 
 def normalize_and_concat(tracklist, output_pcm, pre_pcm, temp_mgr):
     temp_files = []
@@ -75,14 +114,18 @@ def normalize_and_concat(tracklist, output_pcm, pre_pcm, temp_mgr):
             '-guess_layout_max', '0', '-channel_layout', 'stereo',
             '-i', track, '-ar', '44100', '-ac', '2', '-sample_fmt', 's16', temp
         ])
+
         temp_files.append(temp)
-    print('Merging tracks')
+    print('Concatenating tracks')
     subprocess.run(['sox', '-V2'] + temp_files + [pre_pcm])
-    print('Normalising merged tracks')
-    subprocess.run([
-        'ffmpeg-normalize', pre_pcm, '-o', output_pcm,
-        '-f', '-pr', '-t', '-5', '--auto-lower-loudness-target'
-    ])
+    if USE_NORMALIZATION:
+        print('Normalising concatenated tracks')
+        subprocess.run([
+            'ffmpeg-normalize', pre_pcm, '-o', output_pcm,
+            '-f', '-pr', '-t', '-5', '--auto-lower-loudness-target'
+        ])
+    else:
+        shutil.copyfile(pre_pcm, output_pcm)
     return temp_files
 
 def get_track_durations(temp_files):
@@ -113,8 +156,12 @@ def build_container(tracklist_file, output_file):
     temp_files = normalize_and_concat(tracks, TEMP.pcm_file, TEMP.pcm_pre, TEMP)
     durations = get_track_durations(temp_files)
     toc_data = generate_toc(tracks, durations)
-    toc_checksum = hashlib.sha256(toc_data).digest()
+    toc_checksum = sha256sum(toc_data)
+    if toc_checksum is False:
+        return
     pcm_checksum = sha256sum(TEMP.pcm_file)
+    if pcm_checksum is False:
+        return
     created_str = f"Created by cdda2img v{VERSION_STR} on {datetime.datetime.now().isoformat()}"
     created_bytes = created_str.encode('utf-8')
     metadata_len = len(created_bytes)
@@ -177,15 +224,15 @@ def extract_data(container_file):
         print('⚠️ TOC checksum mismatch!')
     if hashlib.sha256(pcm_data).digest() != header['pcm_checksum']:
         print('⚠️ PCM checksum mismatch!')
-
     with open('extracted.toc', 'wb') as f:
         f.write(toc_data)
-    with open('extracted.wav', 'wb') as f:
-        f.write(pcm_data)
-
-    print(f'✅ Extracted TOC and PCM from {container_file}')
     print(f'📄 TOC saved as extracted.toc')
-    print(f'🎵 PCM saved as extracted.wav')
+
+    if write_with_progress("extracted.wav", pcm_data):
+        print(f'🎵 PCM saved as extracted.wav')
+    else:
+        return
+
     print(f'🗞️ Metadata: {header["created_by"]}')
 
 if __name__ == "__main__":
