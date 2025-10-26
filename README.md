@@ -5,7 +5,7 @@ of Red Book standard CD-DA Audio CDs. It supports volume normalization, TOC
 generation with CD-TEXT metadata, and checksum-verified container packaging.
 
 ## Goals
-Although the logical format of the physical media itself is clearly defined,by
+Although the logical format of the physical media itself is clearly defined, by
 both the Red Book standard and IEC 60908-1999, there is no formal definition
 for a CD-DA container format, beyond a raw sector copy of the disc. This is
 because the CD was not initially designed as a general purpose storage device,
