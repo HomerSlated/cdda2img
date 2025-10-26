@@ -20,9 +20,9 @@ STRICT_MODE = False  # Set to True for dev/debug mode
 USE_NORMALIZATION = False  # Set to False to disable ffmpeg-normalize
 
 MAGIC = b'RBI'
-VERSION_TUPLE = (0, 1, 3)
-VERSION_STR = '.'.join(map(str, VERSION_TUPLE))
-VERSION_HEX = (VERSION_TUPLE[0] << 8) | (VERSION_TUPLE[1] << 4) | VERSION_TUPLE[2]
+VERSION = "0.1.3"         # Code version
+FORMAT_VERSION = b'1.1'   # ASCII format version
+assert len(FORMAT_VERSION) == 3
 
 def resolve_temp_dir(min_required_bytes=100_000_000):
     candidates = [os.getenv('TMP'), os.getenv('TEMP'), os.getenv('TMPDIR'), '/tmp']
@@ -203,25 +203,27 @@ def build_container(tracklist_file, output_file):
     pcm_checksum = sha256sum(TEMP.pcm_file)
     if pcm_checksum is False:
         return
-    created_str = f"Created by cdda2img v{VERSION_STR} on {datetime.datetime.now().isoformat()}"
+    created_str = f"Created by cdda2img v{VERSION} on {datetime.datetime.now().isoformat()}"
     created_bytes = created_str.encode('utf-8')
     metadata_len = len(created_bytes)
 
     header = bytearray()
     header += MAGIC                      # 0–2
-    header += struct.pack('<H', VERSION_HEX)  # 3–4
-    header += struct.pack('<IIII', 0, 0, 0, 0)  # 5–21
-    header += toc_checksum
-    header += pcm_checksum
-    header += struct.pack('<H', metadata_len)
-    header += created_bytes
+    header += FORMAT_VERSION             # 3–5 (3 ASCII bytes)
+    header += struct.pack('<IIII', 0, 0, 0, 0)  # 6–21
+    header += toc_checksum               # 22–53 (32 bytes)
+    header += pcm_checksum               # 54–85 (32 bytes)
+    header += struct.pack('<H', metadata_len)  # 86–87
+    header += created_bytes              # 88+
 
     header_size = len(header)
     toc_start = header_size
     toc_end = toc_start + len(toc_data)
     pcm_start = toc_end
     pcm_end = pcm_start + os.path.getsize(TEMP.pcm_file)
-    header[5:21] = struct.pack('<IIII', toc_start, toc_end, pcm_start, pcm_end)
+
+    # Patch offsets into header
+    header[6:22] = struct.pack('<IIII', toc_start, toc_end, pcm_start, pcm_end)
 
     with open(output_file, 'wb') as out:
         out.write(header)
@@ -234,16 +236,28 @@ def build_container(tracklist_file, output_file):
 
 def read_header(file):
     with open(file, 'rb') as f:
-        fixed = f.read(87)
-        magic, version = struct.unpack('<3sH', fixed[:5])
+        fixed = f.read(88)  # 3 (MAGIC) + 3 (FORMAT_VERSION) + 16 (offsets) + 64 (checksums) + 2 (metadata_len)
+        magic = fixed[:3]
+        format_version = fixed[3:6]
         if magic != b'RBI':
             raise ValueError('Invalid container format')
-        toc_start, toc_end, pcm_start, pcm_end = struct.unpack('<IIII', fixed[5:21])
-        toc_checksum = fixed[21:53]
-        pcm_checksum = fixed[53:85]
-        metadata_len = struct.unpack('<H', fixed[85:87])[0]
-        created_by = f.read(metadata_len).decode('utf-8')
+        toc_start, toc_end, pcm_start, pcm_end = struct.unpack('<IIII', fixed[6:22])
+        toc_checksum = fixed[22:54]
+        pcm_checksum = fixed[54:86]
+        metadata_len = struct.unpack('<H', fixed[86:88])[0]
+
+        # Validate metadata length before reading
+        if metadata_len > 1024:
+            raise ValueError(f"Unrealistic metadata length: {metadata_len}")
+
+        created_by_bytes = f.read(metadata_len)
+        try:
+            created_by = created_by_bytes.decode('utf-8')
+        except UnicodeDecodeError:
+            raise ValueError(f"Invalid UTF-8 metadata: {created_by_bytes!r}")
+
     return {
+        'format_version': format_version.decode(),
         'toc_start': toc_start,
         'toc_end': toc_end,
         'pcm_start': pcm_start,
