@@ -33,6 +33,7 @@
 # Misc #
 ########
 *.old
+*.new
 
 # OS generated files #
 ######################
