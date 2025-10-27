@@ -31,10 +31,10 @@ with a TOC and a single WAV file.
 
 I'm aware that tools such as cdrdao can create BIN/CUE raw images of CD-DA
 discs, but I wanted something that could also master CD-DA disc image files
-from audio files, and also wanted a fully documented, open specification disc
-image format, that contains everything in a single file, rather than up to
+from audio files, and also wanted a fully documented, open specification audio
+disc image format, that contains everything in a single file, rather than up to
 three separate files (e.g. IMG/CCD/SUB). In other words, my goal is to create
-an ISO 9660 equivalent for CD-DA.
+the ISO 9660 equivalent to CD-DA.
 
 ## Features
 
