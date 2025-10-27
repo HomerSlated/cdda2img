@@ -38,7 +38,7 @@ the ISO 9660 equivalent to CD-DA.
 
 ## Features
 
-- Create `.rbi` container files from WAV tracklists
+- Create `.rbi` container files from a tracklist.txt and corresponding audio
 - Extract TOC and PCM audio from containers
 - Built-in SHA-256 integrity checks
 - Unified CLI interface: `cdda2img c` to create, `cdda2img x` to extract
@@ -47,6 +47,7 @@ the ISO 9660 equivalent to CD-DA.
 
 - Python 3.8+
 - ffmpeg
+- ffmpeg-normalize
 - sox
 
 ## License
