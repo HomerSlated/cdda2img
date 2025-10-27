@@ -96,28 +96,34 @@ def write_with_progress(filename, data, chunk_size=65536):
             print(f"\n❌ Error writing {filename}: {e}")
             return False
 
-def normalize_and_concat(tracklist, output_pcm, pre_pcm, temp_mgr):
-    temp_files = []
+import os
+import re
+import shutil
+import subprocess
 
+USE_NORMALIZATION = True  # Or pass this as a parameter
+
+def transcode_tracks(tracklist, temp_mgr):
+    temp_files = []
     for i, track in enumerate(tracklist, start=1):
         temp = temp_mgr.temp_track(i)
-        # Extract base filename (no path)
         basename = os.path.basename(track)
-        # Remove leading "NN " pattern (e.g., "01 ")
         title = re.sub(r'^\d{2} ', '', basename)
-        # Remove file extension
         title = os.path.splitext(title)[0]
-        # Print with padded track number
-        print(f"Processing track {i:2}: {title}")
+        print(f"Transcoding track {i:2}: {title}")
         subprocess.run([
             'ffmpeg', '-hide_banner', '-loglevel', 'warning', '-y',
             '-guess_layout_max', '0', '-channel_layout', 'stereo',
             '-i', track, '-ar', '44100', '-ac', '2', '-sample_fmt', 's16', temp
         ])
-
         temp_files.append(temp)
+    return temp_files
+
+def concat_tracks(temp_files, pre_pcm):
     print('Concatenating tracks')
     subprocess.run(['sox', '-V2'] + temp_files + [pre_pcm])
+
+def normalize_pcm(pre_pcm, output_pcm):
     if USE_NORMALIZATION:
         print('Normalising concatenated tracks')
         subprocess.run([
@@ -126,6 +132,11 @@ def normalize_and_concat(tracklist, output_pcm, pre_pcm, temp_mgr):
         ])
     else:
         shutil.copyfile(pre_pcm, output_pcm)
+
+def process_tracks(tracklist, output_pcm, pre_pcm, temp_mgr):
+    temp_files = transcode_tracks(tracklist, temp_mgr)
+    concat_tracks(temp_files, pre_pcm)
+    normalize_pcm(pre_pcm, output_pcm)
     return temp_files
 
 def get_track_durations(temp_files):
