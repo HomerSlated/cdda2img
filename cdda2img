@@ -40,8 +40,8 @@ class TempFiles:
         self.pcm_pre = os.path.join(base_dir, "all_tracks_pre.wav")
         self._temp_tracks = []
 
-    def temp_track(self, i):
-        path = os.path.join(self.base, f"temp_track_{i}.wav")
+    def temp_track(self, i, suffix):
+        path = os.path.join(self.base, f"temp_track_{i}{suffix}")
         self._temp_tracks.append(path)
         return path
 
@@ -96,28 +96,44 @@ def write_with_progress(filename, data, chunk_size=65536):
             print(f"\n❌ Error writing {filename}: {e}")
             return False
 
-import os
-import re
-import shutil
-import subprocess
-
-USE_NORMALIZATION = True  # Or pass this as a parameter
-
 def transcode_tracks(tracklist, temp_mgr):
-    temp_files = []
+    trans_files = []
     for i, track in enumerate(tracklist, start=1):
-        temp = temp_mgr.temp_track(i)
+        temp_trans = temp_mgr.temp_track(i, suffix='_trans.wav')
+
         basename = os.path.basename(track)
         title = re.sub(r'^\d{2} ', '', basename)
         title = os.path.splitext(title)[0]
         print(f"Transcoding track {i:2}: {title}")
+
         subprocess.run([
             'ffmpeg', '-hide_banner', '-loglevel', 'warning', '-y',
             '-guess_layout_max', '0', '-channel_layout', 'stereo',
-            '-i', track, '-ar', '44100', '-ac', '2', '-sample_fmt', 's16', temp
+            '-i', track, '-ar', '44100', '-ac', '2', '-sample_fmt', 's16', temp_trans
         ])
-        temp_files.append(temp)
-    return temp_files
+        trans_files.append(temp_trans)
+    return trans_files
+
+def trim_silence(trans_files, tracklist, temp_mgr):
+    trimmed_files = []
+    for i, (temp_trans, track) in enumerate(zip(trans_files, tracklist), start=1):
+        temp_trim = temp_mgr.temp_track(i, suffix='_trim.wav')
+
+        basename = os.path.basename(track)
+        title = re.sub(r'^\d{2} ', '', basename)
+        title = os.path.splitext(title)[0]
+
+        print(f"Trimming silence from track {i:2}: {title}")
+        subprocess.run([
+            'sox', temp_trans, temp_trim,
+            'silence', '1', '0.001', '0.1%',
+            'reverse',
+            'silence', '1', '0.001', '0.1%',
+            'reverse',
+            'pad', '0', '1'
+        ])
+        trimmed_files.append(temp_trim)
+    return trimmed_files
 
 def concat_tracks(temp_files, pre_pcm):
     print('Concatenating tracks')
@@ -134,10 +150,11 @@ def normalize_pcm(pre_pcm, output_pcm):
         shutil.copyfile(pre_pcm, output_pcm)
 
 def process_tracks(tracklist, output_pcm, pre_pcm, temp_mgr):
-    temp_files = transcode_tracks(tracklist, temp_mgr)
-    concat_tracks(temp_files, pre_pcm)
-    normalize_pcm(pre_pcm, output_pcm)
-    return temp_files
+    trans_files = transcode_tracks(tracklist, temp_mgr)         # Raw PCM from ffmpeg
+    trim_files = trim_silence(trans_files, tracklist, temp_mgr) # Silence-trimmed PCM from sox
+    concat_tracks(trim_files, pre_pcm)                          # sox concatenation
+    normalize_pcm(pre_pcm, output_pcm)                          # ffmpeg-normalize or copy
+    return trim_files
 
 def get_track_durations(temp_files):
     durations = []
@@ -205,7 +222,8 @@ def build_container(tracklist_file, output_file):
     TEMP = TempFiles(resolve_temp_dir())
     with open(tracklist_file) as f:
         tracks = [line.strip() for line in f if line.strip()]
-    temp_files = normalize_and_concat(tracks, TEMP.pcm_file, TEMP.pcm_pre, TEMP)
+    temp_files = process_tracks(tracks, TEMP.pcm_file, TEMP.pcm_pre, TEMP)
+#   temp_files = normalize_and_concat(tracks, TEMP.pcm_file, TEMP.pcm_pre, TEMP)
     durations = get_track_durations(temp_files)
     toc_data = generate_toc(tracks, durations)
     toc_checksum = sha256sum(toc_data)
