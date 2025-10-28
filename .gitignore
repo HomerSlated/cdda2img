@@ -36,6 +36,7 @@
 *.new
 *.bak
 *.rbi
+*.orig
 
 # OS generated files #
 ######################
