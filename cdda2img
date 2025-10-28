@@ -6,15 +6,15 @@
 # Copyright: Copyright © 2025 HazenSparkle
 # License: GPLv3 or later
 
-import re
-import os
-import sys
-import struct
-import hashlib
 import datetime
-import subprocess
-import wave
+import hashlib
+import os
+import re
 import shutil
+import struct
+import subprocess
+import sys
+import wave
 
 STRICT_MODE = False  # Set to True for dev/debug mode
 USE_NORMALIZATION = False  # Set to False to disable ffmpeg-normalize
@@ -24,14 +24,24 @@ VERSION = "0.1.3"         # Code version
 FORMAT_VERSION = b'1.1'   # ASCII format version
 assert len(FORMAT_VERSION) == 3
 
+
 def resolve_temp_dir(min_required_bytes=100_000_000):
-    candidates = [os.getenv('TMP'), os.getenv('TEMP'), os.getenv('TMPDIR'), '/tmp']
+    candidates = [
+        os.getenv('TMP'),
+        os.getenv('TEMP'),
+        os.getenv('TMPDIR'),
+        '/tmp',
+    ]
     for path in candidates:
         if path and os.path.isdir(path) and os.access(path, os.R_OK | os.W_OK):
             stat = shutil.disk_usage(path)
             if stat.free >= min_required_bytes:
                 return path
-    raise RuntimeError("No suitable temporary directory found with enough space.")
+    raise RuntimeError(
+        "No suitable temporary directory found "
+        "with enough space."
+    )
+
 
 class TempFiles:
     def __init__(self, base_dir):
@@ -53,6 +63,7 @@ class TempFiles:
             except Exception:
                 pass
 
+
 def sha256sum(source):
     try:
         if isinstance(source, str):
@@ -73,6 +84,7 @@ def sha256sum(source):
         else:
             print(f"\n❌ Error in sha256sum: {e}")
             return False
+
 
 def write_with_progress(filename, data, chunk_size=65536):
     try:
@@ -96,6 +108,7 @@ def write_with_progress(filename, data, chunk_size=65536):
             print(f"\n❌ Error writing {filename}: {e}")
             return False
 
+
 def transcode_tracks(tracklist, temp_mgr):
     trans_files = []
     for i, track in enumerate(tracklist, start=1):
@@ -109,14 +122,18 @@ def transcode_tracks(tracklist, temp_mgr):
         subprocess.run([
             'ffmpeg', '-hide_banner', '-loglevel', 'warning', '-y',
             '-guess_layout_max', '0', '-channel_layout', 'stereo',
-            '-i', track, '-ar', '44100', '-ac', '2', '-sample_fmt', 's16', temp_trans
+            '-i', track, '-ar', '44100', '-ac', '2', '-sample_fmt', 's16',
+            temp_trans
         ])
         trans_files.append(temp_trans)
     return trans_files
 
+
 def trim_silence(trans_files, tracklist, temp_mgr):
     trimmed_files = []
-    for i, (temp_trans, track) in enumerate(zip(trans_files, tracklist), start=1):
+    for i, (temp_trans, track) in enumerate(
+            zip(trans_files, tracklist), start=1
+    ):
         temp_trim = temp_mgr.temp_track(i, suffix='_trim.wav')
 
         basename = os.path.basename(track)
@@ -135,9 +152,11 @@ def trim_silence(trans_files, tracklist, temp_mgr):
         trimmed_files.append(temp_trim)
     return trimmed_files
 
+
 def concat_tracks(temp_files, pre_pcm):
     print('Concatenating tracks')
     subprocess.run(['sox', '-V2'] + temp_files + [pre_pcm])
+
 
 def normalize_pcm(pre_pcm, output_pcm):
     if USE_NORMALIZATION:
@@ -149,12 +168,18 @@ def normalize_pcm(pre_pcm, output_pcm):
     else:
         shutil.copyfile(pre_pcm, output_pcm)
 
+
 def process_tracks(tracklist, output_pcm, pre_pcm, temp_mgr):
-    trans_files = transcode_tracks(tracklist, temp_mgr)         # Raw PCM from ffmpeg
-    trim_files = trim_silence(trans_files, tracklist, temp_mgr) # Silence-trimmed PCM from sox
-    concat_tracks(trim_files, pre_pcm)                          # sox concatenation
-    normalize_pcm(pre_pcm, output_pcm)                          # ffmpeg-normalize or copy
+    # Raw PCM from ffmpeg
+    trans_files = transcode_tracks(tracklist, temp_mgr)
+    # Silence-trimmed PCM from sox
+    trim_files = trim_silence(trans_files, tracklist, temp_mgr)
+    # sox concatenation
+    concat_tracks(trim_files, pre_pcm)
+    # ffmpeg-normalize or copy
+    normalize_pcm(pre_pcm, output_pcm)
     return trim_files
+
 
 def get_track_durations(temp_files):
     durations = []
@@ -167,6 +192,7 @@ def get_track_durations(temp_files):
             durations.append(frames_75)
     return durations
 
+
 def generate_toc(tracklist, durations, output_pcm_name='extracted.wav'):
     def frames_to_timestamp(frames):
         minutes = frames // (75 * 60)
@@ -177,7 +203,8 @@ def generate_toc(tracklist, durations, output_pcm_name='extracted.wav'):
     def sanitize(text):
         # Replace problematic UTF-8 characters
         replacements = {
-            '’': "'", '‘': "'", '“': '"', '”': '"', '–': '-', '—': '-', '…': '...',
+            '’': "'", '‘': "'", '“': '"', '”': '"', '–': '-', '—': '-',
+            '…': '...',
         }
         for bad, good in replacements.items():
             text = text.replace(bad, good)
@@ -218,12 +245,12 @@ def generate_toc(tracklist, durations, output_pcm_name='extracted.wav'):
 
     return '\n'.join(toc).encode('utf-8')
 
+
 def build_container(tracklist_file, output_file):
     TEMP = TempFiles(resolve_temp_dir())
     with open(tracklist_file) as f:
         tracks = [line.strip() for line in f if line.strip()]
     temp_files = process_tracks(tracks, TEMP.pcm_file, TEMP.pcm_pre, TEMP)
-#   temp_files = normalize_and_concat(tracks, TEMP.pcm_file, TEMP.pcm_pre, TEMP)
     durations = get_track_durations(temp_files)
     toc_data = generate_toc(tracks, durations)
     toc_checksum = sha256sum(toc_data)
@@ -232,7 +259,10 @@ def build_container(tracklist_file, output_file):
     pcm_checksum = sha256sum(TEMP.pcm_file)
     if pcm_checksum is False:
         return
-    created_str = f"Created by cdda2img v{VERSION} on {datetime.datetime.now().isoformat()}"
+    created_str = (
+       f"Created by cdda2img v{VERSION} on "
+       f"{datetime.datetime.now().isoformat()}"
+    )
     created_bytes = created_str.encode('utf-8')
     metadata_len = len(created_bytes)
 
@@ -263,14 +293,19 @@ def build_container(tracklist_file, output_file):
     TEMP.cleanup()
     print(f'✅ Container created: {output_file}')
 
+
 def read_header(file):
     with open(file, 'rb') as f:
-        fixed = f.read(88)  # 3 (MAGIC) + 3 (FORMAT_VERSION) + 16 (offsets) + 64 (checksums) + 2 (metadata_len)
+        # 3 (MAGIC) + 3 (FORMAT_VERSION) + 16 (offsets) + 64 (checksums)
+        # + 2 (metadata_len)
+        fixed = f.read(88)
         magic = fixed[:3]
         format_version = fixed[3:6]
         if magic != b'RBI':
             raise ValueError('Invalid container format')
-        toc_start, toc_end, pcm_start, pcm_end = struct.unpack('<IIII', fixed[6:22])
+        toc_start, toc_end, pcm_start, pcm_end = struct.unpack(
+            '<IIII', fixed[6:22]
+        )
         toc_checksum = fixed[22:54]
         pcm_checksum = fixed[54:86]
         metadata_len = struct.unpack('<H', fixed[86:88])[0]
@@ -296,6 +331,7 @@ def read_header(file):
         'created_by': created_by
     }
 
+
 def extract_data(container_file):
     header = read_header(container_file)
     with open(container_file, 'rb') as f:
@@ -319,6 +355,7 @@ def extract_data(container_file):
 
     print(f'🗞️ Metadata: {header["created_by"]}')
 
+
 if __name__ == "__main__":
     if len(sys.argv) < 2:
         print("Usage: cdda2img <c|x>")
@@ -331,4 +368,3 @@ if __name__ == "__main__":
     else:
         print(f"Unknown command: {cmd}")
         sys.exit(1)
-
