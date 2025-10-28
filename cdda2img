@@ -132,7 +132,7 @@ def transcode_tracks(tracklist, temp_mgr):
 def trim_silence(trans_files, tracklist, temp_mgr):
     trimmed_files = []
     for i, (temp_trans, track) in enumerate(
-            zip(trans_files, tracklist), start=1
+        zip(trans_files, tracklist), start=1
     ):
         temp_trim = temp_mgr.temp_track(i, suffix='_trim.wav')
 
