@@ -1,0 +1,370 @@
+#!/bin/env python3
+# Name: cdda2img
+# Version: 0.1.3
+# Summary: Creates archive images of Red Book standard CD-DA Audio CDs
+# Requires: ffmpeg, ffmpeg-normalize, sox
+# Copyright: Copyright © 2025 HazenSparkle
+# License: GPLv3 or later
+
+import datetime
+import hashlib
+import os
+import re
+import shutil
+import struct
+import subprocess
+import sys
+import wave
+
+STRICT_MODE = False  # Set to True for dev/debug mode
+USE_NORMALIZATION = False  # Set to False to disable ffmpeg-normalize
+
+MAGIC = b'RBI'
+VERSION = "0.1.3"         # Code version
+FORMAT_VERSION = b'1.1'   # ASCII format version
+assert len(FORMAT_VERSION) == 3
+
+
+def resolve_temp_dir(min_required_bytes=100_000_000):
+    candidates = [
+        os.getenv('TMP'),
+        os.getenv('TEMP'),
+        os.getenv('TMPDIR'),
+        '/tmp',
+    ]
+    for path in candidates:
+        if path and os.path.isdir(path) and os.access(path, os.R_OK | os.W_OK):
+            stat = shutil.disk_usage(path)
+            if stat.free >= min_required_bytes:
+                return path
+    raise RuntimeError(
+        "No suitable temporary directory found "
+        "with enough space."
+    )
+
+
+class TempFiles:
+    def __init__(self, base_dir):
+        self.base = base_dir
+        self.pcm_file = os.path.join(base_dir, "all_tracks.wav")
+        self.pcm_pre = os.path.join(base_dir, "all_tracks_pre.wav")
+        self._temp_tracks = []
+
+    def temp_track(self, i, suffix):
+        path = os.path.join(self.base, f"temp_track_{i}{suffix}")
+        self._temp_tracks.append(path)
+        return path
+
+    def cleanup(self):
+        for path in [self.pcm_file, self.pcm_pre] + self._temp_tracks:
+            try:
+                if os.path.exists(path):
+                    os.remove(path)
+            except Exception:
+                pass
+
+
+def sha256sum(source):
+    try:
+        if isinstance(source, str):
+            with open(source, 'rb') as f:
+                return hashlib.sha256(f.read()).digest()
+        elif isinstance(source, bytes):
+            return hashlib.sha256(source).digest()
+        else:
+            msg = "sha256sum expects a file path or bytes"
+            if STRICT_MODE:
+                raise TypeError(msg)
+            else:
+                print(f"\n❌ {msg}")
+                return False
+    except Exception as e:
+        if STRICT_MODE:
+            raise
+        else:
+            print(f"\n❌ Error in sha256sum: {e}")
+            return False
+
+
+def write_with_progress(filename, data, chunk_size=65536):
+    try:
+        total = len(data)
+        written = 0
+        with open(filename, "wb") as f:
+            while written < total:
+                chunk = data[written:written + chunk_size]
+                f.write(chunk)
+                written += len(chunk)
+
+                percent = (written / total) * 100
+                sys.stdout.write(f"\rExtracting PCM data: {percent:5.1f}%")
+                sys.stdout.flush()
+        print()  # newline after progress bar
+        return True
+    except Exception as e:
+        if STRICT_MODE:
+            raise
+        else:
+            print(f"\n❌ Error writing {filename}: {e}")
+            return False
+
+
+def transcode_tracks(tracklist, temp_mgr):
+    trans_files = []
+    for i, track in enumerate(tracklist, start=1):
+        temp_trans = temp_mgr.temp_track(i, suffix='_trans.wav')
+
+        basename = os.path.basename(track)
+        title = re.sub(r'^\d{2} ', '', basename)
+        title = os.path.splitext(title)[0]
+        print(f"Transcoding track {i:2}: {title}")
+
+        subprocess.run([
+            'ffmpeg', '-hide_banner', '-loglevel', 'warning', '-y',
+            '-guess_layout_max', '0', '-channel_layout', 'stereo',
+            '-i', track, '-ar', '44100', '-ac', '2', '-sample_fmt', 's16',
+            temp_trans
+        ])
+        trans_files.append(temp_trans)
+    return trans_files
+
+
+def trim_silence(trans_files, tracklist, temp_mgr):
+    trimmed_files = []
+    for i, (temp_trans, track) in enumerate(
+        zip(trans_files, tracklist), start=1
+    ):
+        temp_trim = temp_mgr.temp_track(i, suffix='_trim.wav')
+
+        basename = os.path.basename(track)
+        title = re.sub(r'^\d{2} ', '', basename)
+        title = os.path.splitext(title)[0]
+
+        print(f"Trimming silence from track {i:2}: {title}")
+        subprocess.run([
+            'sox', temp_trans, temp_trim,
+            'silence', '1', '0.001', '0.1%',
+            'reverse',
+            'silence', '1', '0.001', '0.1%',
+            'reverse',
+            'pad', '0', '1'
+        ])
+        trimmed_files.append(temp_trim)
+    return trimmed_files
+
+
+def concat_tracks(temp_files, pre_pcm):
+    print('Concatenating tracks')
+    subprocess.run(['sox', '-V2'] + temp_files + [pre_pcm])
+
+
+def normalize_pcm(pre_pcm, output_pcm):
+    if USE_NORMALIZATION:
+        print('Normalising concatenated tracks')
+        subprocess.run([
+            'ffmpeg-normalize', pre_pcm, '-o', output_pcm,
+            '-f', '-pr', '-t', '-5', '--auto-lower-loudness-target'
+        ])
+    else:
+        shutil.copyfile(pre_pcm, output_pcm)
+
+
+def process_tracks(tracklist, output_pcm, pre_pcm, temp_mgr):
+    # Raw PCM from ffmpeg
+    trans_files = transcode_tracks(tracklist, temp_mgr)
+    # Silence-trimmed PCM from sox
+    trim_files = trim_silence(trans_files, tracklist, temp_mgr)
+    # sox concatenation
+    concat_tracks(trim_files, pre_pcm)
+    # ffmpeg-normalize or copy
+    normalize_pcm(pre_pcm, output_pcm)
+    return trim_files
+
+
+def get_track_durations(temp_files):
+    durations = []
+    for track in temp_files:
+        with wave.open(track, 'rb') as w:
+            frames = w.getnframes()
+            rate = w.getframerate()
+            seconds = frames / rate
+            frames_75 = int(seconds * 75)
+            durations.append(frames_75)
+    return durations
+
+
+def generate_toc(tracklist, durations, output_pcm_name='extracted.wav'):
+    def frames_to_timestamp(frames):
+        minutes = frames // (75 * 60)
+        seconds = (frames // 75) % 60
+        subframes = frames % 75
+        return f'{minutes:02}:{seconds:02}:{subframes:02}'
+
+    def sanitize(text):
+        # Replace problematic UTF-8 characters
+        replacements = {
+            '’': "'", '‘': "'", '“': '"', '”': '"', '–': '-', '—': '-',
+            '…': '...',
+        }
+        for bad, good in replacements.items():
+            text = text.replace(bad, good)
+        # Remove leading track number (e.g. "01 ")
+        text = re.sub(r'^\d{2} ', '', text)
+        # Remove any remaining non-ASCII characters
+        return re.sub(r'[^\x00-\x7F]+', '', text)
+
+    toc = ['CD_DA\n']
+
+    # Album-level CD_TEXT
+    toc.append('CD_TEXT {')
+    toc.append('  LANGUAGE_MAP {\n    0: 9\n  }')
+    toc.append('  LANGUAGE 0 {')
+    toc.append('    TITLE "Unknown Album"')
+    toc.append('    PERFORMER "Unknown Performer"')
+    toc.append('  }')
+    toc.append('}\n')
+
+    current_frame = 0
+    for i, (track, frames) in enumerate(zip(tracklist, durations), start=1):
+        title = sanitize(os.path.splitext(os.path.basename(track))[0])
+        start_ts = frames_to_timestamp(current_frame)
+        duration_ts = frames_to_timestamp(frames)
+        toc.append(f'// Track {i}')
+        toc.append('TRACK AUDIO')
+        toc.append('NO COPY')
+        toc.append('NO PRE_EMPHASIS')
+        toc.append('TWO_CHANNEL_AUDIO')
+        toc.append('CD_TEXT {')
+        toc.append('  LANGUAGE 0 {')
+        toc.append(f'    TITLE "{title}"')
+        toc.append('    PERFORMER "Unknown Performer"')
+        toc.append('  }')
+        toc.append('}')
+        toc.append(f'FILE "{output_pcm_name}" {start_ts} {duration_ts}\n')
+        current_frame += frames
+
+    return '\n'.join(toc).encode('utf-8')
+
+
+def build_container(tracklist_file, output_file):
+    TEMP = TempFiles(resolve_temp_dir())
+    with open(tracklist_file) as f:
+        tracks = [line.strip() for line in f if line.strip()]
+    temp_files = process_tracks(tracks, TEMP.pcm_file, TEMP.pcm_pre, TEMP)
+    durations = get_track_durations(temp_files)
+    toc_data = generate_toc(tracks, durations)
+    toc_checksum = sha256sum(toc_data)
+    if toc_checksum is False:
+        return
+    pcm_checksum = sha256sum(TEMP.pcm_file)
+    if pcm_checksum is False:
+        return
+    created_str = (
+       f"Created by cdda2img v{VERSION} on "
+       f"{datetime.datetime.now().isoformat()}"
+    )
+    created_bytes = created_str.encode('utf-8')
+    metadata_len = len(created_bytes)
+
+    header = bytearray()
+    header += MAGIC                      # 0–2
+    header += FORMAT_VERSION             # 3–5 (3 ASCII bytes)
+    header += struct.pack('<IIII', 0, 0, 0, 0)  # 6–21
+    header += toc_checksum               # 22–53 (32 bytes)
+    header += pcm_checksum               # 54–85 (32 bytes)
+    header += struct.pack('<H', metadata_len)  # 86–87
+    header += created_bytes              # 88+
+
+    header_size = len(header)
+    toc_start = header_size
+    toc_end = toc_start + len(toc_data)
+    pcm_start = toc_end
+    pcm_end = pcm_start + os.path.getsize(TEMP.pcm_file)
+
+    # Patch offsets into header
+    header[6:22] = struct.pack('<IIII', toc_start, toc_end, pcm_start, pcm_end)
+
+    with open(output_file, 'wb') as out:
+        out.write(header)
+        out.write(toc_data)
+        with open(TEMP.pcm_file, 'rb') as pcm:
+            out.write(pcm.read())
+
+    TEMP.cleanup()
+    print(f'✅ Container created: {output_file}')
+
+
+def read_header(file):
+    with open(file, 'rb') as f:
+        # 3 (MAGIC) + 3 (FORMAT_VERSION) + 16 (offsets) + 64 (checksums)
+        # + 2 (metadata_len)
+        fixed = f.read(88)
+        magic = fixed[:3]
+        format_version = fixed[3:6]
+        if magic != b'RBI':
+            raise ValueError('Invalid container format')
+        toc_start, toc_end, pcm_start, pcm_end = struct.unpack(
+            '<IIII', fixed[6:22]
+        )
+        toc_checksum = fixed[22:54]
+        pcm_checksum = fixed[54:86]
+        metadata_len = struct.unpack('<H', fixed[86:88])[0]
+
+        # Validate metadata length before reading
+        if metadata_len > 1024:
+            raise ValueError(f"Unrealistic metadata length: {metadata_len}")
+
+        created_by_bytes = f.read(metadata_len)
+        try:
+            created_by = created_by_bytes.decode('utf-8')
+        except UnicodeDecodeError:
+            raise ValueError(f"Invalid UTF-8 metadata: {created_by_bytes!r}")
+
+    return {
+        'format_version': format_version.decode(),
+        'toc_start': toc_start,
+        'toc_end': toc_end,
+        'pcm_start': pcm_start,
+        'pcm_end': pcm_end,
+        'toc_checksum': toc_checksum,
+        'pcm_checksum': pcm_checksum,
+        'created_by': created_by
+    }
+
+
+def extract_data(container_file):
+    header = read_header(container_file)
+    with open(container_file, 'rb') as f:
+        f.seek(header['toc_start'])
+        toc_data = f.read(header['toc_end'] - header['toc_start'])
+        f.seek(header['pcm_start'])
+        pcm_data = f.read(header['pcm_end'] - header['pcm_start'])
+
+    if hashlib.sha256(toc_data).digest() != header['toc_checksum']:
+        print('⚠️ TOC checksum mismatch!')
+    if hashlib.sha256(pcm_data).digest() != header['pcm_checksum']:
+        print('⚠️ PCM checksum mismatch!')
+    with open('extracted.toc', 'wb') as f:
+        f.write(toc_data)
+    print('📄 TOC saved as extracted.toc')
+
+    if write_with_progress("extracted.wav", pcm_data):
+        print('🎵 PCM saved as extracted.wav')
+    else:
+        return
+
+    print(f'🗞️ Metadata: {header["created_by"]}')
+
+
+if __name__ == "__main__":
+    if len(sys.argv) < 2:
+        print("Usage: cdda2img <c|x>")
+        sys.exit(1)
+    cmd = sys.argv[1]
+    if cmd == "c":
+        build_container('tracklist.txt', 'Eliminator.rbi')
+    elif cmd == "x":
+        extract_data('Eliminator.rbi')
+    else:
+        print(f"Unknown command: {cmd}")
+        sys.exit(1)
