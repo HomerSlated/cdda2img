@@ -39,6 +39,7 @@ docs/source
 *.old
 *.new
 *.bak
+*.fish
 *.rbi
 *.orig
 *.vimrc
