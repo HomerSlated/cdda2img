@@ -57,4 +57,3 @@ GPLv3 or later
 ---
 
 *Copyright © 2025 HazenSparkle*
-

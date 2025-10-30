@@ -61,4 +61,3 @@
 - `metadata_len` must be ≤ 1024
 - `created_by` must decode as valid UTF-8
 - Checksums must match actual TOC and PCM data
-
