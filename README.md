@@ -5,8 +5,8 @@ of Red Book standard CD-DA Audio CDs. It supports volume normalization, TOC
 generation with CD-TEXT metadata, and checksum-verified container packaging.
 
 ## Goals
-Although the logical format of the physical media itself is clearly defined, by
-both the Red Book standard and IEC 60908-1999, there is no formal definition
+Although the logical format of the physical media itself is clearly defined,
+both by the Red Book standard and IEC 60908-1999, there is no formal definition
 for a CD-DA container format, beyond a raw sector copy of the disc. This is
 because the CD was not initially designed as a general purpose storage device,
 so CD-DA does not contain a filesystem, such as the CD-Rom ISO 9660 introduced
@@ -38,10 +38,9 @@ the ISO 9660 equivalent to CD-DA.
 
 ## Features
 
-- Create `.rbi` container files from a tracklist.txt and corresponding audio
-- Extract TOC and PCM audio from containers
+- Create RBI archive images from a directory of valid audio files
+- Extract the TOC and PCM audio from those images
 - Built-in SHA-256 integrity checks
-- Unified CLI interface: `cdda2img c` to create, `cdda2img x` to extract
 
 ## Requirements
 
@@ -56,4 +55,4 @@ GPLv3 or later
 
 ---
 
-*Copyright © 2025 HazenSparkle*
+*Copyright © 2025 Homer*
