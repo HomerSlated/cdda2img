@@ -43,6 +43,7 @@ docs/source
 *.rbi
 *.orig
 *.vimrc
+*.wav
 private/
 
 # OS generated files #
