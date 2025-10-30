@@ -6,7 +6,7 @@ This music is all licensed CC0 1.0 Universal Public Domain Dedication.
 
 All artists are named in the respective file's metadata.
 
-Please see https://freepd.com for further details. 
+Please see https://freepd.com for further details.
 
 - Tag information for "Action Strike.mp3":
   - Title             Action Strike
@@ -70,4 +70,3 @@ Please see https://freepd.com for further details.
   - Encoder settings  Lavf60.16.100
   - Composer          Rafael Krux
   - Copyright         CC0
-
