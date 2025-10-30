@@ -1,7 +1,7 @@
 docs/source
 
 # From https://raw.githubusercontent.com/github/gitignore/main/Python.gitignore
-# And elsewhere ...
+# And https://gist.githubusercontent.com/octocat/9257657/raw/3f9569e65df83a7b328b39a091f0ce9c6efc6429/.gitignore
 
 # Compiled source #
 ###################
@@ -34,7 +34,6 @@ docs/source
 #########################
 *.pdf
 
-
 # Misc #
 ########
 *.old
@@ -42,6 +41,7 @@ docs/source
 *.bak
 *.rbi
 *.orig
+*.vimrc
 private/
 
 # OS generated files #
