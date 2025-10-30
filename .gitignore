@@ -40,7 +40,6 @@ docs/source
 *.new
 *.bak
 *.fish
-*.ghj
 *.rbi
 *.orig
 *.vimrc
