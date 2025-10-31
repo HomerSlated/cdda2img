@@ -4,13 +4,10 @@ import av
 from av.audio.frame import AudioFrame
 
 
-def transcode_audio(input_path: Path, output_path: Path) -> None:
-    if not input_path.is_file():
-        raise FileNotFoundError
-    if not output_path.parent.exists():
-        raise FileNotFoundError
+def transcode_audio(input_path: Path, output_dir: Path) -> None:
+    output_dir.mkdir(parents=True, exist_ok=False)
 
-    print(f"Transcoding: {input_path.name} → {output_path.name}")
+    output_path = output_dir / input_path.with_suffix(".wav").name
 
     with av.open(str(input_path)) as container:
         input_stream = container.streams.audio[0]
@@ -27,9 +24,9 @@ def transcode_audio(input_path: Path, output_path: Path) -> None:
             for packet in container.demux(input_stream):
                 for frame in packet.decode():
                     if not isinstance(frame, AudioFrame):
-                        continue  # Skip non-audio frames
-                    frame.pts = 0  # or omit this line entirely
+                        continue
+                    frame.pts = 0
                     for resampled in resampler.resample(frame):
                         output.mux(output_stream.encode(resampled))
 
-            output.mux(output_stream.encode(None))  # flush
+            output.mux(output_stream.encode(None))
