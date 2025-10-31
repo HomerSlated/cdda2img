@@ -1,7 +1,7 @@
 import sys
 from pathlib import Path
 
-from transcode import transcode_audio
+from cdda2img.transcode import transcode_audio
 
 
 def main():
