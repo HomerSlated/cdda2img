@@ -1,0 +1,1 @@
+{"config":{"lang":["en"],"separator":"[\\s\\-]+","pipeline":["stopWordFilter"]},"docs":[{"location":"","title":"cdda2img","text":"<p>Creates archive images of Red Book standard CD-DA Audio CDs</p>"}]}
