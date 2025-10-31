@@ -1,7 +1,7 @@
 import sys
 from pathlib import Path
 
-from cdda2img.cdda2img import transcode_audio
+from cdda2img.transcode import transcode_audio
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
