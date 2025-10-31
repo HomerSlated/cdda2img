@@ -1,6 +1,7 @@
 from pathlib import Path
 
 import av
+from av.audio.frame import AudioFrame
 
 
 def transcode_audio(input_path: Path, output_path: Path) -> None:
@@ -25,7 +26,9 @@ def transcode_audio(input_path: Path, output_path: Path) -> None:
 
             for packet in container.demux(input_stream):
                 for frame in packet.decode():
-                    frame.pts = None
+                    if not isinstance(frame, AudioFrame):
+                        continue  # Skip non-audio frames
+                    frame.pts = 0  # or omit this line entirely
                     for resampled in resampler.resample(frame):
                         output.mux(output_stream.encode(resampled))
 
