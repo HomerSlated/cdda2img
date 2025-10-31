@@ -5,11 +5,10 @@ site_description: Creates archive images of Red Book standard CD-DA Audio CDs
 site_author: Homer
 edit_uri: edit/main/docs/
 repo_name: HomerSlated/cdda2img
-copyright: Maintained by <a href="https://HomerSlated.com">HomerSlated</a>.
+copyright: Maintained by <a href="https://www.hazensparkle.co.uk">Homer</a>.
 
 nav:
   - Home: index.md
-  - Modules: modules.md
 plugins:
   - search
   - mkdocstrings:
@@ -43,7 +42,7 @@ extra:
     - icon: fontawesome/brands/github
       link: https://github.com/HomerSlated/cdda2img
     - icon: fontawesome/brands/python
-      link: https://pypi.org/project/cdda2img
+      link: https://not-on-pypi.org/project/cdda2img
 
 markdown_extensions:
   - toc:
