@@ -19,6 +19,7 @@ classifiers = [
 ]
 dependencies = [
     "av>=16.0.1",
+    "ortools>=9.14.6206",
 ]
 
 [project.urls]
