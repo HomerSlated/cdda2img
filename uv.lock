@@ -85,6 +85,7 @@ version = "0.1.3"
 source = { editable = "." }
 dependencies = [
     { name = "av" },
+    { name = "ffmpeg-normalize" },
     { name = "ortools" },
 ]
 
@@ -103,6 +104,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "av", specifier = ">=16.0.1" },
+    { name = "ffmpeg-normalize", specifier = ">=1.36.0" },
     { name = "ortools", specifier = ">=9.14.6206" },
 ]
 
@@ -208,12 +210,52 @@ wheels = [
 ]
 
 [[package]]
+name = "colorlog"
+version = "6.7.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "colorama", marker = "sys_platform == 'win32'" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/78/6b/4e5481ddcdb9c255b2715f54c863629f1543e97bc8c309d1c5c131ad14f2/colorlog-6.7.0.tar.gz", hash = "sha256:bd94bd21c1e13fac7bd3153f4bc3a7dc0eb0974b8bc2fdf1a989e474f6e582e5", size = 29920, upload-time = "2022-08-29T14:51:27.945Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/58/43/a363c213224448f9e194d626221123ce00e3fb3d87c0c22aed52b620bdd1/colorlog-6.7.0-py2.py3-none-any.whl", hash = "sha256:0d33ca236784a1ba3ff9c532d4964126d8a2c44f1f0cb1d2b0728196f512f662", size = 11286, upload-time = "2022-08-29T14:51:26.426Z" },
+]
+
+[[package]]
 name = "distlib"
 version = "0.4.0"
 source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/96/8e/709914eb2b5749865801041647dc7f4e6d00b549cfe88b65ca192995f07c/distlib-0.4.0.tar.gz", hash = "sha256:feec40075be03a04501a973d81f633735b4b69f98b05450592310c0f401a4e0d", size = 614605, upload-time = "2025-07-17T16:52:00.465Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/33/6b/e0547afaf41bf2c42e52430072fa5658766e3d65bd4b03a563d1b6336f57/distlib-0.4.0-py2.py3-none-any.whl", hash = "sha256:9659f7d87e46584a30b5780e43ac7a2143098441670ff0a49d5f9034c54a6c16", size = 469047, upload-time = "2025-07-17T16:51:58.613Z" },
+]
+
+[[package]]
+name = "ffmpeg-normalize"
+version = "1.36.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "colorama", marker = "sys_platform == 'win32'" },
+    { name = "colorlog" },
+    { name = "ffmpeg-progress-yield" },
+    { name = "mutagen" },
+    { name = "tqdm" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/02/d5/5bb928eebe744763b3c0fe4827dd5149d10d4f81973d1bcf6f8d8395d4bb/ffmpeg_normalize-1.36.0.tar.gz", hash = "sha256:f3981f4c61cbb0bb5e1dd55dcbf341173b5aec925f8de0850607a51ce2a0347f", size = 31852, upload-time = "2025-11-03T11:52:08.756Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/25/13/a0c8648bc577bdbe35b2a4558f742ca29d153d93c8ebefb23bd39af55304/ffmpeg_normalize-1.36.0-py3-none-any.whl", hash = "sha256:125bffe6abcd0def858fc2ca453e1c413f8ad76222325c6ef2c4f064ed134787", size = 38140, upload-time = "2025-11-03T11:52:07.157Z" },
+]
+
+[[package]]
+name = "ffmpeg-progress-yield"
+version = "1.0.4"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "tqdm" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/23/3e/5a5a9a441f0ee73088065000ccda1193e261101d3c3d8cdcdc6acb4bd0b4/ffmpeg_progress_yield-1.0.4.tar.gz", hash = "sha256:30b3aacb4430e824d5034850f01d564dc7c7eb7ef033e5eb059e8a96eae1f879", size = 9757, upload-time = "2025-10-17T18:30:08.051Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/a8/58/f31e55e3014fc9a33ef75ceb61a6cba567f2d6aa57947e4eb5a1f5aa87fc/ffmpeg_progress_yield-1.0.4-py3-none-any.whl", hash = "sha256:c0e1de6fab9dd8a9b4e0c791549514dc7b86b2ee9027caf003a4fc7b594b2e82", size = 12460, upload-time = "2025-10-17T18:30:06.986Z" },
 ]
 
 [[package]]
@@ -484,6 +526,15 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/95/ae/58ab2bfbee2792e92a98b97e872f7c003deb903071f75d8d83aa55db28fa/mkdocstrings_python-1.18.2.tar.gz", hash = "sha256:4ad536920a07b6336f50d4c6d5603316fafb1172c5c882370cbbc954770ad323", size = 207972, upload-time = "2025-08-28T16:11:19.847Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/d5/8f/ce008599d9adebf33ed144e7736914385e8537f5fc686fdb7cceb8c22431/mkdocstrings_python-1.18.2-py3-none-any.whl", hash = "sha256:944fe6deb8f08f33fa936d538233c4036e9f53e840994f6146e8e94eb71b600d", size = 138215, upload-time = "2025-08-28T16:11:18.176Z" },
+]
+
+[[package]]
+name = "mutagen"
+version = "1.47.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/81/e6/64bc71b74eef4b68e61eb921dcf72dabd9e4ec4af1e11891bbd312ccbb77/mutagen-1.47.0.tar.gz", hash = "sha256:719fadef0a978c31b4cf3c956261b3c58b6948b32023078a2117b1de09f0fc99", size = 1274186, upload-time = "2023-09-03T16:33:33.411Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/b0/7a/620f945b96be1f6ee357d211d5bf74ab1b7fe72a9f1525aafbfe3aee6875/mutagen-1.47.0-py3-none-any.whl", hash = "sha256:edd96f50c5907a9539d8e5bba7245f62c9f520aef333d13392a79a4f70aca719", size = 194391, upload-time = "2023-09-03T16:33:29.955Z" },
 ]
 
 [[package]]
@@ -889,6 +940,18 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/4f/90/06752775b8cfadba8856190f5beae9f552547e0f287e0246677972107375/tox_uv-1.29.0.tar.gz", hash = "sha256:30fa9e6ad507df49d3c6a2f88894256bcf90f18e240a00764da6ecab1db24895", size = 23427, upload-time = "2025-10-09T20:40:27.384Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/5c/17/221d62937c4130b044bb437caac4181e7e13d5536bbede65264db1f0ac9f/tox_uv-1.29.0-py3-none-any.whl", hash = "sha256:b1d251286edeeb4bc4af1e24c8acfdd9404700143c2199ccdbb4ea195f7de6cc", size = 17254, upload-time = "2025-10-09T20:40:25.885Z" },
+]
+
+[[package]]
+name = "tqdm"
+version = "4.67.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "colorama", marker = "sys_platform == 'win32'" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/a8/4b/29b4ef32e036bb34e4ab51796dd745cdba7ed47ad142a9f4a1eb8e0c744d/tqdm-4.67.1.tar.gz", hash = "sha256:f8aef9c52c08c13a65f30ea34f4e5aac3fd1a34959879d7e59e63027286627f2", size = 169737, upload-time = "2024-11-24T20:12:22.481Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/d0/30/dc54f88dd4a2b5dc8a0279bdd7270e735851848b762aeb1c1184ed1f6b14/tqdm-4.67.1-py3-none-any.whl", hash = "sha256:26445eca388f82e72884e0d580d5464cd801a3ea01e63e5601bdff9ba6a48de2", size = 78540, upload-time = "2024-11-24T20:12:19.698Z" },
 ]
 
 [[package]]
