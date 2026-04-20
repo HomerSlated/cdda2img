@@ -61,11 +61,11 @@ def best_fit_knapsack(values: list[float], capacity: float) -> list[int]:
 
     model = cp_model.CpModel()
     n = len(int_values)
-    x = [model.NewBoolVar(f"x{i}") for i in range(n)]
+    x = [model.NewBoolVar(f"x{i}") for i in range(n)]  # type: ignore[attr-defined]
 
-    model.Add(sum(x[i] * int_values[i] for i in range(n)) <= int_capacity)
-    model.Add(sum(x) <= MAX_TRACKS)
-    model.Maximize(sum(x[i] * int_values[i] for i in range(n)))
+    model.Add(sum(x[i] * int_values[i] for i in range(n)) <= int_capacity)  # type: ignore[attr-defined]
+    model.Add(sum(x) <= MAX_TRACKS)  # type: ignore[attr-defined]
+    model.Maximize(sum(x[i] * int_values[i] for i in range(n)))  # type: ignore[attr-defined]
 
     solver = cp_model.CpSolver()
     status = solver.Solve(model)

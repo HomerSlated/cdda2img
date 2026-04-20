@@ -8,6 +8,7 @@ import wave
 from pathlib import Path
 
 import av
+from av.audio.frame import AudioFrame
 
 from cdda2img.rbi_format import CD_FRAMES_PER_SECOND
 from cdda2img.toc_parser import ParsedDisc, ParsedTrack
@@ -79,13 +80,15 @@ def _wav_bytes_to_flac(
     sample_rate: int,
 ) -> None:
     buf = io.BytesIO(wav_bytes)
-    with av.open(buf, format="wav") as in_c:
+    with av.open(buf, format="wav", mode="r") as in_c:
         in_stream = in_c.streams.audio[0]
         with av.open(str(output_path), "w", format="flac") as out_c:
             out_c.metadata.update(metadata)
             out_stream = out_c.add_stream("flac", rate=sample_rate)
             for packet in in_c.demux(in_stream):
                 for frame in packet.decode():
+                    if not isinstance(frame, AudioFrame):
+                        continue
                     for out_packet in out_stream.encode(frame):
                         out_c.mux(out_packet)
             for out_packet in out_stream.encode(None):
