@@ -5,7 +5,7 @@ description = "Creates archive images of Red Book standard CD-DA Audio CDs"
 authors = [{ name = "Homer", email = "github@hazensparkle.co.uk" }]
 readme = "README.md"
 keywords = ['python']
-requires-python = ">=3.14,<4.0"
+requires-python = ">=3.13,<4.0"
 classifiers = [
     "Intended Audience :: Developers",
     "Programming Language :: Python",
