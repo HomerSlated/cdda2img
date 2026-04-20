@@ -45,6 +45,9 @@ docs/source
 *.vimrc
 *.wav
 *.flac
+*.toc
+*.mgc
+*.s16le
 .gitignore
 extra/
 private/
