@@ -8,10 +8,9 @@ from cdda2img.transcode import transcode_audio
 
 def test_transcode_roundtrip(tmp_path):
     input_mp3 = Path("example/Koiduuni.mp3")
-    output_dir = tmp_path / "outdir"
+    output_wav = tmp_path / "Koiduuni.wav"
 
-    transcode_audio(input_mp3, output_dir)
+    transcode_audio(input_mp3, output_wav)
 
-    output_wav = output_dir / "Koiduuni.wav"
     assert output_wav.exists()
     assert output_wav.stat().st_size > 0

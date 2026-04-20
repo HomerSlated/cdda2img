@@ -4,11 +4,7 @@ import av
 from av.audio.frame import AudioFrame
 
 
-def transcode_audio(input_path: Path, output_dir: Path) -> None:
-    output_dir.mkdir(parents=True, exist_ok=False)
-
-    output_path = output_dir / input_path.with_suffix(".wav").name
-
+def transcode_audio(input_path: Path, output_path: Path) -> None:
     with av.open(str(input_path)) as container:
         input_stream = container.streams.audio[0]
 

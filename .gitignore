@@ -45,7 +45,10 @@ docs/source
 *.vimrc
 *.wav
 *.flac
+.gitignore
+extra/
 private/
+CLAUDE.md
 
 # OS generated files #
 ######################
