@@ -52,17 +52,17 @@ def batch_aatc(files: list[Path], durations: list[float]) -> list[list[Path]]:
     return batches
 
 
-def best_fit_knapsack(values: list[float], capacity: float) -> list[int]:
+def _knapsack_single_disc(values: list[float], capacity: float) -> list[int]:
+    """Return indices of items that maximise total value within capacity (single-disc knapsack)."""
     if not values:
         return []
 
     int_values = [math.ceil(v * SCALE) for v in values]
     int_capacity = int(capacity * SCALE)
+    n = len(int_values)
 
     model = cp_model.CpModel()
-    n = len(int_values)
     x = [model.NewBoolVar(f"x{i}") for i in range(n)]  # type: ignore[attr-defined]
-
     model.Add(sum(x[i] * int_values[i] for i in range(n)) <= int_capacity)  # type: ignore[attr-defined]
     model.Add(sum(x) <= MAX_TRACKS)  # type: ignore[attr-defined]
     model.Maximize(sum(x[i] * int_values[i] for i in range(n)))  # type: ignore[attr-defined]
@@ -73,7 +73,8 @@ def best_fit_knapsack(values: list[float], capacity: float) -> list[int]:
     return [i for i in range(n) if solver.Value(x[i])] if status in (cp_model.OPTIMAL, cp_model.FEASIBLE) else []
 
 
-def batch_best(files: list[Path], durations: list[float]) -> list[list[Path]]:
+def batch_bech(files: list[Path], durations: list[float]) -> list[list[Path]]:
+    """Best-each: greedily pack each disc as full as possible in turn (track order not preserved)."""
     remaining = list(enumerate(zip(files, durations)))
     batches = []
 
@@ -81,25 +82,73 @@ def batch_best(files: list[Path], durations: list[float]) -> list[list[Path]]:
         idx_map, file_and_durations = zip(*remaining)
         _, batch_durations = zip(*file_and_durations)
 
-        selected = best_fit_knapsack(list(batch_durations), MAX_RUNTIME_MINUTES)
+        selected = _knapsack_single_disc(list(batch_durations), MAX_RUNTIME_MINUTES)
 
         int_durations = [math.ceil(d * SCALE) for d in batch_durations]
         int_limit = int(MAX_RUNTIME_MINUTES * SCALE)
 
-        selected_batch_local = []
-        selected_batch_global = []
+        selected_local = []
+        selected_global = []
         total_runtime = 0
         for i in selected:
-            if len(selected_batch_local) < MAX_TRACKS and total_runtime + int_durations[i] <= int_limit:
-                selected_batch_local.append(i)
-                selected_batch_global.append(idx_map[i])
+            if len(selected_local) < MAX_TRACKS and total_runtime + int_durations[i] <= int_limit:
+                selected_local.append(i)
+                selected_global.append(idx_map[i])
                 total_runtime += int_durations[i]
 
-        if not selected_batch_local:
+        if not selected_local:
             break
 
-        batches.append([files[i] for i in selected_batch_global])
-        remaining = [item for j, item in enumerate(remaining) if j not in selected_batch_local]
+        batches.append([files[i] for i in selected_global])
+        remaining = [item for j, item in enumerate(remaining) if j not in selected_local]
+
+    return batches
+
+
+def batch_ball(files: list[Path], durations: list[float]) -> list[list[Path]]:
+    """Best-all: global bin-packing to minimise total number of discs (track order not preserved)."""
+    # Use aatc as the upper bound — ball can only match or beat it
+    upper = batch_aatc(files, durations)
+    if len(upper) <= 1:
+        return upper
+
+    n = len(files)
+    max_discs = len(upper)
+    int_durations = [math.ceil(d * SCALE) for d in durations]
+    int_capacity = int(MAX_RUNTIME_MINUTES * SCALE)
+
+    model = cp_model.CpModel()
+    y = [model.NewBoolVar(f"y{j}") for j in range(max_discs)]  # type: ignore[attr-defined]
+    x = [[model.NewBoolVar(f"x{i}_{j}") for j in range(max_discs)] for i in range(n)]  # type: ignore[attr-defined]
+
+    for i in range(n):
+        model.Add(sum(x[i][j] for j in range(max_discs)) == 1)  # type: ignore[attr-defined]
+
+    for j in range(max_discs):
+        model.Add(sum(x[i][j] * int_durations[i] for i in range(n)) <= int_capacity)  # type: ignore[attr-defined]
+        model.Add(sum(x[i][j] for i in range(n)) <= MAX_TRACKS)  # type: ignore[attr-defined]
+        for i in range(n):
+            model.Add(x[i][j] <= y[j])  # type: ignore[attr-defined]
+
+    # Symmetry breaking: used discs come first
+    for j in range(max_discs - 1):
+        model.Add(y[j] >= y[j + 1])  # type: ignore[attr-defined]
+
+    model.Minimize(sum(y))  # type: ignore[attr-defined]
+
+    solver = cp_model.CpSolver()
+    solver.parameters.max_time_in_seconds = 30.0
+    status = solver.Solve(model)
+
+    if status not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
+        return upper
+
+    batches = []
+    for j in range(max_discs):
+        if solver.Value(y[j]):
+            batch = [files[i] for i in range(n) if solver.Value(x[i][j])]
+            if batch:
+                batches.append(batch)
 
     return batches
 
@@ -116,7 +165,10 @@ def select_batches(files: list[Path], strategy: str) -> list[list[Path]]:
         return batch_fcfs(list(files), list(durations))
     elif strategy == "aatc":
         return batch_aatc(list(files), list(durations))
-    elif strategy == "best":
-        return batch_best(list(files), list(durations))
+    elif strategy == "bech":
+        return batch_bech(list(files), list(durations))
+    elif strategy == "ball":
+        return batch_ball(list(files), list(durations))
     else:
-        raise ValueError
+        msg = f"Unknown strategy: {strategy!r}"
+        raise ValueError(msg)

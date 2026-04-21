@@ -24,8 +24,12 @@ def parse_args() -> argparse.Namespace:
         epilog=textwrap.dedent("""\
             create options:
               --normalize           Apply EBU R128 loudness normalisation
-              --strategy {fcfs,aatc,best}
+              --strategy {fcfs,aatc,bech,ball}
                                     Disc batching strategy (default: aatc)
+                fcfs  first-come-first-served: fill one disc in input order, stop
+                aatc  all-as-they-come: fill discs in input order, as many as needed
+                bech  best-each: pack each disc as full as possible in turn (order not preserved)
+                ball  best-all: global bin-packing to minimise total disc count (order not preserved)
 
             extract options:
               --tracks              Write per-track FLAC files and CUE sheet (default)
@@ -34,7 +38,7 @@ def parse_args() -> argparse.Namespace:
 
             examples:
               cdda2img c /music/album
-              cdda2img c /music/album --normalize --strategy best
+              cdda2img c /music/album --normalize --strategy ball
               cdda2img x album.rbi
               cdda2img x album.rbi --raw
               cdda2img x album.rbi --tracks --raw
@@ -48,7 +52,7 @@ def parse_args() -> argparse.Namespace:
     c.add_argument(
         "--strategy",
         default=DEFAULT_STRATEGY,
-        choices=["fcfs", "aatc", "best"],
+        choices=["fcfs", "aatc", "bech", "ball"],
         help="Disc batching strategy (default: aatc)",
     )
 
@@ -78,6 +82,7 @@ def _normalize(pre_pcm: Path, norm_wav: Path) -> None:
         normalization_type="ebu",
         target_level=-5.0,
         auto_lower_loudness_target=True,
+        keep_loudness_range_target=True,
         audio_codec="pcm_s16le",
         sample_rate=PCM_SAMPLE_RATE,
         audio_channels=PCM_CHANNELS,
