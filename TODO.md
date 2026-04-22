@@ -65,6 +65,82 @@ optimisation.
 
 ---
 
+## ReplayGain and Loudness — HIGH PRIORITY
+
+Agreed design. Reference material: `private/REPLAYGAIN.md`.
+
+### Rules (never violate these)
+
+- **Normalize and ReplayGain are mutually exclusive.** Never apply both to the same
+  audio. Applying both produces incorrect output: a player will re-apply a gain offset
+  to audio that has already been level-adjusted.
+- **Per-track ReplayGain must be computed from individual track audio before
+  concatenation**, not from the concatenated PCM blob. The concatenated blob yields
+  only a single album-level measurement; per-track values require per-track audio.
+- **For FLAC track extraction (`--tracks`)**: either normalize the extracted tracks
+  OR embed ReplayGain tags — never both. This mirrors the create-pipeline choice.
+
+### Create pipeline (`c` subcommand)
+
+- [ ] **RBI spec v1.3** — add optional RG block to the container format:
+  - Define `FLAG_RG_PRESENT` (bit 0 of `flags` in the fixed header)
+  - New optional binary RG block (appended after PCM, before or as part of checksum
+    coverage): `rg_version` (uint8), `rg_reference` (float32, LUFS), `album_gain`
+    (float32, dB), `album_peak` (float32, linear), `album_range` (float32, LU), then
+    per-track array of `track_gain` / `track_peak` / `track_range` (float32 each,
+    N = `track_count`). Add a SHA-256 checksum for the RG block to the fixed header.
+  - Update `rbi_spec.md`, `rbi_format.py` accordingly; bump to v1.3.
+
+- [ ] **Remaster mode loudness choice** — replace the current `--normalize` flag with
+  a `--loudness` option:
+  - `--loudness rg` (default) — compute ReplayGain 2.0 (ITU-R BS.1770-3, −18 LUFS)
+    from individual trimmed track WAVs **before** `concat_wav()`; store in RBI RG block
+  - `--loudness normalize` — apply EBU R128 normalization to the concatenated PCM
+    (current `--normalize` behaviour); no RG block written
+  - `--loudness none` — no loudness processing at all
+  - When flag is absent in remaster mode: prompt the user interactively
+
+- [ ] **Master mode** — compute ReplayGain from individual trimmed track WAVs (same
+  point in pipeline as remaster/rg) regardless of user preference; always store in RBI
+  RG block. No audio modification.
+
+- [ ] **Source file RG tags** — if source files already have `REPLAYGAIN_*` tags,
+  record their values as provenance metadata in the TOC (as cdrdao comments); the
+  authoritative RG values in the RBI RG block are always freshly computed from the
+  ingested audio, not copied from source tags.
+
+- [ ] **Implement `replaygain.py`** — wrapper around `rsgain` (preferred) or
+  `loudgain` subprocess; takes a list of WAV paths, returns per-track and album
+  gain/peak/range values; called from `create_image()` between silence trim and
+  concatenation.
+
+### Extract pipeline (`x` subcommand)
+
+- [ ] **`--tracks` output** — after writing FLAC files, embed RG values from the RBI
+  RG block as Vorbis comment tags: `REPLAYGAIN_TRACK_GAIN`, `REPLAYGAIN_TRACK_PEAK`,
+  `REPLAYGAIN_ALBUM_GAIN`, `REPLAYGAIN_ALBUM_PEAK`, `REPLAYGAIN_REFERENCE_LOUDNESS`,
+  `REPLAYGAIN_TRACK_RANGE`, `REPLAYGAIN_ALBUM_RANGE`. If the RBI has no RG block,
+  compute ReplayGain from the extracted FLAC files post-extraction (single rsgain pass).
+  If the RBI was created in normalize mode, offer to normalize the FLAC output instead
+  (matching the original create-pipeline choice).
+
+- [ ] **`--raw` output** — if RBI RG block is present, write a `.rg.json` sidecar
+  alongside `.toc` and `.s16le`:
+  ```json
+  {
+    "reference_loudness_lufs": -18.0,
+    "algorithm": "ITU-R BS.1770-3",
+    "album_gain_db": -1.20,
+    "album_peak": 0.992341,
+    "album_range_lu": 5.11,
+    "tracks": [
+      { "number": 1, "gain_db": 2.35, "peak": 0.987654, "range_lu": 7.23 }
+    ]
+  }
+  ```
+
+---
+
 ## Tests (deferred — code verified working in practice)
 
 - [ ] `input_selector.py` — tests for all four strategies (`fcfs`, `aatc`, `bech`, `ball`)
@@ -81,7 +157,7 @@ input to the `c` pipeline. Audio-only scope: for mixed-mode discs, extract audio
 tracks and discard data tracks. Writing foreign formats is supported for internal
 testing/validation only, not for distribution.
 
-Reference: `extra/libmirage/images/` contains parser source for all formats below.
+Reference: `private/libmirage/images/` contains parser source for all formats below.
 
 ### Read (audio tracks only → RBI or FLAC+CUE)
 - [ ] CUE/BIN — text CUE sheet + raw binary audio; structurally close to existing TOC support
@@ -117,7 +193,7 @@ Re-evaluate if existing tools prove limiting.
 - [ ] Evaluate 3rd-party options: `pycdio` (libcdio bindings), `whipper` (implements
   AccurateRip; usable as subprocess), `cdrdao` (already used for ripping)
 - [ ] New `r` subcommand: `cdda2img r /dev/sr0` — rip disc directly to RBI
-- [ ] Parse subchannel Q data for MCN and CD-TEXT (see `extra/libmirage/mirage/cdtext-coder.c`)
+- [ ] Parse subchannel Q data for MCN and CD-TEXT (see `private/libmirage/mirage/cdtext-coder.c`)
 
 ### MCN (Media Catalogue Number)
 MCN is a physical disc property (EAN-13 barcode); omit silently when the input does
@@ -224,11 +300,11 @@ Borrow ideas from other formats (CUE/BIN, MDS, CloneCD) where they address gaps.
 
 ## Research Pool
 
-Maintain a local collection of CDDA reference material in `extra/`.
+Maintain a local collection of CDDA reference material in `private/`.
 
 Current holdings:
-- `extra/IEC_60908-1999.pdf` — Red Book standard
-- `extra/libmirage/` — image format parser source (MDS, CCD, NRG, TOC, CUE, CD-TEXT)
+- `private/IEC_60908-1999.pdf` — Red Book standard
+- `private/libmirage/images` — image format parser source (MDS, CCD, NRG, TOC, CUE, CD-TEXT)
 
 To add:
 - [ ] dBpoweramp Spoon's Audio Guide (CD ripping): https://dbpoweramp.com/spoons-audio-guide-cd-ripping
