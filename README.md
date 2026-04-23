@@ -5,7 +5,8 @@ Red Book standard CD-DA audio discs. It ingests a directory of audio files
 (any format supported by ffmpeg), transcodes them to lossless Red Book PCM,
 and writes a self-contained, checksum-verified **RBI (Red Book Image)** container
 with an embedded cdrdao TOC. Extraction produces per-track FLAC files with
-embedded metadata and a CUE sheet, or raw PCM with a TOC, or both.
+embedded metadata and a CUE sheet, or raw PCM with a TOC, or both. Future versions
+will read physical CD-Audio discs directly as well.
 
 ## Why?
 
@@ -122,4 +123,4 @@ GPLv3 or later
 
 ---
 
-*Copyright © 2025 Homer*
+*Copyright © 2026 Haze N Sparkle*
