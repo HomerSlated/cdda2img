@@ -1,5 +1,46 @@
 # TODO
 
+## ⏸ PAUSED — Awaiting hardware (Lite-On SH-20A1S, up to 1 week from 2026-04-26)
+
+Physical CD-DA drive work is blocked pending hardware arrival. All software tasks
+in the active scope are complete and CI passes. Resume from the Physical Media
+section below once the drive is available and tested.
+
+---
+
+## ✅ DONE — Research: Redump drive requirements + lead-in/lead-out documentation (2026-04-26)
+
+- [x] **`private/ABHOOD.md` §5.4 added** — "CD Drive Technical Requirements for Accurate
+  Dumping": scrambled-mode dumping, full P–W subchannel requirements, C2 error pointer
+  semantics (MMC, not Red Book), lead-in depth (≥75 sectors, up to 150 for large positive
+  write offsets), lead-out depth (≥75 sectors, more for large negative offsets), write
+  offset vs drive offset distinction, `DATA_C2_SUB` vs `DATA_SUB_C2` ordering, redumper
+  as preferred tool, DIC restrictions for Audio CDs.
+- [x] **`private/NONSPEC.md` created** — "Lead-in and Lead-out: What They Contain, What
+  They're Forced to Contain, and Where the Spec Breaks." Full technical discussion covering:
+  spec-conformant lead-in layout (Q-channel TOC, P=0x00, zero main channel, CD TEXT in
+  R–W); spec-conformant lead-out (P=0xFF, zero main channel, lead-out Q address); the
+  pre-gap and HTOA as an intentional spec exploit; disc write offsets (manufacturing
+  imprecision, Red Book does not define them, ±500–3000 samples seen in practice, how
+  positive/negative offsets push audio into lead-in/lead-out respectively); drive offset
+  vs disc write offset (net correction formula); copy protection attacks on the lead-in
+  (Key2Audio corrupted main-channel TOC, fake second session, SafeDisc weak sectors);
+  pre-mastering edge cases (non-zero lead-out main channel from early CD-R tools, why
+  Redump checksums programme area only).
+
+---
+
+## ✅ DONE — Stale file cleanup (2026-04-26)
+
+- [x] **Deleted** `test_normalize.py` — dead ffmpeg-normalize exploration script
+- [x] **Deleted** `tests/test_transcode.py` — thin roundtrip test, superseded; better test planned
+- [x] **Deleted** `src/cdda2img/unique_name.py` — dead module, not imported anywhere
+- [x] **Deleted** `modules.md` — vestigial MkDocs placeholder
+- [x] **Moved** `src/cdda2img/test_tui.py` → `docs/test_tui.py` — Textual TUI prototype,
+  misplaced in `src/`; moved via `git mv` to preserve history
+
+---
+
 ## ✅ DONE — Lint override register and LINT-007 fix (2026-04-27)
 
 - [x] **LINT.md created** — documents all 10 lint suppressions and intentional unused
@@ -248,12 +289,25 @@ Reference: `private/libmirage/images/` contains parser source for all formats be
 
 ---
 
-## Physical Media / CD Drive (deferred — requires hardware)
+## Physical Media / CD Drive (deferred — AWAITING HARDWARE)
+
+**Hardware arriving**: Lite-On SH-20A1S DVD/CD Rewritable Drive. Expected within 1 week
+of 2026-04-26. Resume this section once the drive is connected and tested.
+
+**Drive evaluation criteria** (from `private/ABHOOD.md` §5.4 and `private/NONSPEC.md`):
+- Scrambled-mode dumping support
+- Full subchannel P–W readback; raw `DATA_C2_SUB` or `DATA_SUB_C2` ordering
+- Reliable C2 error pointer support (Redump hard requirement)
+- Lead-in read depth ≥ 75 sectors (150 preferred for write-offset edge cases)
+- Lead-out read depth ≥ 75 sectors
+- Check AccurateRip drive offset database for this model's known sample offset
 
 Goal: read physical CD-DA discs. Creating our own disc writing/reading code is out
 of scope; use third-party tools, preferring Python libraries where available.
 Re-evaluate if existing tools prove limiting.
 
+- [ ] Test Lite-On SH-20A1S: verify C2, subchannel, lead-in/lead-out depth against
+  Redump criteria using `redumper` or `DiscImageCreator`; record drive offset
 - [ ] Evaluate 3rd-party options: `pycdio` (libcdio bindings), `whipper` (implements
   AccurateRip; usable as subprocess), `cdrdao` (already used for ripping)
 - [ ] New `r` subcommand: `cdda2img r /dev/sr0` — rip disc directly to RBI
@@ -541,13 +595,22 @@ Borrow ideas from other formats (CUE/BIN, MDS, CloneCD) where they address gaps.
 Maintain a local collection of CDDA reference material in `private/`.
 
 Current holdings:
-- `private/IEC_60908-1999.pdf` — Red Book standard
-- `private/libmirage/images` — image format parser source (MDS, CCD, NRG, TOC, CUE, CD-TEXT)
+- `private/IEC_60908-1999.pdf` — Red Book standard (IEC 60908:1999, second edition)
+- `private/libmirage/` — image format parser source (MDS, CCD, NRG, TOC, CUE, CD-TEXT coder)
+- `private/spoons-audio-guide-cd-ripping.txt` — dBpoweramp Spoon's Audio Guide: drive
+  features, copy protection, secure ripping practice
+- `private/ABHOOD.md` — A Brief History of Optical Discs; comprehensive research notes
+  including §5.4: CD Drive Technical Requirements for Accurate Dumping (Redump criteria)
+- `private/NONSPEC.md` — Lead-in and lead-out: spec content, write offsets, copy-protection
+  attacks, pre-mastering edge cases
+- `private/OFE.md` — The Orange Forum Embargo: Orange Book paywalling and its implications
+  for open-source tools
 
 To add:
-- [ ] dBpoweramp Spoon's Audio Guide (CD ripping): https://dbpoweramp.com/spoons-audio-guide-cd-ripping
-- [ ] AccurateRip protocol documentation (EAC forum posts / whipper source)
-- [ ] Drive offset database (AccurateRip or similar)
+- [ ] AccurateRip protocol documentation (EAC forum posts / whipper source) — needed for
+  computing and verifying AccurateRip v1/v2 checksums
+- [ ] Drive offset database snapshot (AccurateRip or similar) — needed before implementing
+  drive offset correction in the `r` subcommand
 
 ---
 
