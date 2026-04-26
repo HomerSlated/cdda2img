@@ -1,6 +1,6 @@
 # TODO
 
-## ⏸ PAUSED — Awaiting hardware (Lite-On SH-20A1S, up to 1 week from 2026-04-26)
+## ⏸ PAUSED — Awaiting hardware (Lite-On LH-20A1S, up to 1 week from 2026-04-26)
 
 Physical CD-DA drive work is blocked pending hardware arrival. All software tasks
 in the active scope are complete and CI passes. Resume from the Physical Media
@@ -251,39 +251,83 @@ optimisation.
 - [ ] `input_selector.py` — tests for all four strategies (`fcfs`, `aatc`, `bech`, `ball`)
 - [ ] `silence.py` — output shorter than input, has correct pad duration
 - [x] Container roundtrip — write RBI, read back, verify checksums and track list
-- [ ] Foreign format sample bank — acquire images in each supported format (see acquisition options below); use as fixtures
+- [ ] Foreign format sample bank — acquire authoritative images in each supported format
+  using tools in `TOOLING.md`; store in `tests/fixtures/foreign/` with confidence scores
 
 ---
 
 ## Foreign Image Format Support (deferred — needs sample files)
 
-Goal: read CUE/BIN, CCD/IMG/SUB, MDS/MDF, NRG and similar CDDA image formats as
-input to the `c` pipeline. Audio-only scope: for mixed-mode discs, extract audio
-tracks and discard data tracks. Writing foreign formats is supported for internal
-testing/validation only, not for distribution.
+### Architecture principles (fixed — do not revisit)
 
-Reference: `private/libmirage/images/` contains parser source for all formats below.
+**Read-only plugins only.** Production code ships no foreign disc image writing
+capability. Writing is out of scope and carries potential IP issues. The only
+output format is RBI.
 
-### Read (audio tracks only → RBI or FLAC+CUE)
-- [ ] CUE/BIN — text CUE sheet + raw binary audio; structurally close to existing TOC support
-- [ ] CCD/IMG/SUB — CloneCD binary header + raw sectors + subchannel data
-- [ ] MDS/MDF — Alcohol 120% binary format
-- [ ] NRG — Nero binary format
-- [ ] M3U — simple playlist; pair with audio files in the same directory
-- [ ] TOC (cdrdao) — already parsed for RBI extract; extend to accept as `c` input
+**Always convert to RBI first.** Converters never operate on foreign images
+directly. The pipeline is always: foreign image → RBI → extract/validate.
+This guarantees a known-good, validated intermediate at every stage.
 
-### Write (internal testing only — not distributed)
-- [ ] CUE/BIN — straightforward given existing TOC generation
+**CDDA audio scope only.** For mixed-mode discs, extract audio tracks and
+discard data tracks. ISO and pure data formats are out of scope.
 
-### Sample bank (needed before implementation)
-- Internet Archive (`archive.org`) — legitimate CD rips in various formats
-- Redump.org — authoritative preservation database; checksums + source software info
-- Create test images using CloneCD, Alcohol 120%, ImgBurn (most reliable for format
-  accuracy since source disc is controlled)
-- Store samples in `tests/fixtures/foreign/` — not committed if large; document
-  acquisition steps in `tests/fixtures/foreign/README.md`
+Reference: `private/libmirage/images/` contains parser source for all formats.
+Authoritative sample images will be created using the tools listed in `TOOLING.md`
+(Windows applications; for reference only).
+
+### Converter confidence-scoring workflow
+
+Each foreign format converter is validated and scored using the following cycle,
+repeated ad hoc whenever new sample images are available:
+
+1. Read a foreign disc image
+2. Validate it against its format spec (reject malformed input early)
+3. Convert to RBI
+4. Extract TOC + raw PCM from the RBI
+5. Re-create the foreign disc image from the extracted data *(developer harness
+   only — this write path is never shipped)*
+6. Validate the re-created image against the format spec
+7. Update the confidence score for that converter
+8. Repeat with new samples for the same format (ad hoc, when available)
+9. Continue accumulating confidence over time
+
+A high confidence score means the converter faithfully round-trips the disc
+structure. Converters ship when confidence is sufficient; the score is recorded
+in `tests/fixtures/foreign/README.md`.
+
+### Formats
+
+All formats below are read targets. The developer-only write path (step 5 above)
+is implemented only as far as needed for round-trip validation and is never
+distributed. See `TOOLING.md` for the authoritative Windows tools used to create
+sample images.
+
+| Format | Authoritative tool | Parser reference | Status |
+|--------|--------------------|-----------------|--------|
+| CUE/BIN | ImgBurn, EAC | libmirage | `[ ]` |
+| CCD/IMG/SUB | CloneCD | libmirage | `[ ]` |
+| MDS/MDF | Alcohol 120% | libmirage | `[ ]` |
+| MDX | Alcohol 120% | libmirage | `[ ]` |
+| NRG | Nero Burning ROM | libmirage | `[ ]` |
+| CDI | DiscJuggler | libmirage | `[ ]` |
+| B6T/BWT | BlindWrite | libmirage | `[ ]` |
+| C2D | WinOnCD 6 | libmirage | `[ ]` |
+| CIF/GI | Roxio Creator 10 | libmirage | `[ ]` |
+| TOC (cdrdao) | cdrdao | existing toc_parser.py | `[ ]` extend as `c` input |
+| READCD | readcd | libmirage | `[ ]` |
+| M3U | — | trivial | `[ ]` playlist paired with audio files |
+
+*XCDRoast and Harddisk formats from TOOLING.md are out of scope: XCDRoast is a
+trivial project format (implement if a sample surfaces); Harddisk is not optical.*
+
+### Sample bank
+
+- Store samples in `tests/fixtures/foreign/` — not committed if large
+- Document acquisition steps and confidence scores in `tests/fixtures/foreign/README.md`
+- Prioritise formats with the largest existing sample pools: CUE/BIN, MDS/MDF, NRG
 
 ### CLI change needed
+
 `c` command gains format auto-detection from file extension, plus an explicit
 `--input-format` option when auto-detection is ambiguous.
 
@@ -291,7 +335,7 @@ Reference: `private/libmirage/images/` contains parser source for all formats be
 
 ## Physical Media / CD Drive (deferred — AWAITING HARDWARE)
 
-**Hardware arriving**: Lite-On SH-20A1S DVD/CD Rewritable Drive. Expected within 1 week
+**Hardware arriving**: Lite-On LH-20A1S DVD/CD Rewritable Drive. Expected within 1 week
 of 2026-04-26. Resume this section once the drive is connected and tested.
 
 **Drive evaluation criteria** (from `private/ABHOOD.md` §5.4 and `private/NONSPEC.md`):
@@ -300,14 +344,16 @@ of 2026-04-26. Resume this section once the drive is connected and tested.
 - Reliable C2 error pointer support (Redump hard requirement)
 - Lead-in read depth ≥ 75 sectors (150 preferred for write-offset edge cases)
 - Lead-out read depth ≥ 75 sectors
-- Check AccurateRip drive offset database for this model's known sample offset
+- AccurateRip drive offset: **+6 samples confirmed** (969 submissions, 100% agreement;
+  shared by all LH-20A1 variants — MediaTek MT1898E chipset property). See `private/DRIVES.md`.
 
 Goal: read physical CD-DA discs. Creating our own disc writing/reading code is out
 of scope; use third-party tools, preferring Python libraries where available.
 Re-evaluate if existing tools prove limiting.
 
-- [ ] Test Lite-On SH-20A1S: verify C2, subchannel, lead-in/lead-out depth against
-  Redump criteria using `redumper` or `DiscImageCreator`; record drive offset
+- [ ] Test Lite-On LH-20A1S on arrival: verify C2 reliability, subchannel P–W
+  capture, and lead-in/lead-out read depth against Redump criteria using `redumper`
+  or `DiscImageCreator`; follow checklist in `private/DRIVES.md`
 - [ ] Evaluate 3rd-party options: `pycdio` (libcdio bindings), `whipper` (implements
   AccurateRip; usable as subprocess), `cdrdao` (already used for ripping)
 - [ ] New `r` subcommand: `cdda2img r /dev/sr0` — rip disc directly to RBI
@@ -587,6 +633,58 @@ Borrow ideas from other formats (CUE/BIN, MDS, CloneCD) where they address gaps.
   after PCM, signalled by a flag)
 - [ ] Evaluate whether CD-TEXT block should be a separate optional section or
   encoded within the TOC text
+
+### Canonical TOC formatting
+
+Currently `generate_toc()` produces correct cdrdao-compatible TOC but without
+documented rules for whitespace, indentation, line endings, or field ordering.
+Without canonical formatting, the TOC SHA-256 checksum is an implementation
+detail rather than a content fingerprint — two logically identical containers
+could have different TOC checksums if `generate_toc()` is ever changed.
+
+- [ ] Define and document canonical TOC formatting rules in `rbi_spec.md`:
+  consistent indentation (2 spaces), Unix line endings, fixed field ordering
+  (CATALOG before TRACK, ISRC on a fixed line within the track block, etc.)
+- [ ] Update `generate_toc()` to comply; add a round-trip test that verifies
+  byte-identical TOC output across an RBI → parse → regenerate cycle
+
+### Lossless round-trip invariant
+
+Once canonical TOC formatting is in place, the following invariant should hold
+and be documented in `rbi_spec.md` validation rules:
+
+> **RBI → TOC parse → TOC regenerate → RBI** must produce a byte-identical TOC
+> block (and therefore a matching SHA-256 checksum) for any container within
+> the CDDA scope. Any loss across this cycle must be explicitly classified:
+> *structural loss* (invalid, hard error), *metadata loss* (allowed, logged),
+> or *format limitation* (documented in spec).
+
+- [ ] Add invariant to `rbi_spec.md` §9 validation rules
+- [ ] Add round-trip checksum test to `test_container.py` once canonical
+  formatting is implemented
+
+### Subchannel optional block (flag reservation only)
+
+Raw subchannel data (P–W channels, 96 bits/sector) from physical disc rips is
+valuable for CD TEXT, ISRC, MCN, and CD+G. For archival completeness it should
+eventually be embeddable in the RBI container as an optional block, analogous
+to the RG block.
+
+No implementation now — this requires physical ripping hardware to be useful.
+Reserve the flag bit in the spec so the assignment is stable.
+
+- [ ] Reserve `FLAG_SUBCHANNEL_PRESENT` (proposed: bit 3) in `rbi_format.py`
+  and `rbi_spec.md` flags table; no implementation
+- [ ] Storage strategy (when implemented): embedded block preferred over
+  external `.sub` sidecar — self-containment is the archival goal
+
+### Out-of-scope disc feature support (defer to third-party tools)
+
+Mixed-mode CD, copy-protection artefact modelling, and subchannel-aware forensic
+imaging are explicitly out of scope for this tool. If ever needed, cdda2img would
+delegate to established third-party tools (cdrdao for burning, DiscImageCreator
+or redumper for forensic imaging) — the same pattern used for disc writing today.
+No cdda2img implementation required; document the delegation point when relevant.
 
 ---
 
