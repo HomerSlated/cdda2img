@@ -52,7 +52,7 @@ def find_loudest_start(path: Path) -> float:
 
     for packet in container.demux(stream):
         for frame in packet.decode():
-            for rf in resampler.resample(frame):
+            for rf in resampler.resample(frame):  # type: ignore[arg-type]  # LINT-002: audio stream yields AudioFrame; stubs over-broad
                 chunks.append(rf.to_ndarray()[0])
 
     for rf in resampler.resample(None):  # flush
@@ -76,7 +76,11 @@ def find_loudest_start(path: Path) -> float:
 
 
 def _window_frames(
-    in_c: av.container.InputContainer, in_stream, start: float, end: float, resampler: av.AudioResampler
+    in_c,
+    in_stream,
+    start: float,
+    end: float,
+    resampler: av.AudioResampler,  # in_c: av.InputContainer (av.container not re-exported by stubs)
 ):
     """Yield resampled audio frames from *in_c* in the half-open interval [start, end) seconds."""
     in_c.seek(int(start * 1_000_000))  # AV_TIME_BASE units (µs); lands on prior keyframe
@@ -151,7 +155,7 @@ class Player:
         if gain_db:
             cmd += ["-af", f"volume={gain_db:.2f}dB"]
         cmd.append(str(path))
-        self._proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL)  # noqa: S603
+        self._proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL)  # noqa: S603  # LINT-008
 
     def toggle_pause(self) -> bool:
         """Pause if playing, resume if paused. Returns True if now paused."""

@@ -96,7 +96,7 @@ def built_containers(tmp_path_factory, wav_tracks):
 
 
 def test_header_fields_with_rg(built_containers):
-    rbi, disc, _ = built_containers["rg"]
+    rbi, _disc, _ = built_containers["rg"]  # LINT-010: disc and rg_result not needed; header re-read independently
     h = read_header(rbi)
 
     assert h.version_major == VERSION_MAJOR
@@ -114,7 +114,7 @@ def test_header_fields_with_rg(built_containers):
 
 
 def test_header_fields_without_rg(built_containers):
-    rbi, _, _ = built_containers["no_rg"]
+    rbi, _, _ = built_containers["no_rg"]  # LINT-010
     h = read_header(rbi)
 
     assert not h.has_rg
@@ -130,7 +130,7 @@ def test_header_fields_without_rg(built_containers):
 
 def test_checksums_pass(built_containers):
     """All three SHA-256 checksums in the header match the actual block bytes."""
-    rbi, _, _ = built_containers["rg"]
+    rbi, _, _ = built_containers["rg"]  # LINT-010
     h = read_header(rbi)
 
     with open(rbi, "rb") as f:
@@ -179,7 +179,7 @@ def test_toc_roundtrip(built_containers):
 
 def test_rg_block_roundtrip(built_containers):
     """RG values survive pack→embed→read→unpack; all fields match within float tolerance."""
-    rbi, _, rg_result = built_containers["rg"]
+    rbi, _, rg_result = built_containers["rg"]  # LINT-010: disc not needed; rg_result used for assertions
     h = read_header(rbi)
 
     assert h.has_rg
@@ -209,7 +209,7 @@ def test_rg_block_roundtrip(built_containers):
 
 def test_flac_extraction_rg_tags(tmp_path, built_containers):
     """Extracted FLACs carry uppercase RG Vorbis comment tags matching stored values."""
-    rbi, disc, rg_result = built_containers["rg"]
+    rbi, _disc, rg_result = built_containers["rg"]  # LINT-010: disc re-derived from TOC bytes below (round-trip test)
     h = read_header(rbi)
 
     with open(rbi, "rb") as f:

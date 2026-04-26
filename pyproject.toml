@@ -104,7 +104,7 @@ ignore = [
 ]
 
 [tool.ruff.lint.per-file-ignores]
-"tests/*" = ["S101"]
+"tests/*" = ["S101"]  # LINT-009: assert is the canonical pytest idiom; -O is never used in test runs
 
 [tool.ruff.format]
 preview = true

@@ -4,7 +4,7 @@ metadata.py — Derive album and artist metadata from audio files or a tracklist
 
 from pathlib import Path
 
-from mutagen import File  # type: ignore[import-untyped]
+from mutagen import File  # type: ignore[import-untyped]  # LINT-004
 
 _RG_TAGS: frozenset[str] = frozenset({
     "REPLAYGAIN_TRACK_GAIN",

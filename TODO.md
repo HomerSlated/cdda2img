@@ -1,19 +1,17 @@
 # TODO
 
-## 🔴 HIGHEST PRIORITY — Discuss lint overrides
+## ✅ DONE — Lint override register and LINT-007 fix (2026-04-27)
 
-Several `# noqa` suppressions are scattered across the codebase and have never been
-explicitly reviewed. Before the next feature sprint, walk through each suppression and
-decide: justified (add a comment explaining why), reducible (fix the underlying issue),
-or removable (false positive that ruff has since fixed).
-
-Known suppressions to review:
-- `S603 / S607` — subprocess with untrusted input warning, on `ffplay` calls in `audition.py`
-- `BLE001` — broad exception catch (`except Exception`) in `verify_container()`
-- `S101` — assert statements in `rbi_format.py` (compile-time struct size assertions) and
-  in tests (`pyproject.toml` `[tool.ruff.lint.per-file-ignores]`)
-- `TRY003` — long exception messages; some are in `# noqa` form, some are not
-- `attr-defined` / `no-matching-overload` — `# type: ignore` on OR-Tools and PyAV calls
+- [x] **LINT.md created** — documents all 10 lint suppressions and intentional unused
+  variables with UIDs (LINT-001 through LINT-010), rationale, alternatives considered,
+  and final decision. Every `# type: ignore`, `# noqa`, and `_`-prefixed unused variable
+  in active source now carries its UID ref for cross-referencing.
+- [x] **LINT-007 resolved** — `assert state is not None  # noqa: S101` in
+  `replaygain.py:_measure_concat()` replaced with an explicit boundary guard
+  (`if not paths: raise ValueError(...)`) at function entry. Loop refactored so `state`
+  is initialised unconditionally from `paths[0]` before iterating `paths[1:]`; `ty` can
+  now prove `state` is non-None at `_state_results()` without any suppression. The
+  `# noqa: S101` and the `assert` are gone entirely.
 
 ---
 

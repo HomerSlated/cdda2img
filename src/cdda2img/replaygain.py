@@ -107,7 +107,7 @@ def _decode_interleaved(path: Path) -> tuple[np.ndarray, int, int]:
         chunks: list[np.ndarray] = []
         for packet in c.demux(stream):
             for frame in packet.decode():
-                for rf in resampler.resample(frame):
+                for rf in resampler.resample(frame):  # type: ignore[arg-type]  # LINT-002: audio stream yields AudioFrame; stubs over-broad
                     chunks.append(rf.to_ndarray().T.flatten())  # (ch, samples) → interleaved
         for rf in resampler.resample(None):  # flush resampler
             chunks.append(rf.to_ndarray().T.flatten())
@@ -138,19 +138,18 @@ def _measure_concat(paths: list[Path]) -> tuple[float, float, float]:
     on a single R128State — equivalent to the ffmpeg filter_complex concat approach
     but without subprocess overhead.
     """
+    if not paths:
+        msg = "_measure_concat() requires at least one path"
+        raise ValueError(msg)
     if len(paths) == 1:
         return _measure_single(paths[0])
 
-    state: pyebur128.R128State | None = None
-    channels = 0
-    for path in paths:
-        samples, rate, ch = _decode_interleaved(path)
-        if state is None:
-            channels = ch
-            state = pyebur128.R128State(channels, rate, _EBUR128_MODE)
+    samples, rate, channels = _decode_interleaved(paths[0])
+    state = pyebur128.R128State(channels, rate, _EBUR128_MODE)
+    state.add_frames(samples, len(samples) // channels)
+    for path in paths[1:]:
+        samples, _, _ = _decode_interleaved(path)
         state.add_frames(samples, len(samples) // channels)
-
-    assert state is not None  # noqa: S101
     return _state_results(state, channels)
 
 
@@ -241,7 +240,7 @@ def embed_rg_tags(result: RGResult, flac_paths: list[Path]) -> None:
                 merged = {**in_c.metadata, **rg_tags}  # preserve existing tags; add RG
                 with av.open(str(tmp), "w") as out_c:
                     out_c.metadata.update(merged)
-                    out_stream = out_c.add_stream(template=in_stream)
+                    out_stream = out_c.add_stream(template=in_stream)  # type: ignore[call-overload]  # LINT-003: template= is documented PyAV stream-copy API; missing from stubs
                     for packet in in_c.demux(in_stream):
                         if packet.dts is None:
                             continue

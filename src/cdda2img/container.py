@@ -166,7 +166,7 @@ def build_container(
         rg_end,
         rg_checksum_val,
     )
-    assert len(header) == HEADER_FIXED_SIZE  # noqa: S101
+    assert len(header) == HEADER_FIXED_SIZE  # noqa: S101  # LINT-006
 
     with open(output_file, "wb") as out:
         out.write(header)

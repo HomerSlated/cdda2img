@@ -62,10 +62,10 @@ def _knapsack_single_disc(values: list[float], capacity: float) -> list[int]:
     n = len(int_values)
 
     model = cp_model.CpModel()
-    x = [model.NewBoolVar(f"x{i}") for i in range(n)]  # type: ignore[attr-defined]
-    model.Add(sum(x[i] * int_values[i] for i in range(n)) <= int_capacity)  # type: ignore[attr-defined]
-    model.Add(sum(x) <= MAX_TRACKS)  # type: ignore[attr-defined]
-    model.Maximize(sum(x[i] * int_values[i] for i in range(n)))  # type: ignore[attr-defined]
+    x = [model.NewBoolVar(f"x{i}") for i in range(n)]  # type: ignore[attr-defined]  # LINT-001
+    model.Add(sum(x[i] * int_values[i] for i in range(n)) <= int_capacity)  # type: ignore[attr-defined]  # LINT-001
+    model.Add(sum(x) <= MAX_TRACKS)  # type: ignore[attr-defined]  # LINT-001
+    model.Maximize(sum(x[i] * int_values[i] for i in range(n)))  # type: ignore[attr-defined]  # LINT-001
 
     solver = cp_model.CpSolver()
     status = solver.Solve(model)
@@ -118,23 +118,23 @@ def batch_ball(files: list[Path], durations: list[float]) -> list[list[Path]]:
     int_capacity = int(MAX_RUNTIME_MINUTES * SCALE)
 
     model = cp_model.CpModel()
-    y = [model.NewBoolVar(f"y{j}") for j in range(max_discs)]  # type: ignore[attr-defined]
-    x = [[model.NewBoolVar(f"x{i}_{j}") for j in range(max_discs)] for i in range(n)]  # type: ignore[attr-defined]
+    y = [model.NewBoolVar(f"y{j}") for j in range(max_discs)]  # type: ignore[attr-defined]  # LINT-001
+    x = [[model.NewBoolVar(f"x{i}_{j}") for j in range(max_discs)] for i in range(n)]  # type: ignore[attr-defined]  # LINT-001
 
     for i in range(n):
-        model.Add(sum(x[i][j] for j in range(max_discs)) == 1)  # type: ignore[attr-defined]
+        model.Add(sum(x[i][j] for j in range(max_discs)) == 1)  # type: ignore[attr-defined]  # LINT-001
 
     for j in range(max_discs):
-        model.Add(sum(x[i][j] * int_durations[i] for i in range(n)) <= int_capacity)  # type: ignore[attr-defined]
-        model.Add(sum(x[i][j] for i in range(n)) <= MAX_TRACKS)  # type: ignore[attr-defined]
+        model.Add(sum(x[i][j] * int_durations[i] for i in range(n)) <= int_capacity)  # type: ignore[attr-defined]  # LINT-001
+        model.Add(sum(x[i][j] for i in range(n)) <= MAX_TRACKS)  # type: ignore[attr-defined]  # LINT-001
         for i in range(n):
-            model.Add(x[i][j] <= y[j])  # type: ignore[attr-defined]
+            model.Add(x[i][j] <= y[j])  # type: ignore[attr-defined]  # LINT-001
 
     # Symmetry breaking: used discs come first
     for j in range(max_discs - 1):
-        model.Add(y[j] >= y[j + 1])  # type: ignore[attr-defined]
+        model.Add(y[j] >= y[j + 1])  # type: ignore[attr-defined]  # LINT-001
 
-    model.Minimize(sum(y))  # type: ignore[attr-defined]
+    model.Minimize(sum(y))  # type: ignore[attr-defined]  # LINT-001
 
     solver = cp_model.CpSolver()
     solver.parameters.max_time_in_seconds = 30.0
