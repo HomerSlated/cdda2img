@@ -1,7 +1,7 @@
 """
 rbi_format.py — RBI (Red Book Image) file format definition.
 
-This module is the canonical Python reference for the RBI format (v1.2).
+This module is the canonical Python reference for the RBI format (v2.0).
 It contains only constants, struct definitions, and dataclasses.
 No I/O. No business logic. Translatable directly to C structs, Rust structs, etc.
 
@@ -16,8 +16,8 @@ from dataclasses import dataclass, field
 # ---------------------------------------------------------------------------
 
 MAGIC: bytes = b"RBIMAGE\x00"  # 8 bytes; null byte prevents text false-matches
-VERSION_MAJOR: int = 1
-VERSION_MINOR: int = 2
+VERSION_MAJOR: int = 2
+VERSION_MINOR: int = 0
 
 # ---------------------------------------------------------------------------
 # Red Book audio constraints (IEC 60908:1999)
@@ -39,9 +39,9 @@ CD_FRAMES_PER_SECOND: int = 75  # Red Book frame rate
 # Offset  Size  Type          Field
 # ------  ----  ----          -----
 #      0     8  bytes         magic             b'RBIMAGE\x00'
-#      8     1  uint8         version_major     1
-#      9     1  uint8         version_minor     2
-#     10     4  uint32 LE     flags             feature bitmask (currently 0)
+#      8     1  uint8         version_major     2
+#      9     1  uint8         version_minor     0
+#     10     4  uint32 LE     flags             feature bitmask
 #     14     1  uint8         track_count       1-99
 #     15     1  uint8         disc_number       1-based position in set
 #     16     1  uint8         disc_total        total discs in set
@@ -55,9 +55,12 @@ CD_FRAMES_PER_SECOND: int = 75  # Red Book frame rate
 #     55    32  bytes         toc_checksum      SHA-256 of TOC block
 #     87    32  bytes         pcm_checksum      SHA-256 of raw PCM bytes
 #    119     2  uint16 LE     metadata_len      length of following UTF-8 string
-#    121     ?  UTF-8         metadata          creation string (metadata_len bytes)
-#  121+n     ?  UTF-8         TOC block         (toc_end - toc_start bytes)
-#    ...     ?  bytes         [future sections] gap between toc_end and pcm_start
+#    121     8  uint64 LE     rg_start          byte offset to RG block; 0 if absent
+#    129     8  uint64 LE     rg_end            byte offset past RG block; 0 if absent
+#    137    32  bytes         rg_checksum       SHA-256 of RG block; zeros if absent
+#    169     ?  UTF-8         metadata          creation string (metadata_len bytes)
+#  169+n     ?  UTF-8         TOC block         (toc_end - toc_start bytes)
+#    ...     ?  bytes         RG block          optional; in gap between toc_end and pcm_start
 #    ...     ?  bytes         PCM block         raw s16le interleaved (pcm_end - pcm_start bytes)
 
 OFFSET_MAGIC: int = 0
@@ -77,9 +80,12 @@ OFFSET_PCM_END: int = 47
 OFFSET_TOC_CHECKSUM: int = 55
 OFFSET_PCM_CHECKSUM: int = 87
 OFFSET_METADATA_LEN: int = 119
-OFFSET_METADATA: int = 121
+OFFSET_RG_START: int = 121
+OFFSET_RG_END: int = 129
+OFFSET_RG_CHECKSUM: int = 137
+OFFSET_METADATA: int = 169
 
-HEADER_FIXED_SIZE: int = 121  # bytes 0-120 inclusive
+HEADER_FIXED_SIZE: int = 169  # bytes 0-168 inclusive
 
 # ---------------------------------------------------------------------------
 # Struct format strings (all little-endian)
@@ -90,13 +96,27 @@ HEADER_FIXED_SIZE: int = 121  # bytes 0-120 inclusive
 #         track_count(B), disc_number(B), disc_total(B),
 #         pcm_sample_rate(I), pcm_channels(B), pcm_bit_depth(B),
 #         toc_start(Q), toc_end(Q), pcm_start(Q), pcm_end(Q),
-#         toc_checksum(32s), pcm_checksum(32s), metadata_len(H)
-HEADER_STRUCT: str = "<8sBBIBBBIBBQQQQ32s32sH"
+#         toc_checksum(32s), pcm_checksum(32s), metadata_len(H),
+#         rg_start(Q), rg_end(Q), rg_checksum(32s)
+HEADER_STRUCT: str = "<8sBBIBBBIBBQQQQ32s32sHQQ32s"
 HEADER_STRUCT_SIZE: int = struct.calcsize(HEADER_STRUCT)  # must equal HEADER_FIXED_SIZE
 
 assert HEADER_STRUCT_SIZE == HEADER_FIXED_SIZE, (  # noqa: S101
     f"HEADER_STRUCT size {HEADER_STRUCT_SIZE} != HEADER_FIXED_SIZE {HEADER_FIXED_SIZE}"
 )
+
+# RG block fixed fields (N-dependent arrays follow; see rbi_spec.md §7.2)
+# Fields: rg_version(B), rg_reference(f), album_gain(f), album_peak(f), album_range(f)
+RG_BLOCK_FIXED_STRUCT: str = "<Bffff"
+RG_BLOCK_FIXED_SIZE: int = struct.calcsize(RG_BLOCK_FIXED_STRUCT)  # 17 bytes
+
+assert RG_BLOCK_FIXED_SIZE == 17, (  # noqa: S101
+    f"RG_BLOCK_FIXED_STRUCT size {RG_BLOCK_FIXED_SIZE} != 17"
+)
+
+# Per-track array element (three float32 values: gain, peak, range)
+RG_TRACK_STRUCT: str = "<fff"
+RG_TRACK_SIZE: int = struct.calcsize(RG_TRACK_STRUCT)  # 12 bytes
 
 # Placeholder checksums and offsets used when first writing the header
 CHECKSUM_SIZE: int = 32  # SHA-256 digest length in bytes
@@ -108,14 +128,16 @@ OFFSET_PLACEHOLDER: int = 0
 # ---------------------------------------------------------------------------
 
 MAX_METADATA_LEN: int = 1024  # enforced on read and write
-FLAGS_RESERVED_MASK: int = 0xFFFFFFFF  # all bits reserved in v1.2; must be 0
+FLAGS_RESERVED_MASK: int = 0xFFFFFFFA  # all bits except FLAG_RG_PRESENT and FLAG_MASTER_MODE are reserved
 
 # ---------------------------------------------------------------------------
-# Flags bitmask (v1.2: all zero; defined here for future use)
+# Flags bitmask
 # ---------------------------------------------------------------------------
 # Even bit positions = "safe to ignore if unknown"
 # Odd bit positions  = "must understand to read correctly"
-# (No bits are currently defined.)
+
+FLAG_RG_PRESENT: int = 0x00000001  # bit 0 (even): RG block present in gap
+FLAG_MASTER_MODE: int = 0x00000004  # bit 2 (even): created in master mode (no silence trim)
 
 # ---------------------------------------------------------------------------
 # Dataclasses
@@ -142,6 +164,9 @@ class RBIHeader:
     toc_checksum: bytes  # 32-byte SHA-256 digest
     pcm_checksum: bytes  # 32-byte SHA-256 digest
     metadata: str  # decoded UTF-8 creation string
+    rg_start: int  # uint64; byte offset; 0 if absent
+    rg_end: int  # uint64; byte offset; 0 if absent
+    rg_checksum: bytes  # 32-byte SHA-256 digest; zeros if absent
 
     @property
     def toc_length(self) -> int:
@@ -152,8 +177,34 @@ class RBIHeader:
         return self.pcm_end - self.pcm_start
 
     @property
+    def rg_length(self) -> int:
+        return self.rg_end - self.rg_start
+
+    @property
     def header_size(self) -> int:
         return HEADER_FIXED_SIZE + len(self.metadata.encode("utf-8"))
+
+    @property
+    def has_rg(self) -> bool:
+        return bool(self.flags & FLAG_RG_PRESENT)
+
+    @property
+    def is_master(self) -> bool:
+        return bool(self.flags & FLAG_MASTER_MODE)
+
+
+@dataclass
+class RBIReplayGain:
+    """Parsed RG block from an RBI container."""
+
+    rg_version: int  # uint8; current value: 1
+    rg_reference: float  # LUFS; nominally -18.0
+    album_gain: float  # dB
+    album_peak: float  # linear
+    album_range: float  # LU
+    track_gain: list[float] = field(default_factory=list)  # dB; one per track
+    track_peak: list[float] = field(default_factory=list)  # linear; one per track
+    track_range: list[float] = field(default_factory=list)  # LU; one per track
 
 
 @dataclass

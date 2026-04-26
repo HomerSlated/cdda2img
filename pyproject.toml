@@ -21,6 +21,7 @@ dependencies = [
     "av>=16.0.1",
     "ffmpeg-normalize>=1.37.6",
     "ortools>=9.15.6755",
+    "pyebur128>=0.1.1",
     "textual>=8.2.4",
 ]
 

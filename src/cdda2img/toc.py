@@ -55,8 +55,14 @@ def build_toc_entries(tracklist: list[Path], durations: list[int], disc: RBIDisc
     return entries
 
 
-def generate_toc(disc: RBIDisc) -> bytes:
-    """Generate cdrdao-compatible TOC text for the given disc."""
+def generate_toc(disc: RBIDisc, source_rg: list[dict[str, str]] | None = None) -> bytes:
+    """Generate cdrdao-compatible TOC text for the given disc.
+
+    If *source_rg* is provided (one dict per track), any REPLAYGAIN_* entries
+    are written as '// SOURCE_RG: KEY="VALUE"' comment lines preceding each
+    track block. These lines are ignored by cdrdao and the TOC parser; they
+    serve as provenance metadata for the original source file's loudness tags.
+    """
     album = sanitize_title(disc.album)
     artist = sanitize_title(disc.artist)
     pcm_filename = f"{album}.s16le"
@@ -78,9 +84,13 @@ def generate_toc(disc: RBIDisc) -> bytes:
         "}\n",
     ]
 
-    for track in disc.tracks:
+    for idx, track in enumerate(disc.tracks):
+        rg = source_rg[idx] if source_rg and idx < len(source_rg) else {}
+        rg_lines = [f'// SOURCE_RG: {k}="{v}"' for k, v in sorted(rg.items())]
+
         lines += [
             f"// Track {track.track_number}",
+            *rg_lines,
             "TRACK AUDIO",
             "NO COPY",
             "NO PRE_EMPHASIS",

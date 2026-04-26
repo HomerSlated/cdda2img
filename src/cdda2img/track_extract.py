@@ -10,7 +10,7 @@ from pathlib import Path
 import av
 from av.audio.frame import AudioFrame
 
-from cdda2img.rbi_format import CD_FRAMES_PER_SECOND
+from cdda2img.rbi_format import CD_FRAMES_PER_SECOND, RBIReplayGain
 from cdda2img.toc_parser import ParsedDisc, ParsedTrack
 
 _UNSAFE_RE = re.compile(r'[/\\:*?"<>|]')
@@ -36,6 +36,25 @@ def _track_filename(track: ParsedTrack) -> str:
 
 def _cue_filename(disc: ParsedDisc) -> str:
     return f"{_fs_safe(disc.title) or 'disc'}.cue"
+
+
+def _rg_tags(rg: RBIReplayGain, track_index: int) -> dict[str, str]:
+    """Format ReplayGain 2.0 Vorbis comment tags for one track (0-based index)."""
+    return {
+        "REPLAYGAIN_TRACK_GAIN": f"{rg.track_gain[track_index]:+.2f} dB",
+        "REPLAYGAIN_TRACK_PEAK": f"{rg.track_peak[track_index]:.6f}",
+        "REPLAYGAIN_TRACK_RANGE": f"{rg.track_range[track_index]:.2f} LU",
+        "REPLAYGAIN_ALBUM_GAIN": f"{rg.album_gain:+.2f} dB",
+        "REPLAYGAIN_ALBUM_PEAK": f"{rg.album_peak:.6f}",
+        "REPLAYGAIN_ALBUM_RANGE": f"{rg.album_range:.2f} LU",
+        "REPLAYGAIN_REFERENCE_LOUDNESS": f"{rg.rg_reference:.2f} LUFS",
+    }
+
+
+def collect_track_flac_paths(disc: ParsedDisc, disc_number: int, disc_total: int, base: Path) -> list[Path]:
+    """Return only the per-track FLAC paths (no CUE sheet)."""
+    d = _disc_dir(disc, disc_number, disc_total, base)
+    return [d / _track_filename(t) for t in disc.tracks]
 
 
 def collect_tracks_output_paths(disc: ParsedDisc, disc_number: int, disc_total: int, base: Path) -> list[Path]:
@@ -106,12 +125,13 @@ def extract_tracks(
     bit_depth: int,
     comment: str,
     base: Path,
+    rg_data: RBIReplayGain | None = None,
 ) -> None:
     d = _disc_dir(disc, disc_number, disc_total, base)
     d.mkdir(parents=True, exist_ok=True)
     track_total = len(disc.tracks)
 
-    for track in disc.tracks:
+    for idx, track in enumerate(disc.tracks):
         print(f"  Track {track.track_number:2}/{track_total}: {track.title}")
         pcm = _read_pcm_slice(
             container_file,
@@ -124,15 +144,17 @@ def extract_tracks(
         )
         wav = _pcm_to_wav_bytes(pcm, sample_rate, channels, bit_depth)
 
-        metadata = {
-            "title": track.title,
-            "artist": track.performer,
+        metadata: dict[str, str] = {
+            "TITLE": track.title,
+            "ARTIST": track.performer,
             "album_artist": disc.performer,
-            "album": disc.title,
+            "ALBUM": disc.title,
             "track": f"{track.track_number}/{track_total}",
             "disc": f"{disc_number}/{disc_total}",
             "comment": comment,
         }
+        if rg_data is not None:
+            metadata.update(_rg_tags(rg_data, idx))
 
         out_path = d / _track_filename(track)
         _wav_bytes_to_flac(wav, out_path, metadata, sample_rate)
