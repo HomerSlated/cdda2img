@@ -91,7 +91,7 @@ def read_source_rg_tags(path: Path) -> dict[str, str]:
     if not audio or not audio.tags:
         return {}
     result: dict[str, str] = {}
-    for raw_key in audio.tags:
+    for raw_key in audio.tags.keys():  # noqa: SIM118
         canonical = raw_key.upper().split(":")[-1]
         if canonical not in _RG_TAGS:
             continue

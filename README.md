@@ -1,121 +1,114 @@
 # cdda2img
 
-**cdda2img** is a command-line tool for creating and extracting archive images of
-Red Book standard CD-DA audio discs. It ingests a directory of audio files
-(any format supported by ffmpeg), transcodes them to lossless Red Book PCM,
-and writes a self-contained, checksum-verified **RBI (Red Book Image)** container
-with an embedded cdrdao TOC. Extraction produces per-track FLAC files with
-embedded metadata and a CUE sheet, or raw PCM with a TOC, or both. Future versions
-will read physical CD-Audio discs directly as well.
+**cdda2img** is a command-line tool for creating and extracting **RBI (Red Book Image)**
+archive containers of CD-DA audio discs. It ingests audio files in any format, transcodes
+to lossless Red Book PCM, measures and stores EBU R128 ReplayGain metadata natively, and
+packs everything into a single self-describing, checksum-verified container.
 
 ## Why?
 
-The CD-DA format, defined by the *Red Book* standard (IEC 60908:1999), stores audio
-as a continuous PCM stream — it has no filesystem, no filenames, and no directories.
-The "Track 01.cda" files that appear on your desktop are OS-generated stubs, not data
-present on the disc. Archiving a CD-DA disc means preserving its audio stream and its
-Table of Contents together, in a format that is self-describing and integrity-verified.
+A CD-DA disc has no filesystem — its audio is a continuous PCM stream indexed by a Table
+of Contents. The `.cda` "files" visible in your OS are stubs, not data on the disc.
+Archiving a CD-DA disc means preserving the PCM stream and the TOC together,
+integrity-verified, in a format that will still be readable in twenty years.
 
-Existing CDDA container formats — CUE/BIN, CCD/IMG/SUB, MDS/MDF, NRG — were designed
-for disc burning tools and are proprietary, incompletely documented, and typically
-spread across multiple files. The goal of this project is a single, open, fully
-documented container format suitable for long-term archival, that handles the complete
-pipeline from raw audio files to a finished disc image without requiring access to
-physical media.
+Existing container formats — CUE/BIN, CCD/IMG, MDS/MDF, NRG — were built for disc burning
+tools: proprietary, multi-file, incompletely documented. RBI is a single open container
+with a fully documented binary spec designed for long-term archival.
 
-This is an active prototype. A Rust reimplementation is planned once the design
-has stabilised.
+This is an active prototype. A Rust reimplementation is planned once the design stabilises.
 
 ## Features
 
-- **Create** RBI images from a directory of audio files (any ffmpeg-supported format)
-- **Multi-disc batching** with four packing strategies — from simple first-come-first-served
-  to optimal global bin-packing via OR-Tools CP-SAT
-- **Silence trimming** and configurable inter-track gap
-- **Optional EBU R128 normalisation** via ffmpeg-normalize
-- **Metadata extraction** from file tags (mutagen) with interactive confirm
-- **Extract** to per-track FLAC files with embedded Vorbis tags and CUE sheet
-- **Extract** to raw s16le PCM + cdrdao TOC
-- **SHA-256 integrity checksums** for TOC and PCM blocks
-- **Multi-disc support** — disc number/total stored in the container
+### Now
+
+- **Format-agnostic ingestion** — any audio format supported by PyAV (FLAC, MP3, OGG,
+  M4A, WAV, …); no ffmpeg subprocess required
+- **Red Book transcoding** — 16-bit stereo 44.1 kHz s16le PCM, enforced by PyAV
+- **Master / Remaster modes** — master preserves audio as-is; remaster applies silence
+  trimming (−55 dBFS) and 2-second Red Book inter-track gaps
+- **ReplayGain 2.0** — EBU R128 loudness analysis via pyebur128 (the reference C library);
+  stored as a binary block inside the RBI container; embedded as Vorbis comment tags in
+  extracted FLACs; computed per-track and at album level without any concat step
+- **Multi-disc bin-packing** — four strategies, including global optimisation via
+  OR-Tools CP-SAT (`ball`), which minimises total disc count across an entire collection
+  in a single pass
+- **Extract to FLAC + CUE** or raw s16le PCM + TOC, or both; optional EBU R128
+  normalisation at −18 LUFS on extract (mutually exclusive with ReplayGain tags)
+- **List and verify** — `l` prints the full container index with offsets and sizes;
+  `t` runs 23 structural and checksum checks, exits non-zero on failure
+- **SHA-256 checksums** for TOC, ReplayGain, and PCM blocks — stored in the fixed header,
+  verified on every extract and test
+- **Open, documented format** — `docs/rbi_spec.md` fully specifies every field
+
+### Planned
+
+- `r` subcommand — rip a physical CD-DA disc directly to RBI via `/dev/sr0`
+- AccurateRip v1/v2 checksum verification per track
+- Foreign format import — read CUE/BIN, MDS/MDF, CCD/IMG/SUB, NRG as input;
+  read-only plugins only, always converted to RBI first
+- MusicBrainz + AcoustID metadata lookup chain with confidence ranking
+- **Release intelligence** — automatically detect remasters; surface the original
+  release date so you know whether your archive predates the loudness war
+- **Music collection catalogue** — SQLite database of all created RBIs, queryable
+  by album, artist, remaster status, and more
+- TUI — Textual-based terminal UI with real-time VU metering and delivery-mode audition
+  (compare unprocessed / normalised / ReplayGain before committing to an extract)
+- Rust reimplementation, once the design has stabilised
 
 ## RBI Format
 
-RBI is a binary container format with a 121-byte fixed header: 8-byte magic
-(`RBIMAGE\x00`), format version (major/minor uint8), uint64 offsets for the TOC and
-PCM blocks, flags, track count, disc number/total, PCM parameters (sample rate,
-channels, bit depth), and SHA-256 checksums.
+A single binary file. Fixed 121-byte header containing the magic bytes `RBIMAGE\x00`,
+format version, uint64 offsets, and SHA-256 checksums for three variable-length blocks:
 
-The PCM block stores raw s16le — the canonical Red Book encoding — rather than a WAV
-wrapper. WAV headers are reconstructed on extraction from the stored parameters. The
-embedded TOC is a cdrdao-format text file.
+| Block | Contents |
+|-------|----------|
+| TOC | cdrdao-format text TOC with track durations and provenance comments |
+| ReplayGain | 17 + 12×N bytes: per-track and album gain, peak, and LRA values |
+| PCM | Raw s16le — no WAV wrapper; parameters stored in the fixed header |
 
-The specification is documented in `rbi_spec.md` in the repository.
+The ReplayGain and PCM blocks are optional and signalled by flags in the header.
+Full specification: `docs/rbi_spec.md`.
 
 ## Installation
 
-**Requirements:**
-
-- Python 3.10+
-- [ffmpeg](https://ffmpeg.org/) (system install — must be in `PATH`)
-
-**Install with uv (recommended):**
+**Requirements:** Python 3.10+, [ffmpeg](https://ffmpeg.org/) (system install)
 
 ```bash
 uv sync
 ```
 
-**Or with pip:**
-
-```bash
-pip install cdda2img
-```
-
-Python dependencies (installed automatically): PyAV, ffmpeg-normalize, OR-Tools, Textual.
-
 ## Usage
 
 ```bash
-# Create an RBI image from a directory of audio files
-cdda2img c /music/album
+# Create — remaster mode with ReplayGain, globally optimal disc packing
+cdda2img c /music/album --mode remaster --loudness rg --strategy ball
 
-# Create with EBU R128 normalisation and optimal disc packing
-cdda2img c /music/album --normalize --strategy ball
+# Create — master mode (transcode only, no processing, no ReplayGain)
+cdda2img c /music/album --mode master --loudness none
 
 # Extract to per-track FLAC files + CUE sheet (default)
 cdda2img x album.rbi
 
-# Extract to raw PCM + TOC
-cdda2img x album.rbi --raw
+# Extract to raw PCM + TOC, with EBU R128 normalisation applied
+cdda2img x album.rbi --raw --normalize
 
-# Extract both formats
-cdda2img x album.rbi --tracks --raw
+# Inspect a container; verify all checksums
+cdda2img l album.rbi
+cdda2img t album.rbi
 ```
 
-**Batching strategies:**
+**Batching strategies** (`--strategy`):
 
 | Strategy | Description |
 |----------|-------------|
 | `fcfs`   | First-come-first-served: fill one disc in input order |
 | `aatc`   | All-as-they-come: fill discs in input order (default) |
-| `bech`   | Best-each: pack each disc as full as possible in turn (order not preserved) |
-| `ball`   | Best-all: global bin-packing to minimise total disc count (order not preserved) |
+| `bech`   | Best-each: pack each disc as full as possible in turn |
+| `ball`   | Best-all: global bin-packing to minimise total disc count (OR-Tools CP-SAT) |
 
-The `bech` and `ball` strategies use OR-Tools CP-SAT and may be slow for large collections.
-
-## Roadmap
-
-The following are planned but not yet implemented:
-
-- **ReplayGain support** — compute and store ReplayGain 2.0 metadata in the RBI
-  container; embed as Vorbis comment tags on FLAC extraction
-- **Physical disc ripping** — read audio directly from CD drives using third-party tools
-- **Foreign format import** — read CUE/BIN, CCD/IMG/SUB, MDS/MDF, and NRG images
-  as input to the create pipeline
-- **Metadata lookup** — MusicBrainz and AcoustID fingerprinting, with fallback to
-  heuristics and interactive prompt
-- **TUI** — a Textual-based terminal interface with real-time progress and VU metering
-- **AccurateRip verification** — rip accuracy checksums stored in the container
+A fifth strategy `tags` is planned: uses embedded disc-number metadata to recreate the
+original multi-disc track selection exactly, with overflow handling via `ball`.
 
 ## License
 
