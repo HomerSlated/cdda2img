@@ -2,6 +2,7 @@
 toc_parser.py — Parse cdrdao-format TOC text into structured track data.
 """
 
+import json
 import re
 from dataclasses import dataclass, field
 
@@ -28,6 +29,7 @@ _TITLE_RE = re.compile(r'TITLE\s+"([^"]*)"')
 _PERFORMER_RE = re.compile(r'PERFORMER\s+"([^"]*)"')
 _FILE_TS_RE = re.compile(r'FILE\s+"[^"]+"\s+(\d{2}:\d{2}:\d{2})\s+(\d{2}:\d{2}:\d{2})')
 _TRACK_MARKER_RE = re.compile(r"^//\s*Track\s+(\d+)", re.MULTILINE)
+_TITLE_UNICODE_RE = re.compile(r"^//\s*TRACK_TITLE_UNICODE:\s*(.+)$", re.MULTILINE)
 
 
 def _first(pattern: re.Pattern[str], text: str, default: str = "") -> str:
@@ -53,10 +55,19 @@ def parse_toc(toc_bytes: bytes) -> ParsedDisc:
         if not file_m:
             continue
 
+        unicode_m = _TITLE_UNICODE_RE.search(block)
+        if unicode_m:
+            try:
+                track_title = json.loads(unicode_m.group(1))
+            except (json.JSONDecodeError, ValueError):
+                track_title = _first(_TITLE_RE, block, disc_title)
+        else:
+            track_title = _first(_TITLE_RE, block, disc_title)
+
         tracks.append(
             ParsedTrack(
                 track_number=int(marker.group(1)),
-                title=_first(_TITLE_RE, block, disc_title),
+                title=track_title,
                 performer=_first(_PERFORMER_RE, block, disc_performer),
                 start_frame=frames_from_timestamp(file_m.group(1)),
                 duration_frames=frames_from_timestamp(file_m.group(2)),

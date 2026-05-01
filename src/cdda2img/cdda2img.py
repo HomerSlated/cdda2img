@@ -1,4 +1,5 @@
 import argparse
+import re
 import textwrap
 from pathlib import Path
 
@@ -150,7 +151,8 @@ def create_image(
         disc = RBIDisc(album=album, artist=artist, disc_number=disc_num, disc_total=disc_total)
         disc.tracks = build_toc_entries(batch, durations, disc)
         source_rg = [read_source_rg_tags(p) for p in batch]
-        toc_data = generate_toc(disc, source_rg=source_rg)
+        raw_titles = [re.sub(r"^\d{2} ", "", p.stem) for p in batch]
+        toc_data = generate_toc(disc, source_rg=source_rg, raw_titles=raw_titles)
 
         rg_block: bytes | None = None
         if loudness == "rg":

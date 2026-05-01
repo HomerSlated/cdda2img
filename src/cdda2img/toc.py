@@ -2,6 +2,7 @@
 toc.py — TOC generation and track duration utilities.
 """
 
+import json
 import re
 import wave
 from pathlib import Path
@@ -20,11 +21,16 @@ _TITLE_REPLACEMENTS: dict[str, str] = {
 
 
 def sanitize_title(text: str) -> str:
-    """Sanitize a track or album title for embedding in the TOC."""
+    """Sanitize a track or album title for embedding in the TOC.
+
+    The TOC format uses double-quote as a string delimiter, so any `"` that
+    remains after Unicode replacement is converted to `'` to keep the grammar valid.
+    """
     for bad, good in _TITLE_REPLACEMENTS.items():
         text = text.replace(bad, good)
     text = re.sub(r"^\d{2} ", "", text)
-    return re.sub(r"[^\x00-\x7F]+", "", text)
+    text = re.sub(r"[^\x00-\x7F]+", "", text)
+    return text.replace('"', "'")
 
 
 def get_track_durations(wav_files: list[Path]) -> list[int]:
@@ -55,13 +61,21 @@ def build_toc_entries(tracklist: list[Path], durations: list[int], disc: RBIDisc
     return entries
 
 
-def generate_toc(disc: RBIDisc, source_rg: list[dict[str, str]] | None = None) -> bytes:
+def generate_toc(
+    disc: RBIDisc,
+    source_rg: list[dict[str, str]] | None = None,
+    raw_titles: list[str] | None = None,
+) -> bytes:
     """Generate cdrdao-compatible TOC text for the given disc.
 
     If *source_rg* is provided (one dict per track), any REPLAYGAIN_* entries
     are written as '// SOURCE_RG: KEY="VALUE"' comment lines preceding each
-    track block. These lines are ignored by cdrdao and the TOC parser; they
-    serve as provenance metadata for the original source file's loudness tags.
+    track block.
+
+    If *raw_titles* is provided (one string per track), tracks whose raw title
+    differs from the sanitized TOC title get a '// TRACK_TITLE_UNICODE: <json>'
+    comment. This preserves the original Unicode title (e.g. curly quotes) for
+    use as the FLAC TITLE tag on extraction, without breaking the TOC grammar.
     """
     album = sanitize_title(disc.album)
     artist = sanitize_title(disc.artist)
@@ -88,8 +102,14 @@ def generate_toc(disc: RBIDisc, source_rg: list[dict[str, str]] | None = None) -
         rg = source_rg[idx] if source_rg and idx < len(source_rg) else {}
         rg_lines = [f'// SOURCE_RG: {k}="{v}"' for k, v in sorted(rg.items())]
 
+        raw_title = raw_titles[idx] if raw_titles and idx < len(raw_titles) else None
+        unicode_lines = (
+            [f"// TRACK_TITLE_UNICODE: {json.dumps(raw_title)}"] if raw_title and raw_title != track.title else []
+        )
+
         lines += [
             f"// Track {track.track_number}",
+            *unicode_lines,
             *rg_lines,
             "TRACK AUDIO",
             "NO COPY",
