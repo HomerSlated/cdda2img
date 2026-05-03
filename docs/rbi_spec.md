@@ -1,6 +1,6 @@
 # RBI Format Specification
 ## Red Book Image — CD-DA Archive Container
-### Version 2.0 · Format version `major=2, minor=0`
+### Version 3.0 · Format version `major=3, minor=0`
 
 ---
 
@@ -12,7 +12,9 @@ RBI is deliberately CD-DA-only. It does not attempt to represent raw physical se
 
 ### Backwards compatibility
 
-**RBI v2.0 is not backwards-compatible with v1.x.** The fixed header grew from 121 to 169 bytes. A v1.x reader will mis-parse any v2.0 file; a v2.0 reader **MUST** reject any file with `version_major != 2`. This break is intentional: the format is under active development and has no established userbase at the time of this revision.
+**RBI v3.0 is not backwards-compatible with v2.0.** The fixed header size is unchanged (169 bytes), but the TOC now records per-track pre-gap durations (`pregap_frames`) and ISRC codes that v2.0 readers do not understand. A v2.0 reader extracting a v3.0 file would silently mis-slice PCM — slicing from `start_frame` instead of `start_frame + pregap_frames` — producing audio that begins mid-pre-gap. A v3.0 reader **MUST** reject any file with `version_major != 3`. This break is intentional: the format is under active development and has no established userbase at the time of this revision.
+
+**RBI v2.0 was not backwards-compatible with v1.x.** The fixed header grew from 121 to 169 bytes at v2.0.
 
 ---
 
@@ -84,7 +86,7 @@ All multi-byte integer fields are **little-endian** unless otherwise noted.
 | Offset | Size (bytes) | Type      | Field             | Description |
 |--------|-------------|-----------|-------------------|-------------|
 | 0      | 8           | bytes     | `magic`           | `RBIMAGE\x00` (0x52 0x42 0x49 0x4D 0x41 0x47 0x45 0x00) |
-| 8      | 1           | uint8     | `version_major`   | Format major version; current value: `2` |
+| 8      | 1           | uint8     | `version_major`   | Format major version; current value: `3` |
 | 9      | 1           | uint8     | `version_minor`   | Format minor version; current value: `0` |
 | 10     | 4           | uint32 LE | `flags`           | Feature bitmask (see §5.3); `FLAG_RG_PRESENT = 0x00000001` |
 | 14     | 1           | uint8     | `track_count`     | Number of audio tracks (1–99) |
@@ -107,7 +109,7 @@ All multi-byte integer fields are **little-endian** unless otherwise noted.
 
 **Fixed header size:** 169 bytes
 **Total header size:** `169 + metadata_len` bytes
-**TOC block begins at:** `toc_start` (== `169 + metadata_len` in a v2.0 file with no preceding sections)
+**TOC block begins at:** `toc_start` (== `169 + metadata_len` in a v3.0 file with no preceding sections)
 **PCM block begins at:** `pcm_start` (>= `toc_end`)
 
 Note: `metadata_len` is at offset 119, and the `metadata` string it describes begins at offset 169. The 48-byte RG location fields (`rg_start`, `rg_end`, `rg_checksum`) are interleaved in the fixed header between these two fields. This layout preserves the position of all pre-existing fields from v1.x while keeping all fixed-width fields in a single contiguous struct.
@@ -125,9 +127,9 @@ The offset fields at bytes 23–54 and 121–168 are written as `0x0000000000000
 
 ### 5.2 `version_major` and `version_minor`
 - Two independent `uint8` fields encoding the format version.
-- Current values: `version_major = 2`, `version_minor = 0`.
+- Current values: `version_major = 3`, `version_minor = 0`.
 - The code version (`cdda2img` release) is separate. Format changes increment these fields; tool releases do not.
-- A reader encountering `version_major != 2` **MUST** reject the file. RBI v2.0 is not backwards-compatible with v1.x (the fixed header is a different size); it is also not forwards-compatible (the content of a `version_major = 3` file is unknown).
+- A reader encountering `version_major != 3` **MUST** reject the file. RBI v3.0 is not backwards-compatible with v2.0 (the TOC encodes pre-gap durations that v2.0 readers do not understand; see §1). It is also not forwards-compatible (the content of a `version_major = 4` file is unknown).
 - A reader encountering `version_minor > 0` **SHOULD** attempt to read the file and warn, as minor increments are intended to be backwards-compatible within a major version.
 
 ### 5.3 `flags`
@@ -139,7 +141,7 @@ The offset fields at bytes 23–54 and 121–168 are written as `0x0000000000000
 | 0   | `0x00000001` | `FLAG_RG_PRESENT`  | RG block is present in the gap; `rg_start`, `rg_end`, and `rg_checksum` are valid |
 | 2   | `0x00000004` | `FLAG_MASTER_MODE` | Container was created in master mode (no silence trimming or inter-track gap was applied to the source audio) |
 
-- All other bits are currently reserved and **MUST** be `0` in v2.0 files.
+- All other bits are currently reserved and **MUST** be `0` in v3.0 files.
 - Even-numbered bits (including bits 0 and 2) indicate "safe to ignore if not understood." A reader that does not implement a given even-bit feature **MAY** proceed without it.
 - Odd-numbered bits indicate "must understand to read correctly." A reader encountering an unknown flag bit at an odd position **MUST** reject the file.
 
@@ -156,7 +158,7 @@ The offset fields at bytes 23–54 and 121–168 are written as `0x0000000000000
 ### 5.6 `pcm_sample_rate`, `pcm_channels`, `pcm_bit_depth`
 - Explicitly encode the audio parameters of the PCM block.
 - Red Book standard values: `44100`, `2`, `16`.
-- A v2.0 reader **SHOULD** reject files where these differ from Red Book values, as no other values are currently defined.
+- A v3.0 reader **SHOULD** reject files where these differ from Red Book values, as no other values are currently defined.
 - These fields exist to enable future format variants (e.g. 24-bit archival quality) without a major version bump.
 
 ### 5.7 Offset fields (`toc_start`, `toc_end`, `pcm_start`, `pcm_end`)
@@ -183,8 +185,8 @@ The offset fields at bytes 23–54 and 121–168 are written as `0x0000000000000
 
 ### 5.11 `metadata`
 - UTF-8 encoded string, `metadata_len` bytes long. Not null-terminated.
-- Canonical format: `Created by cdda2img vX.Y.Z (format 2.0) on ISO8601_DATETIME`
-- Example: `Created by cdda2img v0.2.0 (format 2.0) on 2026-04-25T14:30:00`
+- Canonical format: `Created by cdda2img vX.Y.Z (format 3.0) on ISO8601_DATETIME`
+- Example: `Created by cdda2img v0.1.4 (format 3.0) on 2026-05-03T21:46:52`
 - A reader that cannot decode this field as valid UTF-8 **MUST** reject the file.
 
 ---
@@ -215,6 +217,7 @@ TRACK AUDIO
 NO COPY
 NO PRE_EMPHASIS
 TWO_CHANNEL_AUDIO
+ISRC "GBAYE9300135"
 CD_TEXT {
   LANGUAGE 0 {
     TITLE "<track title>"
@@ -223,11 +226,30 @@ CD_TEXT {
 }
 FILE "<album>.pcm" MM:SS:FF MM:SS:FF
 
-// Track 2
+// Track 2 (with pre-gap)
+TRACK AUDIO
+NO COPY
+NO PRE_EMPHASIS
+TWO_CHANNEL_AUDIO
+ISRC "GBAYE9300136"
+CD_TEXT {
+  LANGUAGE 0 {
+    TITLE "<track title>"
+    PERFORMER "<track artist>"
+  }
+}
+FILE "<album>.pcm" MM:SS:FF MM:SS:FF
+START MM:SS:FF
+
+// Track 3
 ...
 ```
 
-The `CATALOG` line is optional; it is included only when an MCN is available from the source material (physical rip or existing subchannel data).
+The `CATALOG` line is optional; it is included only when an MCN (Media Catalogue Number / EAN-13) is available from the source material. All-zeros MCNs (`0000000000000`) are treated as absent and omitted.
+
+The `ISRC` line is optional per track; it is included when an ISO 3901 ISRC code is available.
+
+The `START` line is optional per track; it is present only for tracks that have a pre-gap (see §6.5).
 
 ### 6.2 Timestamp format
 
@@ -236,13 +258,32 @@ CD-DA frame timestamps use the format `MM:SS:FF` where:
 - `SS` = seconds (00–59)
 - `FF` = frames (00–74); 1 frame = 1/75 second
 
-The first `MM:SS:FF` in each `FILE` line is the start position within the PCM blob; the second is the duration of the track.
+The first `MM:SS:FF` in each `FILE` line is the start position within the PCM blob (the start of the slot, which includes any pre-gap); the second is the total slot duration (pre-gap + audio). When no `START` line is present, the slot is entirely audio.
 
 Conversion: `total_frames = MM × 75 × 60 + SS × 75 + FF`
 
 ### 6.3 FILE reference
 
 The filename in each `FILE` line uses the extension `.pcm` to reflect that the payload is raw PCM, not a WAV file. The stem is the sanitised album title. When extracting, a WAV file is reconstructed from the raw PCM using the audio parameters in the fixed header.
+
+### 6.4 ISRC
+
+The `ISRC` line contains the ISO 3901 International Standard Recording Code for the track (12 characters: country code 2, registrant 3, year 2, designation 5). It is written immediately after `TWO_CHANNEL_AUDIO` and before the `CD_TEXT` block. Absent when the source did not provide an ISRC.
+
+### 6.5 Pre-gap storage
+
+Tracks on a CD-DA disc may have a pre-gap: a period of silence (or, rarely, audio) preceding the track's INDEX 01 point. RBI v3.0 stores pre-gap audio contiguously in the PCM block as part of the following track's slot.
+
+For a track with a pre-gap of duration P frames and audio of duration D frames:
+
+- `FILE` line: `start_timestamp` = PCM offset to the beginning of the slot (pre-gap start); `slot_duration` = P + D frames.
+- `START` line: duration = P frames (the pre-gap length). This tells the reader where the audio starts within the slot.
+- Audio-only offset: `audio_start_frame = start_frame + pregap_frames`
+- Audio-only duration: `duration_frames = slot_frames − pregap_frames`
+
+**Extraction rule**: when slicing PCM for a track, skip `pregap_frames` frames from `start_frame` before reading `duration_frames` frames of audio. Do not include the pre-gap in the extracted audio.
+
+**Master mode**: pre-gaps are always preserved in the PCM block when the container was created in master mode (`FLAG_MASTER_MODE` set). The pre-gap bytes exist in the PCM at `start_frame * bytes_per_frame`; only the TOC interpretation changes.
 
 ### 6.4 Character sanitisation
 
@@ -319,7 +360,7 @@ The PCM block contains only sample data — no RIFF header or chunk structure. T
 A conforming reader **MUST** enforce:
 
 1. `magic == b'RBIMAGE\x00'`
-2. `version_major == 2` (reject if not equal)
+2. `version_major == 3` (reject if not equal)
 3. `flags & 0xFFFFFFFA == 0` (all bits except `FLAG_RG_PRESENT` and `FLAG_MASTER_MODE` are reserved); reject if any unknown odd-position flag bit is set
 4. `1 <= track_count <= 99`
 5. `1 <= disc_number <= disc_total`
