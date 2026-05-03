@@ -29,13 +29,21 @@ def build_filter_graph(in_stream, pad_dur):
         channels=in_stream.codec_context.channels,
         time_base=in_stream.time_base,
     )
-    silenceremove1 = graph.add("silenceremove", "start_periods=1:start_duration=0:start_threshold=-55dB:detection=peak")
+    silenceremove1 = graph.add(
+        "silenceremove",
+        "start_periods=1:start_duration=0:start_threshold=-55dB:detection=peak",
+    )
     reverse1 = graph.add("areverse")
-    silenceremove2 = graph.add("silenceremove", "start_periods=1:start_duration=0:start_threshold=-55dB:detection=peak")
+    silenceremove2 = graph.add(
+        "silenceremove",
+        "start_periods=1:start_duration=0:start_threshold=-55dB:detection=peak",
+    )
     reverse2 = graph.add("areverse")
     apad = graph.add("apad", f"pad_dur={pad_dur}")
     sink = graph.add("abuffersink")
-    graph.link_nodes(abuffer, silenceremove1, reverse1, silenceremove2, reverse2, apad, sink)
+    graph.link_nodes(
+        abuffer, silenceremove1, reverse1, silenceremove2, reverse2, apad, sink
+    )
     graph.configure()
     return graph
 

@@ -13,7 +13,12 @@ import av
 import pytest
 
 from cdda2img.concat import concat_wav
-from cdda2img.container import build_container, extract_data, read_header, wav_to_raw_pcm
+from cdda2img.container import (
+    build_container,
+    extract_data,
+    read_header,
+    wav_to_raw_pcm,
+)
 from cdda2img.rbi_format import (
     FLAG_MASTER_MODE,
     FLAG_RG_PRESENT,
@@ -65,7 +70,9 @@ def built_containers(tmp_path_factory, wav_tracks):
     """
     tmp = tmp_path_factory.mktemp("containers")
 
-    disc = RBIDisc(album="Test Album", artist="Test Artist", disc_number=1, disc_total=1)
+    disc = RBIDisc(
+        album="Test Album", artist="Test Artist", disc_number=1, disc_total=1
+    )
     durations = get_track_durations(wav_tracks)
     disc.tracks = build_toc_entries(_EXAMPLE_TRACKS, durations, disc)
     toc_data = generate_toc(disc)
@@ -96,7 +103,9 @@ def built_containers(tmp_path_factory, wav_tracks):
 
 
 def test_header_fields_with_rg(built_containers):
-    rbi, _disc, _ = built_containers["rg"]  # LINT-010: disc and rg_result not needed; header re-read independently
+    rbi, _disc, _ = built_containers[
+        "rg"
+    ]  # LINT-010: disc and rg_result not needed; header re-read independently
     h = read_header(rbi)
 
     assert h.version_major == VERSION_MAJOR
@@ -179,7 +188,9 @@ def test_toc_roundtrip(built_containers):
 
 def test_rg_block_roundtrip(built_containers):
     """RG values survive pack→embed→read→unpack; all fields match within float tolerance."""
-    rbi, _, rg_result = built_containers["rg"]  # LINT-010: disc not needed; rg_result used for assertions
+    rbi, _, rg_result = built_containers[
+        "rg"
+    ]  # LINT-010: disc not needed; rg_result used for assertions
     h = read_header(rbi)
 
     assert h.has_rg
@@ -209,7 +220,9 @@ def test_rg_block_roundtrip(built_containers):
 
 def test_flac_extraction_rg_tags(tmp_path, built_containers):
     """Extracted FLACs carry uppercase RG Vorbis comment tags matching stored values."""
-    rbi, _disc, rg_result = built_containers["rg"]  # LINT-010: disc re-derived from TOC bytes below (round-trip test)
+    rbi, _disc, rg_result = built_containers[
+        "rg"
+    ]  # LINT-010: disc re-derived from TOC bytes below (round-trip test)
     h = read_header(rbi)
 
     with open(rbi, "rb") as f:
@@ -219,7 +232,9 @@ def test_flac_extraction_rg_tags(tmp_path, built_containers):
 
     extract_data(rbi, raw_dir=None, tracks=True, base_dir=tmp_path, embed_rg=True)
 
-    flac_paths = collect_track_flac_paths(parsed_disc, h.disc_number, h.disc_total, tmp_path)
+    flac_paths = collect_track_flac_paths(
+        parsed_disc, h.disc_number, h.disc_total, tmp_path
+    )
     assert len(flac_paths) == len(_EXAMPLE_TRACKS)
 
     for i, flac in enumerate(flac_paths):

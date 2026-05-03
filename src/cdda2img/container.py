@@ -69,7 +69,11 @@ def resolve_temp_dir(min_required_bytes: int = 100_000_000) -> Path:
         if not candidate:
             continue
         p = Path(candidate)
-        if p.is_dir() and os.access(p, os.R_OK | os.W_OK) and shutil.disk_usage(p).free >= min_required_bytes:
+        if (
+            p.is_dir()
+            and os.access(p, os.R_OK | os.W_OK)
+            and shutil.disk_usage(p).free >= min_required_bytes
+        ):
             return p
     msg = "No suitable temporary directory with enough free space."
     raise RuntimeError(msg)
@@ -79,8 +83,12 @@ class TempFiles:
     def __init__(self, base_dir: Path):
         self.base = base_dir
         self.pcm_file = base_dir / "all_tracks.pcm"  # final raw PCM (stored in RBI)
-        self.pcm_pre = base_dir / "all_tracks_pre.wav"  # concatenated WAV, pre-normalisation
-        self.pcm_norm = base_dir / "all_tracks_norm.wav"  # normalised WAV (if normalisation enabled)
+        self.pcm_pre = (
+            base_dir / "all_tracks_pre.wav"
+        )  # concatenated WAV, pre-normalisation
+        self.pcm_norm = (
+            base_dir / "all_tracks_norm.wav"
+        )  # normalised WAV (if normalisation enabled)
         self._temp_tracks: list[Path] = []
 
     def temp_track(self, i: int, suffix: str) -> Path:
@@ -320,7 +328,11 @@ def extract_data(
     """Extract TOC and/or per-track FLACs from an RBI container."""
     from cdda2img.replaygain import analyse, embed_rg_tags, unpack_rg_block
     from cdda2img.toc_parser import parse_toc
-    from cdda2img.track_extract import collect_track_flac_paths, extract_tracks, write_cue
+    from cdda2img.track_extract import (
+        collect_track_flac_paths,
+        extract_tracks,
+        write_cue,
+    )
 
     header = read_header(container_file)
     stem = container_file.stem
@@ -342,7 +354,9 @@ def extract_data(
         if sha256_bytes(rg_raw) == header.rg_checksum:
             rg_data = unpack_rg_block(rg_raw, header.track_count)
         else:
-            print("Warning: RG block checksum mismatch — ReplayGain data may be corrupt")
+            print(
+                "Warning: RG block checksum mismatch — ReplayGain data may be corrupt"
+            )
 
     disc = parse_toc(toc_data)
 
@@ -383,8 +397,12 @@ def extract_data(
             if rg_data is not None:
                 print("ReplayGain tags embedded.")
             else:
-                print("\nNo RG block in container — measuring loudness from extracted tracks...")
-                flac_paths = collect_track_flac_paths(disc, header.disc_number, header.disc_total, base_dir)
+                print(
+                    "\nNo RG block in container — measuring loudness from extracted tracks..."
+                )
+                flac_paths = collect_track_flac_paths(
+                    disc, header.disc_number, header.disc_total, base_dir
+                )
                 rg_result = analyse(flac_paths)
                 for warning in rg_result.warnings:
                     print(f"  Warning: {warning}")
@@ -403,7 +421,9 @@ def wav_to_raw_pcm(wav_path: Path, pcm_path: Path) -> None:
         pcm_path.write_bytes(w.readframes(w.getnframes()))
 
 
-def _write_wav(path: Path, pcm_data: bytes, sample_rate: int, channels: int, bit_depth: int) -> None:
+def _write_wav(
+    path: Path, pcm_data: bytes, sample_rate: int, channels: int, bit_depth: int
+) -> None:
     """Reconstruct a WAV file from raw PCM bytes using the given audio parameters."""
     with wave.open(str(path), "wb") as w:
         w.setnchannels(channels)
@@ -469,8 +489,15 @@ def list_container(rbi_file: Path) -> None:
     if header.has_rg:
         sections.append(("ReplayGain block", header.rg_start, header.rg_length, None))
 
-    pcm_seconds = header.pcm_length / (header.pcm_sample_rate * header.pcm_channels * (header.pcm_bit_depth // 8))
-    sections.append(("PCM audio", header.pcm_start, header.pcm_length, _fmt_duration(pcm_seconds)))
+    pcm_seconds = header.pcm_length / (
+        header.pcm_sample_rate * header.pcm_channels * (header.pcm_bit_depth // 8)
+    )
+    sections.append((
+        "PCM audio",
+        header.pcm_start,
+        header.pcm_length,
+        _fmt_duration(pcm_seconds),
+    ))
 
     for name, offset, size, extra in sections:
         extra_str = f"  ({extra})" if extra else ""
@@ -564,12 +591,31 @@ def verify_container(rbi_file: Path) -> bool:
         (flags & FLAGS_RESERVED_MASK) == 0,
         f"flags=0x{flags:08X}, reserved bits 0x{flags & FLAGS_RESERVED_MASK:08X} set",
     )
-    check(f"Track count {track_count} in range 1-{MAX_TRACKS}", 1 <= track_count <= MAX_TRACKS)
+    check(
+        f"Track count {track_count} in range 1-{MAX_TRACKS}",
+        1 <= track_count <= MAX_TRACKS,
+    )
     check(f"Disc {disc_number}/{disc_total} consistent", 1 <= disc_number <= disc_total)
-    check(f"PCM sample rate {pcm_sample_rate} Hz", pcm_sample_rate == PCM_SAMPLE_RATE, f"expected {PCM_SAMPLE_RATE}")
-    check(f"PCM channels {pcm_channels}", pcm_channels == PCM_CHANNELS, f"expected {PCM_CHANNELS}")
-    check(f"PCM bit depth {pcm_bit_depth}-bit", pcm_bit_depth == PCM_BIT_DEPTH, f"expected {PCM_BIT_DEPTH}")
-    check(f"Metadata length {metadata_len} B in range", metadata_len <= MAX_METADATA_LEN, f"max {MAX_METADATA_LEN}")
+    check(
+        f"PCM sample rate {pcm_sample_rate} Hz",
+        pcm_sample_rate == PCM_SAMPLE_RATE,
+        f"expected {PCM_SAMPLE_RATE}",
+    )
+    check(
+        f"PCM channels {pcm_channels}",
+        pcm_channels == PCM_CHANNELS,
+        f"expected {PCM_CHANNELS}",
+    )
+    check(
+        f"PCM bit depth {pcm_bit_depth}-bit",
+        pcm_bit_depth == PCM_BIT_DEPTH,
+        f"expected {PCM_BIT_DEPTH}",
+    )
+    check(
+        f"Metadata length {metadata_len} B in range",
+        metadata_len <= MAX_METADATA_LEN,
+        f"max {MAX_METADATA_LEN}",
+    )
 
     expected_toc_start = HEADER_FIXED_SIZE + metadata_len
     check(
@@ -577,17 +623,45 @@ def verify_container(rbi_file: Path) -> bool:
         toc_start == expected_toc_start,
         f"toc_start={toc_start}, expected {expected_toc_start}",
     )
-    check("TOC end > TOC start", toc_end > toc_start, f"toc_start={toc_start}, toc_end={toc_end}")
+    check(
+        "TOC end > TOC start",
+        toc_end > toc_start,
+        f"toc_start={toc_start}, toc_end={toc_end}",
+    )
 
     has_rg = bool(flags & FLAG_RG_PRESENT)
     if has_rg:
-        check("RG block starts at TOC end", rg_start == toc_end, f"rg_start={rg_start}, toc_end={toc_end}")
-        check("RG block end > RG start", rg_end > rg_start, f"rg_start={rg_start}, rg_end={rg_end}")
-        check("PCM starts at RG block end", pcm_start == rg_end, f"pcm_start={pcm_start}, rg_end={rg_end}")
+        check(
+            "RG block starts at TOC end",
+            rg_start == toc_end,
+            f"rg_start={rg_start}, toc_end={toc_end}",
+        )
+        check(
+            "RG block end > RG start",
+            rg_end > rg_start,
+            f"rg_start={rg_start}, rg_end={rg_end}",
+        )
+        check(
+            "PCM starts at RG block end",
+            pcm_start == rg_end,
+            f"pcm_start={pcm_start}, rg_end={rg_end}",
+        )
     else:
-        check("PCM starts at TOC end", pcm_start == toc_end, f"pcm_start={pcm_start}, toc_end={toc_end}")
-    check("PCM end > PCM start", pcm_end > pcm_start, f"pcm_start={pcm_start}, pcm_end={pcm_end}")
-    check("File size matches pcm_end", pcm_end == file_size, f"pcm_end={pcm_end}, actual={file_size}")
+        check(
+            "PCM starts at TOC end",
+            pcm_start == toc_end,
+            f"pcm_start={pcm_start}, toc_end={toc_end}",
+        )
+    check(
+        "PCM end > PCM start",
+        pcm_end > pcm_start,
+        f"pcm_start={pcm_start}, pcm_end={pcm_end}",
+    )
+    check(
+        "File size matches pcm_end",
+        pcm_end == file_size,
+        f"pcm_end={pcm_end}, actual={file_size}",
+    )
 
     with open(rbi_file, "rb") as f:
         f.seek(HEADER_FIXED_SIZE)
@@ -607,7 +681,10 @@ def verify_container(rbi_file: Path) -> bool:
         with open(rbi_file, "rb") as f:
             f.seek(rg_start)
             rg_bytes = f.read(rg_end - rg_start)
-        check("ReplayGain block checksum (SHA-256)", sha256_bytes(rg_bytes) == rg_checksum_stored)
+        check(
+            "ReplayGain block checksum (SHA-256)",
+            sha256_bytes(rg_bytes) == rg_checksum_stored,
+        )
 
     print("  Verifying PCM checksum (may take a moment)...")
     with open(rbi_file, "rb") as f:

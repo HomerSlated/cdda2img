@@ -83,7 +83,9 @@ def _window_frames(
     resampler: av.AudioResampler,  # in_c: av.InputContainer (av.container not re-exported by stubs)
 ):
     """Yield resampled audio frames from *in_c* in the half-open interval [start, end) seconds."""
-    in_c.seek(int(start * 1_000_000))  # AV_TIME_BASE units (µs); lands on prior keyframe
+    in_c.seek(
+        int(start * 1_000_000)
+    )  # AV_TIME_BASE units (µs); lands on prior keyframe
     for packet in in_c.demux(in_stream):
         done = False
         for frame in packet.decode():
@@ -106,7 +108,9 @@ def extract_clip(src: Path, start: float, dest: Path) -> None:
         in_stream = in_c.streams.audio[0]
         with av.open(str(dest), "w", format="flac") as out_c:
             out_stream = out_c.add_stream("flac", rate=PCM_RATE)
-            for rf in _window_frames(in_c, in_stream, start, start + SAMPLE_DURATION, resampler):
+            for rf in _window_frames(
+                in_c, in_stream, start, start + SAMPLE_DURATION, resampler
+            ):
                 for out_packet in out_stream.encode(rf):
                     out_c.mux(out_packet)
             for out_packet in out_stream.encode(None):
@@ -221,7 +225,9 @@ def _print_status(msg: str) -> None:
     print(f"  → {msg}")
 
 
-def _handle_key(key: str, player: Player, options: dict[str, tuple[Path, float, str]]) -> bool:
+def _handle_key(
+    key: str, player: Player, options: dict[str, tuple[Path, float, str]]
+) -> bool:
     """Process one keypress. Returns True to signal quit."""
     if key in ("1", "2", "3"):
         path, gain, desc = options[key]
@@ -275,7 +281,9 @@ def main() -> None:
     track_rg = rg_result.tracks[0]
     shutil.copy2(f_raw, f_rg)
     _rg_embed_tags(rg_result, [f_rg])
-    print(f" gain {track_rg.gain:+.2f} dB  peak {track_rg.peak:.4f}  LRA {track_rg.lra:.1f} LU")
+    print(
+        f" gain {track_rg.gain:+.2f} dB  peak {track_rg.peak:.4f}  LRA {track_rg.lra:.1f} LU"
+    )
 
     # Each entry: (path, gain_db_for_playback, display_description)
     options: dict[str, tuple[Path, float, str]] = {

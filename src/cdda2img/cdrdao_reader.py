@@ -35,7 +35,9 @@ def _find_bin_filename(toc_text: str) -> str:
     return m.group(1)
 
 
-def convert_cdrdao_bin(bin_path: Path, pcm_out: Path, chunk_frames: int = 75 * 60) -> None:
+def convert_cdrdao_bin(
+    bin_path: Path, pcm_out: Path, chunk_frames: int = 75 * 60
+) -> None:
     """Byte-swap a cdrdao s16be BIN file to s16le PCM and write to *pcm_out*.
 
     Processes the file in chunks of *chunk_frames* CD frames (default: 4500 = 60 s)

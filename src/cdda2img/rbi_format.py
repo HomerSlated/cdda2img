@@ -128,7 +128,9 @@ OFFSET_PLACEHOLDER: int = 0
 # ---------------------------------------------------------------------------
 
 MAX_METADATA_LEN: int = 1024  # enforced on read and write
-FLAGS_RESERVED_MASK: int = 0xFFFFFFFA  # all bits except FLAG_RG_PRESENT and FLAG_MASTER_MODE are reserved
+FLAGS_RESERVED_MASK: int = (
+    0xFFFFFFFA  # all bits except FLAG_RG_PRESENT and FLAG_MASTER_MODE are reserved
+)
 
 # ---------------------------------------------------------------------------
 # Flags bitmask
@@ -137,7 +139,9 @@ FLAGS_RESERVED_MASK: int = 0xFFFFFFFA  # all bits except FLAG_RG_PRESENT and FLA
 # Odd bit positions  = "must understand to read correctly"
 
 FLAG_RG_PRESENT: int = 0x00000001  # bit 0 (even): RG block present in gap
-FLAG_MASTER_MODE: int = 0x00000004  # bit 2 (even): created in master mode (no silence trim)
+FLAG_MASTER_MODE: int = (
+    0x00000004  # bit 2 (even): created in master mode (no silence trim)
+)
 
 # ---------------------------------------------------------------------------
 # Dataclasses

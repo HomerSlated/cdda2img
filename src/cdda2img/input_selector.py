@@ -70,7 +70,11 @@ def _knapsack_single_disc(values: list[float], capacity: float) -> list[int]:
     solver = cp_model.CpSolver()
     status = solver.Solve(model)
 
-    return [i for i in range(n) if solver.Value(x[i])] if status in (cp_model.OPTIMAL, cp_model.FEASIBLE) else []
+    return (
+        [i for i in range(n) if solver.Value(x[i])]
+        if status in (cp_model.OPTIMAL, cp_model.FEASIBLE)
+        else []
+    )
 
 
 def batch_bech(files: list[Path], durations: list[float]) -> list[list[Path]]:
@@ -91,7 +95,10 @@ def batch_bech(files: list[Path], durations: list[float]) -> list[list[Path]]:
         selected_global = []
         total_runtime = 0
         for i in selected:
-            if len(selected_local) < MAX_TRACKS and total_runtime + int_durations[i] <= int_limit:
+            if (
+                len(selected_local) < MAX_TRACKS
+                and total_runtime + int_durations[i] <= int_limit
+            ):
                 selected_local.append(i)
                 selected_global.append(idx_map[i])
                 total_runtime += int_durations[i]
@@ -100,7 +107,9 @@ def batch_bech(files: list[Path], durations: list[float]) -> list[list[Path]]:
             break
 
         batches.append([files[i] for i in selected_global])
-        remaining = [item for j, item in enumerate(remaining) if j not in selected_local]
+        remaining = [
+            item for j, item in enumerate(remaining) if j not in selected_local
+        ]
 
     return batches
 

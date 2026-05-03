@@ -58,12 +58,18 @@ def derive_album_info(tracks: list[Path], autoaccept: bool = False) -> dict[str,
         for tag in _ARTIST_TAGS:
             value = audio.get(tag)
             if value:
-                metadata_artist = value[0].strip() if isinstance(value, list) else str(value).strip()
+                metadata_artist = (
+                    value[0].strip() if isinstance(value, list) else str(value).strip()
+                )
                 break
 
         album_value = audio.get("album") or audio.get("ALBUM")
         if album_value:
-            metadata_album = album_value[0].strip() if isinstance(album_value, list) else str(album_value).strip()
+            metadata_album = (
+                album_value[0].strip()
+                if isinstance(album_value, list)
+                else str(album_value).strip()
+            )
 
         break  # only need the first readable track
 
@@ -110,7 +116,9 @@ def read_source_rg_tags(path: Path) -> dict[str, str]:
 def _confirm(prompt: str, default: str) -> str:
     """Interactively confirm or edit a derived metadata value."""
     while True:
-        response = input(f"Confirm {prompt} [{default}]: a=accept, e=edit > ").strip().lower()
+        response = (
+            input(f"Confirm {prompt} [{default}]: a=accept, e=edit > ").strip().lower()
+        )
         if response == "a":
             return default
         if response == "e":

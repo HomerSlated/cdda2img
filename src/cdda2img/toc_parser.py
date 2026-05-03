@@ -37,7 +37,9 @@ _CATALOG_RE = re.compile(r'CATALOG\s+"([^"]+)"')
 _TITLE_RE = re.compile(r'TITLE\s+"([^"]*)"')
 _PERFORMER_RE = re.compile(r'PERFORMER\s+"([^"]*)"')
 _ISRC_RE = re.compile(r'ISRC\s+"([^"]+)"')
-_FILE_TS_RE = re.compile(r'FILE\s+"[^"]+"\s+(0|\d{2}:\d{2}:\d{2})\s+(\d{2}:\d{2}:\d{2})')
+_FILE_TS_RE = re.compile(
+    r'FILE\s+"[^"]+"\s+(0|\d{2}:\d{2}:\d{2})\s+(\d{2}:\d{2}:\d{2})'
+)
 _START_RE = re.compile(r"^\s*START\s+(\d{2}:\d{2}:\d{2})", re.MULTILINE)
 _TRACK_MARKER_RE = re.compile(r"^//\s*Track\s+(\d+)", re.MULTILINE)
 _TITLE_UNICODE_RE = re.compile(r"^//\s*TRACK_TITLE_UNICODE:\s*(.+)$", re.MULTILINE)
@@ -95,11 +97,15 @@ def parse_toc(toc_bytes: bytes) -> ParsedDisc:
                 track_number=int(marker.group(1)),
                 title=track_title,
                 performer=_first(_PERFORMER_RE, block, disc_performer),
-                start_frame=0 if file_m.group(1) == "0" else frames_from_timestamp(file_m.group(1)),
+                start_frame=0
+                if file_m.group(1) == "0"
+                else frames_from_timestamp(file_m.group(1)),
                 duration_frames=duration_frames,
                 pregap_frames=pregap_frames,
                 isrc=_first_or_none(_ISRC_RE, block),
             )
         )
 
-    return ParsedDisc(title=disc_title, performer=disc_performer, catalog=catalog, tracks=tracks)
+    return ParsedDisc(
+        title=disc_title, performer=disc_performer, catalog=catalog, tracks=tracks
+    )

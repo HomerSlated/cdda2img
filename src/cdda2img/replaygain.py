@@ -103,18 +103,24 @@ def _decode_interleaved(path: Path) -> tuple[np.ndarray, int, int]:
     with av.open(str(path)) as c:
         stream = c.streams.audio[0]
         rate, channels = stream.sample_rate, stream.channels
-        resampler = av.AudioResampler(format="fltp", layout=stream.layout.name, rate=rate)
+        resampler = av.AudioResampler(
+            format="fltp", layout=stream.layout.name, rate=rate
+        )
         chunks: list[np.ndarray] = []
         for packet in c.demux(stream):
             for frame in packet.decode():
                 for rf in resampler.resample(frame):  # type: ignore[arg-type]  # LINT-002: audio stream yields AudioFrame; stubs over-broad
-                    chunks.append(rf.to_ndarray().T.flatten())  # (ch, samples) → interleaved
+                    chunks.append(
+                        rf.to_ndarray().T.flatten()
+                    )  # (ch, samples) → interleaved
         for rf in resampler.resample(None):  # flush resampler
             chunks.append(rf.to_ndarray().T.flatten())
     return np.concatenate(chunks), rate, channels
 
 
-def _state_results(state: pyebur128.R128State, channels: int) -> tuple[float, float, float]:
+def _state_results(
+    state: pyebur128.R128State, channels: int
+) -> tuple[float, float, float]:
     """Read (integrated_lufs, peak_linear, lra_lu) from a finalised R128State."""
     lufs = pyebur128.get_loudness_global(state)
     lra = pyebur128.get_loudness_range(state)

@@ -6,7 +6,13 @@ import wave
 from pathlib import Path
 
 from cdda2img.concat import concat_wav
-from cdda2img.container import TempFiles, build_container, extract_data, resolve_temp_dir, wav_to_raw_pcm
+from cdda2img.container import (
+    TempFiles,
+    build_container,
+    extract_data,
+    resolve_temp_dir,
+    wav_to_raw_pcm,
+)
 from cdda2img.input_selector import select_batches
 from cdda2img.metadata import derive_album_info, read_source_rg_tags
 from cdda2img.rbi_format import (
@@ -110,7 +116,9 @@ def parse_args() -> argparse.Namespace:
     x = sub.add_parser("x", help="Extract TOC and audio from an RBI image")
     x.add_argument("rbi_file", type=Path, help="RBI file to extract")
     x.add_argument("--raw", action="store_true", help="Write raw PCM (.s16le) and TOC")
-    x.add_argument("--tracks", action="store_true", help="Write per-track FLAC files and CUE")
+    x.add_argument(
+        "--tracks", action="store_true", help="Write per-track FLAC files and CUE"
+    )
     x.add_argument(
         "--normalize",
         action="store_true",
@@ -123,7 +131,9 @@ def parse_args() -> argparse.Namespace:
     t_cmd = sub.add_parser("t", help="Test/validate an RBI image against the spec")
     t_cmd.add_argument("rbi_file", type=Path, help="RBI file to validate")
 
-    i_cmd = sub.add_parser("i", help="Import a cdrdao TOC+BIN image as an RBI container (master mode)")
+    i_cmd = sub.add_parser(
+        "i", help="Import a cdrdao TOC+BIN image as an RBI container (master mode)"
+    )
     i_cmd.add_argument("toc_file", type=Path, help="cdrdao .toc file to import")
     i_cmd.add_argument(
         "--loudness",
@@ -132,7 +142,10 @@ def parse_args() -> argparse.Namespace:
         help="rg: embed EBU R128 ReplayGain block (default); none: skip loudness analysis",
     )
     i_cmd.add_argument(
-        "--output", type=Path, default=None, help="Output .rbi file path (default: derived from album title)"
+        "--output",
+        type=Path,
+        default=None,
+        help="Output .rbi file path (default: derived from album title)",
     )
 
     return parser.parse_args()
@@ -158,7 +171,9 @@ def create_image(
     strategy: str = DEFAULT_STRATEGY,
     trim_silence: bool = True,
 ) -> None:
-    files = sorted(p for p in input_dir.iterdir() if p.is_file() and not p.name.startswith("."))
+    files = sorted(
+        p for p in input_dir.iterdir() if p.is_file() and not p.name.startswith(".")
+    )
     batches = select_batches(files, strategy)
     if not batches:
         print("No audio files found.")
@@ -198,7 +213,9 @@ def create_image(
         wav_to_raw_pcm(temp.pcm_pre, temp.pcm_file)
 
         durations = get_track_durations(source_wavs)
-        disc = RBIDisc(album=album, artist=artist, disc_number=disc_num, disc_total=disc_total)
+        disc = RBIDisc(
+            album=album, artist=artist, disc_number=disc_num, disc_total=disc_total
+        )
         disc.tracks = build_toc_entries(batch, durations, disc)
         source_rg = [read_source_rg_tags(p) for p in batch]
         raw_titles = [re.sub(r"^\d{2} ", "", p.stem) for p in batch]
@@ -222,13 +239,22 @@ def create_image(
         stem = album if disc_total == 1 else f"{album}_disc{disc_num}"
         output_file = _unique_path(stem, "rbi")
         container_flags = FLAG_MASTER_MODE if mode == "master" else 0
-        build_container(temp.pcm_file, toc_data, disc, output_file, rg_block=rg_block, extra_flags=container_flags)
+        build_container(
+            temp.pcm_file,
+            toc_data,
+            disc,
+            output_file,
+            rg_block=rg_block,
+            extra_flags=container_flags,
+        )
         temp.cleanup()
 
 
 def _per_track_wavs(disc: RBIDisc, pcm_path: Path, out_dir: Path) -> list[Path]:
     """Slice raw s16le PCM into per-track WAV files for loudness analysis."""
-    bytes_per_frame = (PCM_SAMPLE_RATE // CD_FRAMES_PER_SECOND) * PCM_CHANNELS * (PCM_BIT_DEPTH // 8)
+    bytes_per_frame = (
+        (PCM_SAMPLE_RATE // CD_FRAMES_PER_SECOND) * PCM_CHANNELS * (PCM_BIT_DEPTH // 8)
+    )
     paths: list[Path] = []
     with open(pcm_path, "rb") as f:
         for track in disc.tracks:
@@ -245,8 +271,14 @@ def _per_track_wavs(disc: RBIDisc, pcm_path: Path, out_dir: Path) -> list[Path]:
     return paths
 
 
-def import_image(toc_file: Path, loudness: str = "rg", output: Path | None = None) -> None:
-    from cdda2img.cdrdao_reader import _find_bin_filename, convert_cdrdao_bin_to_wav, parsed_to_rbi_disc
+def import_image(
+    toc_file: Path, loudness: str = "rg", output: Path | None = None
+) -> None:
+    from cdda2img.cdrdao_reader import (
+        _find_bin_filename,
+        convert_cdrdao_bin_to_wav,
+        parsed_to_rbi_disc,
+    )
     from cdda2img.toc import generate_toc, sanitize_title
     from cdda2img.toc_parser import parse_toc
 
@@ -299,7 +331,14 @@ def import_image(toc_file: Path, loudness: str = "rg", output: Path | None = Non
             album = sanitize_title(disc.album)
             output = _unique_path(album or toc_file.stem, "rbi")
 
-        build_container(temp.pcm_file, toc_data, disc, output, rg_block=rg_block, extra_flags=FLAG_MASTER_MODE)
+        build_container(
+            temp.pcm_file,
+            toc_data,
+            disc,
+            output,
+            rg_block=rg_block,
+            extra_flags=FLAG_MASTER_MODE,
+        )
     finally:
         temp.cleanup()
 
@@ -343,7 +382,9 @@ def _normalize_flac(path: Path) -> None:
         tmp.unlink(missing_ok=True)
 
 
-def extract_image(rbi_file: Path, raw: bool, tracks: bool, normalize: bool = False) -> None:
+def extract_image(
+    rbi_file: Path, raw: bool, tracks: bool, normalize: bool = False
+) -> None:
     from cdda2img.container import read_header
     from cdda2img.toc_parser import parse_toc
     from cdda2img.track_extract import collect_tracks_output_paths
@@ -370,7 +411,9 @@ def extract_image(rbi_file: Path, raw: bool, tracks: bool, normalize: bool = Fal
     if raw_dir is not None:
         output_paths += [raw_dir / f"{stem}.toc", raw_dir / f"{stem}.s16le"]
     if tracks:
-        output_paths += collect_tracks_output_paths(disc, header.disc_number, header.disc_total, base_dir)
+        output_paths += collect_tracks_output_paths(
+            disc, header.disc_number, header.disc_total, base_dir
+        )
 
     if not _confirm_overwrite(output_paths):
         print("Aborted.")
@@ -399,7 +442,9 @@ def _dispatch(args: argparse.Namespace) -> None:
     elif args.cmd == "i":
         import_image(args.toc_file, loudness=args.loudness, output=args.output)
     elif args.cmd == "x":
-        extract_image(args.rbi_file, raw=args.raw, tracks=args.tracks, normalize=args.normalize)
+        extract_image(
+            args.rbi_file, raw=args.raw, tracks=args.tracks, normalize=args.normalize
+        )
     elif args.cmd == "l":
         from cdda2img.container import list_container
 

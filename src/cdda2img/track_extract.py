@@ -51,13 +51,17 @@ def _rg_tags(rg: RBIReplayGain, track_index: int) -> dict[str, str]:
     }
 
 
-def collect_track_flac_paths(disc: ParsedDisc, disc_number: int, disc_total: int, base: Path) -> list[Path]:
+def collect_track_flac_paths(
+    disc: ParsedDisc, disc_number: int, disc_total: int, base: Path
+) -> list[Path]:
     """Return only the per-track FLAC paths (no CUE sheet)."""
     d = _disc_dir(disc, disc_number, disc_total, base)
     return [d / _track_filename(t) for t in disc.tracks]
 
 
-def collect_tracks_output_paths(disc: ParsedDisc, disc_number: int, disc_total: int, base: Path) -> list[Path]:
+def collect_tracks_output_paths(
+    disc: ParsedDisc, disc_number: int, disc_total: int, base: Path
+) -> list[Path]:
     """Return all paths that would be written by extract_tracks + write_cue."""
     d = _disc_dir(disc, disc_number, disc_total, base)
     paths: list[Path] = [d / _track_filename(t) for t in disc.tracks]
@@ -74,7 +78,9 @@ def _read_pcm_slice(
     channels: int,
     bit_depth: int,
 ) -> bytes:
-    bytes_per_frame = (sample_rate // CD_FRAMES_PER_SECOND) * channels * (bit_depth // 8)
+    bytes_per_frame = (
+        (sample_rate // CD_FRAMES_PER_SECOND) * channels * (bit_depth // 8)
+    )
     byte_offset = pcm_file_start + track_start_frame * bytes_per_frame
     byte_count = track_duration_frames * bytes_per_frame
     with open(container_file, "rb") as f:
@@ -82,7 +88,9 @@ def _read_pcm_slice(
         return f.read(byte_count)
 
 
-def _pcm_to_wav_bytes(pcm_bytes: bytes, sample_rate: int, channels: int, bit_depth: int) -> bytes:
+def _pcm_to_wav_bytes(
+    pcm_bytes: bytes, sample_rate: int, channels: int, bit_depth: int
+) -> bytes:
     buf = io.BytesIO()
     with wave.open(buf, "wb") as w:
         w.setnchannels(channels)

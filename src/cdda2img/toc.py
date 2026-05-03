@@ -43,7 +43,9 @@ def get_track_durations(wav_files: list[Path]) -> list[int]:
     return durations
 
 
-def build_toc_entries(tracklist: list[Path], durations: list[int], disc: RBIDisc) -> list[RBITocEntry]:
+def build_toc_entries(
+    tracklist: list[Path], durations: list[int], disc: RBIDisc
+) -> list[RBITocEntry]:
     """Build RBITocEntry list from file paths, durations, and disc metadata."""
     entries = []
     current_frame = 0
@@ -104,11 +106,15 @@ def generate_toc(
 
         raw_title = raw_titles[idx] if raw_titles and idx < len(raw_titles) else None
         unicode_lines = (
-            [f"// TRACK_TITLE_UNICODE: {json.dumps(raw_title)}"] if raw_title and raw_title != track.title else []
+            [f"// TRACK_TITLE_UNICODE: {json.dumps(raw_title)}"]
+            if raw_title and raw_title != track.title
+            else []
         )
 
         isrc_lines = [f'ISRC "{track.isrc}"'] if track.isrc else []
-        start_lines = [f"START {track.pregap_timestamp}"] if track.pregap_frames > 0 else []
+        start_lines = (
+            [f"START {track.pregap_timestamp}"] if track.pregap_frames > 0 else []
+        )
 
         lines += [
             f"// Track {track.track_number}",
