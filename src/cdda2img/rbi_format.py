@@ -1,7 +1,7 @@
 """
 rbi_format.py — RBI (Red Book Image) file format definition.
 
-This module is the canonical Python reference for the RBI format (v2.0).
+This module is the canonical Python reference for the RBI format (v3.0).
 It contains only constants, struct definitions, and dataclasses.
 No I/O. No business logic. Translatable directly to C structs, Rust structs, etc.
 
@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 # ---------------------------------------------------------------------------
 
 MAGIC: bytes = b"RBIMAGE\x00"  # 8 bytes; null byte prevents text false-matches
-VERSION_MAJOR: int = 2
+VERSION_MAJOR: int = 3
 VERSION_MINOR: int = 0
 
 # ---------------------------------------------------------------------------
@@ -214,8 +214,10 @@ class RBITocEntry:
     track_number: int  # 1-based, 1-99
     title: str  # sanitised track title
     performer: str  # track-level performer string
-    start_frame: int  # absolute frame offset into PCM blob
-    duration_frames: int  # track duration in CD frames (1/75 s)
+    start_frame: int  # PCM block offset to start of pregap (or audio if no pregap)
+    duration_frames: int  # audio-only duration in CD frames (1/75 s); excludes pregap
+    pregap_frames: int = 0  # pregap duration in CD frames; 0 if no pregap
+    isrc: str | None = None  # ISO 3901 ISRC code (12 chars); None if not available
 
     @property
     def start_seconds(self) -> float:
@@ -233,6 +235,15 @@ class RBITocEntry:
     def duration_timestamp(self) -> str:
         return _frames_to_timestamp(self.duration_frames)
 
+    @property
+    def pregap_timestamp(self) -> str:
+        return _frames_to_timestamp(self.pregap_frames)
+
+    @property
+    def slot_timestamp(self) -> str:
+        """Total slot duration (pregap + audio) as MM:SS:FF, for the FILE entry."""
+        return _frames_to_timestamp(self.pregap_frames + self.duration_frames)
+
 
 @dataclass
 class RBIDisc:
@@ -247,7 +258,7 @@ class RBIDisc:
 
     @property
     def total_frames(self) -> int:
-        return sum(t.duration_frames for t in self.tracks)
+        return sum(t.pregap_frames + t.duration_frames for t in self.tracks)
 
     @property
     def total_seconds(self) -> float:

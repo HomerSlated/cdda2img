@@ -1,13 +1,22 @@
 import argparse
 import re
+import tempfile
 import textwrap
+import wave
 from pathlib import Path
 
 from cdda2img.concat import concat_wav
 from cdda2img.container import TempFiles, build_container, extract_data, resolve_temp_dir, wav_to_raw_pcm
 from cdda2img.input_selector import select_batches
 from cdda2img.metadata import derive_album_info, read_source_rg_tags
-from cdda2img.rbi_format import FLAG_MASTER_MODE, RBIDisc
+from cdda2img.rbi_format import (
+    CD_FRAMES_PER_SECOND,
+    FLAG_MASTER_MODE,
+    PCM_BIT_DEPTH,
+    PCM_CHANNELS,
+    PCM_SAMPLE_RATE,
+    RBIDisc,
+)
 from cdda2img.silence import trim_silence_cd_da
 from cdda2img.toc import build_toc_entries, generate_toc, get_track_durations
 from cdda2img.transcode import transcode_audio
@@ -33,6 +42,8 @@ def parse_args() -> argparse.Namespace:
                 aatc  all-as-they-come: fill discs in input order, as many as needed
                 bech  best-each: pack each disc as full as possible in turn (order not preserved)
                 ball  best-all: global bin-packing to minimise total disc count (order not preserved)
+              --no-trim-silence     Skip silence trimming in remaster mode
+              --preserve-pregaps    Preserve pre-gaps in remaster mode (no-op for audio-file sources)
 
             extract options:
               --tracks              Write per-track FLAC files and CUE sheet (default)
@@ -41,14 +52,22 @@ def parse_args() -> argparse.Namespace:
                                     mutually exclusive with RG tag embedding
               (--tracks and --raw may be combined; --normalize requires --tracks)
 
+            import options:
+              --loudness {rg|none}  rg: embed EBU R128 ReplayGain block (default); none: skip
+              --output <path>       Output .rbi path (default: derived from album title)
+              Note: import always uses master mode (1:1 conversion; s16be→s16le only)
+
             examples:
               cdda2img c /music/album
               cdda2img c /music/album --mode master --loudness none
               cdda2img c /music/album --strategy ball
+              cdda2img c /music/album --no-trim-silence
               cdda2img x album.rbi
               cdda2img x album.rbi --raw
               cdda2img x album.rbi --tracks --raw
               cdda2img x album.rbi --normalize
+              cdda2img i disc.toc
+              cdda2img i disc.toc --loudness none --output mydisc.rbi
               cdda2img l album.rbi
               cdda2img t album.rbi
         """),
@@ -75,6 +94,18 @@ def parse_args() -> argparse.Namespace:
         choices=["fcfs", "aatc", "bech", "ball"],
         help="Disc batching strategy (default: aatc)",
     )
+    c.add_argument(
+        "--trim-silence",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Trim leading/trailing silence in remaster mode (default: enabled; no-op in master mode)",
+    )
+    c.add_argument(
+        "--preserve-pregaps",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Preserve pre-gaps in remaster mode (default: disabled; no-op for audio-file sources)",
+    )
 
     x = sub.add_parser("x", help="Extract TOC and audio from an RBI image")
     x.add_argument("rbi_file", type=Path, help="RBI file to extract")
@@ -91,6 +122,18 @@ def parse_args() -> argparse.Namespace:
 
     t_cmd = sub.add_parser("t", help="Test/validate an RBI image against the spec")
     t_cmd.add_argument("rbi_file", type=Path, help="RBI file to validate")
+
+    i_cmd = sub.add_parser("i", help="Import a cdrdao TOC+BIN image as an RBI container (master mode)")
+    i_cmd.add_argument("toc_file", type=Path, help="cdrdao .toc file to import")
+    i_cmd.add_argument(
+        "--loudness",
+        default="rg",
+        choices=["rg", "none"],
+        help="rg: embed EBU R128 ReplayGain block (default); none: skip loudness analysis",
+    )
+    i_cmd.add_argument(
+        "--output", type=Path, default=None, help="Output .rbi file path (default: derived from album title)"
+    )
 
     return parser.parse_args()
 
@@ -109,7 +152,11 @@ def _unique_path(stem: str, ext: str) -> Path:
 
 
 def create_image(
-    input_dir: Path, mode: str = "remaster", loudness: str = "rg", strategy: str = DEFAULT_STRATEGY
+    input_dir: Path,
+    mode: str = "remaster",
+    loudness: str = "rg",
+    strategy: str = DEFAULT_STRATEGY,
+    trim_silence: bool = True,
 ) -> None:
     files = sorted(p for p in input_dir.iterdir() if p.is_file() and not p.name.startswith("."))
     batches = select_batches(files, strategy)
@@ -134,13 +181,16 @@ def create_image(
             trans = temp.temp_track(i, "_trans.wav")
             transcode_audio(track, trans)
 
-            if mode == "remaster":
+            if mode == "remaster" and trim_silence:
                 print(f"  Trimming      {i:2}: {track.stem}")
                 trim = temp.temp_track(i, "_trim.wav")
                 trim_silence_cd_da(str(trans), str(trim), SILENCE_PAD_DUR)
                 source_wavs.append(trim)
             else:
-                print(f"  Skipping silence trim (master mode): {track.stem}")
+                if mode == "remaster":
+                    print(f"  Skipping silence trim (--no-trim-silence): {track.stem}")
+                else:
+                    print(f"  Skipping silence trim (master mode): {track.stem}")
                 source_wavs.append(trans)
 
         print("  Concatenating tracks")
@@ -173,6 +223,84 @@ def create_image(
         output_file = _unique_path(stem, "rbi")
         container_flags = FLAG_MASTER_MODE if mode == "master" else 0
         build_container(temp.pcm_file, toc_data, disc, output_file, rg_block=rg_block, extra_flags=container_flags)
+        temp.cleanup()
+
+
+def _per_track_wavs(disc: RBIDisc, pcm_path: Path, out_dir: Path) -> list[Path]:
+    """Slice raw s16le PCM into per-track WAV files for loudness analysis."""
+    bytes_per_frame = (PCM_SAMPLE_RATE // CD_FRAMES_PER_SECOND) * PCM_CHANNELS * (PCM_BIT_DEPTH // 8)
+    paths: list[Path] = []
+    with open(pcm_path, "rb") as f:
+        for track in disc.tracks:
+            audio_start = track.start_frame + track.pregap_frames
+            f.seek(audio_start * bytes_per_frame)
+            pcm_data = f.read(track.duration_frames * bytes_per_frame)
+            tw = out_dir / f"track{track.track_number:02d}.wav"
+            with wave.open(str(tw), "wb") as w:
+                w.setnchannels(PCM_CHANNELS)
+                w.setsampwidth(PCM_BIT_DEPTH // 8)
+                w.setframerate(PCM_SAMPLE_RATE)
+                w.writeframes(pcm_data)
+            paths.append(tw)
+    return paths
+
+
+def import_image(toc_file: Path, loudness: str = "rg", output: Path | None = None) -> None:
+    from cdda2img.cdrdao_reader import _find_bin_filename, convert_cdrdao_bin_to_wav, parsed_to_rbi_disc
+    from cdda2img.toc import generate_toc, sanitize_title
+    from cdda2img.toc_parser import parse_toc
+
+    if not toc_file.exists():
+        msg = f"{toc_file}: no such file"
+        raise FileNotFoundError(msg)
+
+    if toc_file.suffix.lower() != ".toc":
+        msg = f"{toc_file.name}: expected a cdrdao .toc file (got {toc_file.suffix or 'no extension'})"
+        raise ValueError(msg)
+
+    temp_base = resolve_temp_dir()
+    temp = TempFiles(temp_base)
+
+    try:
+        print(f"Importing {toc_file.name} (master mode) ...")
+        toc_text = toc_file.read_text(encoding="utf-8")
+        bin_name = _find_bin_filename(toc_text)
+        bin_path = toc_file.parent / bin_name
+        if not bin_path.exists():
+            msg = f"BIN file not found: {bin_path}"
+            raise FileNotFoundError(msg)
+
+        disc = parsed_to_rbi_disc(parse_toc(toc_text.encode("utf-8")))
+
+        print(f"  Converting {bin_name} (s16be → s16le) ...")
+        convert_cdrdao_bin_to_wav(bin_path, temp.pcm_pre)
+        wav_to_raw_pcm(temp.pcm_pre, temp.pcm_file)
+
+        toc_data = generate_toc(disc)
+
+        rg_block: bytes | None = None
+        if loudness == "rg":
+            from cdda2img.replaygain import analyse, pack_rg_block
+
+            print("  Measuring loudness (EBU R128)...")
+            with tempfile.TemporaryDirectory() as td:
+                track_wavs = _per_track_wavs(disc, temp.pcm_file, Path(td))
+                rg_result = analyse(track_wavs)
+            for warning in rg_result.warnings:
+                print(f"  Warning: {warning}")
+            print(
+                f"  Album gain: {rg_result.album_gain:+.2f} dB  "
+                f"peak: {rg_result.album_peak:.4f}  "
+                f"LRA: {rg_result.album_lra:.1f} LU"
+            )
+            rg_block = pack_rg_block(rg_result)
+
+        if output is None:
+            album = sanitize_title(disc.album)
+            output = _unique_path(album or toc_file.stem, "rbi")
+
+        build_container(temp.pcm_file, toc_data, disc, output, rg_block=rg_block, extra_flags=FLAG_MASTER_MODE)
+    finally:
         temp.cleanup()
 
 
@@ -261,7 +389,15 @@ def extract_image(rbi_file: Path, raw: bool, tracks: bool, normalize: bool = Fal
 
 def _dispatch(args: argparse.Namespace) -> None:
     if args.cmd == "c":
-        create_image(args.input_dir, mode=args.mode, loudness=args.loudness, strategy=args.strategy)
+        create_image(
+            args.input_dir,
+            mode=args.mode,
+            loudness=args.loudness,
+            strategy=args.strategy,
+            trim_silence=args.trim_silence,
+        )
+    elif args.cmd == "i":
+        import_image(args.toc_file, loudness=args.loudness, output=args.output)
     elif args.cmd == "x":
         extract_image(args.rbi_file, raw=args.raw, tracks=args.tracks, normalize=args.normalize)
     elif args.cmd == "l":

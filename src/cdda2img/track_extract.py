@@ -136,7 +136,7 @@ def extract_tracks(
         pcm = _read_pcm_slice(
             container_file,
             pcm_start,
-            track.start_frame,
+            track.audio_start_frame,  # skip pregap; audio starts after it
             track.duration_frames,
             sample_rate,
             channels,

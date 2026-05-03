@@ -107,6 +107,9 @@ def generate_toc(
             [f"// TRACK_TITLE_UNICODE: {json.dumps(raw_title)}"] if raw_title and raw_title != track.title else []
         )
 
+        isrc_lines = [f'ISRC "{track.isrc}"'] if track.isrc else []
+        start_lines = [f"START {track.pregap_timestamp}"] if track.pregap_frames > 0 else []
+
         lines += [
             f"// Track {track.track_number}",
             *unicode_lines,
@@ -115,13 +118,16 @@ def generate_toc(
             "NO COPY",
             "NO PRE_EMPHASIS",
             "TWO_CHANNEL_AUDIO",
+            *isrc_lines,
             "CD_TEXT {",
             "  LANGUAGE 0 {",
             f'    TITLE "{track.title}"',
             f'    PERFORMER "{sanitize_title(track.performer)}"',
             "  }",
             "}",
-            f'FILE "{pcm_filename}" {track.start_timestamp} {track.duration_timestamp}\n',
+            f'FILE "{pcm_filename}" {track.start_timestamp} {track.slot_timestamp}',
+            *start_lines,
+            "",
         ]
 
     return "\n".join(lines).encode("utf-8")

@@ -27,6 +27,9 @@ This is an active prototype. A Rust reimplementation is planned once the design 
 - **Red Book transcoding** — 16-bit stereo 44.1 kHz s16le PCM, enforced by PyAV
 - **Master / Remaster modes** — master preserves audio as-is; remaster applies silence
   trimming (−55 dBFS) and 2-second Red Book inter-track gaps
+- **cdrdao import** — `i` subcommand imports any cdrdao TOC+BIN disc image as a
+  master-mode RBI: byte-swaps s16be→s16le, preserves pre-gaps, extracts CATALOG and
+  ISRC from the TOC, and measures per-track ReplayGain from individual track slices
 - **ReplayGain 2.0** — EBU R128 loudness analysis via pyebur128 (the reference C library);
   stored as a binary block inside the RBI container; embedded as Vorbis comment tags in
   extracted FLACs; computed per-track and at album level without any concat step
@@ -44,6 +47,8 @@ This is an active prototype. A Rust reimplementation is planned once the design 
 ### Planned
 
 - `r` subcommand — rip a physical CD-DA disc directly to RBI via `/dev/sr0`
+  (hardware: Plextor PX-716A, AccurateRip offset +30; byte-swap infrastructure already
+  in place via `cdrdao_reader.py`)
 - AccurateRip v1/v2 checksum verification per track
 - Foreign format import — read CUE/BIN, MDS/MDF, CCD/IMG/SUB, NRG as input;
   read-only plugins only, always converted to RBI first
@@ -58,17 +63,19 @@ This is an active prototype. A Rust reimplementation is planned once the design 
 
 ## RBI Format
 
-A single binary file. Fixed 121-byte header containing the magic bytes `RBIMAGE\x00`,
-format version, uint64 offsets, and SHA-256 checksums for three variable-length blocks:
+A single binary file. Fixed-size header containing the magic bytes `RBIMAGE\x00`,
+format version (v3.0), uint64 offsets, and SHA-256 checksums for three variable-length
+blocks:
 
 | Block | Contents |
 |-------|----------|
-| TOC | cdrdao-format text TOC with track durations and provenance comments |
+| TOC | cdrdao-format text TOC; per-track pre-gap durations, ISRC, and CATALOG (MCN) |
 | ReplayGain | 17 + 12×N bytes: per-track and album gain, peak, and LRA values |
 | PCM | Raw s16le — no WAV wrapper; parameters stored in the fixed header |
 
-The ReplayGain and PCM blocks are optional and signalled by flags in the header.
-Full specification: `docs/rbi_spec.md`.
+Pre-gap audio is stored contiguously in the PCM block; the TOC records the pre-gap
+duration separately so extraction skips it cleanly. The ReplayGain block is optional
+and signalled by a flag. Full specification: `docs/rbi_spec.md`.
 
 ## Installation
 
@@ -92,6 +99,10 @@ cdda2img x album.rbi
 
 # Extract to raw PCM + TOC, with EBU R128 normalisation applied
 cdda2img x album.rbi --raw --normalize
+
+# Import a cdrdao TOC+BIN disc image (master mode, s16be→s16le)
+cdda2img i disc.toc
+cdda2img i disc.toc --loudness none --output mydisc.rbi
 
 # Inspect a container; verify all checksums
 cdda2img l album.rbi
