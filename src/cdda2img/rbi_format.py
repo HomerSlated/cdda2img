@@ -258,6 +258,7 @@ class RBIDisc:
     disc_number: int = 1
     disc_total: int = 1
     catalog: str | None = None  # MCN / EAN-13; None if not available
+    disc_id: str | None = None  # PTI 0x86 catalogue/label reference; None if absent
     tracks: list[RBITocEntry] = field(default_factory=list)
 
     @property

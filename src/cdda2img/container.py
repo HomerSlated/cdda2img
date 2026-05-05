@@ -2,10 +2,13 @@
 container.py — RBI container writer, reader, and extractor.
 """
 
+import array
 import datetime
 import hashlib
+import importlib.metadata
 import json
 import os
+import re
 import shutil
 import struct
 import tempfile
@@ -33,7 +36,7 @@ from cdda2img.rbi_format import (
     RBIReplayGain,
 )
 
-_TOOL_VERSION = "0.1.4"
+_TOOL_VERSION = importlib.metadata.version("cdda2img")
 
 
 # ---------------------------------------------------------------------------
@@ -292,6 +295,19 @@ def _copy_bytes(f_in, f_out, length: int) -> None:
         remaining -= len(chunk)
 
 
+def _copy_bytes_swapped(f_in, f_out, length: int) -> None:
+    """Copy *length* bytes from f_in to f_out, swapping every 16-bit word (s16le↔s16be)."""
+    remaining = length
+    while remaining > 0:
+        chunk = f_in.read(min(65536, remaining))
+        if not chunk:
+            break
+        a = array.array("h", chunk)
+        a.byteswap()
+        f_out.write(a.tobytes())
+        remaining -= len(chunk)
+
+
 def _warn_checksum(label: str, computed: bytes, expected: bytes) -> None:
     if computed != expected:
         print(f"Warning: {label} checksum mismatch — file may be corrupt")
@@ -363,16 +379,19 @@ def extract_data(
     if raw_dir is not None:
         raw_dir.mkdir(parents=True, exist_ok=True)
 
+        # Patch the FILE references in the TOC from .s16le to .bin before writing.
+        toc_text = toc_data.decode("utf-8").replace(f'"{stem}.s16le"', f'"{stem}.bin"')
         toc_path = raw_dir / f"{stem}.toc"
-        toc_path.write_bytes(toc_data)
+        toc_path.write_text(toc_text, encoding="utf-8")
         print(f"TOC saved: {toc_path}")
 
-        pcm_path = raw_dir / f"{stem}.s16le"
-        with open(container_file, "rb") as f_in, open(pcm_path, "wb") as f_out:
+        bin_path = raw_dir / f"{stem}.bin"
+        with open(container_file, "rb") as f_in, open(bin_path, "wb") as f_out:
             f_in.seek(header.pcm_start)
-            _copy_bytes(f_in, f_out, header.pcm_length)
-        print(f"PCM saved: {pcm_path}")
+            _copy_bytes_swapped(f_in, f_out, header.pcm_length)
+        print(f"BIN saved: {bin_path}  (s16le → s16be, disc-native byte order)")
         print(f"Metadata: {header.metadata}")
+        _print_provenance(_parse_provenance(toc_data.decode("utf-8", errors="replace")))
 
         if rg_data is not None:
             _write_rg_json(raw_dir / f"{stem}.rg.json", rg_data)
@@ -456,6 +475,25 @@ def _fmt_duration(seconds: float) -> str:
     return f"{m}:{s:02}"
 
 
+_PROVENANCE_RE = re.compile(r"^// PROVENANCE_(\w+): (.+)$", re.MULTILINE)
+
+
+def _parse_provenance(toc_text: str) -> dict[str, str]:
+    return {m.group(1): m.group(2) for m in _PROVENANCE_RE.finditer(toc_text)}
+
+
+def _print_provenance(provenance: dict[str, str]) -> None:
+    if not provenance:
+        return
+    mode = provenance.get("MODE", "?")
+    mode_label = {"i": "i (import)", "c": "c (create)"}.get(mode, mode)
+    print(f"Mode:      {mode_label}")
+    if source := provenance.get("SOURCE"):
+        print(f"Source:    {source}")
+    if ptype := provenance.get("TYPE"):
+        print(f"Type:      {ptype}")
+
+
 def list_container(rbi_file: Path) -> None:
     """Print a human-readable listing of an RBI file's sections and tracks."""
     from cdda2img.toc_parser import parse_toc
@@ -468,11 +506,17 @@ def list_container(rbi_file: Path) -> None:
         mode_flags.append("ReplayGain")
     flags_str = ", ".join(mode_flags)
 
+    with open(rbi_file, "rb") as f:
+        f.seek(header.toc_start)
+        toc_bytes_for_prov = f.read(header.toc_length)
+    provenance = _parse_provenance(toc_bytes_for_prov.decode("utf-8", errors="replace"))
+
     print(f"RBI Image: {rbi_file.name}  ({_fmt_size(file_size)})")
     print(
         f"Format:    v{header.version_major}.{header.version_minor}  |  disc {header.disc_number}/{header.disc_total}  |  {header.track_count} tracks  |  {flags_str}"
     )
     print(f"Created:   {header.metadata}")
+    _print_provenance(provenance)
     print()
 
     col_w = len("ReplayGain block") + 2
@@ -505,11 +549,7 @@ def list_container(rbi_file: Path) -> None:
 
     print()
 
-    with open(rbi_file, "rb") as f:
-        f.seek(header.toc_start)
-        toc_bytes = f.read(header.toc_length)
-
-    disc = parse_toc(toc_bytes)
+    disc = parse_toc(toc_bytes_for_prov)
     print(f"Tracks:  {disc.performer} — {disc.title}")
     print()
     for track in disc.tracks:

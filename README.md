@@ -27,9 +27,13 @@ This is an active prototype. A Rust reimplementation is planned once the design 
 - **Red Book transcoding** — 16-bit stereo 44.1 kHz s16le PCM, enforced by PyAV
 - **Master / Remaster modes** — master preserves audio as-is; remaster applies silence
   trimming (−55 dBFS) and 2-second Red Book inter-track gaps
-- **cdrdao import** — `i` subcommand imports any cdrdao TOC+BIN disc image as a
-  master-mode RBI: byte-swaps s16be→s16le, preserves pre-gaps, extracts CATALOG and
-  ISRC from the TOC, and measures per-track ReplayGain from individual track slices
+- **Disc image import** — `i` subcommand imports professional mastering images as
+  master-mode RBIs; pre-gaps, CATALOG, ISRC, and CD-TEXT are preserved; per-track
+  ReplayGain is measured from individual track slices:
+  - *DDP 2.0* (GEAR Pro Mastering Edition) — the only open-source DDP 2.0 reader for
+    Linux; parses DDPID (MCN), PQDESCR (timing + ISRC), and CDTEXT.BIN; enables
+    professional glass-mastering archives without a Windows dependency
+  - *cdrdao TOC+BIN* — byte-swaps s16be→s16le from disc-native format
 - **ReplayGain 2.0** — EBU R128 loudness analysis via pyebur128 (the reference C library);
   stored as a binary block inside the RBI container; embedded as Vorbis comment tags in
   extracted FLACs; computed per-track and at album level without any concat step
@@ -99,6 +103,10 @@ cdda2img x album.rbi
 
 # Extract to raw PCM + TOC, with EBU R128 normalisation applied
 cdda2img x album.rbi --raw --normalize
+
+# Import a DDP 2.0 mastering image (GEAR Pro; master mode, 1:1)
+cdda2img i /path/to/ddp_dir
+cdda2img i /path/to/ddp_dir --output mydisc.rbi
 
 # Import a cdrdao TOC+BIN disc image (master mode, s16be→s16le)
 cdda2img i disc.toc

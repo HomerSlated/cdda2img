@@ -1,4 +1,5 @@
 import argparse
+import importlib.metadata
 import re
 import tempfile
 import textwrap
@@ -62,6 +63,7 @@ def parse_args() -> argparse.Namespace:
               --loudness {rg|none}  rg: embed EBU R128 ReplayGain block (default); none: skip
               --output <path>       Output .rbi path (default: derived from album title)
               Note: import always uses master mode (1:1 conversion; s16be→s16le only)
+              Accepts: cdrdao .toc file, or a DDP 2.0 image directory (must contain DDPID)
 
             examples:
               cdda2img c /music/album
@@ -74,9 +76,16 @@ def parse_args() -> argparse.Namespace:
               cdda2img x album.rbi --normalize
               cdda2img i disc.toc
               cdda2img i disc.toc --loudness none --output mydisc.rbi
+              cdda2img i /path/to/ddp_dir
+              cdda2img i /path/to/ddp_dir --output mydisc.rbi
               cdda2img l album.rbi
               cdda2img t album.rbi
         """),
+    )
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=f"cdda2img {importlib.metadata.version('cdda2img')}",
     )
     sub = parser.add_subparsers(dest="cmd", required=True)
 
@@ -132,9 +141,12 @@ def parse_args() -> argparse.Namespace:
     t_cmd.add_argument("rbi_file", type=Path, help="RBI file to validate")
 
     i_cmd = sub.add_parser(
-        "i", help="Import a cdrdao TOC+BIN image as an RBI container (master mode)"
+        "i",
+        help="Import a cdrdao TOC+BIN or DDP 2.0 image as an RBI container (master mode)",
     )
-    i_cmd.add_argument("toc_file", type=Path, help="cdrdao .toc file to import")
+    i_cmd.add_argument(
+        "source", type=Path, help="cdrdao .toc file or DDP 2.0 image directory"
+    )
     i_cmd.add_argument(
         "--loudness",
         default="rg",
@@ -219,7 +231,14 @@ def create_image(
         disc.tracks = build_toc_entries(batch, durations, disc)
         source_rg = [read_source_rg_tags(p) for p in batch]
         raw_titles = [re.sub(r"^\d{2} ", "", p.stem) for p in batch]
-        toc_data = generate_toc(disc, source_rg=source_rg, raw_titles=raw_titles)
+        provenance = {
+            "MODE": "c",
+            "SOURCE": str(input_dir.resolve()),
+            "TYPE": "audio files",
+        }
+        toc_data = generate_toc(
+            disc, source_rg=source_rg, raw_titles=raw_titles, provenance=provenance
+        )
 
         rg_block: bytes | None = None
         if loudness == "rg":
@@ -272,43 +291,63 @@ def _per_track_wavs(disc: RBIDisc, pcm_path: Path, out_dir: Path) -> list[Path]:
 
 
 def import_image(
-    toc_file: Path, loudness: str = "rg", output: Path | None = None
+    source: Path, loudness: str = "rg", output: Path | None = None
 ) -> None:
-    from cdda2img.cdrdao_reader import (
-        _find_bin_filename,
-        convert_cdrdao_bin_to_wav,
-        parsed_to_rbi_disc,
-    )
     from cdda2img.toc import generate_toc, sanitize_title
-    from cdda2img.toc_parser import parse_toc
 
-    if not toc_file.exists():
-        msg = f"{toc_file}: no such file"
+    if not source.exists():
+        msg = f"{source}: no such file or directory"
         raise FileNotFoundError(msg)
-
-    if toc_file.suffix.lower() != ".toc":
-        msg = f"{toc_file.name}: expected a cdrdao .toc file (got {toc_file.suffix or 'no extension'})"
-        raise ValueError(msg)
 
     temp_base = resolve_temp_dir()
     temp = TempFiles(temp_base)
 
     try:
-        print(f"Importing {toc_file.name} (master mode) ...")
-        toc_text = toc_file.read_text(encoding="utf-8")
-        bin_name = _find_bin_filename(toc_text)
-        bin_path = toc_file.parent / bin_name
-        if not bin_path.exists():
-            msg = f"BIN file not found: {bin_path}"
-            raise FileNotFoundError(msg)
+        if source.is_dir():
+            from cdda2img.ddp_reader import import_ddp
 
-        disc = parsed_to_rbi_disc(parse_toc(toc_text.encode("utf-8")))
+            print(f"Importing DDP image {source.name} (master mode) ...")
+            disc, _ = import_ddp(source, temp.pcm_file)
+            output_stem = sanitize_title(disc.album) or source.name
+            provenance = {
+                "MODE": "i",
+                "SOURCE": str(source.resolve()),
+                "TYPE": "Gear Pro DDP 2.0",
+            }
+        elif source.suffix.lower() == ".toc":
+            from cdda2img.cdrdao_reader import (
+                _find_bin_filename,
+                convert_cdrdao_bin_to_wav,
+                parsed_to_rbi_disc,
+            )
+            from cdda2img.toc_parser import parse_toc
 
-        print(f"  Converting {bin_name} (s16be → s16le) ...")
-        convert_cdrdao_bin_to_wav(bin_path, temp.pcm_pre)
-        wav_to_raw_pcm(temp.pcm_pre, temp.pcm_file)
+            print(f"Importing {source.name} (master mode) ...")
+            toc_text = source.read_text(encoding="utf-8")
+            bin_name = _find_bin_filename(toc_text)
+            bin_path = source.parent / bin_name
+            if not bin_path.exists():
+                msg = f"BIN file not found: {bin_path}"
+                raise FileNotFoundError(msg)
 
-        toc_data = generate_toc(disc)
+            disc = parsed_to_rbi_disc(parse_toc(toc_text.encode("utf-8")))
+
+            print(f"  Converting {bin_name} (s16be → s16le) ...")
+            convert_cdrdao_bin_to_wav(bin_path, temp.pcm_pre)
+            wav_to_raw_pcm(temp.pcm_pre, temp.pcm_file)
+            output_stem = sanitize_title(disc.album) or source.stem
+            provenance = {
+                "MODE": "i",
+                "SOURCE": str(source.resolve()),
+                "TYPE": "cdrdao TOC/BIN",
+            }
+        else:
+            msg = (
+                f"{source.name}: expected a cdrdao .toc file or DDP 2.0 image directory"
+            )
+            raise ValueError(msg)
+
+        toc_data = generate_toc(disc, provenance=provenance)
 
         rg_block: bytes | None = None
         if loudness == "rg":
@@ -328,8 +367,7 @@ def import_image(
             rg_block = pack_rg_block(rg_result)
 
         if output is None:
-            album = sanitize_title(disc.album)
-            output = _unique_path(album or toc_file.stem, "rbi")
+            output = _unique_path(output_stem, "rbi")
 
         build_container(
             temp.pcm_file,
@@ -409,7 +447,7 @@ def extract_image(
     # Collect all paths that will be written and check for overwrites
     output_paths: list[Path] = []
     if raw_dir is not None:
-        output_paths += [raw_dir / f"{stem}.toc", raw_dir / f"{stem}.s16le"]
+        output_paths += [raw_dir / f"{stem}.toc", raw_dir / f"{stem}.bin"]
     if tracks:
         output_paths += collect_tracks_output_paths(
             disc, header.disc_number, header.disc_total, base_dir
@@ -440,7 +478,7 @@ def _dispatch(args: argparse.Namespace) -> None:
             trim_silence=args.trim_silence,
         )
     elif args.cmd == "i":
-        import_image(args.toc_file, loudness=args.loudness, output=args.output)
+        import_image(args.source, loudness=args.loudness, output=args.output)
     elif args.cmd == "x":
         extract_image(
             args.rbi_file, raw=args.raw, tracks=args.tracks, normalize=args.normalize

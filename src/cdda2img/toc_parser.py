@@ -30,12 +30,14 @@ class ParsedDisc:
     title: str
     performer: str
     catalog: str | None = None  # MCN / EAN-13; None if absent or all-zeros
+    disc_id: str | None = None  # PTI 0x86 catalogue/label reference; None if absent
     tracks: list[ParsedTrack] = field(default_factory=list)
 
 
 _CATALOG_RE = re.compile(r'CATALOG\s+"([^"]+)"')
 _TITLE_RE = re.compile(r'TITLE\s+"([^"]*)"')
 _PERFORMER_RE = re.compile(r'PERFORMER\s+"([^"]*)"')
+_DISC_ID_RE = re.compile(r'DISC_ID\s+"([^"]*)"')
 _ISRC_RE = re.compile(r'ISRC\s+"([^"]+)"')
 _FILE_TS_RE = re.compile(
     r'FILE\s+"[^"]+"\s+(0|\d{2}:\d{2}:\d{2})\s+(\d{2}:\d{2}:\d{2})'
@@ -68,6 +70,7 @@ def parse_toc(toc_bytes: bytes) -> ParsedDisc:
 
     catalog_raw = _first_or_none(_CATALOG_RE, disc_section)
     catalog = catalog_raw if catalog_raw and catalog_raw != _ALL_ZEROS_MCN else None
+    disc_id = _first_or_none(_DISC_ID_RE, disc_section)
 
     tracks = []
     for i, marker in enumerate(markers):
@@ -107,5 +110,9 @@ def parse_toc(toc_bytes: bytes) -> ParsedDisc:
         )
 
     return ParsedDisc(
-        title=disc_title, performer=disc_performer, catalog=catalog, tracks=tracks
+        title=disc_title,
+        performer=disc_performer,
+        catalog=catalog,
+        disc_id=disc_id,
+        tracks=tracks,
     )
