@@ -1,0 +1,798 @@
+"""
+metadata_menu.py — Interactive metadata confirmation and enrichment menu.
+
+Called at create/import time after silent MB disc ID pre-population.
+On non-TTY stdin, returns the disc unchanged.
+
+Menu structure:
+  Main: Accept / Fetch / Edit / Find Original Release / Reset / Clear
+    Fetch: MusicBrainz text search / Discogs search / AcoustID fingerprint
+    Edit:  Album / Artist / Track N (Title / Performer / ISRC)
+    Original Release: browse MB release group or search, sorted by date
+"""
+
+from __future__ import annotations
+
+import copy
+import sys
+import tempfile
+import wave
+from pathlib import Path
+
+from cdda2img.lookup_result import (
+    REMASTERED_NO,
+    REMASTERED_POSSIBLE,
+    REMASTERED_UNKNOWN,
+    REMASTERED_YES,
+    DiscMeta,
+)
+from cdda2img.rbi_format import (
+    CD_FRAMES_PER_SECOND,
+    PCM_BIT_DEPTH,
+    PCM_CHANNELS,
+    PCM_SAMPLE_RATE,
+    RBIDisc,
+    RBITocEntry,
+)
+
+_W = 78  # display width
+_BYTES_PER_FRAME: int = (
+    (PCM_SAMPLE_RATE // CD_FRAMES_PER_SECOND) * PCM_CHANNELS * (PCM_BIT_DEPTH // 8)
+)
+
+
+# ---------------------------------------------------------------------------
+# Terminal helpers
+# ---------------------------------------------------------------------------
+
+
+def _hr(char: str = "─") -> None:
+    print(char * _W)
+
+
+def _header(title: str) -> None:
+    print()
+    _hr("═")
+    print(f"  {title}")
+    _hr("─")
+
+
+def _trunc(text: str | None, width: int) -> str:
+    if not text:
+        return ""
+    return text if len(text) <= width else text[: width - 1] + "…"
+
+
+def _prompt(prompt: str) -> str:
+    try:
+        return input(prompt)
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return "b"
+
+
+def _prompt_edit(label: str, current: str) -> str:
+    val = _prompt(f"  {label} [{current}]: ").strip()
+    return val if val else current
+
+
+# ---------------------------------------------------------------------------
+# Disc display
+# ---------------------------------------------------------------------------
+
+
+def _print_disc_summary(disc: RBIDisc) -> None:
+    print(f"  Album:   {disc.album or '(none)'}")
+    print(f"  Artist:  {disc.artist or '(none)'}")
+    if disc.catalog:
+        print(f"  Catalog: {disc.catalog}")
+    print(f"  Tracks:  {len(disc.tracks)}")
+    if disc.tracks:
+        print()
+        print(f"  {'#':>2}  {'Title':<40}  {'ISRC'}")
+        print(f"  {'─':>2}  {'─' * 40}  {'─' * 12}")
+        for t in disc.tracks[:20]:
+            print(f"  {t.track_number:>2}  {_trunc(t.title, 40):<40}  {t.isrc or ''}")
+        if len(disc.tracks) > 20:
+            print(f"  … and {len(disc.tracks) - 20} more")
+
+
+def _print_meta_summary(meta: DiscMeta) -> None:
+    print(f"  Album:         {meta.album or '(none)'}")
+    print(f"  Artist:        {meta.artist or '(none)'}")
+    if meta.release_date:
+        print(f"  Released:      {meta.release_date}")
+    if meta.original_release_date and meta.original_release_date != meta.release_date:
+        print(f"  Orig. release: {meta.original_release_date}")
+    if meta.country:
+        print(f"  Country:       {meta.country}")
+    if meta.label:
+        label_str = meta.label + (
+            f"  [{meta.catalog_number}]" if meta.catalog_number else ""
+        )
+        print(f"  Label:         {label_str}")
+    if meta.catalog:
+        print(f"  Barcode:       {meta.catalog}")
+    if meta.remastered_source != REMASTERED_UNKNOWN:
+        print(f"  Remaster:      {meta.remastered_source}")
+    if meta.tracks:
+        titled = [t for t in meta.tracks if t.title]
+        if titled and len(meta.tracks) == 1:
+            print(f"  Track title:   {titled[0].title}")
+        else:
+            print(f"  Tracks:        {len(meta.tracks)}")
+
+
+# ---------------------------------------------------------------------------
+# Paginated result selection
+# ---------------------------------------------------------------------------
+
+_PAGE = 10
+
+
+def _select_from_results(
+    results: list[DiscMeta], title: str = "Results"
+) -> DiscMeta | None:
+    """Display a paginated list of DiscMeta; return user selection or None (back)."""
+    total = len(results)
+    total_pages = max(1, (total + _PAGE - 1) // _PAGE)
+    page = 0
+
+    while True:
+        start = page * _PAGE
+        page_items = results[start : start + _PAGE]
+
+        _header(f"{title}  [{page + 1}/{total_pages}]  ({total} results)")
+        print(
+            f"  {'#':>3}  {'Artist':<22}  {'Album':<28}  {'Year':<4}  {'Cty':<3}  Label"
+        )
+        print(f"  {'─' * 3}  {'─' * 22}  {'─' * 28}  {'─' * 4}  {'─' * 3}  {'─' * 16}")
+        for i, m in enumerate(page_items, start=start + 1):
+            album_col = m.album or (
+                m.tracks[0].title if m.tracks and m.tracks[0].title else None
+            )
+            print(
+                f"  {i:>3}  {_trunc(m.artist, 22):<22}  {_trunc(album_col, 28):<28}"
+                f"  {(m.release_date or '')[:4]:<4}  {(m.country or '')[:3]:<3}"
+                f"  {_trunc(m.label, 16)}"
+            )
+        print()
+        nav = []
+        if page > 0:
+            nav.append("[p] prev")
+        if page < total_pages - 1:
+            nav.append("[n] next")
+        nav.append("[b] back without selecting")
+        print("  " + "  ".join(nav))
+
+        choice = _prompt(f"  Select 1-{total} or command: ").strip().lower()
+        if choice == "n" and page < total_pages - 1:
+            page += 1
+        elif choice == "p" and page > 0:
+            page -= 1
+        elif choice == "b":
+            return None
+        else:
+            try:
+                idx = int(choice) - 1
+                if 0 <= idx < total:
+                    return results[idx]
+                print("  Invalid selection.")
+            except ValueError:
+                pass
+
+
+# ---------------------------------------------------------------------------
+# Diff and confirm
+# ---------------------------------------------------------------------------
+
+
+def _show_diff(meta: DiscMeta, disc: RBIDisc) -> None:
+    """Print which fields would change when applying *meta* to *disc*."""
+    _unknown = "Unknown Artist"
+    changes: list[str] = []
+
+    def _cmp(label: str, old: str | None, new: str | None) -> None:
+        if new and (not old or old == _unknown) and new != old:
+            changes.append(f"  + {label:<28}  (none)  →  {new}")
+        elif old and new and old != new:
+            changes.append(f"  ~ {label:<28}  {_trunc(old, 20)}  →  {_trunc(new, 20)}")
+
+    _cmp("Album", disc.album, meta.album)
+    _cmp("Artist", disc.artist, meta.artist)
+    _cmp("Catalog/barcode", disc.catalog, meta.catalog)
+
+    meta_by_num = {t.number: t for t in meta.tracks if t.number is not None}
+    for entry in disc.tracks:
+        mt = meta_by_num.get(entry.track_number)
+        if not mt:
+            continue
+        _cmp(f"Track {entry.track_number:>2} title", entry.title, mt.title)
+        if not entry.isrc and mt.isrc:
+            changes.append(
+                f"  + Track {entry.track_number:>2} ISRC{' ':<21}  (none)  →  {mt.isrc}"
+            )
+
+    if not changes:
+        print("  (no fields would change)")
+    else:
+        for line in changes:
+            print(line)
+
+
+def _confirm_apply(meta: DiscMeta, disc: RBIDisc) -> bool:
+    """Show diff and ask the user to confirm applying *meta* to *disc*."""
+    _header("Preview changes")
+    _print_meta_summary(meta)
+    print()
+    print("  Fields that would change:")
+    _show_diff(meta, disc)
+    print()
+    choice = _prompt("  Apply? [y/n]: ").strip().lower()
+    return choice == "y"
+
+
+# ---------------------------------------------------------------------------
+# MusicBrainz search sub-menu
+# ---------------------------------------------------------------------------
+
+
+def _mb_search_menu(disc: RBIDisc, mb_rg_id: str | None) -> tuple[RBIDisc, str | None]:
+    from cdda2img.mb_lookup import _merge_into_disc, lookup_release, search_releases
+
+    query = f"{disc.artist} {disc.album}".strip()
+    while True:
+        _header("MusicBrainz Search")
+        print(f"  Query: {query}")
+        print()
+        print("  [s]  Search with current query")
+        print("  [e]  Edit search query")
+        print("  [b]  Back")
+        choice = _prompt("  > ").strip().lower()
+
+        if choice == "b":
+            return disc, mb_rg_id
+        elif choice == "e":
+            query = _prompt_edit("Search query", query)
+        elif choice == "s":
+            print(f"\n  Searching MusicBrainz for {query!r} ...")
+            results = search_releases(query)
+            if not results:
+                print("  No results found.")
+                continue
+            selected = _select_from_results(results, "MusicBrainz Results")
+            if selected is None:
+                continue
+            if _confirm_apply(selected, disc):
+                if selected.mb_release_id and not selected.tracks:
+                    print("  Fetching full track listing from MusicBrainz...")
+                    full = lookup_release(selected.mb_release_id)
+                    if full:
+                        selected = full
+                disc = _merge_into_disc(selected, disc)
+                mb_rg_id = selected.mb_release_group_id or mb_rg_id
+                print("  Applied.")
+        else:
+            print("  Unknown command.")
+
+
+# ---------------------------------------------------------------------------
+# Discogs search sub-menu
+# ---------------------------------------------------------------------------
+
+
+def _discogs_execute_search(disc: RBIDisc, query: str, use_barcode: bool) -> RBIDisc:
+    """Run one Discogs search (text or barcode) and apply if confirmed."""
+    from cdda2img import discogs_lookup
+    from cdda2img.mb_lookup import _merge_into_disc
+
+    if use_barcode and disc.catalog:
+        label = f"barcode {disc.catalog!r}"
+        results = discogs_lookup.search_by_barcode(disc.catalog)
+    else:
+        label = repr(query)
+        results = discogs_lookup.search_releases(query)
+    print(f"\n  Searching Discogs for {label} ...")
+    if not results:
+        print("  No results found.")
+        return disc
+    selected = _select_from_results(results, "Discogs Results")
+    if selected is not None and _confirm_apply(selected, disc):
+        disc = _merge_into_disc(selected, disc)
+        print("  Applied.")
+    return disc
+
+
+def _discogs_menu(disc: RBIDisc) -> RBIDisc:
+    from cdda2img import discogs_lookup
+
+    if not discogs_lookup.is_available():
+        _header("Discogs Search")
+        print("  Discogs requires a free personal access token.")
+        print("  Set DISCOGS_TOKEN in your environment.")
+        print("  Obtain one at: discogs.com/settings/developers")
+        _prompt("  [Enter to return] ")
+        return disc
+
+    query = f"{disc.artist} {disc.album}".strip()
+    while True:
+        _header("Discogs Search")
+        print(f"  Query: {query}")
+        print()
+        print("  [s]  Search with current query")
+        print("  [e]  Edit search query")
+        if disc.catalog:
+            print("  [c]  Search by barcode/catalog number")
+        print("  [b]  Back")
+        choice = _prompt("  > ").strip().lower()
+
+        if choice == "b":
+            return disc
+        elif choice == "e":
+            query = _prompt_edit("Search query", query)
+        elif choice == "s":
+            disc = _discogs_execute_search(disc, query, use_barcode=False)
+        elif choice == "c" and disc.catalog:
+            disc = _discogs_execute_search(disc, query, use_barcode=True)
+        else:
+            print("  Unknown command.")
+
+
+# ---------------------------------------------------------------------------
+# AcoustID sub-menu
+# ---------------------------------------------------------------------------
+
+
+def _pcm_extract_track_wav(
+    disc: RBIDisc, pcm_path: Path, track_num: int, out_path: Path
+) -> Path | None:
+    """Slice track *track_num* from raw s16le *pcm_path* into a WAV at *out_path*.
+
+    Returns *out_path* on success, None if the track is not found or on I/O error.
+    """
+    track = next((t for t in disc.tracks if t.track_number == track_num), None)
+    if track is None:
+        return None
+    # Read the full track so the WAV header reports the correct duration.
+    # AcoustID uses duration (from the WAV header) as a scoring signal;
+    # a truncated file causes duration mismatch that suppresses all candidates.
+    # fpcalc still caps its own analysis at 120 seconds internally.
+    audio_start = (track.start_frame + track.pregap_frames) * _BYTES_PER_FRAME
+    try:
+        with open(pcm_path, "rb") as f:
+            f.seek(audio_start)
+            pcm_data = f.read(track.duration_frames * _BYTES_PER_FRAME)
+        with wave.open(str(out_path), "wb") as w:
+            w.setnchannels(PCM_CHANNELS)
+            w.setsampwidth(PCM_BIT_DEPTH // 8)
+            w.setframerate(PCM_SAMPLE_RATE)
+            w.writeframes(pcm_data)
+    except OSError:
+        return None
+    read_sec = len(pcm_data) / _BYTES_PER_FRAME / CD_FRAMES_PER_SECOND
+    print(f"  Track {track_num}: {read_sec:.1f}s extracted @ offset {audio_start:,}")
+    return out_path
+
+
+def _acoustid_run_one(
+    disc: RBIDisc, wav_path: Path, *, track_number: int | None = None
+) -> RBIDisc:
+    """Fingerprint *wav_path* via AcoustID, show results, apply if confirmed.
+
+    When *track_number* is given, single-track results with number=None are
+    tagged with that number so title/ISRC merge into the correct disc track.
+    Returns the (possibly updated) disc; identity unchanged means no change applied.
+    """
+    from cdda2img import acoustid_lookup
+    from cdda2img.mb_lookup import _merge_into_disc, lookup_release
+
+    print(f"  Fingerprinting {wav_path.name}... (may take a few seconds)")
+    results = acoustid_lookup.fingerprint_and_lookup(wav_path, verbose=True)
+    if not results:
+        print("  No confident matches found.")
+        print(
+            "  (Ensure fpcalc/libchromaprint is on PATH and ACOUSTID_API_KEY is set.)"
+        )
+        return disc
+    if track_number is not None:
+        for result in results:
+            if len(result.tracks) == 1 and result.tracks[0].number is None:
+                result.tracks[0].number = track_number
+    selected = _select_from_results(results, "AcoustID Matches")
+    if selected is not None and _confirm_apply(selected, disc):
+        if selected.mb_release_id and len(selected.tracks) < len(disc.tracks):
+            print("  Fetching full track listing from MusicBrainz...")
+            full = lookup_release(selected.mb_release_id)
+            if full:
+                selected = full
+        updated = _merge_into_disc(selected, disc)
+        print("  Applied.")
+        return updated
+    return disc
+
+
+def _acoustid_file_loop(disc: RBIDisc) -> RBIDisc:
+    """Prompt for a file path; loop until Enter with no path."""
+    while True:
+        path_str = _prompt("  Audio file path (or Enter to return): ").strip()
+        if not path_str:
+            return disc
+        wav_path = Path(path_str)
+        if not wav_path.exists():
+            print(f"  File not found: {path_str}")
+            continue
+        num_str = _prompt("  Track number (or Enter to skip): ").strip()
+        track_num = int(num_str) if num_str.isdigit() else None
+        disc = _acoustid_run_one(disc, wav_path, track_number=track_num)
+
+
+def _acoustid_pcm_loop(disc: RBIDisc, source_pcm: Path) -> RBIDisc:
+    """Per-track fingerprint loop — extracts each track on demand from *source_pcm*."""
+    valid_nums = {t.track_number for t in disc.tracks}
+    wav_cache: dict[int, Path] = {}
+
+    with tempfile.TemporaryDirectory(prefix="cdda2img_aid_") as td:
+        tmp_dir = Path(td)
+        while True:
+            _header("AcoustID Fingerprint")
+            print(f"  {'#':>3}  {'Duration':>8}  Title")
+            print(f"  {'─' * 3}  {'─' * 8}  {'─' * 32}")
+            for t in sorted(disc.tracks, key=lambda x: x.track_number):
+                mm = int(t.duration_frames / CD_FRAMES_PER_SECOND / 60)
+                ss = int(t.duration_frames / CD_FRAMES_PER_SECOND) % 60
+                print(
+                    f"  {t.track_number:>3}  {mm}:{ss:02d}       "
+                    f"{_trunc(t.title or '(untitled)', 32)}"
+                )
+            print()
+            print("  Enter track number, [f] for file path, or [b] to return:")
+            choice = _prompt("  > ").strip().lower()
+
+            if choice == "b":
+                return disc
+            if choice == "f":
+                disc = _acoustid_file_loop(disc)
+                continue
+            if not choice.isdigit() or int(choice) not in valid_nums:
+                print("  Invalid selection.")
+                continue
+            track_num = int(choice)
+            if track_num not in wav_cache:
+                out_path = tmp_dir / f"track{track_num:02d}.wav"
+                extracted = _pcm_extract_track_wav(
+                    disc, source_pcm, track_num, out_path
+                )
+                if not extracted:
+                    print(f"  Could not extract track {track_num}.")
+                    continue
+                wav_cache[track_num] = extracted
+            disc = _acoustid_run_one(disc, wav_cache[track_num], track_number=track_num)
+
+
+def _acoustid_wavs_loop(disc: RBIDisc, source_wavs: list[Path]) -> RBIDisc:
+    """Per-track fingerprint loop — uses pre-transcoded WAV files from the create pipeline."""
+    valid_nums = {t.track_number for t in disc.tracks}
+    while True:
+        _header("AcoustID Fingerprint")
+        print(f"  {'#':>3}  {'Duration':>8}  Title")
+        print(f"  {'─' * 3}  {'─' * 8}  {'─' * 32}")
+        for t in sorted(disc.tracks, key=lambda x: x.track_number):
+            mm = int(t.duration_frames / CD_FRAMES_PER_SECOND / 60)
+            ss = int(t.duration_frames / CD_FRAMES_PER_SECOND) % 60
+            print(
+                f"  {t.track_number:>3}  {mm}:{ss:02d}       "
+                f"{_trunc(t.title or '(untitled)', 32)}"
+            )
+        print()
+        print("  Enter track number, [f] for file path, or [b] to return:")
+        choice = _prompt("  > ").strip().lower()
+
+        if choice == "b":
+            return disc
+        if choice == "f":
+            disc = _acoustid_file_loop(disc)
+            continue
+        if not choice.isdigit() or int(choice) not in valid_nums:
+            print("  Invalid selection.")
+            continue
+        track_num = int(choice)
+        idx = track_num - 1
+        if idx >= len(source_wavs):
+            print(f"  No WAV file for track {track_num}.")
+            continue
+        wav_path = source_wavs[idx]
+        if not wav_path.exists():
+            print(f"  WAV file not found: {wav_path.name}")
+            continue
+        disc = _acoustid_run_one(disc, wav_path, track_number=track_num)
+
+
+def _acoustid_menu(
+    disc: RBIDisc,
+    source_pcm: Path | None = None,
+    source_wavs: list[Path] | None = None,
+) -> RBIDisc:
+    from cdda2img import acoustid_lookup
+
+    if not acoustid_lookup.is_available():
+        _header("AcoustID Fingerprint")
+        print(f"  Not available: {acoustid_lookup.unavailability_reason()}")
+        _prompt("  [Enter to return] ")
+        return disc
+
+    if source_wavs and disc.tracks:
+        return _acoustid_wavs_loop(disc, source_wavs)
+    if source_pcm and source_pcm.exists() and disc.tracks:
+        return _acoustid_pcm_loop(disc, source_pcm)
+
+    _header("AcoustID Fingerprint")
+    return _acoustid_file_loop(disc)
+
+
+# ---------------------------------------------------------------------------
+# Fetch sub-menu
+# ---------------------------------------------------------------------------
+
+
+def _fetch_menu(
+    disc: RBIDisc,
+    mb_rg_id: str | None,
+    source_pcm: Path | None = None,
+    source_wavs: list[Path] | None = None,
+) -> tuple[RBIDisc, str | None]:
+    while True:
+        _header("Fetch Metadata")
+        print("  [m]  MusicBrainz text search")
+        print("  [d]  Discogs search")
+        print("  [a]  AcoustID fingerprint")
+        print("  [b]  Back")
+        choice = _prompt("  > ").strip().lower()
+
+        if choice == "b":
+            return disc, mb_rg_id
+        elif choice == "m":
+            disc, mb_rg_id = _mb_search_menu(disc, mb_rg_id)
+        elif choice == "d":
+            disc = _discogs_menu(disc)
+        elif choice == "a":
+            disc = _acoustid_menu(disc, source_pcm=source_pcm, source_wavs=source_wavs)
+        else:
+            print("  Unknown command.")
+
+
+# ---------------------------------------------------------------------------
+# Edit sub-menu
+# ---------------------------------------------------------------------------
+
+
+def _edit_menu(disc: RBIDisc) -> RBIDisc:
+    while True:
+        _header("Edit Metadata")
+        _print_disc_summary(disc)
+        print()
+        print("  [a]   Edit album title")
+        print("  [r]   Edit artist")
+        print("  [t N] Edit track N  (e.g.  t 3)")
+        print("  [b]   Back")
+        choice = _prompt("  > ").strip().lower()
+
+        if choice == "b":
+            return disc
+        elif choice == "a":
+            disc.album = _prompt_edit("Album title", disc.album or "")
+        elif choice == "r":
+            disc.artist = _prompt_edit("Artist", disc.artist or "")
+        elif choice.startswith("t "):
+            try:
+                num = int(choice[2:].strip())
+                disc = _edit_track(disc, num)
+            except ValueError:
+                print("  Invalid track number.")
+        else:
+            print("  Unknown command.")
+
+
+def _edit_track(disc: RBIDisc, track_number: int) -> RBIDisc:
+    track = next((t for t in disc.tracks if t.track_number == track_number), None)
+    if not track:
+        print(f"  Track {track_number} not found.")
+        return disc
+    while True:
+        _header(f"Edit Track {track_number}")
+        print(f"  Title:     {track.title}")
+        print(f"  Performer: {track.performer}")
+        print(f"  ISRC:      {track.isrc or '(none)'}")
+        print()
+        print("  [t]  Edit title")
+        print("  [p]  Edit performer")
+        print("  [i]  Edit ISRC")
+        print("  [b]  Back")
+        choice = _prompt("  > ").strip().lower()
+
+        if choice == "b":
+            return disc
+        elif choice == "t":
+            track.title = _prompt_edit("Title", track.title)
+        elif choice == "p":
+            track.performer = _prompt_edit("Performer", track.performer)
+        elif choice == "i":
+            raw = _prompt_edit(
+                "ISRC (12 chars, blank to clear)", track.isrc or ""
+            ).upper()
+            track.isrc = raw if raw else None
+        else:
+            print("  Unknown command.")
+
+
+# ---------------------------------------------------------------------------
+# Find Original Release sub-menu
+# ---------------------------------------------------------------------------
+
+_LOUDNESS_WAR_YEAR = 1994
+
+
+def _assess_remaster(meta: DiscMeta) -> str:
+    """Determine and print the REMASTERED_SOURCE assessment for a release."""
+    date_prefix = (meta.release_date or "")[:4]
+    orig_year = int(date_prefix) if date_prefix.isdigit() else None
+    if orig_year and orig_year < _LOUDNESS_WAR_YEAR:
+        print(f"  Pre-Loudness-War release ({orig_year}): REMASTERED_SOURCE -> NO")
+        return REMASTERED_NO
+    if meta.remastered_source == REMASTERED_YES:
+        print("  Known remaster (title keyword + post-1994): REMASTERED_SOURCE -> YES")
+        return REMASTERED_YES
+    if orig_year and orig_year >= _LOUDNESS_WAR_YEAR:
+        print(f"  Loudness-War era ({orig_year}): REMASTERED_SOURCE -> POSSIBLE")
+        return REMASTERED_POSSIBLE
+    print("  Insufficient date data: REMASTERED_SOURCE -> UNKNOWN")
+    return REMASTERED_UNKNOWN
+
+
+def _fetch_releases_for_group(
+    disc: RBIDisc, mb_rg_id: str | None
+) -> tuple[list[DiscMeta], str | None]:
+    """Return (releases, rg_id): fetch by group ID or fall back to text search."""
+    from cdda2img.mb_lookup import lookup_release_group, search_releases
+
+    if mb_rg_id:
+        print(f"  Fetching MusicBrainz release group {mb_rg_id} ...")
+        releases = lookup_release_group(mb_rg_id)
+        if releases:
+            return releases, mb_rg_id
+        print("  No releases found in group; falling back to text search.")
+    query = _prompt_edit("Search query", f"{disc.artist} {disc.album}".strip())
+    print(f"\n  Searching MusicBrainz for {query!r} ...")
+    return search_releases(query, limit=50), mb_rg_id
+
+
+def _original_release_menu(
+    disc: RBIDisc, mb_rg_id: str | None
+) -> tuple[RBIDisc, str | None]:
+    from cdda2img.mb_lookup import _merge_into_disc, lookup_release
+
+    _header("Find Original Release")
+    releases, mb_rg_id = _fetch_releases_for_group(disc, mb_rg_id)
+
+    if not releases:
+        print("  No results found.")
+        _prompt("  [Enter to return] ")
+        return disc, mb_rg_id
+
+    releases_sorted = sorted(releases, key=lambda m: m.release_date or "9999")
+    print(f"\n  {len(releases_sorted)} release(s) found, sorted earliest first.")
+
+    while True:
+        selected = _select_from_results(
+            releases_sorted, "Original Release - Earliest First"
+        )
+        if selected is None:
+            return disc, mb_rg_id
+
+        _header("Selected Release")
+        _print_meta_summary(selected)
+        print()
+        assessment = _assess_remaster(selected)
+        print()
+        print("  [a]  Apply and set REMASTERED_SOURCE")
+        print("  [b]  Back to list")
+        choice = _prompt("  > ").strip().lower()
+
+        if choice == "a":
+            if selected.mb_release_id and not selected.tracks:
+                print("  Fetching full track listing from MusicBrainz...")
+                full = lookup_release(selected.mb_release_id)
+                if full:
+                    selected = full
+            disc = _merge_into_disc(selected, disc)
+            mb_rg_id = selected.mb_release_group_id or mb_rg_id
+            print(f"  Applied. REMASTERED_SOURCE: {assessment}")
+            return disc, mb_rg_id
+
+
+# ---------------------------------------------------------------------------
+# Disc snapshot helpers
+# ---------------------------------------------------------------------------
+
+
+def _clear_disc(disc: RBIDisc) -> RBIDisc:
+    """Return a new RBIDisc with all metadata cleared; timing and structure preserved."""
+    cleared_tracks = [
+        RBITocEntry(
+            track_number=t.track_number,
+            title="",
+            performer="",
+            start_frame=t.start_frame,
+            duration_frames=t.duration_frames,
+            pregap_frames=t.pregap_frames,
+            isrc=None,
+        )
+        for t in disc.tracks
+    ]
+    return RBIDisc(
+        album="",
+        artist="",
+        disc_number=disc.disc_number,
+        disc_total=disc.disc_total,
+        tracks=cleared_tracks,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Main entry point
+# ---------------------------------------------------------------------------
+
+
+def run_metadata_menu(
+    disc: RBIDisc,
+    source_pcm: Path | None = None,
+    source_wavs: list[Path] | None = None,
+) -> RBIDisc:
+    """Display current metadata and run the interactive enrichment/confirmation menu.
+
+    *source_pcm* — raw s16le PCM file (import pipeline): enables per-track WAV
+    extraction for AcoustID fingerprinting.
+    *source_wavs* — per-track WAV list (create pipeline): used directly for
+    AcoustID fingerprinting without extraction.
+
+    Returns the (possibly updated) RBIDisc. Returns *disc* unchanged when stdin
+    is not a TTY (batch/scripted mode).
+    """
+    if not sys.stdin.isatty():
+        return disc
+
+    _original_disc = copy.deepcopy(disc)  # savepoint for Reset
+    mb_rg_id: str | None = None  # MB release group ID, threaded across sub-menus
+
+    while True:
+        _header("Metadata")
+        _print_disc_summary(disc)
+        print()
+        print("  [a]  Accept and continue")
+        print("  [f]  Fetch metadata from remote services")
+        print("  [e]  Edit metadata")
+        print("  [r]  Find original release")
+        print("  [u]  Reset to original (undo all changes this session)")
+        print("  [c]  Clear all metadata")
+        print()
+        choice = _prompt("  > ").strip().lower()
+
+        if choice == "a":
+            return disc
+        elif choice == "f":
+            disc, mb_rg_id = _fetch_menu(
+                disc, mb_rg_id, source_pcm=source_pcm, source_wavs=source_wavs
+            )
+        elif choice == "e":
+            disc = _edit_menu(disc)
+        elif choice == "r":
+            disc, mb_rg_id = _original_release_menu(disc, mb_rg_id)
+        elif choice == "u":
+            disc = copy.deepcopy(_original_disc)
+            mb_rg_id = None
+            print("  Reset to original metadata.")
+        elif choice == "c":
+            disc = _clear_disc(disc)
+            mb_rg_id = None
+            print("  All metadata cleared.")
+        else:
+            print("  Unknown command. Use a / f / e / r / u / c.")

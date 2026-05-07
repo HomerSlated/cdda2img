@@ -260,6 +260,10 @@ class RBIDisc:
     catalog: str | None = None  # MCN / EAN-13; None if not available
     disc_id: str | None = None  # PTI 0x86 catalogue/label reference; None if absent
     tracks: list[RBITocEntry] = field(default_factory=list)
+    release_date: str | None = None  # YYYY, YYYY-MM, or YYYY-MM-DD
+    original_release_date: str | None = None  # release-group first-release-date
+    remastered_source: str = "UNKNOWN"  # UNKNOWN | NO | POSSIBLE | YES
+    mb_release_id: str | None = None  # MusicBrainz release UUID for provenance
 
     @property
     def total_frames(self) -> int:

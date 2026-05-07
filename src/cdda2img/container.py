@@ -482,6 +482,14 @@ def _parse_provenance(toc_text: str) -> dict[str, str]:
     return {m.group(1): m.group(2) for m in _PROVENANCE_RE.finditer(toc_text)}
 
 
+_REMASTER_LABELS = {
+    "YES": "Yes (confirmed)",
+    "POSSIBLE": "Possible",
+    "NO": "No",
+    "UNKNOWN": "Unknown",
+}
+
+
 def _print_provenance(provenance: dict[str, str]) -> None:
     if not provenance:
         return
@@ -492,6 +500,15 @@ def _print_provenance(provenance: dict[str, str]) -> None:
         print(f"Source:    {source}")
     if ptype := provenance.get("TYPE"):
         print(f"Type:      {ptype}")
+    if rms := provenance.get("REMASTERED_SOURCE"):
+        label = _REMASTER_LABELS.get(rms, rms)
+        extra = ""
+        if rd := provenance.get("RELEASE_DATE"):
+            extra += f"  (this release: {rd}"
+            if od := provenance.get("ORIGINAL_RELEASE_DATE"):
+                extra += f", original: {od}"
+            extra += ")"
+        print(f"Remaster:  {label}{extra}")
 
 
 def list_container(rbi_file: Path) -> None:

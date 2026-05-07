@@ -163,6 +163,18 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def _add_release_provenance(provenance: dict, disc: RBIDisc) -> None:
+    """Append release-intelligence fields to *provenance* if populated on *disc*."""
+    if disc.remastered_source != "UNKNOWN":
+        provenance["REMASTERED_SOURCE"] = disc.remastered_source
+    if disc.release_date:
+        provenance["RELEASE_DATE"] = disc.release_date
+    if disc.original_release_date:
+        provenance["ORIGINAL_RELEASE_DATE"] = disc.original_release_date
+    if disc.mb_release_id:
+        provenance["MB_RELEASE_ID"] = disc.mb_release_id
+
+
 def _unique_path(stem: str, ext: str) -> Path:
     """Return a non-colliding Path for {stem}.{ext}, appending _1, _2... if needed."""
     p = Path(f"{stem}.{ext}")
@@ -229,6 +241,11 @@ def create_image(
             album=album, artist=artist, disc_number=disc_num, disc_total=disc_total
         )
         disc.tracks = build_toc_entries(batch, durations, disc)
+
+        from cdda2img.metadata_menu import run_metadata_menu
+
+        disc = run_metadata_menu(disc, source_wavs=source_wavs)
+
         source_rg = [read_source_rg_tags(p) for p in batch]
         raw_titles = [re.sub(r"^\d{2} ", "", p.stem) for p in batch]
         provenance = {
@@ -236,6 +253,7 @@ def create_image(
             "SOURCE": str(input_dir.resolve()),
             "TYPE": "audio files",
         }
+        _add_release_provenance(provenance, disc)
         toc_data = generate_toc(
             disc, source_rg=source_rg, raw_titles=raw_titles, provenance=provenance
         )
@@ -347,6 +365,15 @@ def import_image(
             )
             raise ValueError(msg)
 
+        import sys
+
+        from cdda2img.mb_lookup import prepopulate_from_mb
+        from cdda2img.metadata_menu import run_metadata_menu
+
+        disc = prepopulate_from_mb(disc, verbose=sys.stdin.isatty())
+        disc = run_metadata_menu(disc, source_pcm=temp.pcm_file)
+
+        _add_release_provenance(provenance, disc)
         toc_data = generate_toc(disc, provenance=provenance)
 
         rg_block: bytes | None = None
