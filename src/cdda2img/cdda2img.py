@@ -495,7 +495,7 @@ def rip_image(
             drive_offset=cfg.drive_offset,
             cddb_id=cddb_id,
         )
-        print_ar_report(ar_results)
+        print_ar_report(ar_results, drive_offset=cfg.drive_offset)
 
         output_stem = sanitize_title(disc.album) or device.lstrip("/").replace("/", "_")
         provenance: dict[str, str] = {

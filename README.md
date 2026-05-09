@@ -30,6 +30,10 @@ This is an active prototype. A Rust reimplementation is planned once the design 
 - **Physical disc ripping** — `r` subcommand rips directly from `/dev/sr0` (or any
   optical drive) via libcdio-paranoia with three paranoia modes: `off` (raw), `overlap`
   (jitter correction, default), `full` (full correction with per-sector retry cap)
+- **AccurateRip v1/v2 verification** — per-track checksum computed against the AccurateRip
+  database after every rip; matches against all drive-offset groups; reports confidence
+  and mismatch status per track; drive offset read from
+  `~/.config/cdda2img/cdda2img.toml`
 - **Disc image import** — `i` subcommand imports professional mastering images as
   master-mode RBIs; pre-gaps, CATALOG, ISRC, and CD-TEXT are preserved; per-track
   ReplayGain is measured from individual track slices:
@@ -65,7 +69,6 @@ This is an active prototype. A Rust reimplementation is planned once the design 
 
 ### Planned
 
-- AccurateRip v1/v2 checksum verification per track
 - Foreign format import — read CUE/BIN, MDS/MDF, CCD/IMG/SUB, NRG as input;
   read-only plugins only, always converted to RBI first
 - **Music collection catalogue** — SQLite database of all created RBIs, queryable

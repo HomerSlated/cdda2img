@@ -328,8 +328,114 @@ Reference implementation: whipper source (AccurateRip disc ID + checksum algorit
 **AccurateRip checksum boundary conditions**:
 - AccurateRip intentionally excludes the first and last 5 frames (2940 samples) of each track
   from its checksum to reduce sensitivity to drive offset errors.
-- Ensure the checksum implementation handles these boundary exclusions correctly — this is a
-  common source of implementation bugs. Verify against whipper's implementation.
+- The implemented `_ar_checksums()` uses `sum_from`/`sum_to` guards (see below). The most
+  common implementation bug is **clipping** the read window at the file boundary instead of
+  zero-padding — this shifts `sum_to` and mismatches the last track only. See zero-padding
+  invariant in the AccurateRip Verification section below.
+
+### AccurateRip Verification — `accuraterip.py`
+
+Implementation: `src/cdda2img/accuraterip.py`. Called from `rip_image()` after either rip
+path, before the metadata menu and container build. Verification is **informational only** —
+never fails the rip. `verify_rip` skips the entire checksum loop when the disc is not in
+the database (early return on empty `responses`).
+
+**Algorithm — `_ar_checksums(frames, track, total_tracks)`**:
+
+- `frames`: `array.array('I')` — raw PCM bytes reinterpreted as u32 LE (4 bytes = one stereo
+  sample pair). Platform guard at module load: `array.array('I').itemsize != 4` raises
+  `RuntimeError`.
+- Multiplier `mult = i + 1` (1-based from frame 0; never reset across track boundaries).
+- Boundary exclusion via guards (not by resetting the multiplier):
+  - `sum_from = 2940 if track == 1 else 0` — skip the first 2939 frames of track 1
+  - `sum_to = n - 2940 if track == last else n` — skip the last 2939 frames of last track
+  - Include frame `i` when: `mult >= sum_from and mult <= sum_to` (`>=`, not `>`)
+- `csum_lo += product & 0xFFFFFFFF`; `csum_hi += product >> 32` (overflow bits for v2)
+- `v1 = csum_lo & 0xFFFFFFFF`; `v2 = (csum_lo + csum_hi) & 0xFFFFFFFF`
+- Algorithm mirrors ARver `arver/audio/_audio.c:accuraterip()`.
+
+**Boundary zero-padding invariant (critical — do not clip)**:
+
+With drive offset `+N`, the read window for the last track is `(disc_last_lsn+1)*2352 + N*4`
+bytes, which overshoots the PCM file by exactly `N*4` bytes. The correct fix is to
+**zero-pad the raw buffer**, not clip it:
+
+```python
+if byte_start < 0:
+    raw = bytes(-byte_start) + raw        # negative offset: pad zeros at start (track 1)
+if byte_end > pcm_size:
+    raw = raw + bytes(byte_end - pcm_size) # positive offset: pad zeros at end (last track)
+```
+
+Why zero-padding works: the padded samples fall within the ±2940-frame exclusion zone and
+contribute nothing to the checksum. Clipping instead shortens the array by N elements,
+shifts `sum_to = n - 2940` down by N, and excludes N frames that the database included —
+causing a mismatch on the last track only.
+
+Empirically confirmed: Madness *Divine Madness* (22 tracks), drive_offset=+30. Tracks 1–21
+verified OK at conf 14; track 22 showed MISMATCH before the fix, OK at conf 13 after.
+The conf 13 (vs 14 on other tracks) means one of the 14 same-offset submitters had this
+exact clipping bug in their software — their track 22 CRC went into a different block.
+
+**Disc IDs — `_ar_disc_ids(track_lsns, disc_last_lsn)`**:
+
+Inputs are LSNs (not LBA). `lsn_leadout = disc_last_lsn + 1`.
+
+```python
+id1 = (sum(track_lsns) + lsn_leadout) & 0xFFFFFFFF
+id2 = (sum((lsn or 1) * (i+1) for i, lsn in enumerate(track_lsns))
+       + lsn_leadout * (n+1)) & 0xFFFFFFFF
+```
+
+Formula from ARver `arver/disc/fingerprint.py`. The `lsn or 1` guard handles LSN=0 for
+track 1 on discs with no pre-gap offset.
+
+**URL — `_ar_url(track_count, id1, id2, cddb_id)`**:
+
+```
+http://www.accuraterip.com/accuraterip/{id1[-1]}/{id1[-2]}/{id1[-3]}/
+    dBAR-{n:03d}-{id1}-{id2}-{cddb_id:08x}.bin
+```
+
+The directory path uses the **last three characters of `id1` in reverse order** (LSBs first,
+not first three characters). `cddb_id` is a 32-bit integer: `int(compute_cddb_disc_id(...), 16)`.
+
+**dBAR binary format — `_parse_dbar(data, n_tracks)`**:
+
+The response contains one or more consecutive blocks, each representing a different
+drive-offset group in the AccurateRip database:
+
+```
+Block header:  13 bytes  <BLLL  n_tracks, id1, id2, cddb_id
+Per-track:      9 bytes  <BLL   conf, v1_crc, v2_crc
+                         × n_tracks
+```
+
+`verify_rip` matches the computed CRCs against every block and records the highest
+matching confidence per track. A track not matched in any block gets `confidence=None`.
+
+**Confidence interpretation**:
+
+- Each block's confidence is the count of submissions that produced that CRC. The block
+  with the highest confidence is typically from EAC-corrected rips at the "standard" offset.
+- A minority-offset drive (e.g. Plextor PX-716A at +30) matches a lower-confidence block
+  (conf ≈ 14) rather than the dominant block (conf ≈ 136). Conf 14 means 14 independent
+  drives at this exact offset all agreed — this is **not** a sign of a bad rip.
+- All-tracks mismatch on a disc that IS in the database (all `max_confidence` not None)
+  almost always means `drive_offset` is missing or wrong. `print_ar_report` detects this
+  case and prints a concise hint rather than 22 per-track MISMATCH lines:
+  `"AccurateRip: disc found (max confidence 136) but no CRC match at drive_offset=0"`
+- Partial mismatches (some tracks OK, some not) indicate genuine data corruption and always
+  trigger per-track output.
+- Do not trust confidence 1 as a reliable match. For blind offset detection, require ≥ 2–3.
+
+**Drive offset config**:
+
+`drive_offset` (integer, samples) in `~/.config/cdda2img/cdda2img.toml`. On first run with
+no config file and a TTY, `_prompt_create_config()` offers to create it from
+`conf/cdda2img.toml.example`. The example path uses
+`Path(__file__).parent.parent.parent / "conf"` (dev-tree relative); replace with
+`importlib.resources` when packaging is set up.
 
 ### cdrdao .toc Field Reference (relevant subset)
 

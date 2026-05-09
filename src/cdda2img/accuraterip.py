@@ -195,6 +195,15 @@ def verify_rip(
             f.seek(read_start)
             raw = f.read(read_end - read_start)
 
+            # Zero-pad to cover the full offset window when it extends outside the
+            # file.  The padded zeros fall within the ±2940-frame exclusion zone, so
+            # they don't affect the checksum — but without them the exclusion boundary
+            # shifts and the last (or first) track mismatches.
+            if byte_start < 0:
+                raw = bytes(-byte_start) + raw
+            if byte_end > pcm_size:
+                raw = raw + bytes(byte_end - pcm_size)
+
             frames: array.array = array.array("I")
             frames.frombytes(raw[: len(raw) - len(raw) % 4])
 
@@ -237,7 +246,7 @@ def verify_rip(
     return results
 
 
-def print_ar_report(results: list[ARTrackResult]) -> None:
+def print_ar_report(results: list[ARTrackResult], drive_offset: int = 0) -> None:
     """Print a per-track AccurateRip verification report to stdout."""
     if not results:
         return
@@ -245,20 +254,32 @@ def print_ar_report(results: list[ARTrackResult]) -> None:
         print("  AccurateRip: disc not found in database")
         return
 
+    n = len(results)
+    n_ok = sum(
+        1 for r in results if r.confidence_v1 is not None or r.confidence_v2 is not None
+    )
+
+    # All tracks mismatch on a disc that IS in the database — almost always a
+    # drive offset configuration gap, not data corruption.
+    if n_ok == 0:
+        max_conf = max(r.max_confidence or 0 for r in results)
+        print(
+            f"  AccurateRip: disc found (max confidence {max_conf}) but no CRC match"
+            f" at drive_offset={drive_offset}"
+        )
+        print("    Set drive_offset in ~/.config/cdda2img/cdda2img.toml")
+        return
+
     print("  AccurateRip:")
-    n_ok = 0
     for r in results:
         if r.confidence_v1 is not None:
             status = f"OK  [conf {r.confidence_v1}/{r.max_confidence}]"
-            n_ok += 1
         elif r.confidence_v2 is not None:
             status = f"OK v2  [conf {r.confidence_v2}/{r.max_confidence}]"
-            n_ok += 1
         else:
             status = f"MISMATCH  [max conf {r.max_confidence}]"
         print(f"    Track {r.track:2d}: v1={r.v1_crc}  {status}")
 
-    n = len(results)
     if n_ok == n:
         confs = [r.confidence_v1 or r.confidence_v2 or 0 for r in results]
         print(f"    {n}/{n} tracks verified (min confidence {min(confs)})")

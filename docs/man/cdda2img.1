@@ -1,6 +1,6 @@
 .\" cdda2img.1 — manual page for cdda2img
 .\" Install: doas install -m 644 docs/cdda2img.1 /usr/local/share/man/man1/
-.TH CDDA2IMG 1 "2026\-05\-08" "cdda2img 0.1.5" "User Commands"
+.TH CDDA2IMG 1 "2026\-05\-09" "cdda2img 0.1.5" "User Commands"
 .\"
 .SH NAME
 cdda2img \- create and extract RBI audio CD archive images
@@ -46,9 +46,26 @@ lookups and embedded in the TOC block.
 .SH SUBCOMMANDS
 .SS r \(em Rip
 Rips a physical CD\-DA disc to an RBI image.
-Rip always uses master mode: raw audio is captured 1:1 via libcdio\-paranoia
-with jitter correction and overlapping reads, then encapsulated in the RBI
-container without any silence trimming or gap insertion.
+Rip always uses master mode: raw audio is captured 1:1 and encapsulated in
+the RBI container without any silence trimming or gap insertion.
+.PP
+The primary rip path uses
+.BR cdrdao ,
+which captures the full subchannel data in one pass: MCN (Q\-channel Mode 2),
+per\-track ISRC (Q\-channel Mode 3), and CD\-Text (R\-W subchannels).
+If cdrdao fails, the fallback path uses
+.B libcdio\-paranoia
+with jitter correction and overlapping reads; subchannel data is not available
+on the fallback path.
+.PP
+After a successful rip, the per\-track AccurateRip v1/v2 checksums are computed
+and verified against the AccurateRip database.
+Results are printed as an informational report; a mismatch does not fail the rip.
+Verification requires
+.B drive_offset
+to be set correctly in the configuration file; run
+.B cdda2img r
+once without a config file to be prompted to create one from the bundled example.
 .PP
 .BI "cdda2img r " "[options] [DEVICE]"
 .PP
@@ -255,7 +272,7 @@ Generate one under Settings\~\(->~Developers at
 If unset, Discogs lookups are silently skipped.
 .PP
 MusicBrainz lookups require no account or API key.
-AccurateRip lookups (future) are anonymous HTTP and require no account.
+AccurateRip lookups are anonymous HTTP and require no account or API key.
 .\"
 .SH CONFIGURATION
 cdda2img reads configuration from
@@ -268,9 +285,17 @@ When
 .B XDG_CONFIG_HOME
 is unset, the default path is
 .IR ~/.config/cdda2img/cdda2img.toml .
-A missing file is silently ignored; all settings use built\-in defaults.
+If the file does not exist and standard input is a terminal,
+.B cdda2img r
+will offer to create it automatically from the bundled example file
+.RB ( conf/cdda2img.toml.example ).
+Answer
+.B y
+at the prompt; the file is created and read before the rip continues.
+In non\-interactive contexts (scripts, pipes) a missing file is silently
+ignored and all settings use built\-in defaults.
 .PP
-Create the directory and an initial configuration:
+To create the configuration manually:
 .PP
 .RS
 .nf
@@ -278,26 +303,32 @@ mkdir \-p ~/.config/cdda2img
 cat > ~/.config/cdda2img/cdda2img.toml << 'EOF'
 # cdda2img configuration
 
-# Sample read offset for AccurateRip checksum computation.
-# Obtain from the AccurateRip drive database or by running
-# EAC's drive offset calibration test.
-# Sign convention: positive = drive reads ahead of disc position.
-drive_offset = "+30"
+# CD drive read offset in samples (4 bytes per sample, stereo).
+# Find your drive at https://www.accuraterip.com/driveoffsets.htm
+# Default: 0 (no offset correction)
+drive_offset = 30
+
+# CDDB server for disc metadata lookup (host:port).
+# cddb_server = "cddb.retrobridge.org:888"
 EOF
 .fi
 .RE
 .SS Configuration keys
 .TP
-.BI "drive_offset = " \(dq+30\(dq
-Integer sample read offset applied during AccurateRip checksum computation.
-The value may be a quoted string
-.RB ( \(dq+30\(dq ,
-.BR \(dq\-5\(dq )
-or a bare integer
-.RB ( 30 ,
-.BR \-5 ).
-Obtain the correct value for your drive from the AccurateRip drive database
-or by running EAC's offset calibration test against a reference disc.
+.BI "drive_offset = " 30
+Integer sample read offset applied during AccurateRip checksum computation
+after a rip.
+Look up the correct value for your drive at
+.I https://www.accuraterip.com/driveoffsets.htm
+or via EAC's drive offset calibration tool.
+Sign convention: positive means the drive reads ahead of the disc write position
+(the most common case; e.g. Plextor PX\-716A = +30).
+When
+.B drive_offset
+is 0 (the default) and the disc is found in the AccurateRip database but no
+track checksums match,
+.B cdda2img r
+prints a hint to check this setting rather than a per\-track mismatch table.
 Default:
 .BR 0 .
 .TP
@@ -324,7 +355,8 @@ hardware access.
 .PP
 The
 .B r
-subcommand rips a physical disc using libcdio\-paranoia.
+subcommand rips a physical disc using cdrdao (primary) or
+libcdio\-paranoia (fallback).
 The optical drive device
 .RI ( /dev/sr0
 or similar) must be readable by the user.
@@ -387,13 +419,16 @@ Package names:
 .SS Optional
 .TP
 .B cdrdao
-Required only for importing cdrdao TOC/BIN images
+Required for ripping physical discs
+.RB ( "cdda2img r" ,
+primary path) and for importing cdrdao TOC/BIN images
 .RB ( "cdda2img i " *.toc ).
+The rip path uses cdrdao to capture subchannel data (MCN, ISRC, CD\-Text)
+in a single pass.
 Not required for creating, extracting, or verifying RBI images.
 .TP
 .B libcdio\-paranoia
-Required for ripping physical discs
-.RB ( "cdda2img r" ).
+Used as the fallback rip path when cdrdao fails.
 Provides jitter correction and overlapping reads via
 .BR libcdio_cdda.so.2
 and

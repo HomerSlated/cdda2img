@@ -1,5 +1,41 @@
 # TODO
 
+## ✅ DONE — AccurateRip verification + first-run config (2026-05-09)
+
+End-to-end validated: Technotronic *Pump Up the Jam* (12 tracks) at conf 14/136;
+Madness *Divine Madness* (22 tracks) at conf 13–14/155–166, all 22 tracks OK.
+
+- [x] **`src/cdda2img/accuraterip.py`** (new module):
+  - `ARTrackResult` dataclass: track, v1_crc, v2_crc, confidence_v1, confidence_v2, max_confidence.
+  - `_ar_checksums(frames, track, total_tracks)` — AccurateRip v1/v2 checksum (pure Python).
+    Multiplier 1-based from frame 0; boundary exclusion via `sum_from`/`sum_to` guards.
+    `sum_from = 2940 if track == 1 else 0`; `sum_to = n-2940 if track == last else n`.
+    `v1 = csum_lo & 0xFFFFFFFF`; `v2 = (csum_lo + csum_hi) & 0xFFFFFFFF`.
+  - **Zero-padding invariant**: when the drive-offset read window extends past the PCM file
+    boundary (positive offset: last track; negative offset: track 1), the raw buffer is
+    zero-padded rather than clipped. Clipping shifts `sum_to` and mismatches the last track.
+    Confirmed: track 22 mismatch on Madness disc with drive_offset=+30, fixed by padding.
+  - `_ar_disc_ids(track_lsns, disc_last_lsn)` — ARver disc ID formula; inputs are LSNs.
+    `id1 = sum(track_lsns) + lsn_leadout`; `id2` weighted sum + `lsn_leadout * (n+1)`.
+  - `_ar_url` — directory uses the **last three chars of `id1` in reverse order** (LSBs first).
+  - `_parse_dbar(data, n_tracks)` — parses binary dBAR response into per-block per-track dicts.
+    Multiple blocks per disc (one per drive-offset group); `verify_rip` matches against all.
+  - `verify_rip(pcm_path, track_lsns, disc_last_lsn, drive_offset=0, cddb_id=0)` — full pipeline.
+    Early-returns with `max_confidence=None` results if disc not in database.
+  - `print_ar_report(results, drive_offset=0)` — per-track output. When all tracks mismatch
+    but the disc IS in the database, prints a concise drive_offset hint instead of N MISMATCH
+    lines. Partial mismatches always show per-track output.
+- [x] **`src/cdda2img/cdda2img.py`** — `rip_image()` calls `verify_rip` + `print_ar_report`
+  after `prepopulate_from_cddb`, using `cfg.drive_offset` and computed `cddb_id`.
+- [x] **`src/cdda2img/config.py`** — `_prompt_create_config()` added: on first run with no
+  config file and a TTY, offers to create it from `conf/cdda2img.toml.example`; re-reads the
+  file on creation so the rip picks up `drive_offset` immediately.
+- [x] **`conf/cdda2img.toml.example`** — fixed `"+30"` (string) → `30` (integer); added
+  header comment and per-field documentation including `cddb_server`.
+- [x] 85 tests passing; ruff + ty clean.
+
+---
+
 ## ✅ DONE — Remaster provenance + create pipeline AcoustID (2026-05-07)
 
 - [x] **`_acoustid_wavs_loop`** (new function) — per-track fingerprint loop for the `c`
@@ -594,8 +630,9 @@ libraries: `libcdio-paranoia` (reading) and `libburn` (writing).
   **Note**: cdrdao BIN output is s16be (raw sector byte order). Byte-swap to s16le
   using `cdrdao_reader.convert_cdrdao_bin_to_wav()` (already implemented and tested);
   then `wav_to_raw_pcm()` for the container. Reuse `import_image()` internals directly.
-- [ ] Implement AccurateRip v1/v2 checksum computation (own code, no third-party)
-- [ ] Implement AccurateRip database lookup; verify rip; trigger paranoia fallback on mismatch
+- [x] Implement AccurateRip v1/v2 checksum computation (own code, no third-party) — `accuraterip.py`
+- [x] Implement AccurateRip database lookup and verify rip — informational only; no paranoia
+  fallback on mismatch by design (AccurateRip CRC is a safety net, not a pass/fail gate)
 - [ ] Write thin ctypes/cffi wrapper around `libcdio-paranoia` for paranoia fallback
 - [ ] Parse subchannel Q data for MCN and CD-TEXT (see `private/libmirage/mirage/cdtext-coder.c`)
 - [ ] New `b` subcommand (or `x --burn`): burn RBI to physical disc via `cdrdao write`
@@ -617,8 +654,8 @@ not provide one. Include in the TOC `CATALOG` field when available.
 - [ ] Verify C2 pointer support on the Plextor PX-716A (rip a scratched disc with C2
   enabled and disabled; compare — if C2 fires on known-good sectors it is unreliable
   for this unit)
-- [ ] Implement drive sample offset correction (AccurateRip database or user-supplied
-  value via config); apply before AccurateRip checksum computation
+- [x] Implement drive sample offset correction — `drive_offset` in
+  `~/.config/cdda2img/cdda2img.toml`; applied as byte shift in `verify_rip`
 
 ---
 
@@ -945,10 +982,10 @@ Current holdings:
   for open-source tools
 
 To add:
-- [ ] AccurateRip protocol documentation (EAC forum posts / whipper source) — needed for
-  computing and verifying AccurateRip v1/v2 checksums
-- [ ] Drive offset database snapshot (AccurateRip or similar) — needed before implementing
-  drive offset correction in the `r` subcommand
+- [x] AccurateRip protocol documentation — algorithm derived from ARver `_audio.c`; disc ID
+  from ARver `fingerprint.py`; URL/dBAR format from binary inspection + empirical validation
+- [x] Drive offset — Plextor PX-716A confirmed +30 via AccurateRip (conf 14); stored in
+  `conf/cdda2img.toml.example` and `~/.config/cdda2img/cdda2img.toml`
 - [ ] Reference test material: Hi-Fi grade albums (e.g. Face Value — Phil Collins) for
   ReplayGain/normalisation validation; counter-examples (e.g. Death Magnetic — Metallica)
   for worst-case loudness-war testing. Obtain lossless copies; store in
@@ -963,8 +1000,8 @@ All user-tunable settings read from a TOML config file at
 CLI flags override config values. Config file is created on first run with
 documented defaults if absent.
 
-- [ ] Create `config.py` — load/write TOML; resolve XDG paths; expose typed accessors
-  used by the rest of the pipeline
+- [x] Create `config.py` — `Config` dataclass (`drive_offset`, `cddb_server`); `load_config()`;
+  `_prompt_create_config()` for first-run; XDG path via `config_path()`
 - [ ] `silence = 55` — silence detection threshold in dBFS (absolute value); replaces
   the hardcoded constant in `silence.py`. Add `--silence N` flag to `c` subcommand for
   one-off override. TUI will expose this as a live-adjustable control so the user can
