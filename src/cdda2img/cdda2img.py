@@ -465,7 +465,8 @@ def rip_image(
     loudness: str = "rg",
     output: Path | None = None,
 ) -> None:
-    from cdda2img.cddb import prepopulate_from_cddb
+    from cdda2img.accuraterip import print_ar_report, verify_rip
+    from cdda2img.cddb import compute_cddb_disc_id, prepopulate_from_cddb
     from cdda2img.config import load_config
     from cdda2img.toc import sanitize_title
 
@@ -485,6 +486,16 @@ def rip_image(
         disc = prepopulate_from_cddb(
             info.disc, info.track_lsns, info.disc_last_lsn, server=cfg.cddb_server
         )
+
+        cddb_id = int(compute_cddb_disc_id(info.track_lsns, info.disc_last_lsn), 16)
+        ar_results = verify_rip(
+            temp.pcm_file,
+            info.track_lsns,
+            info.disc_last_lsn,
+            drive_offset=cfg.drive_offset,
+            cddb_id=cddb_id,
+        )
+        print_ar_report(ar_results)
 
         output_stem = sanitize_title(disc.album) or device.lstrip("/").replace("/", "_")
         provenance: dict[str, str] = {

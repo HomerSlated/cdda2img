@@ -285,6 +285,33 @@ Format per entry:
 
 ---
 
+## LINT-014 — AccurateRip trusted HTTP fetch and array itemsize guard (`accuraterip.py`)
+
+- **Rules:** `ruff: S310` (urllib.request.urlopen with non-literal URL), implicit `S101` rationale (platform guard)
+- **Locations:**
+  - `accuraterip.py:98` — `urllib.request.urlopen(url, timeout=10)` in `_fetch_ar()`
+  - `accuraterip.py:23` — `if array.array("I").itemsize != 4:` platform check
+- **Rationale:**
+  - *S310:* The `url` passed to `urlopen` is constructed internally in `_ar_url()` with a
+    hardcoded `http://www.accuraterip.com/accuraterip` prefix. The only variable components
+    are the disc ID hex strings and track count derived from the ripped TOC — no user-supplied
+    string reaches the call. The AccurateRip database is HTTP-only; there is no HTTPS
+    alternative. The scheme is always `http://` and is not user-configurable.
+  - *Platform guard:* The `if array.array("I").itemsize != 4: raise RuntimeError` check verifies
+    at module load that unsigned int is 4 bytes (required for u32 LE stereo frame interpretation).
+    This is a compile-time platform invariant rather than a runtime guard; it fires on first
+    `import cdda2img.accuraterip` on any non-x86 platform where the assumption breaks. Using
+    `if`/`raise` rather than `assert` avoids S101 while preserving the fail-fast behaviour.
+- **Alternatives:**
+  - *Validate URL against an allow-list* — unnecessary; the URL is constructed from internal
+    constants. The AccurateRip server is fixed and not configurable.
+  - *Use `requests` with cert verification* — AccurateRip is HTTP-only; `requests` would add
+    a heavy dependency for no security benefit on a server that does not offer HTTPS.
+  - *Use `numpy` for the frame array* — deferred; see verify_rip() docstring.
+- **Decision:** `# noqa: S310` on the urlopen call is correct. Platform guard uses if/raise.
+
+---
+
 ## LINT-010 — Intentional tuple discard in test fixture unpacking (`test_container.py`)
 
 - **Rule:** `ruff: RUF059` (unpacked variable never used)
