@@ -1,0 +1,546 @@
+.\" cdda2img.1 — manual page for cdda2img
+.\" Install: doas install -m 644 docs/cdda2img.1 /usr/local/share/man/man1/
+.TH CDDA2IMG 1 "2026\-05\-08" "cdda2img 0.1.5" "User Commands"
+.\"
+.SH NAME
+cdda2img \- create and extract RBI audio CD archive images
+.\"
+.SH SYNOPSIS
+.B "cdda2img r"
+.RI [ options ]
+.RI [ DEVICE ]
+.br
+.B "cdda2img c"
+.RI [ options ]
+.I INPUT_DIR
+.br
+.B "cdda2img x"
+.RI [ options ]
+.I FILE.rbi
+.br
+.B "cdda2img i"
+.RI [ options ]
+.I SOURCE
+.br
+.B "cdda2img l"
+.I FILE.rbi
+.br
+.B "cdda2img t"
+.I FILE.rbi
+.br
+.B "cdda2img \-\-version"
+.\"
+.SH DESCRIPTION
+.B cdda2img
+archives CD\-DA (Red Book audio) discs and collections of audio files
+as RBI (Red Book Image) container images.
+An RBI file stores the disc\(cqs raw PCM audio (signed 16\-bit little\-endian,
+44100\~Hz stereo), an embedded cdrdao\-format TOC, an optional EBU\~R128
+ReplayGain block, and SHA\-256 integrity checksums in a single self\-contained file.
+The current format version is RBI v3.0.
+.PP
+Metadata \(em album title, artist, per\-track titles, ISRC codes, and remaster
+provenance \(em is sourced interactively from MusicBrainz, AcoustID, and Discogs
+lookups and embedded in the TOC block.
+.\"
+.SH SUBCOMMANDS
+.SS r \(em Rip
+Rips a physical CD\-DA disc to an RBI image.
+Rip always uses master mode: raw audio is captured 1:1 via libcdio\-paranoia
+with jitter correction and overlapping reads, then encapsulated in the RBI
+container without any silence trimming or gap insertion.
+.PP
+.BI "cdda2img r " "[options] [DEVICE]"
+.PP
+.I DEVICE
+is the optical drive device node (default:
+.BR /dev/sr0 ).
+.TP
+.BI \-\-loudness " {rg|none}"
+Same semantics as for the
+.B c
+subcommand.
+Default:
+.BR rg .
+.TP
+.BI \-\-output " PATH"
+Output
+.B .rbi
+file path.
+Default: derived from the album title.
+.TP
+.BI \-\-paranoia " {off|overlap|full}"
+.RS
+.TP
+.B off
+Single raw read per sector, no jitter correction.
+Fastest, but may produce audible glitches on worn or dirty discs.
+.TP
+.B overlap
+Overlap and verify reads with standard jitter correction.
+This is the default.
+.TP
+.B full
+Full paranoia correction with a per-sector retry cap.
+Slowest; recommended for physically damaged or heavily worn discs.
+.RE
+.\"
+.SS c \(em Create
+Creates one or more RBI images from a directory of audio files.
+Files are grouped into CD\-sized batches (up to 99 tracks, up to 80 minutes)
+according to the chosen batching strategy.
+Each track is transcoded to Red Book PCM (44100\~Hz, 16\-bit, stereo) via PyAV.
+.PP
+.BI "cdda2img c " "[options] INPUT_DIR"
+.TP
+.BI \-\-mode " {master|remaster}"
+.RS
+.TP
+.B master
+Transcodes audio to Red Book PCM without further processing.
+Silence trimming and inter\-track gap padding are disabled.
+Use this mode for 1:1 preservation of source audio.
+.TP
+.B remaster
+Trims leading and trailing silence (threshold: \-55\~dBFS) and appends a
+2\-second inter\-track gap per track.
+This is the default.
+.RE
+.TP
+.BI \-\-loudness " {rg|none}"
+.RS
+.TP
+.B rg
+Measures EBU\~R128 integrated loudness and embeds a ReplayGain block containing
+per\-track and album gain, peak, and LRA values.
+This is the default.
+.TP
+.B none
+Skips loudness analysis.
+No ReplayGain block is written.
+.RE
+.TP
+.BI \-\-strategy " {fcfs|aatc|bech|ball}"
+Disc batching strategy (default:
+.BR aatc ).
+.RS
+.TP
+.B fcfs
+First\-come\-first\-served.
+Fills a single disc in input file order; stops when full.
+.TP
+.B aatc
+All\-as\-they\-come.
+Fills discs in input file order, creating as many discs as needed.
+.TP
+.B bech
+Best\-each.
+Packs each disc as full as possible in turn; input order is not preserved.
+Requires OR\-Tools.
+.TP
+.B ball
+Best\-all.
+Global bin\-packing to minimise the total number of discs; input order is
+not preserved.
+Requires OR\-Tools.
+.RE
+.TP
+.B \-\-no\-trim\-silence
+Disables silence trimming in remaster mode.
+.TP
+.B \-\-preserve\-pregaps
+Preserves pre\-gaps in remaster mode (no\-op for audio\-file input).
+.\"
+.SS x \(em Extract
+Extracts audio and metadata from an RBI image.
+The default output mode is
+.B \-\-tracks
+if neither
+.B \-\-tracks
+nor
+.B \-\-raw
+is specified.
+.PP
+.BI "cdda2img x " "[options] FILE.rbi"
+.TP
+.B \-\-tracks
+Writes per\-track FLAC files with embedded metadata and a CUE sheet.
+ReplayGain Vorbis comment tags are embedded when an RG block is present,
+unless
+.B \-\-normalize
+is also given.
+.TP
+.B \-\-raw
+Writes a raw PCM file
+.RI ( .s16le ),
+the embedded TOC
+.RI ( .toc ),
+and (when present) a ReplayGain JSON sidecar
+.RI ( .rg.json ).
+.TP
+.B \-\-normalize
+Applies EBU\~R128 normalisation to each extracted FLAC at \-18\~LUFS.
+Requires
+.BR \-\-tracks .
+Mutually exclusive with ReplayGain tag embedding.
+.PP
+.B \-\-tracks
+and
+.B \-\-raw
+may be combined.
+.\"
+.SS i \(em Import
+Imports a foreign disc image into an RBI container.
+Import always uses master mode: the source audio is preserved 1:1,
+with only byte\-order conversion and container encapsulation applied.
+.PP
+.BI "cdda2img i " "[options] SOURCE"
+.PP
+.I SOURCE
+is either a cdrdao
+.B .toc
+file (the corresponding
+.B .bin
+must exist in the same directory) or a DDP\~2.0 image directory
+containing a
+.B DDPID
+file.
+.TP
+.BI \-\-loudness " {rg|none}"
+Same semantics as for the
+.B c
+subcommand.
+Default:
+.BR rg .
+.TP
+.BI \-\-output " PATH"
+Output
+.B .rbi
+file path.
+Default: derived from the album title.
+.\"
+.SS l \(em List
+Prints a section table and numbered track listing for an RBI image.
+The section table shows byte offsets, sizes, and checksums for the fixed header,
+TOC block, optional ReplayGain block, and PCM audio block.
+.PP
+.B "cdda2img l"
+.I FILE.rbi
+.\"
+.SS t \(em Test
+Verifies the integrity and spec\-conformance of an RBI image.
+Runs 23 checks covering magic bytes, format version, flags, section
+layout continuity, file size, UTF\-8 metadata, SHA\-256 checksums for all
+three blocks, TOC parse, and track\-count consistency.
+Exits with status 1 if any check fails.
+.PP
+.B "cdda2img t"
+.I FILE.rbi
+.\"
+.SH ENVIRONMENT
+.TP
+.B ACOUSTID_API_KEY
+AcoustID application API key, required for fingerprint lookups during the
+interactive metadata menu.
+To obtain one, register a free
+.I application
+(not just a user account) at
+.IR acoustid.org .
+If unset, AcoustID lookups are silently skipped.
+.TP
+.B DISCOGS_TOKEN
+Discogs personal access token, required for Discogs metadata lookups.
+Generate one under Settings\~\(->~Developers at
+.IR discogs.com .
+If unset, Discogs lookups are silently skipped.
+.PP
+MusicBrainz lookups require no account or API key.
+AccurateRip lookups (future) are anonymous HTTP and require no account.
+.\"
+.SH CONFIGURATION
+cdda2img reads configuration from
+.PP
+.RS
+.I $XDG_CONFIG_HOME/cdda2img/cdda2img.toml
+.RE
+.PP
+When
+.B XDG_CONFIG_HOME
+is unset, the default path is
+.IR ~/.config/cdda2img/cdda2img.toml .
+A missing file is silently ignored; all settings use built\-in defaults.
+.PP
+Create the directory and an initial configuration:
+.PP
+.RS
+.nf
+mkdir \-p ~/.config/cdda2img
+cat > ~/.config/cdda2img/cdda2img.toml << 'EOF'
+# cdda2img configuration
+
+# Sample read offset for AccurateRip checksum computation.
+# Obtain from the AccurateRip drive database or by running
+# EAC's drive offset calibration test.
+# Sign convention: positive = drive reads ahead of disc position.
+drive_offset = "+30"
+EOF
+.fi
+.RE
+.SS Configuration keys
+.TP
+.BI "drive_offset = " \(dq+30\(dq
+Integer sample read offset applied during AccurateRip checksum computation.
+The value may be a quoted string
+.RB ( \(dq+30\(dq ,
+.BR \(dq\-5\(dq )
+or a bare integer
+.RB ( 30 ,
+.BR \-5 ).
+Obtain the correct value for your drive from the AccurateRip drive database
+or by running EAC's offset calibration test against a reference disc.
+Default:
+.BR 0 .
+.TP
+.BI "cddb_server = " \(dqcddb.retrobridge.org:888\(dq
+CDDB server used for automatic disc identification during
+.BR "cdda2img r" .
+Format is
+.IR host : port .
+Default:
+.BR cddb.retrobridge.org:888 .
+.\"
+.SH HARDWARE SETUP
+The
+.BR c ,
+.BR x ,
+.BR l ,
+and
+.B t
+subcommands operate entirely on files and require no special hardware access.
+The
+.B i
+subcommand reads existing image files from disk and likewise requires no
+hardware access.
+.PP
+The
+.B r
+subcommand rips a physical disc using libcdio\-paranoia.
+The optical drive device
+.RI ( /dev/sr0
+or similar) must be readable by the user.
+On Linux this requires membership in the
+.B cdrom
+group:
+.PP
+.RS
+.nf
+doas usermod \-aG cdrom USERNAME
+.fi
+.RE
+.PP
+Log out and back in for the group change to take effect.
+Verify access with:
+.PP
+.RS
+.nf
+ls \-la /dev/sr0
+.fi
+.RE
+.PP
+.B Note on cdrdao and raw SCSI:
+When cdrdao is invoked with the Plextor\-specific driver
+.RB ( "\-\-driver plextor" ),
+root privileges are required.
+The driver sends vendor\-specific SCSI commands (CDB opcode 0xD8) via
+.BR SG_IO .
+The Linux kernel\(cqs SCSI generic driver blocks vendor\-specific commands
+(range 0xC0\(en0xFF) from unprivileged users regardless of device group membership;
+only root (or a process with
+.BR CAP_SYS_RAWIO )
+may issue them.
+Using
+.B \-\-driver generic\-mmc
+instead avoids this restriction but loses Plextor\-specific features
+such as C2 error pointer support.
+Standard cdrdao usage without
+.B \-\-driver plextor
+does not require root.
+This constraint applies only to cdrdao; the
+.B cdda2img
+.B r
+subcommand uses libcdio\-paranoia, which issues only standard MMC commands
+and does not require root.
+.\"
+.SH SYSTEM DEPENDENCIES
+.SS Required
+.TP
+.B ffmpeg
+Audio transcoding (via PyAV) and EBU\~R128 normalisation.
+.TP
+.B fpcalc
+AcoustID audio fingerprinting binary, part of the Chromaprint library.
+Package names:
+.B chromaprint
+(Void Linux),
+.B libchromaprint\-tools
+(Debian/Ubuntu).
+.SS Optional
+.TP
+.B cdrdao
+Required only for importing cdrdao TOC/BIN images
+.RB ( "cdda2img i " *.toc ).
+Not required for creating, extracting, or verifying RBI images.
+.TP
+.B libcdio\-paranoia
+Required for ripping physical discs
+.RB ( "cdda2img r" ).
+Provides jitter correction and overlapping reads via
+.BR libcdio_cdda.so.2
+and
+.BR libcdio_paranoia.so.2 .
+Package name:
+.B libcdio\-paranoia
+(Void Linux),
+.B libcdio\-paranoia\-dev
+(Debian/Ubuntu).
+Not required for creating, importing, extracting, or verifying RBI images.
+.SS Python packages
+All Python dependencies are installed automatically by
+.BR uv :
+.PP
+.RS
+.nf
+uv sync
+.fi
+.RE
+.PP
+No separate Python package installation is needed.
+.\"
+.SH FILES
+.TP
+.I $XDG_CONFIG_HOME/cdda2img/cdda2img.toml
+User configuration file.
+Default location:
+.IR ~/.config/cdda2img/cdda2img.toml .
+.\"
+.SH EXAMPLES
+Rip the disc in the default drive:
+.PP
+.RS
+.nf
+cdda2img r
+.fi
+.RE
+.PP
+Rip from a specific device, skip loudness analysis:
+.PP
+.RS
+.nf
+cdda2img r /dev/sr0 \-\-loudness none \-\-output mydisc.rbi
+.fi
+.RE
+.PP
+Create an RBI image from a directory of audio files:
+.PP
+.RS
+.nf
+cdda2img c /music/Technotronic\ \-\ Pump\ Up\ the\ Jam
+.fi
+.RE
+.PP
+Create in master mode without loudness analysis:
+.PP
+.RS
+.nf
+cdda2img c /music/album \-\-mode master \-\-loudness none
+.fi
+.RE
+.PP
+Use global bin\-packing to minimise disc count across a large collection:
+.PP
+.RS
+.nf
+cdda2img c /music/album \-\-strategy ball
+.fi
+.RE
+.PP
+Extract per\-track FLACs with ReplayGain tags (default):
+.PP
+.RS
+.nf
+cdda2img x album.rbi
+.fi
+.RE
+.PP
+Extract FLACs and also write raw PCM + TOC:
+.PP
+.RS
+.nf
+cdda2img x album.rbi \-\-tracks \-\-raw
+.fi
+.RE
+.PP
+Extract FLACs normalised to \-18\~LUFS:
+.PP
+.RS
+.nf
+cdda2img x album.rbi \-\-normalize
+.fi
+.RE
+.PP
+Import a cdrdao rip:
+.PP
+.RS
+.nf
+cdda2img i disc.toc
+cdda2img i disc.toc \-\-loudness none \-\-output mydisc.rbi
+.fi
+.RE
+.PP
+Import a DDP\~2.0 image directory:
+.PP
+.RS
+.nf
+cdda2img i /media/DDP_Technotronic
+.fi
+.RE
+.PP
+List sections and track listing:
+.PP
+.RS
+.nf
+cdda2img l album.rbi
+.fi
+.RE
+.PP
+Verify container integrity:
+.PP
+.RS
+.nf
+cdda2img t album.rbi
+.fi
+.RE
+.\"
+.SH EXIT STATUS
+.TP
+.B 0
+Success.
+.TP
+.B 1
+Error (file not found, unsupported format, checksum mismatch, validation failure).
+.TP
+.B 130
+Interrupted by SIGINT
+.RB ( Ctrl\-C ).
+.\"
+.SH SEE ALSO
+.BR cdrdao (1),
+.BR flac (1),
+.BR ffmpeg (1),
+.BR fpcalc (1)
+.\"
+.SH AUTHORS
+.MT github@hazensparkle.co.uk
+Homer
+.ME
+.\" End of cdda2img.1

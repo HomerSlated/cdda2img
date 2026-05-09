@@ -59,6 +59,15 @@ def parse_args() -> argparse.Namespace:
                                     mutually exclusive with RG tag embedding
               (--tracks and --raw may be combined; --normalize requires --tracks)
 
+            rip options:
+              --loudness {rg|none}  rg: embed EBU R128 ReplayGain block (default); none: skip
+              --output <path>       Output .rbi path (default: derived from album title)
+              --paranoia {off|overlap|full}
+                                    off: raw read, no jitter correction (fastest)
+                                    overlap: overlap+verify jitter correction (default)
+                                    full: full paranoia with retry cap (slowest, best for damaged discs)
+              Note: rip always uses master mode (1:1 capture via cd-paranoia)
+
             import options:
               --loudness {rg|none}  rg: embed EBU R128 ReplayGain block (default); none: skip
               --output <path>       Output .rbi path (default: derived from album title)
@@ -66,6 +75,8 @@ def parse_args() -> argparse.Namespace:
               Accepts: cdrdao .toc file, or a DDP 2.0 image directory (must contain DDPID)
 
             examples:
+              cdda2img r
+              cdda2img r /dev/sr0 --loudness none --output mydisc.rbi
               cdda2img c /music/album
               cdda2img c /music/album --mode master --loudness none
               cdda2img c /music/album --strategy ball
@@ -139,6 +150,32 @@ def parse_args() -> argparse.Namespace:
 
     t_cmd = sub.add_parser("t", help="Test/validate an RBI image against the spec")
     t_cmd.add_argument("rbi_file", type=Path, help="RBI file to validate")
+
+    r_cmd = sub.add_parser("r", help="Rip a physical CD-DA disc to an RBI container")
+    r_cmd.add_argument(
+        "device",
+        nargs="?",
+        default="/dev/sr0",
+        help="Optical drive device (default: /dev/sr0)",
+    )
+    r_cmd.add_argument(
+        "--loudness",
+        default="rg",
+        choices=["rg", "none"],
+        help="rg: embed EBU R128 ReplayGain block (default); none: skip loudness analysis",
+    )
+    r_cmd.add_argument(
+        "--output",
+        type=Path,
+        default=None,
+        help="Output .rbi file path (default: derived from album title)",
+    )
+    r_cmd.add_argument(
+        "--paranoia",
+        default="overlap",
+        choices=["off", "overlap", "full"],
+        help="off: raw read; overlap: jitter correction (default); full: full with retry cap",
+    )
 
     i_cmd = sub.add_parser(
         "i",
@@ -311,7 +348,7 @@ def _per_track_wavs(disc: RBIDisc, pcm_path: Path, out_dir: Path) -> list[Path]:
 def import_image(
     source: Path, loudness: str = "rg", output: Path | None = None
 ) -> None:
-    from cdda2img.toc import generate_toc, sanitize_title
+    from cdda2img.toc import sanitize_title
 
     if not source.exists():
         msg = f"{source}: no such file or directory"
@@ -365,45 +402,97 @@ def import_image(
             )
             raise ValueError(msg)
 
-        import sys
+        _finalize_import(disc, temp.pcm_file, provenance, output_stem, loudness, output)
+    finally:
+        temp.cleanup()
 
-        from cdda2img.mb_lookup import prepopulate_from_mb
-        from cdda2img.metadata_menu import run_metadata_menu
 
-        disc = prepopulate_from_mb(disc, verbose=sys.stdin.isatty())
-        disc = run_metadata_menu(disc, source_pcm=temp.pcm_file)
+def _finalize_import(
+    disc: RBIDisc,
+    pcm_file: Path,
+    provenance: dict[str, str],
+    output_stem: str,
+    loudness: str,
+    output: Path | None,
+) -> None:
+    """Shared post-rip/import pipeline: MB lookup → metadata menu → TOC → RG → container."""
+    import sys
 
-        _add_release_provenance(provenance, disc)
-        toc_data = generate_toc(disc, provenance=provenance)
+    from cdda2img.mb_lookup import prepopulate_from_mb
+    from cdda2img.metadata_menu import run_metadata_menu
 
-        rg_block: bytes | None = None
-        if loudness == "rg":
-            from cdda2img.replaygain import analyse, pack_rg_block
+    disc = prepopulate_from_mb(disc, verbose=sys.stdin.isatty())
+    disc = run_metadata_menu(disc, source_pcm=pcm_file)
 
-            print("  Measuring loudness (EBU R128)...")
-            with tempfile.TemporaryDirectory() as td:
-                track_wavs = _per_track_wavs(disc, temp.pcm_file, Path(td))
-                rg_result = analyse(track_wavs)
-            for warning in rg_result.warnings:
-                print(f"  Warning: {warning}")
-            print(
-                f"  Album gain: {rg_result.album_gain:+.2f} dB  "
-                f"peak: {rg_result.album_peak:.4f}  "
-                f"LRA: {rg_result.album_lra:.1f} LU"
-            )
-            rg_block = pack_rg_block(rg_result)
+    _add_release_provenance(provenance, disc)
+    toc_data = generate_toc(disc, provenance=provenance)
 
-        if output is None:
-            output = _unique_path(output_stem, "rbi")
+    rg_block: bytes | None = None
+    if loudness == "rg":
+        from cdda2img.replaygain import analyse, pack_rg_block
 
-        build_container(
-            temp.pcm_file,
-            toc_data,
-            disc,
-            output,
-            rg_block=rg_block,
-            extra_flags=FLAG_MASTER_MODE,
+        print("  Measuring loudness (EBU R128)...")
+        with tempfile.TemporaryDirectory() as td:
+            track_wavs = _per_track_wavs(disc, pcm_file, Path(td))
+            rg_result = analyse(track_wavs)
+        for warning in rg_result.warnings:
+            print(f"  Warning: {warning}")
+        print(
+            f"  Album gain: {rg_result.album_gain:+.2f} dB  "
+            f"peak: {rg_result.album_peak:.4f}  "
+            f"LRA: {rg_result.album_lra:.1f} LU"
         )
+        rg_block = pack_rg_block(rg_result)
+
+    if output is None:
+        output = _unique_path(output_stem, "rbi")
+
+    build_container(
+        pcm_file,
+        toc_data,
+        disc,
+        output,
+        rg_block=rg_block,
+        extra_flags=FLAG_MASTER_MODE,
+    )
+
+
+def rip_image(
+    device: str,
+    loudness: str = "rg",
+    output: Path | None = None,
+    paranoia: str = "overlap",
+) -> None:
+    from cdda2img.cddb import prepopulate_from_cddb
+    from cdda2img.config import load_config
+    from cdda2img.disc_reader import rip_disc
+    from cdda2img.toc import sanitize_title
+
+    cfg = load_config()
+    temp_base = resolve_temp_dir()
+    temp = TempFiles(temp_base)
+    try:
+        print(f"Ripping {device} (paranoia={paranoia}) ...")
+        info = rip_disc(device, temp.pcm_file, paranoia=paranoia)
+
+        track_count = len(info.disc.tracks)
+        total_s = info.disc.total_seconds
+        print(
+            f"  {track_count} track(s), "
+            f"{int(total_s) // 60}:{int(total_s) % 60:02d} total"
+        )
+
+        disc = prepopulate_from_cddb(
+            info.disc, info.track_lsns, info.disc_last_lsn, server=cfg.cddb_server
+        )
+
+        output_stem = sanitize_title(disc.album) or device.lstrip("/").replace("/", "_")
+        provenance: dict[str, str] = {
+            "MODE": "r",
+            "SOURCE": device,
+            "TYPE": "cd-paranoia",
+        }
+        _finalize_import(disc, temp.pcm_file, provenance, output_stem, loudness, output)
     finally:
         temp.cleanup()
 
@@ -503,6 +592,13 @@ def _dispatch(args: argparse.Namespace) -> None:
             loudness=args.loudness,
             strategy=args.strategy,
             trim_silence=args.trim_silence,
+        )
+    elif args.cmd == "r":
+        rip_image(
+            args.device,
+            loudness=args.loudness,
+            output=args.output,
+            paranoia=args.paranoia,
         )
     elif args.cmd == "i":
         import_image(args.source, loudness=args.loudness, output=args.output)

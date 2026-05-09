@@ -207,6 +207,62 @@ Format per entry:
 
 ---
 
+## LINT-011 — tomli compatibility shim for Python < 3.11 (`config.py`)
+
+- **Rule:** `ty: import-not-found`, `ty: no-redef`
+- **Location:** `config.py:14–16`
+- **Rationale:** `tomllib` is part of the Python standard library from 3.11 onwards.
+  For Python 3.10 (the project's minimum), `tomli` is listed as a conditional dependency
+  (`tomli>=2.0.0 ; python_version < '3.11'`) and provides an identical API.
+  The standard compatibility shim is:
+  ```python
+  try:
+      import tomllib
+  except ImportError:
+      import tomli as tomllib
+  ```
+  `ty` is configured for Python 3.13 (`python-version = "3.13"` in `pyproject.toml`),
+  so the `except ImportError` branch is statically unreachable. `import-not-found` fires
+  because `tomli` is a conditional dependency absent from the 3.13 virtual environment;
+  `no-redef` fires because `tomllib` is bound twice in the same scope.
+- **Alternatives:**
+  - *`sys.version_info >= (3, 11)` branch* — functionally equivalent; `ty` may still flag
+    the unreachable else branch. Slightly less idiomatic than try/except for this pattern.
+  - *Require Python ≥ 3.11* — eliminates the issue entirely. Deferred; the project still
+    targets 3.10 for tox CI coverage.
+- **Decision:** `# type: ignore[import-not-found,no-redef]` is correct. This is the
+  canonical PEP\~508 / `importlib` compatibility pattern used across the Python ecosystem.
+
+---
+
+## LINT-012 — Trusted internal subprocess calls for `cd-paranoia` (`disc_reader.py`)
+
+- **Rules:** `ruff: S603` (subprocess without `shell=True` check), `ruff: S607` (partial executable path)
+- **Locations:**
+  - `disc_reader.py:62–63` — `subprocess.run(["cd-paranoia", "-Q", ...])` in `_query_disc()`
+  - `disc_reader.py:152–153` — `subprocess.run(["cd-paranoia", "-d", ...])` in `rip_disc()`
+- **Rationale:**
+  - *S603:* Both calls construct argument lists entirely from hardcoded string literals,
+    the caller-supplied `device` string (a device path like `/dev/sr0`), and a resolved
+    `Path` for the output WAV. `shell=False` (the default) is used throughout, so there
+    is no shell injection surface.
+  - *S607:* `"cd-paranoia"` is intentionally a name lookup via `PATH`, not an absolute
+    path. `cd-paranoia` is a standard system package (`cdparanoia` on Debian/Ubuntu) with
+    no known impersonation risk in normal CD-ripping environments. Hardcoding
+    `/usr/bin/cd-paranoia` would break on systems where it is installed elsewhere.
+- **Alternatives:**
+  - *Validate `device` against `/dev/sr*`* — security theatre: the user already has
+    shell access and could invoke `cd-paranoia` directly. Adds noise with no real benefit.
+  - *Use absolute path for `cd-paranoia`* — fragile; the binary location varies by
+    distribution and environment. `shutil.which("cd-paranoia")` would find it but adds
+    noise and doesn't address the underlying concern.
+  - *Replace with a Python CD-DA library* — the motivation for this commit is precisely
+    to eliminate the ctypes `libcdio-paranoia` bindings; subprocess is the intended design.
+- **Decision:** `# noqa: S603, S607` is correct. Both calls are trusted internal
+  invocations of a known binary with internally-constructed arguments.
+
+---
+
 ## LINT-010 — Intentional tuple discard in test fixture unpacking (`test_container.py`)
 
 - **Rule:** `ruff: RUF059` (unpacked variable never used)

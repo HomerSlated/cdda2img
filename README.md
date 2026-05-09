@@ -27,6 +27,9 @@ This is an active prototype. A Rust reimplementation is planned once the design 
 - **Red Book transcoding** — 16-bit stereo 44.1 kHz s16le PCM, enforced by PyAV
 - **Master / Remaster modes** — master preserves audio as-is; remaster applies silence
   trimming (−55 dBFS) and 2-second Red Book inter-track gaps
+- **Physical disc ripping** — `r` subcommand rips directly from `/dev/sr0` (or any
+  optical drive) via libcdio-paranoia with three paranoia modes: `off` (raw), `overlap`
+  (jitter correction, default), `full` (full correction with per-sector retry cap)
 - **Disc image import** — `i` subcommand imports professional mastering images as
   master-mode RBIs; pre-gaps, CATALOG, ISRC, and CD-TEXT are preserved; per-track
   ReplayGain is measured from individual track slices:
@@ -34,6 +37,18 @@ This is an active prototype. A Rust reimplementation is planned once the design 
     Linux; parses DDPID (MCN), PQDESCR (timing + ISRC), and CDTEXT.BIN; enables
     professional glass-mastering archives without a Windows dependency
   - *cdrdao TOC+BIN* — byte-swaps s16be→s16le from disc-native format
+- **Automatic metadata lookup** — disc is identified before the metadata menu fires:
+  - *CDDB* — TCP query against configurable server (default: retrobridge.org:888);
+    auto-populates album, artist, year, and track titles from the disc TOC
+  - *MusicBrainz disc ID* — SHA-1 TOC fingerprint lookup; single matches are
+    auto-applied; multiple are presented for selection
+  - *AcoustID + Chromaprint* — per-track acoustic fingerprint lookup for recordings
+    not yet in the MB disc database
+  - *Discogs* — supplementary label, catalogue number, and country lookup
+- **Release intelligence** — detects remasters from release title keywords and
+  release-group first-release-date; embeds `PROVENANCE_REMASTERED_SOURCE` (NO /
+  POSSIBLE / YES) and original release year in the TOC so your archive records whether
+  the source predates the loudness war
 - **ReplayGain 2.0** — EBU R128 loudness analysis via pyebur128 (the reference C library);
   stored as a binary block inside the RBI container; embedded as Vorbis comment tags in
   extracted FLACs; computed per-track and at album level without any concat step
@@ -50,15 +65,9 @@ This is an active prototype. A Rust reimplementation is planned once the design 
 
 ### Planned
 
-- `r` subcommand — rip a physical CD-DA disc directly to RBI via `/dev/sr0`
-  (hardware: Plextor PX-716A, AccurateRip offset +30; byte-swap infrastructure already
-  in place via `cdrdao_reader.py`)
 - AccurateRip v1/v2 checksum verification per track
 - Foreign format import — read CUE/BIN, MDS/MDF, CCD/IMG/SUB, NRG as input;
   read-only plugins only, always converted to RBI first
-- MusicBrainz + AcoustID metadata lookup chain with confidence ranking
-- **Release intelligence** — automatically detect remasters; surface the original
-  release date so you know whether your archive predates the loudness war
 - **Music collection catalogue** — SQLite database of all created RBIs, queryable
   by album, artist, remaster status, and more
 - TUI — Textual-based terminal UI with real-time VU metering and delivery-mode audition
@@ -92,6 +101,11 @@ uv sync
 ## Usage
 
 ```bash
+# Rip a disc (CDDB + MusicBrainz auto-identification, default jitter correction)
+cdda2img r
+cdda2img r /dev/sr0 --paranoia full     # maximum correction for damaged discs
+cdda2img r --loudness none              # skip ReplayGain analysis
+
 # Create — remaster mode with ReplayGain, globally optimal disc packing
 cdda2img c /music/album --mode remaster --loudness rg --strategy ball
 

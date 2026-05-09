@@ -1,0 +1,398 @@
+Link: [1]Redump Wiki (en) (search)
+Link: [2]Redump Wiki Atom feed (alternate)
+
+            Optical Disc Drives: CD Compatibility Technical Details
+
+  From Redump Wiki
+
+Jump to: [3]navigation, [4]search
+
+See [5]Optical Disc Drive Compatibility: CD for the current list of drives that
+are currently acceptable for submitting CDs (Audio CDs, CD-ROMs, and other CD
+formats) to redump.
+
+Contents
+
+  • [6]1 General Technical Requirements
+  • [7]2 Dumping Tools
+       • [8]2.1 Redumper
+       • [9]2.2 DiscImageCreator
+  • [10]3 Specific Drive Technical Details
+       • [11]3.1 Good Plextors
+       • [12]3.2 MediaTek Blu-ray Drives
+            • [13]3.2.1 HLDS (LG, ASUS, etc)
+       • [14]3.3 TSST (SH-D163C / TS-H353C)
+  • [15]4 Copy Protected CDs
+
+General Technical Requirements
+
+In order to make 1:1 CD dumps that are accepted at redump.org, drives
+(generally) require the following features:
+
+  • Dump data sectors in scrambled mode
+  • While dumping in scrambled mode, support dumping full subchannel (P, Q, R-W)
+    and C2 error pointers
+  • Reliable C2 error pointers support
+  • Dump at least 75 sectors (1 second) of lead-in¹
+  • Dump at least 75 sectors (1 second) of lead-out¹
+
+¹ Note: In rare cases, such as Audio CDs with large write offsets, data may be
+present far into the lead-in pre-gap or the lead-out and may require a drive
+that can read all 150 sectors of the pre-gap or more than 75 sectors of the
+lead-out in order to fully dump the CD.
+
+Dumping Tools
+
+  Redumper
+
+Redumper is the preferred and recommended dumping tool to use for dumps
+submitted to redump, the full list of support drives is [16]here
+
+  DiscImageCreator
+
+DiscImageCreator (DIC) was the recommended tool prior to Redumper's development
+and is also still acceptable for Redump submission with a few caveats.
+
+Dumps with DIC are not acceptable for Audio CDs and only the good Plextor drives
+in the table below are acceptable when dumping with DIC.
+
+Specific Drive Technical Details
+
+  Good Plextors
+
+The following table of Plextor drive models have been recommended for use by
+Redump for many years, and are well tested. These models are unique in their
+ability to fully dump the lead-in of a CD (that is, the pre-gap and sectors
+before a pregap). Other good drives are capable of reading some portion of the
+pre-gap, but currently only these drives are known to be able to read all 150
+sectors (and beyond the pre-gap). The latest firmware is linked for each model.
+
+Note: While the PX-7xx series are capable of dumping DVDs, we recommend you use
+a different drive for DVDs to avoid unnecessary wear on these older drives.
+
+Note also that like all old drives these models suffer from rubber degradation.
+And while not something that will affect dumping it can lead to issues with the
+tray ejection mechanism, requiring either a light knock on the drive or the
+usage of a pin to manually open it.
+
+  Model        IDE          SATA         SCSI           USB      USB/Firewire      Notes
+                                                                               The PX-704A is
+                                                                               a cost-reduced
+                                                                               variant of the
+                                                                               PX-708A, sold
+                                                                               in China and
+                                                                               rebadged in
+PX-704    [17]PX-704A                                                          Japan (Buffalo
+                                                                               DVM-H44FB,
+                                                                               Kuroutoshikou
+                                                                               DVDRWX4244PX).
+                                                                               PX-704A can be
+                                                                               flashed to the
+                                                                               newer PX-708A
+                                                                               firmware.
+                                                                               The [20]TDK
+PX-708    [18]PX-708A                                            [19]PX-708UF  840G is a
+                                                                               PX-708A
+                                                                               rebadge.
+                                                                               The PX-708A2 /
+                                                                               PX-708UF2 is a
+PX-708(2) [21]PX-708A2                                           [22]PX-708UF2 cost-reduced
+                                                                               variant of the
+                                                                               PX-712A/UF.
+PX-712    [23]PX-712A   [24]PX-712SA                             [25]PX-712UF
+                                                                               The PX-714A is
+                                                                               a cost-reduced
+                                                                               variant of the
+                                                                               PX-716A, sold
+PX-714    [26]PX-714A                                                          in China.
+                                                                               PX-714A can be
+                                                                               flashed to the
+                                                                               newer 716A
+                                                                               firmware.
+                                                                               Buffalo
+                                                                               DVM-DM16FBS
+                                                                               (IDE) /
+                                                                               DVM-DM16U2
+                                                                               (USB) are
+          [27]PX-716A                                            [30]PX-716UF  PX-716
+PX-716    [28]PX-716AL  [29]PX-716SA                             [31]PX-716UFL rebadges.
+                                                                               The PX-716AL /
+                                                                               PX-716UFL are
+                                                                               slot-in
+                                                                               variants that
+                                                                               have specific
+                                                                               firmware.
+PX-755    [32]PX-755A   [33]PX-755SA                             [34]PX-755UF
+PX-760    [35]PX-760A   [36]PX-760SA                             [37]PX-760AUF
+                                                                               The Iomega
+                                                                               CDRW19200INT-A
+                                                                               is a PX-W4012
+          [38]PX-W4012A              [39]PX-W4012S [40]PX-W4012U               rebadge.
+PX-W4012  PX-W4012TA                 PX-W4012TS    PX-W4012TU                  The PX-W4012S
+                                                                               / PX-W4012TS
+                                                                               SCSI variants
+                                                                               have specific
+                                                                               firmware.
+PX-W5224  [41]PX-W5224A                            [42]PX-W5224U
+          PX-W5224TA                               PX-W5224TU
+                                                                               The Premium is
+                                                                               also known as
+Premium   [43]Premium                              [44]Premium-U               the PX-W5232TA
+                                                                               (e.g. used in
+                                                                               the Yamaha
+                                                                               CDR-HD1500)
+                                                                               Premium2U (USB
+Premium2  [45]Premium2                             [46]Premium2U               model) sold in
+                                                                               Japan.
+
+Despite having all the features of the above good Plextors, the PX-W4824 is not
+capable of reading the lead-in and is limited to just 75 sectors of the pre-gap.
+
+ Model        IDE      SATA SCSI      USB      USB/Firewire        Notes
+                                                            Has the following
+                                                            minor limitations
+                                                            for Audio CDs /
+                                                            Enhanced CDs:
+                                                               1. Unable to read
+                                                            full lead-in like
+                                                            other Plextors (only
+                                                            1 second of pregap
+                                                            is available)
+                                                               2. Illegal TOC
+                                                            discs may need
+PX-W4824 [47]PX-W4824A           [48]PX-W4824U              dumping with
+         PX-W4824TA              PX-W4824TU                 --force-qtoc
+                                                            (Redumper) or
+                                                            /fulltoc (DIC)
+                                                               3. *Some reports
+                                                            of issues with
+                                                            CD-Text on
+                                                            Multisession CDs
+                                                            Otherwise, PX-W4824
+                                                            dumps are still
+                                                            acceptable for most
+                                                            Audio CDs and all
+                                                            CD-ROMs.
+
+Some older Plextor drive models (e.g. PX-40TS, PX-W1210TS, PX-W4220T) are
+capable of reading in scrambled mode, but other issues prevent them from being
+classified as compatible for dumping CDs in most scenarios. Only the above good
+Plextor drives are compatible for dumping CDs.
+
+  MediaTek Blu-ray Drives
+
+Blu-ray drives using the MediaTek MT1959 or MT1939 chipsets have been found to
+support the majority of the features required for dumping CDs compatible with
+redump. If the MediaTek drive supports the custom 0xF1 opcode that allows for
+reading from the drive's cache, redumper can be configured for lead-out reading
+and thus making these drives compatible with dumping CDs. The ASUS BW-16D1HT and
+many of the disc drives currently listed as acceptable for verifications on the
+[49]compatible drives list are MT1959 or MT1939-based blu-ray drives that
+support cache reading and will work with redumper automatically (if not listed,
+you will need to provide flags when running redumper).
+
+    HLDS (LG, ASUS, etc)
+
+Blu-ray drives manufactured by [50]HLDS using the MediaTek MT1959 chipset have
+all the features required for good CD dumping, with some caveats. HLDS has both
+slim external USB drives (based on the same platform as the LG BU40N drive), as
+well as at least four "platforms" of their half-height desktop drives: JB9, JB8,
+JB7, JBC5.
+
+Half-height desktop drives based on the older JB7 and JBC5 are currently
+accepted for redump verification submissions if they are on the [51]compatible
+drives list.
+
+Half-height desktop drives based on the newer JB8 and JB9 platform had the 0xF1
+opcode removed in later firmware versions, so require specific earlier firmware
+versions to read the lead-out with the cache (typically the earliest available).
+However, all of these drives are able to be cross-flashed to [52]OmniDrive that
+enables reading into the lead-out of a CD without the use of the cache. Drives
+flashed to OmniDrive are acceptable for both new disc dumps and verifications.
+See the [53]OmniDrive page for a detailed listed of compatible JB8 and JB9
+drives and flashing instructions (redump recommends using OmniDrive for all
+submissions with JB8 or JB9 drives, rather than their stock firmware).
+
+  TSST (SH-D163C / TS-H353C)
+
+A specific model of DVD drive manufactured by TSST (with MediaTek MT1339
+chipset) has had its firmware patched by MoriGM to enable all the desired
+features for dumping CD to redump standards. This firmware is currently
+acceptable for verifications while it is being tested more broadly. The patched
+firmware, currently revision "ZZ00", is compatible with the following specific
+models: Samsung SH-D163C, Toshiba TS-H353C, and rebadges of the TS-H353C (Acer,
+Dell, HP, Lenovo).
+
+To flash the firmware, you can run the redumper command given the drive path and
+firmware path:
+
+redumper flash::mt1339 --drive=E: --firmware=TS-H353C_ZZ00-mod.bin
+
+Copy Protected CDs
+
+Some forms of copy protection require specific optical disc drives to dump
+correctly.
+
+  • [54]Ringed Discs
+  • [55]HexaLock AutoLock
+  • [56]CodeLok / CopyLok
+  • [57]N-CD
+Retrieved from
+"[58]http://wiki.redump.org/index.php?title=Optical_Disc_Drives:_CD_Compatibility_Technical_Details"
+[59]Category: [60]Optical Disc Drives
+
+      Views
+
+  • [61]Page
+  • [62]Discussion
+  • [63]View source
+  • [64]History
+
+      Personal tools
+
+  • [65]Log in
+
+      Navigation
+
+  • [66]Main page
+  • [67]What is Redump.org
+  • [68]Lists of missing Discs
+  • [69]Dumping Guides
+  • [70]Compatible Drives
+  • [71]Useful Links
+  • [72]Random page
+  • [73]Recent changes
+  • [74]Redump.org
+
+      Search
+
+[75]_____________________ [76][ Go ]   [77][ Search ]
+
+      Toolbox
+
+  • [78]What links here
+  • [79]Related changes
+  • [80]Special pages
+  • [81]Printable version
+  • [82]Permanent link
+[83]Powered by MediaWiki
+  • This page was last modified on 5 March 2026, at 07:48.
+  • This page has been accessed 17,462 times.
+  • [84]Privacy policy
+  • [85]About Redump Wiki
+  • [86]Disclaimers
+
+References
+
+   Visible links
+   1. http://wiki.redump.org/opensearch_desc.php
+   2. http://wiki.redump.org/index.php?title=Special:RecentChanges&feed=atom
+   3. http://wiki.redump.org/index.php?title=Optical_Disc_Drives:_CD_Compatibility_Technical_Details#column-one
+   4. http://wiki.redump.org/index.php?title=Optical_Disc_Drives:_CD_Compatibility_Technical_Details#searchInput
+   5. Optical Disc Drive Compatibility: CD
+	http://wiki.redump.org/index.php?title=Optical_Disc_Drive_Compatibility:_CD
+   6. http://wiki.redump.org/index.php?title=Optical_Disc_Drives:_CD_Compatibility_Technical_Details#General_Technical_Requirements
+   7. http://wiki.redump.org/index.php?title=Optical_Disc_Drives:_CD_Compatibility_Technical_Details#Dumping_Tools
+   8. http://wiki.redump.org/index.php?title=Optical_Disc_Drives:_CD_Compatibility_Technical_Details#Redumper
+   9. http://wiki.redump.org/index.php?title=Optical_Disc_Drives:_CD_Compatibility_Technical_Details#DiscImageCreator
+  10. http://wiki.redump.org/index.php?title=Optical_Disc_Drives:_CD_Compatibility_Technical_Details#Specific_Drive_Technical_Details
+  11. http://wiki.redump.org/index.php?title=Optical_Disc_Drives:_CD_Compatibility_Technical_Details#Good_Plextors
+  12. http://wiki.redump.org/index.php?title=Optical_Disc_Drives:_CD_Compatibility_Technical_Details#MediaTek_Blu-ray_Drives
+  13. http://wiki.redump.org/index.php?title=Optical_Disc_Drives:_CD_Compatibility_Technical_Details#HLDS_.28LG.2C_ASUS.2C_etc.29
+  14. http://wiki.redump.org/index.php?title=Optical_Disc_Drives:_CD_Compatibility_Technical_Details#TSST_.28SH-D163C_.2F_TS-H353C.29
+  15. http://wiki.redump.org/index.php?title=Optical_Disc_Drives:_CD_Compatibility_Technical_Details#Copy_Protected_CDs
+  16. Optical Disc Drive Compatibility: CD
+	http://wiki.redump.org/index.php?title=Optical_Disc_Drive_Compatibility:_CD
+  17. https://archive.org/download/plextor_px704a_fw111/plextor_px704a_fw111.zip
+  18. https://archive.org/download/PlextorFirmware/px708A%20&%20px708UF_112.zip
+  19. https://archive.org/download/PlextorFirmware/px708A%20&%20px708UF_112.zip
+  20. https://archive.org/download/dvdrw-840-g-112/DVDRW840G_112.zip
+  21. https://archive.org/download/PlextorFirmware/708A2109.zip
+  22. https://archive.org/download/PlextorFirmware/708A2109.zip
+  23. https://archive.org/download/PlextorFirmware/px712A%20&%20px712SA%20&%20px712U_109.zip
+  24. https://archive.org/download/PlextorFirmware/px712A%20&%20px712SA%20&%20px712U_109.zip
+  25. https://archive.org/download/PlextorFirmware/px712A%20&%20px712SA%20&%20px712U_109.zip
+  26. https://archive.org/download/plextor_px714a_fw109/plextor_px714a_fw109.zip
+  27. https://archive.org/download/PlextorFirmware/px716A%20&%20px716SA%20&%20px716UF_111.zip
+  28. https://archive.org/download/PlextorFirmware/px716l%20aka%20px716AL%20&%20px716UFL_102.zip
+  29. https://archive.org/download/PlextorFirmware/px716A%20&%20px716SA%20&%20px716UF_111.zip
+  30. https://archive.org/download/PlextorFirmware/px716A%20&%20px716SA%20&%20px716UF_111.zip
+  31. https://archive.org/download/PlextorFirmware/px716l%20aka%20px716AL%20&%20px716UFL_102.zip
+  32. https://archive.org/download/PlextorFirmware/px755A%20&%20px755SA_108.zip
+  33. https://archive.org/download/PlextorFirmware/px755A%20&%20px755SA_108.zip
+  34. https://archive.org/download/PlextorFirmware/px755A%20&%20px755SA_108.zip
+  35. https://archive.org/download/PlextorFirmware/px760A%20&%20px760SA_107.zip
+  36. https://archive.org/download/PlextorFirmware/px760A%20&%20px760SA_107.zip
+  37. https://archive.org/download/PlextorFirmware/px760A%20&%20px760SA_107.zip
+  38. https://archive.org/download/PlextorFirmware/pxw4012_107.zip
+  39. https://archive.org/download/PlextorFirmware/W4012S106.zip
+  40. https://archive.org/download/PlextorFirmware/pxw4012_107.zip
+  41. https://archive.org/download/PlextorFirmware/pxw5224_104.zip
+  42. https://archive.org/download/PlextorFirmware/pxw5224_104.zip
+  43. https://archive.org/download/PlextorFirmware/Premium%20%28first%20Premium%20model%29.zip
+  44. https://archive.org/download/PlextorFirmware/Premium%20%28first%20Premium%20model%29.zip
+  45. https://archive.org/download/PlextorFirmware/Premium2_103.zip
+  46. https://archive.org/download/PlextorFirmware/Premium2_103.zip
+  47. https://archive.org/download/PlextorFirmware/pxw4824_107.zip
+  48. https://archive.org/download/PlextorFirmware/pxw4824_107.zip
+  49. Optical Disc Drive Compatibility: CD
+	http://wiki.redump.org/index.php?title=Optical_Disc_Drive_Compatibility:_CD
+  50. https://en.wikipedia.org/wiki/Hitachi-LG_Data_Storage
+  51. Optical Disc Drive Compatibility: CD
+	http://wiki.redump.org/index.php?title=Optical_Disc_Drive_Compatibility:_CD
+  52. OmniDrive
+	http://wiki.redump.org/index.php?title=OmniDrive
+  53. OmniDrive
+	http://wiki.redump.org/index.php?title=OmniDrive
+  54. Ringed Disc Dumping Guide
+	http://wiki.redump.org/index.php?title=Ringed_Disc_Dumping_Guide
+  55. HexaLock AutoLock
+	http://wiki.redump.org/index.php?title=HexaLock_AutoLock
+  56. CodeLok / CopyLok
+	http://wiki.redump.org/index.php?title=CodeLok_/_CopyLok
+  57. N-CD
+	http://wiki.redump.org/index.php?title=N-CD
+  58. http://wiki.redump.org/index.php?title=Optical_Disc_Drives:_CD_Compatibility_Technical_Details
+  59. Special:Categories
+	http://wiki.redump.org/index.php?title=Special:Categories
+  60. Category:Optical Disc Drives
+	http://wiki.redump.org/index.php?title=Category:Optical_Disc_Drives
+  61. View the content page [c]
+	http://wiki.redump.org/index.php?title=Optical_Disc_Drives:_CD_Compatibility_Technical_Details
+  62. Discussion about the content page [t]
+	http://wiki.redump.org/index.php?title=Talk:Optical_Disc_Drives:_CD_Compatibility_Technical_Details&action=edit&redlink=1
+  63. This page is protected.
+You can view its source [e]
+	http://wiki.redump.org/index.php?title=Optical_Disc_Drives:_CD_Compatibility_Technical_Details&action=edit
+  64. Past revisions of this page [h]
+	http://wiki.redump.org/index.php?title=Optical_Disc_Drives:_CD_Compatibility_Technical_Details&action=history
+  65. You are encouraged to log in; however, it is not mandatory [o]
+	http://wiki.redump.org/index.php?title=Special:UserLogin&returnto=Optical_Disc_Drives:_CD_Compatibility_Technical_Details
+  66. Visit the main page [z]
+	http://wiki.redump.org/index.php?title=Main_Page
+  67. http://wiki.redump.org/index.php?title=Redump.org
+  68. http://wiki.redump.org/index.php?title=Discs_not_yet_dumped
+  69. http://wiki.redump.org/index.php?title=Dumping_Guides
+  70. http://wiki.redump.org/index.php?title=Optical_Disc_Drive_Compatibility
+  71. http://wiki.redump.org/index.php?title=Useful_Links
+  72. Load a random page [x]
+	http://wiki.redump.org/index.php?title=Special:Random
+  73. http://wiki.redump.org/index.php?title=Special:RecentChanges
+  74. http://www.redump.org/
+  78. List of all wiki pages that link here [j]
+	http://wiki.redump.org/index.php?title=Special:WhatLinksHere/Optical_Disc_Drives:_CD_Compatibility_Technical_Details
+  79. Recent changes in pages linked from this page [k]
+	http://wiki.redump.org/index.php?title=Special:RecentChangesLinked/Optical_Disc_Drives:_CD_Compatibility_Technical_Details
+  80. List of all special pages [q]
+	http://wiki.redump.org/index.php?title=Special:SpecialPages
+  81. Printable version of this page [p]
+	http://wiki.redump.org/index.php?title=Optical_Disc_Drives:_CD_Compatibility_Technical_Details&printable=yes
+  82. Permanent link to this revision of the page
+	http://wiki.redump.org/index.php?title=Optical_Disc_Drives:_CD_Compatibility_Technical_Details&oldid=77092
+  83. http://www.mediawiki.org/
+  84. Redump Wiki:Privacy policy
+	http://wiki.redump.org/index.php?title=Redump_Wiki:Privacy_policy
+  85. Redump Wiki:About
+	http://wiki.redump.org/index.php?title=Redump_Wiki:About
+  86. Redump Wiki:General disclaimer
+	http://wiki.redump.org/index.php?title=Redump_Wiki:General_disclaimer

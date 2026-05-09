@@ -1,0 +1,219 @@
+                                 [1]illustrate
+      [2]Products            [3]Buy            [4]Support Forum           
+   [5]Registrations            [6]Professional            [7]About           
+                                        
+
+   Spoon's Audio Guide: CD Ripping
+ To Rip (verb): Extract audio Digitally from an Audio CD, also known as
+ Digital Audio Extraction (DAE).
+  
+
+    Audio CDs  
+
+ Format
+ Audio CDs have been around since the 1980's and contain uncompressed audio: 2
+ Channels, 16 bit, 44.1 KHz. Audio quality from Audio CDs is above perception,
+ that is the general public cannot hear a difference between 16 bit and 24 bit
+ (DVD-Audio or SACD), neither can they hear a difference between 44.1KHz and
+ 96KHz or 192KHz (again DVD-Audio and SACD). There is a slight caveat in this
+ last statement, in that in the last number of years there has been a loudness
+ race, that is CDs produced now are volume compressed, that is the quiet parts
+ are pushed up louder, so that when played on the radio or TV the track sounds
+ louder (and more people will apparently purchase, a 1980's CD would sound
+ quiet in comparison to one from 2005). The downside is that 16 bit CDs are no
+ longer effectively 16 bit, the full audible range is not being used. 24 bit
+ helps, but in the long run, the same fate (loudness war) might happen to 24
+ bit discs.
+
+ Layout
+
+ An audio CD is often referred to as Red Book (because the technical details
+ were enclosed in a red book), and consist of:
+
+ Lead In Area
+ Audio Tracks, each track is separated by 'gaps' of around 2 seconds
+ Lead Out
+
+ The design of audio CD players did not put a constraint on the player
+ locating a track precisely, a player could jump roughly where the track
+ starts this is why Lead In / Out and Gaps between audio tracks exist, these
+ 'landing areas' contain silence.
+
+ CD Disc Types
+
+ Outside of standard audio CDs, exist CDs which are:
+
+   • Gapless (aka. live mix CDs) these discs do not have 2 second gaps between
+     tracks, the idea is one track mixes into another and is popular with
+     Dance,
+   • Enhanced CDs (CD Extra): a combination of audio, followed by a data
+     session. This data session might have a video viewable on a computer,
+     normal CD players are unaware of the enhanced part of the CD. Once
+     copy-controlled CDs started appearing on the market, it was fashionable
+     to have Trojans which auto-installed when the CD is inserted.
+   • Hidden Track One Audio (HTOA): before track 1 is a hidden track, playable
+     on CD players by skipping back. If your CD Ripper supports HTOA
+     (dBpoweramp) it can be ripped if the drive can read HTOA.
+   • Hidden last track: the last track can be 'hidden' by having a long
+     section of silence between the published last track and the hidden one
+     (perhaps a few minutes). Another possibility is to have many silence
+     tracks (two seconds long) before the last hidden track,
+   • DualDisc: One side is Audio CD, the other DVD - never really took off.
+   • Game Audio CDs, where there is a data session followed by an audio
+     session, popular on PlayStation discs.
+
+    Secure Ripping  
+
+ Secure ripping is the process of ripping audio CDs without errors, errors
+ manifest as audible pops, clicks, or extended periods of silence (where the
+ CD drive has substituted the error with silence), rips with errors are
+ sub-optimal. Secure ripping is different, errors are detected, potentially
+ recovered and unrecoverable tracks are separated out, the last thing your
+ speakers need are tracks with speaker damaging pops and clicks.
+
+ Secure ripping has many pre-requisites, each need to be fulfilled to rip
+ securely: from finding a quality CD drive (C2, cache invalidation,
+ over-reading, drive offset). Each of these is covered later in 'Drives and
+ Features'.
+
+ Secure ripping has progressed leaps and bounds over the years since the
+ introduction of [8]AccurateRip, previously secure ripping programs relied
+ upon C2 error pointers or by reading the same area twice to detect errors.
+ Lets examine each of these methods:
+
+ C2 Error Pointers
+
+ Each drive chipset implements C2 pointers with differing levels of quality,
+ even the best implementation can still let through 3% or more errors through.
+ Having C2 helps, but should not be relied upon alone.
+
+ Re-Reading
+
+ CD is read twice, if a section contains an error it will likely return
+ different errors, so can be detected. This is true mostly but not always,
+ consistent errors exist and in our opinion present more of a problem to
+ secure ripping than the C2 error pointer detection 'hole'.
+
+ As mentioned AccurateRip helps enormously with secure ripping, a CD rip is
+ compared to an independently ripped disc (different drive, different CD - no
+ 2 discs would have the same scratch).
+
+ Finally, not all Secure Rippers are equal, when in doubt test: all secure
+ rippers should give the same results as another secure ripper (as long as the
+ correct drive offset is used), also use a program which compares only the
+ audio data, not the whole file (where ID Tags might be different), Illustrate
+ have a [Calculate Audio CRC] utility codec which can do just that.
+                                                                                
+    Drives and Features  
+
+ Modern CD drives (every drive bar a handful in the last 4 years) support
+ Accurate Stream, this feature allows a CD drive to precisely locate an area
+ of CD (unlike their counter part - ordinary CD players), it also puts an end
+ to the requirement for a CD Ripper to jitter correct (that is jump back more
+ than required to re-sync when ripping blocks).
+
+ Every drive has an offset, if two different (model) CD drives were to read
+ the same track the results from the 2nd drive would be slightly offset by a
+ number of samples, because the track starting point would be different, for
+ example take the following audio track where 24 samples are read (each number
+ represents an audio sample):
+
+ As you can see each different drive reads the same track differently, Ripping
+ programs are able to internally correct for a drives offset. Offsets can be
+ measured in samples, or bytes (samples x 4).
+
+ Over-reading enables a drive with a non-zero offset to recover the last few
+ samples (if has a + offset), or the first few samples (for a - offset), as
+ these samples will appear to the drive in either the lead out, or lead in
+ area. Not many drives are able to over-read, but fear not as these audio
+ samples are nearly always silence.
+
+ C2 Error Pointers are a form or error detection. Audio CDs have many layers
+ of error correction and detection. What happens if there is an error which
+ cannot be corrected (recovered)? a CD drive can either pass the audio out as
+ is, with possible pops and clicks, or interpolate the audio, that is silence
+ out the blocks with errors. Either way there is an error and a secure ripper
+ might not be able to detect the error (if a re-read returns the same
+ error...). C2 Error Pointers are a way for the drive to inform the ripper
+ that a section of audio has an error, sounds good, except the implementation
+ of C2 Pointers can be:
+
+   • Drive does not support C2
+
+   • Drive does not support C2, but pretends it does in the feature lookup
+
+   • Drive supports C2, actual implementation can be from poor to good.
+
+ As mentioned before, even the best C2 implementations can still let errors
+ through, but overall using C2 with a ripper which correctly supports it
+ (dBpoweramp Reference) is helpful, consider it an extra layer which can catch
+ errors. There has grown a culture of recommending c2 is always switched off,
+ this has grown up around EAC where it's implementation of c2 pointers relies
+ on c2 alone and not secure re-reading, unlike in dBpoweramp where c2 pointers
+ can be used. A ripper should have a test section where the detection of C2
+ pointers can be detected with a scratched CD.
+
+ Caching is employed by the majority of drives to improve performance, but
+ caching stops secure extraction: when a secure ripper tries to re-rip the
+ same section a 2nd time, instead of getting audio from the disc, audio comes
+ from the cache (which is the same as the first rip). A secure ripper must be
+ able to detect and invalidate the cache (by reading more than the cache value
+ before the section of audio desired).
+
+ CD-Text was invented by Philips and Sony, audio CDs do not contain details of
+ the track names and artist(s) on the disc - CD Text adds these details, but
+ requires a compatible drive and disc with CD-Text (majority do not have
+ CD-Text). CD-Text would have been a good standard if implemented on all audio
+ CDs and drives. Computer based CD Rippers instead use the Internet to get the
+ track names (by looking up the discs in an online database).
+
+    Copy Protections Employed  
+
+ The music industry engaged in a folly around 2002, with the idea that CDs
+ could be made unreadable on computers, but still play on CD players. The
+ first method employed used a fake 2nd session with invalid track times, CD
+ players can only read the first session, computers will use the last session
+ and thus be fooled. Good CD Rippers can read the first session, then it is
+ down to the CD drive to be able to read outside of the false first session
+ (over-read). The method was also bypassed using the infamous black marker pen
+ trick (draw over the 2nd session of the disc).
+
+ The 2nd copy protection employed is the deliberate inserting of noise and
+ errors into the audio, that is right you heard it right, music companies were
+ intentionally inserting errors into the discs, the idea being that CD players
+ would interpolate (silence) the errors out, where as a computer would not
+ (but could be done in software), either way playback on any device would have
+ a sub-optimal rendition.
+
+ The final copy protection employed is the installation of a Trojan program
+ when the audio CD is inserted in to a computer (hidden in an Enhanced CD),
+ these Trojan programs can install filters into Windows which disrupt audio
+ ripping. Sony experienced a huge backlash when it did just this, and hid the
+ fact they had installed something nasty on PCs, which opened a huge security
+ hole in PCs. For this reason it is best to disable autorun when ripping Audio
+ CDs.
+
+ It is safe now to say that the experiment with audio CD protections has
+ failed.
+
+    Getting Technical  
+
+ Audio CD times are represented as M S F (minutes, seconds, frames), where
+ there are 75 frames per second, each frame consists of 2352 audio bytes, or
+ 588 samples. One second of uncompressed audio CD data = 75 x 2352 = 176400
+ bytes, or 176 KB.
+
+ [9]<< Spoon's Audio Guide
+
+References
+
+   Visible links
+   1. http://www.dbpoweramp.com/
+   2. https://www.dbpoweramp.com/
+   3. https://www.dbpoweramp.com/purchase.htm
+   4. https://forum.dbpoweramp.com/
+   5. https://www.dbpoweramp.com/registration/
+   6. https://www.dbpoweramp.com/professional.htm
+   7. https://www.dbpoweramp.com/about.html
+   8. http://www.accuraterip.com/
+   9. https://dbpoweramp.com/spoons-audio-guide.htm
