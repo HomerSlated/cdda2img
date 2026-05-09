@@ -263,6 +263,28 @@ Format per entry:
 
 ---
 
+## LINT-013 — Trusted internal subprocess call for `cdrdao` (`cdrdao_ripper.py`)
+
+- **Rules:** `ruff: S603` (subprocess without `shell=True` check), `ruff: S607` (partial executable path)
+- **Locations:**
+  - `cdrdao_ripper.py:39–40` — `subprocess.run([...])` in `rip_cdrdao()` (S603 on the `run(` line; S607 on the `[` line)
+- **Rationale:**
+  - *S603:* The argument list is constructed entirely from hardcoded string literals and the
+    caller-supplied `device` string (a device path like `/dev/sr0`). `shell=False` (the default)
+    is used; no shell injection surface.
+  - *S607:* `"cdrdao"` is intentionally a `PATH` lookup. Hardcoding `/usr/bin/cdrdao` would break
+    on systems that install it under `/usr/local/bin` or a non-standard prefix. The binary is a
+    well-known disc imaging tool with no impersonation risk in normal environments.
+- **Alternatives:**
+  - *Validate `device` against `/dev/sr*`* — security theatre: the user already has shell access
+    and could invoke `cdrdao` directly. Validation adds noise with no real benefit.
+  - *Use `shutil.which("cdrdao")`* — finds the absolute path but adds boilerplate and doesn't
+    address the underlying security concern. The `FileNotFoundError` handler in `rip_cdrdao()`
+    already provides an actionable error message when cdrdao is not on `PATH`.
+- **Decision:** `# noqa: S603, S607` is correct. Same rationale as LINT-012.
+
+---
+
 ## LINT-010 — Intentional tuple discard in test fixture unpacking (`test_container.py`)
 
 - **Rule:** `ruff: RUF059` (unpacked variable never used)

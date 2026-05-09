@@ -62,11 +62,7 @@ def parse_args() -> argparse.Namespace:
             rip options:
               --loudness {rg|none}  rg: embed EBU R128 ReplayGain block (default); none: skip
               --output <path>       Output .rbi path (default: derived from album title)
-              --paranoia {off|overlap|full}
-                                    off: raw read, no jitter correction (fastest)
-                                    overlap: overlap+verify jitter correction (default)
-                                    full: full paranoia with retry cap (slowest, best for damaged discs)
-              Note: rip always uses master mode (1:1 capture via cd-paranoia)
+              Note: rip always uses master mode (1:1 capture via cdrdao; falls back to cd-paranoia)
 
             import options:
               --loudness {rg|none}  rg: embed EBU R128 ReplayGain block (default); none: skip
@@ -170,13 +166,6 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Output .rbi file path (default: derived from album title)",
     )
-    r_cmd.add_argument(
-        "--paranoia",
-        default="overlap",
-        choices=["off", "overlap", "full"],
-        help="off: raw read; overlap: jitter correction (default); full: full with retry cap",
-    )
-
     i_cmd = sub.add_parser(
         "i",
         help="Import a cdrdao TOC+BIN or DDP 2.0 image as an RBI container (master mode)",
@@ -457,23 +446,34 @@ def _finalize_import(
     )
 
 
+def _rip_with_fallback(device: str, output_pcm: Path):
+    """Try cdrdao read-cd first; fall back to cd-paranoia (full) on failure."""
+    from cdda2img.cdrdao_ripper import rip_cdrdao
+    from cdda2img.disc_reader import rip_disc
+
+    print(f"Ripping {device} via cdrdao ...")
+    try:
+        return rip_cdrdao(device, output_pcm), "cdrdao"
+    except RuntimeError as exc:
+        print(f"  cdrdao failed: {exc}")
+        print("  Falling back to cd-paranoia (paranoia=full) ...")
+        return rip_disc(device, output_pcm, paranoia="full"), "cd-paranoia"
+
+
 def rip_image(
     device: str,
     loudness: str = "rg",
     output: Path | None = None,
-    paranoia: str = "overlap",
 ) -> None:
     from cdda2img.cddb import prepopulate_from_cddb
     from cdda2img.config import load_config
-    from cdda2img.disc_reader import rip_disc
     from cdda2img.toc import sanitize_title
 
     cfg = load_config()
     temp_base = resolve_temp_dir()
     temp = TempFiles(temp_base)
     try:
-        print(f"Ripping {device} (paranoia={paranoia}) ...")
-        info = rip_disc(device, temp.pcm_file, paranoia=paranoia)
+        info, rip_type = _rip_with_fallback(device, temp.pcm_file)
 
         track_count = len(info.disc.tracks)
         total_s = info.disc.total_seconds
@@ -490,7 +490,7 @@ def rip_image(
         provenance: dict[str, str] = {
             "MODE": "r",
             "SOURCE": device,
-            "TYPE": "cd-paranoia",
+            "TYPE": rip_type,
         }
         _finalize_import(disc, temp.pcm_file, provenance, output_stem, loudness, output)
     finally:
@@ -598,7 +598,6 @@ def _dispatch(args: argparse.Namespace) -> None:
             args.device,
             loudness=args.loudness,
             output=args.output,
-            paranoia=args.paranoia,
         )
     elif args.cmd == "i":
         import_image(args.source, loudness=args.loudness, output=args.output)

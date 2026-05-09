@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 `cdda2img` is a CLI tool for creating, importing, ripping, extracting, and verifying **RBI (Red Book Image)** archive containers of CD-DA audio discs. Subcommands:
 
-- **`r`** — rip a physical disc via libcdio-paranoia with configurable paranoia mode
+- **`r`** — rip a physical disc via cdrdao (primary) with cd-paranoia fallback
 - **`c`** — create one or more RBIs from a directory of audio files
 - **`i`** — import a foreign disc image (cdrdao TOC+BIN or DDP 2.0 / GEAR Pro)
 - **`x`** — extract to per-track FLAC + CUE, or raw PCM + TOC, or both
@@ -23,9 +23,9 @@ This is a prototype; a Rust reimplementation is planned once the design has stab
 # Install dependencies
 uv sync
 
-# Rip a physical disc
+# Rip a physical disc (cdrdao primary; cd-paranoia fallback)
 uv run python -m cdda2img r
-uv run python -m cdda2img r /dev/sr0 --paranoia full
+uv run python -m cdda2img r /dev/sr0
 uv run python -m cdda2img r --loudness none
 
 # Create an RBI image from a directory of audio files
@@ -77,7 +77,9 @@ All source lives under `src/cdda2img/`. The pipeline is fully wired end-to-end.
 10. `container.py:build_container()` — writes the RBI file
 
 ### Rip pipeline (`r` subcommand)
-1. `disc_reader.py:rip_disc()` — rips all sectors via libcdio-paranoia; `paranoia` param controls mode (`off`/`overlap`/`full`); returns `RipInfo(disc, track_lsns, disc_last_lsn)`
+1. `cdda2img.py:_rip_with_fallback()` — tries `cdrdao_ripper.rip_cdrdao()` (primary); falls back to `disc_reader.rip_disc(paranoia="full")` on RuntimeError
+   - `cdrdao_ripper.py:rip_cdrdao()` — runs `cdrdao read-cd`; parses TOC via `toc_parser.py`, builds disc via `cdrdao_reader.parsed_to_rbi_disc()`, byte-swaps s16be BIN via `cdrdao_reader.convert_cdrdao_bin()`; returns `RipInfo(disc, track_lsns, disc_last_lsn)`
+   - `disc_reader.py:rip_disc()` — cd-paranoia fallback; queries disc via `-Q`, rips via subprocess; returns same `RipInfo`
 2. `cddb.py:prepopulate_from_cddb()` — TCP CDDB query using disc TOC fingerprint; pre-populates album/artist/track titles before the metadata menu
 3. Shared finalization: `_finalize_import()` (see below)
 
@@ -104,7 +106,8 @@ Two source types, each producing s16le PCM, then both call `_finalize_import()`:
 - **`cdda2img.py`** — CLI entry point; `create_image()`, `import_image()`, `rip_image()`, `extract_image()` top-level functions
 - **`container.py`** — `build_container()`, `read_header()`, `extract_data()`, `wav_to_raw_pcm()`
 - **`input_selector.py`** — four batching strategies: `fcfs`, `aatc`, `bech`, `ball` (last two use OR-Tools CP-SAT)
-- **`disc_reader.py`** — libcdio-paranoia rip; returns `RipInfo(disc, track_lsns, disc_last_lsn)`
+- **`cdrdao_ripper.py`** — cdrdao read-cd rip (primary); parses TOC via toc_parser + cdrdao_reader; returns `RipInfo`
+- **`disc_reader.py`** — cd-paranoia rip (fallback); subprocess-based; returns `RipInfo(disc, track_lsns, disc_last_lsn)`
 - **`cddb.py`** — CDDB disc ID computation, TCP query, `prepopulate_from_cddb()`
 - **`cdrdao_reader.py`** — cdrdao TOC+BIN import; s16be → s16le conversion
 - **`ddp_reader.py`** — DDP 2.0 (GEAR Pro Mastering Edition) import
@@ -149,9 +152,9 @@ Full specification: `docs/reference/rbi_spec.md`.
 - Ruff line length is 120; `E501` is ignored. `S101` (assert) is allowed in tests
 - Long exception messages use the `msg = ...; raise Err(msg)` pattern (TRY003)
 - Tests use `example/` directory audio files (committed to repo) as fixtures
-- **Byte-order invariants**: GEAR Pro DDP TRACK*.DAT is s16le — no byte-swap on import; cdrdao BIN output is s16be — always byte-swap via `convert_cdrdao_bin_to_wav()`; libcdio-paranoia returns s16le — no byte-swap for ripped data
+- **Byte-order invariants**: GEAR Pro DDP TRACK*.DAT is s16le — no byte-swap on import; cdrdao BIN output is s16be — always byte-swap via `convert_cdrdao_bin()` (import) or `convert_cdrdao_bin_to_wav()` (RG analysis); cd-paranoia outputs WAV (s16le) — no byte-swap for ripped data
 - **Normalize vs ReplayGain**: `--normalize` is extract-time only (mutually exclusive with RG tag embedding); `--loudness rg` at create/rip/import time measures EBU R128 and stores the result in the RBI container without modifying the PCM
-- **Subprocess**: `audition.py` spawns `ffplay` via `subprocess.Popen`; intentional subprocess calls carry `# noqa: S603`
+- **Subprocess**: `disc_reader.py` and `cdrdao_ripper.py` spawn `cd-paranoia` and `cdrdao` via `subprocess.run`; `audition.py` spawns `ffplay` via `subprocess.Popen`; intentional subprocess calls carry `# noqa: S603, S607` (see LINT-012, LINT-013, LINT-008)
 - **Version** lives in `pyproject.toml` only; `container.py` and `cdda2img.py` read it via `importlib.metadata`
 - **spec-before-code**: update `docs/reference/rbi_spec.md` before changing the container format
 
