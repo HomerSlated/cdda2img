@@ -58,14 +58,25 @@ If cdrdao fails, the fallback path uses
 with jitter correction and overlapping reads; subchannel data is not available
 on the fallback path.
 .PP
+Before each rip,
+.B cdda2img r
+automatically resolves the correct drive sample offset.
+Resolution order: (1) per-drive entry in the
+.B [[drives]]
+section of
+.IR cdda2img.toml ;
+(2) the AccurateRip drive offset catalog, auto-applied when the entry has
+\(>=\~3 submissions and prompts interactively when confidence is lower;
+(3) the global
+.B drive_offset
+setting as a fallback.
+A confirmed offset is saved to
+.B [[drives]]
+automatically so subsequent rips skip the catalog lookup.
+.PP
 After a successful rip, the per\-track AccurateRip v1/v2 checksums are computed
 and verified against the AccurateRip database.
 Results are printed as an informational report; a mismatch does not fail the rip.
-Verification requires
-.B drive_offset
-to be set correctly in the configuration file; run
-.B cdda2img r
-once without a config file to be prompted to create one from the bundled example.
 .PP
 .BI "cdda2img r " "[options] [DEVICE]"
 .PP
@@ -315,20 +326,19 @@ EOF
 .RE
 .SS Configuration keys
 .TP
-.BI "drive_offset = " 30
-Integer sample read offset applied during AccurateRip checksum computation
-after a rip.
-Look up the correct value for your drive at
-.I https://www.accuraterip.com/driveoffsets.htm
-or via EAC's drive offset calibration tool.
+.BI "drive_offset = " 0
+Global fallback sample read offset (integer, samples), used when the drive is
+not found in the AccurateRip catalog and has no per-drive
+.B [[drives]]
+entry.
 Sign convention: positive means the drive reads ahead of the disc write position
-(the most common case; e.g. Plextor PX\-716A = +30).
-When
-.B drive_offset
-is 0 (the default) and the disc is found in the AccurateRip database but no
-track checksums match,
+(e.g. Plextor PX\-716A = +30).
+In practice this setting is rarely needed: on first rip
 .B cdda2img r
-prints a hint to check this setting rather than a per\-track mismatch table.
+queries the AccurateRip drive offset catalog and, on a confident match, saves
+the result to
+.B [[drives]]
+automatically.
 Default:
 .BR 0 .
 .TP
@@ -339,6 +349,54 @@ Format is
 .IR host : port .
 Default:
 .BR cddb.retrobridge.org:888 .
+.TP
+.BI "database_backups = " 3
+Number of rotating backups to keep for the drive offsets SQLite database.
+Set to
+.B 0
+to disable backups.
+Default:
+.BR 3 .
+.TP
+.BI "database_backup_frequency = " \(dq1d\(dq
+Minimum interval between automatic database backups.
+Format:
+.IR N \c
+.BR d
+(days),
+.IR N \c
+.BR h
+(hours), or
+.IR N \c
+.BR m
+(minutes).
+Default:
+.BR 1d .
+.SS Per-drive offset entries
+Per-drive sample offsets are stored as an array of TOML tables under
+.BR [[drives]] ,
+one table per drive.
+Entries are created and updated automatically by
+.B cdda2img r
+when a drive offset is confirmed from the AccurateRip catalog.
+They can also be set manually:
+.PP
+.RS
+.nf
+[[drives]]
+name = "PLEXTOR DVDR PX-716A"
+offset = 30
+.fi
+.RE
+.PP
+The
+.B name
+field must match the normalised sysfs drive name printed by
+.B cdda2img r
+at rip time.
+A per-drive entry always takes precedence over the global
+.B drive_offset
+setting.
 .\"
 .SH HARDWARE SETUP
 The
@@ -454,9 +512,17 @@ No separate Python package installation is needed.
 .SH FILES
 .TP
 .I $XDG_CONFIG_HOME/cdda2img/cdda2img.toml
-User configuration file.
+User configuration file (global settings and per-drive
+.B [[drives]]
+entries).
 Default location:
 .IR ~/.config/cdda2img/cdda2img.toml .
+.TP
+.I $XDG_DATA_HOME/cdda2img/drive_offsets.db
+SQLite database caching the AccurateRip drive offset catalog.
+Created automatically on first rip.
+Default location:
+.IR ~/.local/share/cdda2img/drive_offsets.db .
 .\"
 .SH EXAMPLES
 Rip the disc in the default drive:

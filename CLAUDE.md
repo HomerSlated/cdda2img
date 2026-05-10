@@ -77,6 +77,11 @@ All source lives under `src/cdda2img/`. The pipeline is fully wired end-to-end.
 10. `container.py:build_container()` — writes the RBI file
 
 ### Rip pipeline (`r` subcommand)
+0. `cdda2img.py:_resolve_drive_offset(device, cfg) → (int, str | None)` — resolves `(drive_offset, drive_name)` before the rip:
+   1. `cfg.drives` (`[[drives]]` TOML entries keyed by normalised sysfs name) — always authoritative.
+   2. AccurateRip catalog: `drive_info.ensure_drive_offsets(conn)` + `find_drive_offset(conn, name)` — auto-applies at ≥ `_MIN_AR_CONFIDENCE=3` submissions; prompts if lower; no-op without a TTY.
+   3. `cfg.drive_offset` (global fallback).
+   Confirmed offsets written via `config.save_drive()` (atomic rename). `OSError` swallowed with warning. `drive_name` feeds `PROVENANCE_DRIVE_NAME`/`PROVENANCE_DRIVE_OFFSET` in the container TOC so `l` shows the drive.
 1. `cdda2img.py:_rip_with_fallback()` — tries `cdrdao_ripper.rip_cdrdao()` (primary); falls back to `disc_reader.rip_disc(paranoia="full")` on RuntimeError
    - `cdrdao_ripper.py:rip_cdrdao()` — runs `cdrdao read-cd`; parses TOC via `toc_parser.py`, builds disc via `cdrdao_reader.parsed_to_rbi_disc()`, byte-swaps s16be BIN via `cdrdao_reader.convert_cdrdao_bin()`; returns `RipInfo(disc, track_lsns, disc_last_lsn)`
    - `disc_reader.py:rip_disc()` — cd-paranoia fallback; queries disc via `-Q`, rips via subprocess; returns same `RipInfo`
@@ -120,7 +125,9 @@ Two source types, each producing s16le PCM, then both call `_finalize_import()`:
 - **`metadata.py`** — `derive_album_info()` from file tags via mutagen
 - **`metadata_menu.py`** — interactive metadata confirmation menu
 - **`replaygain.py`** — EBU R128 analysis via pyebur128; `analyse()`, `pack_rg_block()`
-- **`config.py`** — `Config` dataclass (`drive_offset`, `cddb_server`); `load_config()` from XDG TOML
+- **`config.py`** — `Config` dataclass + `DriveConfig` (per-drive offset); `load_config()`, `save_drive()`, `_rewrite_config_drives()`; `[[drives]]` TOML array-of-tables round-trip; XDG path via `config_path()`
+- **`db.py`** — SQLite management for `drive_offsets.db`; `open_drive_offsets_db()`, `ensure_backup()`, `parse_frequency()`; WAL + foreign_keys; schema: `ar_drives`, `fetch_log`, `fetch_state`
+- **`drive_info.py`** — sysfs drive name probe (`probe_drive_name`); AccurateRip `driveoffsets.htm` catalog (`ensure_drive_offsets` with 30-day cooldown, `find_drive_offset`); `_normalize_ar_name` handles `"VENDOR  - MODEL"` and `"- MODEL"` formats via two-pattern regex
 - **`transcode.py`** — PyAV audio transcoding to Red Book PCM WAV
 - **`silence.py`** — silence trimming and gap padding
 - **`concat.py`** — WAV concatenation via the `wave` module
@@ -431,11 +438,12 @@ matching confidence per track. A track not matched in any block gets `confidence
 
 **Drive offset config**:
 
-`drive_offset` (integer, samples) in `~/.config/cdda2img/cdda2img.toml`. On first run with
-no config file and a TTY, `_prompt_create_config()` offers to create it from
-`conf/cdda2img.toml.example`. The example path uses
-`Path(__file__).parent.parent.parent / "conf"` (dev-tree relative); replace with
-`importlib.resources` when packaging is set up.
+`_resolve_drive_offset(device, cfg)` in `cdda2img.py` resolves the offset via three-tier lookup:
+1. **`cfg.drives`** — `[[drives]]` TOML entries, keyed by normalised sysfs drive name; user-confirmed, always authoritative. Populated automatically on first successful AR catalog match.
+2. **AccurateRip catalog** (`drive_info.py`) — `drive_offsets.db` at `$XDG_DATA_HOME/cdda2img/`; fetched from `http://www.accuraterip.com/driveoffsets.htm` with 30-day cooldown; auto-applied when submissions ≥ 3, interactive prompt when lower (no-op without TTY).
+3. **`cfg.drive_offset`** — global integer fallback in `cdda2img.toml`; only used when the drive is absent from the catalog or the user declines.
+
+On first run with no config file and a TTY, `_prompt_create_config()` offers to create it from `conf/cdda2img.toml.example`. The example path uses `Path(__file__).parent.parent.parent / "conf"` (dev-tree relative); replace with `importlib.resources` when packaging is set up.
 
 ### cdrdao .toc Field Reference (relevant subset)
 

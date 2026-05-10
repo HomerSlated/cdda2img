@@ -1,5 +1,6 @@
 import argparse
 import importlib.metadata
+import logging
 import re
 import tempfile
 import textwrap
@@ -28,7 +29,12 @@ from cdda2img.silence import trim_silence_cd_da
 from cdda2img.toc import build_toc_entries, generate_toc, get_track_durations
 from cdda2img.transcode import transcode_audio
 
+log = logging.getLogger(__name__)
+
 DEFAULT_STRATEGY = "aatc"
+_MIN_AR_CONFIDENCE = (
+    3  # minimum AccurateRip submissions for auto-applying a drive offset
+)
 SILENCE_PAD_DUR = "2"  # seconds of post-track silence (Red Book inter-track gap)
 
 
@@ -446,6 +452,90 @@ def _finalize_import(
     )
 
 
+def _resolve_drive_offset(
+    device: str, cfg
+) -> tuple[int, str | None]:  # cfg: Config (inline import avoids top-level dep)
+    """Return ``(offset, drive_name)`` for *device*.
+
+    *drive_name* is the normalised sysfs name (e.g. ``"PLEXTOR DVDR PX-716A"``),
+    or ``None`` when the sysfs probe fails.
+
+    Resolution order for *offset*:
+      1. Per-drive entry in cfg.drives (user-confirmed; always takes precedence).
+      2. AccurateRip catalog (auto-applied when submissions >= _MIN_AR_CONFIDENCE;
+         prompts the user when confidence is lower).
+      3. cfg.drive_offset (global fallback).
+
+    Confirmed offsets are persisted to [[drives]] in cdda2img.toml so that
+    subsequent rips skip the catalog lookup entirely.
+    """
+    import sys
+
+    from cdda2img.config import DriveConfig, save_drive
+    from cdda2img.db import open_drive_offsets_db
+    from cdda2img.drive_info import (
+        ensure_drive_offsets,
+        find_drive_offset,
+        probe_drive_name,
+    )
+
+    drive_name = probe_drive_name(device)
+    if drive_name is None:
+        print(
+            f"  Drive: unknown (sysfs probe failed); using offset {cfg.drive_offset:+d}"
+        )
+        return cfg.drive_offset, None
+
+    print(f"  Drive: {drive_name}")
+
+    # 1. User-confirmed per-drive entry in config takes precedence over AR catalog.
+    for d in cfg.drives:
+        if d.name == drive_name:
+            print(f"  Offset: {d.offset:+d} samples (from config)")
+            return d.offset, drive_name
+
+    # 2. AccurateRip catalog lookup.
+    conn = open_drive_offsets_db(cfg)
+    try:
+        ensure_drive_offsets(conn)
+        ar = find_drive_offset(conn, drive_name)
+    finally:
+        conn.close()
+
+    if ar is not None:
+        offset, submissions = ar
+        if submissions >= _MIN_AR_CONFIDENCE:
+            use_it = True
+        elif sys.stdin.isatty():
+            answer = (
+                input(
+                    f"  AccurateRip: offset {offset:+d} ({submissions} submission(s)). Use? [y/N] "
+                )
+                .strip()
+                .lower()
+            )
+            use_it = answer == "y"
+        else:
+            use_it = False
+
+        if use_it:
+            print(
+                f"  Offset: {offset:+d} samples (AccurateRip, {submissions} submission(s))"
+            )
+            try:
+                save_drive(DriveConfig(name=drive_name, offset=offset))
+            except OSError as exc:
+                log.warning("Could not persist drive offset to config: %s", exc)
+            return offset, drive_name
+
+    # 3. Global config fallback.
+    if ar is None:
+        print(f"  Drive not in AccurateRip catalog; using offset {cfg.drive_offset:+d}")
+    else:
+        print(f"  AccurateRip match not applied; using offset {cfg.drive_offset:+d}")
+    return cfg.drive_offset, drive_name
+
+
 def _rip_with_fallback(device: str, output_pcm: Path):
     """Try cdrdao read-cd first; fall back to cd-paranoia (full) on failure."""
     from cdda2img.cdrdao_ripper import rip_cdrdao
@@ -471,6 +561,8 @@ def rip_image(
     from cdda2img.toc import sanitize_title
 
     cfg = load_config()
+    drive_offset, drive_name = _resolve_drive_offset(device, cfg)
+
     temp_base = resolve_temp_dir()
     temp = TempFiles(temp_base)
     try:
@@ -492,10 +584,10 @@ def rip_image(
             temp.pcm_file,
             info.track_lsns,
             info.disc_last_lsn,
-            drive_offset=cfg.drive_offset,
+            drive_offset=drive_offset,
             cddb_id=cddb_id,
         )
-        print_ar_report(ar_results, drive_offset=cfg.drive_offset)
+        print_ar_report(ar_results, drive_offset=drive_offset)
 
         output_stem = sanitize_title(disc.album) or device.lstrip("/").replace("/", "_")
         provenance: dict[str, str] = {
@@ -503,6 +595,9 @@ def rip_image(
             "SOURCE": device,
             "TYPE": rip_type,
         }
+        if drive_name is not None:
+            provenance["DRIVE_NAME"] = drive_name
+            provenance["DRIVE_OFFSET"] = f"{drive_offset:+d}"
         _finalize_import(disc, temp.pcm_file, provenance, output_stem, loudness, output)
     finally:
         temp.cleanup()

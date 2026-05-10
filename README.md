@@ -32,8 +32,11 @@ This is an active prototype. A Rust reimplementation is planned once the design 
   (jitter correction, default), `full` (full correction with per-sector retry cap)
 - **AccurateRip v1/v2 verification** — per-track checksum computed against the AccurateRip
   database after every rip; matches against all drive-offset groups; reports confidence
-  and mismatch status per track; drive offset read from
-  `~/.config/cdda2img/cdda2img.toml`
+  and mismatch status per track. Drive offset is resolved automatically before each rip:
+  checks the per-drive `[[drives]]` config entries first, then queries the AccurateRip drive
+  offset catalog (auto-applied at ≥ 3 submissions, interactive prompt below that threshold),
+  then falls back to the global `drive_offset` setting. Confirmed offsets are persisted to
+  `[[drives]]` in `cdda2img.toml` so subsequent rips skip the catalog lookup
 - **Disc image import** — `i` subcommand imports professional mastering images as
   master-mode RBIs; pre-gaps, CATALOG, ISRC, and CD-TEXT are preserved; per-track
   ReplayGain is measured from individual track slices:

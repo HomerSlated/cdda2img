@@ -500,6 +500,9 @@ def _print_provenance(provenance: dict[str, str]) -> None:
         print(f"Source:    {source}")
     if ptype := provenance.get("TYPE"):
         print(f"Type:      {ptype}")
+    if drive_name := provenance.get("DRIVE_NAME"):
+        offset_str = provenance.get("DRIVE_OFFSET", "?")
+        print(f"Drive:     {drive_name}  (offset {offset_str})")
     if rms := provenance.get("REMASTERED_SOURCE"):
         label = _REMASTER_LABELS.get(rms, rms)
         extra = ""

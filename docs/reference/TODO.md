@@ -1,5 +1,60 @@
 # TODO
 
+## ✅ DONE — AccurateRip drive offset catalog + [[drives]] config persistence (2026-05-10)
+
+End-to-end validated: Plextor PX-716A auto-detected at +30 samples (2781 AccurateRip
+submissions), persisted to `[[drives]]` in `cdda2img.toml`, `Drive:` line shown in
+`cdda2img l` output.
+
+- [x] **`src/cdda2img/db.py`** (new module): `open_drive_offsets_db(cfg)` — WAL-mode
+  SQLite at `$XDG_DATA_HOME/cdda2img/drive_offsets.db`; schema: `ar_drives` (ar_name,
+  offset, submissions), `fetch_log` (cooldown tracking), `fetch_state` (Last-Modified/ETag
+  cache for future use). `ensure_backup()` / `_rotate_backups()` / `parse_frequency()` for
+  rotating database backups. `_apply_schema()` is idempotent (IF NOT EXISTS throughout).
+- [x] **`src/cdda2img/drive_info.py`** (new module):
+  - `probe_drive_name(device) -> str | None`: sysfs `/sys/block/<dev>/device/{vendor,model}`;
+    collapses whitespace; returns `"VENDOR MODEL"` or `None` on OSError.
+  - `_normalize_ar_name(raw)`: two-pattern approach — Pattern 1 `^-\s+(.*)` for no-vendor
+    entries (`"- 16X12 DVD DUAL"` → `"16X12 DVD DUAL"`); Pattern 2 `^(.*?)\s+-\s+(.*)`
+    with `\s+` on **both** sides of hyphen (distinguishes `HL-DT-ST` intra-hyphens from
+    `" - "` separator).
+  - `ensure_drive_offsets(conn)`: fetches `http://www.accuraterip.com/driveoffsets.htm`;
+    30-day cooldown via `fetch_log`; atomic `DELETE+INSERT` into `ar_drives`; handles
+    network errors (warns, no-op) and 304 (logs only). AccurateRip sends no caching headers
+    so every request is a full 200 — cooldown is the sole throttle.
+  - `find_drive_offset(conn, drive_name) -> tuple[int, int] | None`: highest-submissions
+    match by exact name.
+- [x] **`src/cdda2img/config.py`** extended:
+  - `DriveConfig(name: str, offset: int)` dataclass. No `submissions` — that's an AR
+    property recoverable from `ar_drives`.
+  - `Config.drives: list[DriveConfig]` parsed from `[[drives]]` blocks.
+  - `_toml_quote(s)` — TOML basic-string literal with `\`, `"`, `\n` escaping.
+  - `_rewrite_config_drives(text, drives)` — line-walker: strips all `[[drives]]` blocks,
+    appends fresh entries at EOF. Correctly handles mid-file blocks.
+  - `save_drive(drive, path=None)` — upserts by name; atomic write (`.tmp` + `Path.replace()`);
+    falls back to `{}` on `TOMLDecodeError`.
+  - `conf/cdda2img.toml.example` updated with a commented `[[drives]]` example block.
+- [x] **`src/cdda2img/cdda2img.py`** — `_resolve_drive_offset(device, cfg) → (int, str | None)`:
+  resolution order: `cfg.drives` → AR catalog (auto-apply ≥3 submissions, prompt <3,
+  no-op without TTY) → `cfg.drive_offset`. Persists via `save_drive()`; swallows `OSError`
+  with a warning. `rip_image()` calls it before the rip; unpacks `(drive_offset, drive_name)`;
+  adds `PROVENANCE_DRIVE_NAME` / `PROVENANCE_DRIVE_OFFSET` (formatted `+N`) when drive name
+  is known.
+- [x] **`src/cdda2img/container.py`** — `_print_provenance()` emits
+  `Drive:     PLEXTOR DVDR PX-716A  (offset +30)` between `Type:` and `Remaster:` lines
+  when `PROVENANCE_DRIVE_NAME` is present.
+- [x] 179 tests, ruff + ty clean.
+  - `tests/test_db.py` (21 tests): `parse_frequency`, backup helpers, `ensure_backup`,
+    `open_drive_offsets_db` schema/WAL/idempotency.
+  - `tests/test_drive_info.py` (25 tests): `probe_drive_name`, `_normalize_ar_name`,
+    `_parse_drive_offsets_html`, `ensure_drive_offsets` (cooldown/stale/error/304/atomic),
+    `find_drive_offset`.
+  - `tests/test_config.py` (26 tests): `_toml_quote`, `_parse_drives`, `_rewrite_config_drives`,
+    `save_drive` round-trips.
+  - `tests/test_resolve_drive_offset.py` (10 tests): all 6 resolution paths + OSError swallow.
+
+---
+
 ## ✅ DONE — AccurateRip verification + first-run config (2026-05-09)
 
 End-to-end validated: Technotronic *Pump Up the Jam* (12 tracks) at conf 14/136;

@@ -10,3 +10,18 @@ drive_offset = 30
 # CDDB server for disc metadata lookup (host:port).
 # Default: cddb.retrobridge.org:888
 # cddb_server = "cddb.retrobridge.org:888"
+
+# Number of rotating database backups to keep (0 = disabled).
+# Default: 3
+# database_backups = 3
+
+# Minimum interval between database backups: Nd (days), Nh (hours), Nm (minutes).
+# Default: 1d
+# database_backup_frequency = "1d"
+
+# Per-drive read offset, stored automatically after AccurateRip confirmation.
+# You can also add entries manually:
+#
+# [[drives]]
+# name = "PLEXTOR DVDR PX-716A"
+# offset = 30
