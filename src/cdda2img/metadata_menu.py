@@ -668,8 +668,6 @@ def _fetch_releases_for_group(
 def _original_release_menu(
     disc: RBIDisc, mb_rg_id: str | None
 ) -> tuple[RBIDisc, str | None]:
-    from cdda2img.mb_lookup import _merge_into_disc, lookup_release
-
     _header("Find Original Release")
     releases, mb_rg_id = _fetch_releases_for_group(disc, mb_rg_id)
 
@@ -698,12 +696,10 @@ def _original_release_menu(
         choice = _prompt("  > ").strip().lower()
 
         if choice == "a":
-            if selected.mb_release_id and not selected.tracks:
-                print("  Fetching full track listing from MusicBrainz...")
-                full = lookup_release(selected.mb_release_id)
-                if full:
-                    selected = full
-            disc = _merge_into_disc(selected, disc)
+            disc.original_release_date = (
+                selected.release_date or disc.original_release_date
+            )
+            disc.remastered_source = assessment
             mb_rg_id = selected.mb_release_group_id or mb_rg_id
             print(f"  Applied. REMASTERED_SOURCE: {assessment}")
             return disc, mb_rg_id
