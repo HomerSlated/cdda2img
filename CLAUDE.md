@@ -60,6 +60,33 @@ make check
 tox
 ```
 
+## Tools
+
+Standalone utility scripts live in `tools/` (tracked, not part of the installed package).
+
+- **`tools/measure_write_offset.py`** — burn-and-read-back write offset measurement.
+  Generates a synthetic test signal, burns it via `cdrdao write`, rips via `cdrdao read-cd`,
+  and measures where the known pulses landed. Accumulates cycles in
+  `rips/write_offset_results.toml`. Run from project root:
+  ```
+  uv run python tools/measure_write_offset.py --device /dev/sr0 --read-offset 30
+  ```
+
+## Commit and push workflow
+
+1. **Run `make check`** — catches everything the pre-commit hook will catch (trailing
+   whitespace in all files, unused imports, ruff format, TOML/YAML validity, lock drift,
+   ty). Do this *before* writing the commit message; if it fixes anything, the tests
+   should be re-run to confirm nothing regressed.
+2. **Write `.git/COMMIT_EDITMSG`** — the sync script reads this file directly.
+3. **Run `fish scripts/sync.fish`** — stages all changes, commits using `COMMIT_EDITMSG`,
+   pushes to `origin/main`, and runs `backup.fish`.
+
+If the pre-commit hook auto-fixes files during the sync (causing the commit to abort),
+re-run `fish scripts/sync.fish` immediately — the same commit message is still valid
+(the stale-message guard only fires when `COMMIT_EDITMSG` matches `.git/COMMIT_EDITMSG.old`,
+which is only updated on a *successful* commit).
+
 ## Architecture
 
 All source lives under `src/cdda2img/`. The pipeline is fully wired end-to-end.
