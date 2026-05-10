@@ -16,6 +16,8 @@ import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 
+import numpy as np
+
 log = logging.getLogger(__name__)
 
 # Sanity-check array item size at module load — AccurateRip frames are u32 LE.
@@ -57,17 +59,16 @@ def _ar_checksums(
     # Last track: skip last 2940 frames (mult <= n-2940 included)
     sum_from = _SKIP_FRAMES if track == 1 else 0
     sum_to = n - _SKIP_FRAMES if track == total_tracks else n
-    csum_hi = 0
-    csum_lo = 0
-    for i in range(n):
-        mult = i + 1
-        if mult >= sum_from and mult <= sum_to:
-            product = frames[i] * mult
-            csum_lo += product & 0xFFFFFFFF
-            csum_hi += product >> 32
-    v1 = csum_lo & 0xFFFFFFFF
-    v2 = (csum_lo + csum_hi) & 0xFFFFFFFF
-    return v1, v2
+    # sum_from/sum_to map to a contiguous slice: mult >= sum_from ↔ i >= sum_from-1
+    lo = max(0, sum_from - 1)
+    if sum_to <= lo or n == 0:
+        return 0, 0
+    arr = np.frombuffer(frames, dtype=np.uint32)[lo:sum_to].astype(np.uint64)
+    mults = np.arange(lo + 1, sum_to + 1, dtype=np.uint64)
+    products = arr * mults
+    csum_lo = int((products & np.uint64(0xFFFFFFFF)).sum())
+    csum_hi = int((products >> np.uint64(32)).sum())
+    return csum_lo & 0xFFFFFFFF, (csum_lo + csum_hi) & 0xFFFFFFFF
 
 
 def _ar_disc_ids(track_lsns: list[int], disc_last_lsn: int) -> tuple[str, str]:

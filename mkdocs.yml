@@ -8,7 +8,7 @@ repo_name: HomerSlated/cdda2img
 copyright: Maintained by <a href="https://www.hazensparkle.co.uk">Homer</a>.
 
 nav:
-  - Home: index.md
+  - Home: mkdocs/index.md
 plugins:
   - search
   - mkdocstrings:

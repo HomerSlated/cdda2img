@@ -53,8 +53,8 @@ uv run pytest tests/
 # Run a single test
 uv run pytest tests/test_transcode.py::test_transcode_roundtrip
 
-# Lint, format, and type check
-uv run ruff format src/ && uv run ruff check src/ && uv run ty check
+# Lint, format, and type check (matches CI exactly — runs pre-commit on all files + ty)
+make check
 
 # Run tox (multi-Python CI)
 tox
