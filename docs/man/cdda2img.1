@@ -1,6 +1,6 @@
 .\" cdda2img.1 — manual page for cdda2img
-.\" Install: doas install -m 644 docs/cdda2img.1 /usr/local/share/man/man1/
-.TH CDDA2IMG 1 "2026\-05\-09" "cdda2img 0.1.5" "User Commands"
+.\" Install: doas install -m 644 docs/man/cdda2img.1 /usr/local/share/man/man1/
+.TH CDDA2IMG 1 "2026\-05\-10" "cdda2img 0.1.6" "User Commands"
 .\"
 .SH NAME
 cdda2img \- create and extract RBI audio CD archive images
@@ -455,11 +455,11 @@ such as C2 error pointer support.
 Standard cdrdao usage without
 .B \-\-driver plextor
 does not require root.
-This constraint applies only to cdrdao; the
-.B cdda2img
-.B r
-subcommand uses libcdio\-paranoia, which issues only standard MMC commands
-and does not require root.
+.B cdda2img r
+uses cdrdao with the default
+.B generic\-mmc
+driver (no vendor\-specific commands) and does not require root.
+The libcdio\-paranoia fallback path likewise issues only standard MMC commands.
 .\"
 .SH SYSTEM DEPENDENCIES
 .SS Required

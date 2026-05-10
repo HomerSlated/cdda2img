@@ -28,7 +28,8 @@ This is an active prototype. A Rust reimplementation is planned once the design 
 - **Master / Remaster modes** — master preserves audio as-is; remaster applies silence
   trimming (−55 dBFS) and 2-second Red Book inter-track gaps
 - **Physical disc ripping** — `r` subcommand rips directly from `/dev/sr0` (or any
-  optical drive) via libcdio-paranoia with three paranoia modes: `off` (raw), `overlap`
+  optical drive); primary path uses cdrdao (captures MCN, ISRC, and CD-Text in one pass);
+  fallback uses libcdio-paranoia with three paranoia modes: `off` (raw), `overlap`
   (jitter correction, default), `full` (full correction with per-sector retry cap)
 - **AccurateRip v1/v2 verification** — per-track checksum computed against the AccurateRip
   database after every rip; matches against all drive-offset groups; reports confidence

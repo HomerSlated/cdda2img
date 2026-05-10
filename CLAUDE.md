@@ -79,13 +79,14 @@ Standalone utility scripts live in `tools/` (tracked, not part of the installed 
    ty). Do this *before* writing the commit message; if it fixes anything, the tests
    should be re-run to confirm nothing regressed.
 2. **Write `.git/COMMIT_EDITMSG`** — the sync script reads this file directly.
-3. **Run `fish scripts/sync.fish`** — stages all changes, commits using `COMMIT_EDITMSG`,
-   pushes to `origin/main`, and runs `backup.fish`.
+3. **Run `fish scripts/sync.fish`** — runs `ruff format` + `ruff check --fix` as a
+   pre-flight, stages all changes, commits using `COMMIT_EDITMSG`, pushes to `origin/main`,
+   and runs `backup.fish`.
 
-If the pre-commit hook auto-fixes files during the sync (causing the commit to abort),
-re-run `fish scripts/sync.fish` immediately — the same commit message is still valid
-(the stale-message guard only fires when `COMMIT_EDITMSG` matches `.git/COMMIT_EDITMSG.old`,
-which is only updated on a *successful* commit).
+If the commit still aborts (e.g. a C901 complexity error that ruff cannot auto-fix),
+fix the issue manually and re-run `fish scripts/sync.fish` — the same commit message
+remains valid (the stale-message guard only fires when `COMMIT_EDITMSG` matches
+`.git/COMMIT_EDITMSG.old`, which is only updated on a *successful* commit).
 
 ## Architecture
 

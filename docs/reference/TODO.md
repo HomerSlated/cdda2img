@@ -1,5 +1,49 @@
 # TODO
 
+## ✅ DONE — Write offset measurement tool (2026-05-10)
+
+PX-716A write offset confirmed: **−30 samples** (3 cycles, 100% confidence).
+Combined offset = read_offset + write_offset = +30 + (−30) = 0 (self-correcting,
+same-drive round-trip). Burn correction: prepend 30 samples silence before burning.
+
+- [x] **`tools/measure_write_offset.py`** — standalone burn-and-read-back write offset tool:
+  - Generates a 75-second synthetic test signal with noise bursts at 1.0 s and 60.0 s.
+  - Burns via `cdrdao write`; rips via `cdrdao read-cd`; applies read offset correction.
+  - Detects pulse positions by RMS peak detection (±8820-sample search window).
+  - `write_offset = found_position − expected_position` per cycle.
+  - Dual-pulse internal consistency check flags defective discs.
+  - Accumulates cycles in `rips/write_offset_results.toml` (atomic TOML write; resumable).
+  - Sign convention: W < 0 = burns early; burn correction = prepend |W| silence to disc stream.
+  - McCabe complexity kept under 10 by extracting `_run_one_cycle()`.
+- [x] **`docs/research/OFFSETS.md`** (new) — documents read offsets, write offsets, combined
+  offset, and cdda2img strategy; includes key facts for PX-716A.
+
+---
+
+## ✅ DONE — AccurateRip unit tests + numpy speedup + metadata menu bug fix (2026-05-10)
+
+196 tests total; ruff + ty clean.
+
+- [x] **`tests/test_accuraterip.py`** (17 new tests):
+  - `_ar_disc_ids`: frozen Technotronic vector (12 tracks), lsn-zero guard, 32-bit wrap.
+  - `_ar_checksums`: middle track, first/last fully excluded, multiplier 1-based, overflow
+    (v2≠v1 via csum_hi), boundary inclusive, padding-differs-from-clipping invariant.
+  - `_parse_dbar`: empty, two-block happy path, truncated block ignored, wrong n_tracks.
+  - `verify_rip`: disc-not-in-database early return; last-track zero-padding integration
+    (patches `_fetch_ar`; proves padded v1 ≠ clipped v1; verify_rip returns conf=15).
+- [x] **numpy speedup — `src/cdda2img/accuraterip.py:_ar_checksums`**:
+  - Rewritten with numpy: `np.frombuffer` zero-copy view → slice `[lo:sum_to]` →
+    `arange(lo+1, sum_to+1, dtype=uint64)` → vectorized multiply + bitwise sum.
+  - ~20× speedup: ~264 ms/track vs ~5 s/track on a 4-minute track (10.5M frames).
+  - `numpy>=1.24` added as explicit dep to `pyproject.toml`.
+- [x] **Bug fix — `metadata_menu.py:_original_release_menu`**:
+  - `[r] Find original release` was incorrectly calling `_merge_into_disc(selected, disc)`,
+    writing ISRCs and per-track metadata from the original release to the current disc.
+  - Fix: removed the `lookup_release` fetch and `_merge_into_disc` call entirely.
+    Now sets only two provenance fields: `disc.original_release_date` and `disc.remastered_source`.
+
+---
+
 ## ✅ DONE — AccurateRip drive offset catalog + [[drives]] config persistence (2026-05-10)
 
 End-to-end validated: Plextor PX-716A auto-detected at +30 samples (2781 AccurateRip
@@ -653,8 +697,10 @@ trivial project format (implement if a sample surfaces); Harddisk is not optical
 - C2 error pointer reliability: ⏳ PENDING (requires scratched disc)
 - Lead-in read depth: ✅ PASS (150 sectors, meets ≥75 minimum and ≥150 preferred)
 - Lead-out read depth: ⏳ PENDING (redumper PLEXTOR driver only probes lead-in)
-- AccurateRip offset: ✅ **+30 samples** confirmed via EAC AR v2 (confidence 12–13,
-  Technotronic *Pump Up the Jam*, 12 tracks, 2026-05-10)
+- AccurateRip read offset: ✅ **+30 samples** confirmed (confidence ~2781, auto-applied)
+- Write offset: ✅ **−30 samples** confirmed via `tools/measure_write_offset.py`
+  (3 burn-read cycles, 100% confidence, 2026-05-10; see `rips/write_offset_results.toml`)
+- Combined offset: **0** — self-correcting in same-drive rip+burn round-trip
 
 ### Architecture (decided)
 
@@ -690,7 +736,13 @@ libraries: `libcdio-paranoia` (reading) and `libburn` (writing).
   fallback on mismatch by design (AccurateRip CRC is a safety net, not a pass/fail gate)
 - [ ] Write thin ctypes/cffi wrapper around `libcdio-paranoia` for paranoia fallback
 - [ ] Parse subchannel Q data for MCN and CD-TEXT (see `private/libmirage/mirage/cdtext-coder.c`)
-- [ ] New `b` subcommand (or `x --burn`): burn RBI to physical disc via `cdrdao write`
+- [ ] New `b` subcommand: burn RBI to physical disc via `cdrdao write`
+  - Apply write offset correction (`−write_offset` samples) to full disc stream before burn
+  - Read `write_offset` from `[[drives]]` config (new field alongside `offset`)
+  - Embed burn provenance in TOC comments (drive name, offsets, correction applied)
+- [ ] `drive` subcommand: unified drive management (read offset from AR catalog + write
+  offset from `measure_write_offset.py` cycles; store both in `[[drives]]`)
+- [ ] Extend `[[drives]]` TOML schema with `write_offset` field in `config.py`
 
 ### MCN (Media Catalogue Number)
 MCN is a physical disc property (EAN-13 barcode); omit silently when the input does
@@ -1039,8 +1091,8 @@ Current holdings:
 To add:
 - [x] AccurateRip protocol documentation — algorithm derived from ARver `_audio.c`; disc ID
   from ARver `fingerprint.py`; URL/dBAR format from binary inspection + empirical validation
-- [x] Drive offset — Plextor PX-716A confirmed +30 via AccurateRip (conf 14); stored in
-  `conf/cdda2img.toml.example` and `~/.config/cdda2img/cdda2img.toml`
+- [x] Drive read/write offsets — `docs/research/OFFSETS.md`: what they are, sign conventions,
+  how to find/measure them, combined offset, cdda2img strategy, PX-716A facts (+30/−30/0)
 - [ ] Reference test material: Hi-Fi grade albums (e.g. Face Value — Phil Collins) for
   ReplayGain/normalisation validation; counter-examples (e.g. Death Magnetic — Metallica)
   for worst-case loudness-war testing. Obtain lossless copies; store in
