@@ -222,6 +222,28 @@ def lookup_release(release_id: str) -> DiscMeta | None:
     return _parse_release(release)
 
 
+def _mb_lucene_escape(value: str) -> str:
+    """Escape backslash and double-quote for use inside a Lucene quoted string."""
+    return value.replace("\\", "\\\\").replace('"', '\\"')
+
+
+def build_mb_search_query(artist: str | None, album: str | None) -> str:
+    """Build a MusicBrainz Lucene query from separate artist and album strings.
+
+    Uses field-qualified quoted terms so MB's engine does not misinterpret a
+    plain "Artist Album" string as a single release-title search. Falls back to
+    a plain joined string when only one field is present.
+    """
+    parts: list[str] = []
+    if album and album.strip():
+        parts.append(f'release:"{_mb_lucene_escape(album.strip())}"')
+    if artist and artist.strip():
+        parts.append(f'artist:"{_mb_lucene_escape(artist.strip())}"')
+    if len(parts) == 2:
+        return f"{parts[0]} AND {parts[1]}"
+    return " ".join(parts)
+
+
 def search_releases(query: str, limit: int = 25) -> list[DiscMeta]:
     """Text search for releases on MusicBrainz. Returns empty list on error."""
     log.debug("MusicBrainz text search: %r", query)

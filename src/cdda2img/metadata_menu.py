@@ -238,9 +238,14 @@ def _confirm_apply(meta: DiscMeta, disc: RBIDisc) -> bool:
 
 
 def _mb_search_menu(disc: RBIDisc, mb_rg_id: str | None) -> tuple[RBIDisc, str | None]:
-    from cdda2img.mb_lookup import _merge_into_disc, lookup_release, search_releases
+    from cdda2img.mb_lookup import (
+        _merge_into_disc,
+        build_mb_search_query,
+        lookup_release,
+        search_releases,
+    )
 
-    query = f"{disc.artist} {disc.album}".strip()
+    query = build_mb_search_query(disc.artist, disc.album)
     while True:
         _header("MusicBrainz Search")
         print(f"  Query: {query}")
@@ -298,6 +303,11 @@ def _discogs_execute_search(disc: RBIDisc, query: str, use_barcode: bool) -> RBI
         return disc
     selected = _select_from_results(results, "Discogs Results")
     if selected is not None and _confirm_apply(selected, disc):
+        if selected.discogs_release_id and not selected.tracks:
+            print("  Fetching full track listing from Discogs...")
+            full = discogs_lookup.fetch_release(selected.discogs_release_id)
+            if full:
+                selected = full
         disc = _merge_into_disc(selected, disc)
         print("  Applied.")
     return disc
@@ -652,7 +662,11 @@ def _fetch_releases_for_group(
     disc: RBIDisc, mb_rg_id: str | None
 ) -> tuple[list[DiscMeta], str | None]:
     """Return (releases, rg_id): fetch by group ID or fall back to text search."""
-    from cdda2img.mb_lookup import lookup_release_group, search_releases
+    from cdda2img.mb_lookup import (
+        build_mb_search_query,
+        lookup_release_group,
+        search_releases,
+    )
 
     if mb_rg_id:
         print(f"  Fetching MusicBrainz release group {mb_rg_id} ...")
@@ -660,7 +674,8 @@ def _fetch_releases_for_group(
         if releases:
             return releases, mb_rg_id
         print("  No releases found in group; falling back to text search.")
-    query = _prompt_edit("Search query", f"{disc.artist} {disc.album}".strip())
+    default_query = build_mb_search_query(disc.artist, disc.album)
+    query = _prompt_edit("Search query", default_query)
     print(f"\n  Searching MusicBrainz for {query!r} ...")
     return search_releases(query, limit=50), mb_rg_id
 

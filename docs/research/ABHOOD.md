@@ -80,7 +80,7 @@ The **Orange Book** (Philips and Sony, 1988–1990) defined recordable and rewri
 - **Part II**: **CD-R** (Compact Disc Recordable / CD-WO, Write Once). A pre-grooved spiral (the ATIP wobble) guides the laser; cyanine, phthalocyanine, or azo organic dyes darken under write-laser heat, simulating pits. The ATIP (Absolute Time In Pre-groove) encodes the disc manufacturer's 16-bit MID code (12-bit manufacturer identifier registered with Philips, 4-bit variant), disc type, recommended recording speed, and lead-in/out timing. The first standalone CD-R drive was the Philips CDD521 (1990), priced at approximately US$10,000.
 - **Part III**: **CD-RW** (Compact Disc ReWritable). Uses a phase-change alloy (typically AgInSbTe) that can be switched between crystalline and amorphous states repeatedly. CD-RW discs have lower reflectivity than CD-R and require player compatibility.
 
-As detailed in `private/OFE.md`, the Orange Book specifications are distributed only to parties with a paid CD Information Agreement, and the authoritative MID registry is likewise paywalled — a constraint that continues to affect open-source tools.
+As detailed in `docs/research/OFE.md`, the Orange Book specifications are distributed only to parties with a paid CD Information Agreement, and the authoritative MID registry was controlled by the Orange Forum (`orangeforum.or.jp`), a Japanese industry body that charged for access — a constraint that continues to affect open-source tools.
 
 **High Definition Compatible Digital (HDCD)**: Pacific Microsonics' proprietary CD-compatible audio format (1995). HDCD encodes extended dynamic range and subtle dither information in the LSB of the audio stream, transparent on standard players. Microsoft acquired the technology in 2000; it has since been discontinued.
 
@@ -484,7 +484,7 @@ None of these tools produces a self-contained archival format that:
 
 ### 8.2 The Licensing Obstacle
 
-As documented in `private/OFE.md`, the Orange Book specification and MID registry are paywalled. Any tool that attempts accurate manufacturer identification from ATIP data must maintain its own best-effort table. The table will be necessarily incomplete and will contain guesses — a condition Jörg Schilling embedded directly in cdrecord's output messages.
+As documented in `docs/research/OFE.md`, the Orange Book specification and MID registry are paywalled; the MID registry was administered by the Orange Forum, a real Japanese registered organization (`orangeforum.or.jp`), later succeeded by CDs21 Solutions. Any tool that attempts accurate manufacturer identification from ATIP data must maintain its own best-effort table. The table will be necessarily incomplete and will contain guesses — a condition Jörg Schilling embedded directly in cdrecord's output messages.
 
 The broader licensing apparatus for the Rainbow Books creates a hostile environment for open-source archival tools. The Red Book (IEC 60908) is technically a public IEC standard, but costs money to purchase; the Orange Book, used for any CD-R/RW media identification, is not publicly accessible. A formal archival tool cannot claim authoritative media identification.
 
@@ -539,12 +539,12 @@ The **RBI (Red Book Image)** format under development in this project represents
 - *Universal City Studios v. Reimerdes*, 111 F. Supp. 2d 294 (S.D.N.Y. 2000) — the DeCSS DMCA case.
 
 ### Project-internal research
-- `private/OFE.md` — The Orange Forum Embargo: what it is, who operates it, and its implications for open-source tools.
-- `private/IEC_60908-1999.pdf` — Full text of IEC 60908:1999 (licensed copy).
-- `private/NONSPEC.md` — Lead-in and Lead-out: What They Contain, What They're Forced to Contain, and Where the Spec Breaks. Covers write offsets, copy protection attacks on the lead-in, HTOA, and pre-mastering edge cases.
-- `private/DRIVES.md` — Per-drive technical notes for drives used or evaluated. Currently: Lite-On LH-20A1S (AccurateRip offset +6, 969 submissions; optical quality assessment; Redump compatibility checklist).
-- `private/spoons-audio-guide-cd-ripping.txt` — dBpoweramp's Spoon's Audio Guide: practical guide to secure ripping, drive features, copy protection.
-- `private/libmirage/` — libmirage image format parser source: authoritative reference implementations for CUE/BIN, CCD/IMG/SUB, MDS/MDF, NRG, TOC formats.
+- `docs/research/OFE.md` — The Orange Forum and the ATIP Manufacturer Code Embargo: the real Japanese organization, its successor CDs21 Solutions, and implications for open-source tools.
+- `docs/research/NONSPEC.md` — Lead-in and Lead-out: What They Contain, What They're Forced to Contain, and Where the Spec Breaks. Covers write offsets, copy protection attacks on the lead-in, HTOA, and pre-mastering edge cases.
+- `docs/research/spoons-audio-guide-cd-ripping.txt` — dBpoweramp's Spoon's Audio Guide: practical guide to secure ripping, drive features, copy protection.
+- `private/IEC_60908-1999.pdf` — Full text of IEC 60908:1999 (licensed copy; not redistributable).
+- `private/DRIVES.md` — Per-drive technical notes. Currently: Plextor PX-716A (read offset +30, write offset −30, combined 0; Redump 5-point checklist results).
+- `private/code/libmirage/` — libmirage image format parser source: authoritative reference implementations for CUE/BIN, CCD/IMG/SUB, MDS/MDF, NRG, TOC formats.
 
 ### Community projects
 - **Redump** (redump.org) — Authoritative game disc preservation database and checksums. The wiki at wiki.redump.org documents drive compatibility requirements in detail (see §5.4 above).

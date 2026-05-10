@@ -37,6 +37,7 @@ class DiscMeta:
     mb_disc_id: str | None = None  # computed SHA1 disc ID
     mb_release_id: str | None = None  # MusicBrainz release UUID
     mb_release_group_id: str | None = None  # MusicBrainz release group UUID
+    discogs_release_id: int | None = None  # Discogs integer release ID
     release_date: str | None = None  # YYYY, YYYY-MM, or YYYY-MM-DD
     original_release_date: str | None = None
     country: str | None = None
@@ -63,6 +64,7 @@ def merge_disc_meta(base: DiscMeta, update: DiscMeta) -> DiscMeta:
         "mb_disc_id",
         "mb_release_id",
         "mb_release_group_id",
+        "discogs_release_id",
         "release_date",
         "original_release_date",
         "country",

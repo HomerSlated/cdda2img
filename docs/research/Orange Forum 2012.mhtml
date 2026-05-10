@@ -1,0 +1,1515 @@
+From: <Saved by Blink>
+Snapshot-Content-Location: https://web.archive.org/web/20120730003401/http://www.orangeforum.or.jp/
+Subject: Wayback Machine
+Date: Sun, 10 May 2026 22:43:32 +0100
+MIME-Version: 1.0
+Content-Type: multipart/related;
+	type="text/html";
+	boundary="----MultipartBoundary--NOo4mjfLoiq6hjtlxBr3f5zDzsTBQMzhrBFplzoUj6----"
+
+
+------MultipartBoundary--NOo4mjfLoiq6hjtlxBr3f5zDzsTBQMzhrBFplzoUj6----
+Content-Type: text/html
+Content-ID: <frame-F3040CEAC51206FA2370BECF9155C883@mhtml.blink>
+Content-Transfer-Encoding: quoted-printable
+Content-Location: https://web.archive.org/web/20120730003401/http://www.orangeforum.or.jp/
+
+<!DOCTYPE html><html style=3D"--wm-toolbar-height: 67px;"><head><meta http-=
+equiv=3D"Content-Type" content=3D"text/html; charset=3Dwindows-1252"><link =
+rel=3D"stylesheet" type=3D"text/css" href=3D"cid:css-9bf0f876-ac3e-4cfc-87f=
+3-76bb0573e6d8@mhtml.blink" />
+<title>Wayback Machine</title>
+
+
+
+<link rel=3D"stylesheet" type=3D"text/css" href=3D"https://web-static.archi=
+ve.org/_static/css/banner-styles.css?v=3D1utQkbB3">
+<link rel=3D"stylesheet" type=3D"text/css" href=3D"https://web-static.archi=
+ve.org/_static/css/iconochive.css?v=3D3PDvdIFv">
+
+</head>
+<body style=3D"height:100vh;overflow:hidden;margin:0;display:flex;flex-flow=
+:column nowrap;align-items:stretch;">
+<div style=3D"flex:0 0;">
+<!-- BEGIN WAYBACK TOOLBAR INSERT -->
+
+<div id=3D"wm-ipp-base" lang=3D"en" style=3D"display: block; direction: ltr=
+; height: 67px;" toolbar-mode=3D"auto"><template shadowmode=3D"closed"><div=
+ id=3D"wm-ipp" style=3D"position:fixed;left:0;top:0;right:0;">
+<div id=3D"donato" style=3D"position:relative;width:100%;height:0;">
+  <div id=3D"donato-base">
+    <iframe id=3D"donato-if" src=3D"cid:frame-DDE182594923C6E3E58D7411C2D79=
+B8D@mhtml.blink" scrolling=3D"no" frameborder=3D"0" style=3D"width:100%; he=
+ight:100%">
+    </iframe>
+  </div>
+</div><div id=3D"wm-ipp-inside">
+  <div id=3D"wm-toolbar" style=3D"position:relative;display:flex;flex-flow:=
+row nowrap;justify-content:space-between;" nav=3D"async">
+    <div id=3D"wm-logo" style=3D"/*width:110px;*/padding-top:12px;">
+      <a href=3D"https://web.archive.org/web/" title=3D"Wayback Machine hom=
+e page"><img src=3D"https://web-static.archive.org/_static/images/toolbar/w=
+ayback-toolbar-logo-200.png" alt=3D"Wayback Machine" style=3D"width:100px" =
+border=3D"0" width=3D"100" height=3D"36"></a>
+    </div>
+    <div class=3D"c" style=3D"display:flex;flex-flow:column nowrap;justify-=
+content:space-between;flex:1;">
+      <form class=3D"u" style=3D"display:flex;flex-direction:row;flex-wrap:=
+nowrap;" target=3D"_top" method=3D"get" action=3D"https://web.archive.org/w=
+eb/submit" name=3D"wmtb" id=3D"wmtb"><input type=3D"text" name=3D"url" id=
+=3D"wmtbURL" value=3D"http://www.orangeforum.or.jp/" style=3D"flex:1;" auto=
+complete=3D"off"><input type=3D"submit" value=3D"Go">
+      </form>
+      <div style=3D"display:flex;flex-flow:row nowrap;align-items:flex-end;=
+">
+                <div class=3D"s" id=3D"wm-nav-captures" style=3D"flex:1;"><=
+a class=3D"t" href=3D"https://web.archive.org/web/*/http://www.orangeforum.=
+or.jp/" title=3D"See a list of every capture for this URL">226 captures</a>=
+<div class=3D"r" title=3D"Timespan for captures of this URL">10 Oct 1997 - =
+30 Jul 2012</div></div>
+        <div class=3D"k">
+          <a href=3D"https://web.archive.org/web/20120730003401/http://www.=
+orangeforum.or.jp/" id=3D"wm-graph-anchor">
+            <div id=3D"wm-ipp-sparkline" title=3D"Explore captures for this=
+ URL" style=3D"position: relative">
+              <canvas id=3D"wm-sparkline-canvas" width=3D"775" height=3D"27=
+" border=3D"0"></canvas>
+            <div class=3D"yt" style=3D"display: none; width: 25px; height: =
+27px;"></div><div class=3D"mt" style=3D"display: none; width: 2px; height: =
+27px;"></div></div>
+          </a>
+        </div>
+      </div>
+    </div>
+    <div class=3D"n">
+      <table>
+        <tbody>
+          <!-- NEXT/PREV MONTH NAV AND MONTH INDICATOR -->
+          <tr class=3D"m">
+            <td class=3D"b" nowrap=3D"nowrap"><a href=3D"https://web.archiv=
+e.org/web/20120629013604/http://www.orangeforum.or.jp/" title=3D"01:36:04 J=
+un 29, 2012">Jun</a></td>
+            <td class=3D"c" id=3D"displayMonthEl" title=3D"You are here: 00=
+:34:01 Jul 30, 2012">JUL</td>
+            <td class=3D"f" nowrap=3D"nowrap">Aug</td>
+          </tr>
+          <!-- NEXT/PREV CAPTURE NAV AND DAY OF MONTH INDICATOR -->
+          <tr class=3D"d">
+            <td class=3D"b" nowrap=3D"nowrap"><a href=3D"https://web.archiv=
+e.org/web/20120728184056/http://www.orangeforum.or.jp/" title=3D"18:40:56 J=
+ul 28, 2012"><span class=3D"ta"></span></a></td>
+            <td class=3D"c" id=3D"displayDayEl" style=3D"width:34px;font-si=
+ze:22px;white-space:nowrap;" title=3D"You are here: 00:34:01 Jul 30, 2012">=
+30</td>
+            <td class=3D"f" nowrap=3D"nowrap"><span class=3D"ta"></span></t=
+d>
+          </tr>
+          <!-- NEXT/PREV YEAR NAV AND YEAR INDICATOR -->
+          <tr class=3D"y">
+            <td class=3D"b" nowrap=3D"nowrap"><a href=3D"https://web.archiv=
+e.org/web/20110716143951/http://www.orangeforum.or.jp/" title=3D"14:39:51 J=
+ul 16, 2011">2011</a></td>
+            <td class=3D"c" id=3D"displayYearEl" title=3D"You are here: 00:=
+34:01 Jul 30, 2012">2012</td>
+            <td class=3D"f" nowrap=3D"nowrap">2013</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+    <div class=3D"r" style=3D"display:flex;flex-flow:column nowrap;align-it=
+ems:flex-end;justify-content:space-between;">
+      <div id=3D"wm-btns" style=3D"text-align:right;height:23px;">
+                <span class=3D"xxs">
+          <div id=3D"wm-save-snapshot-success">success</div>
+          <div id=3D"wm-save-snapshot-fail">fail</div>
+          <a id=3D"wm-save-snapshot-open" href=3D"https://web.archive.org/w=
+eb/20120730003401/http://www.orangeforum.or.jp/#" title=3D"Share via My Web=
+ Archive" style=3D"display: none;">
+            <span class=3D"iconochive-web"></span>
+          </a>
+          <a href=3D"https://archive.org/account/login.php" title=3D"Sign I=
+n" id=3D"wm-sign-in" style=3D"display: inline-block;">
+            <span class=3D"iconochive-person"></span>
+          </a>
+          <span id=3D"wm-save-snapshot-in-progress" class=3D"iconochive-web=
+" style=3D"display: none;"></span>
+        </span>
+                <a class=3D"xxs" href=3D"https://help.archive.org/help/cate=
+gory/the-wayback-machine/" title=3D"Get some help using the Wayback Machine=
+" style=3D"top:-6px;"><span class=3D"iconochive-question" style=3D"color:rg=
+b(87,186,244);font-size:160%;"></span></a>
+        <a id=3D"wm-tb-close" href=3D"https://web.archive.org/web/201207300=
+03401/http://www.orangeforum.or.jp/#close" style=3D"top:-2px;" title=3D"Clo=
+se the toolbar"><span class=3D"iconochive-remove-circle" style=3D"color:#88=
+8888;font-size:240%;"></span></a>
+      </div>
+      <div id=3D"wm-share" class=3D"xxs">
+        <a href=3D"https://web.archive.org/web/20120730003401/http://web.ar=
+chive.org/screenshot/http://www.orangeforum.or.jp/" id=3D"wm-screenshot" ti=
+tle=3D"screenshot" style=3D"visibility: hidden;">
+          <span class=3D"wm-icon-screen-shot"></span>
+        </a>
+        <a href=3D"https://web.archive.org/web/20120730003401/http://www.or=
+angeforum.or.jp/#" id=3D"wm-video" title=3D"video">
+          <span class=3D"iconochive-movies"></span>
+        </a>
+        <a id=3D"wm-share-facebook" href=3D"https://web.archive.org/web/201=
+20730003401/http://www.orangeforum.or.jp/#" data-url=3D"https://web.archive=
+.org/web/20120730003401/http://www.orangeforum.or.jp/" title=3D"Share on Fa=
+cebook" style=3D"margin-right:5px;" target=3D"_blank"><span class=3D"iconoc=
+hive-facebook" style=3D"color:#3b5998;font-size:160%;"></span></a>
+        <a id=3D"wm-share-twitter" href=3D"https://web.archive.org/web/2012=
+0730003401/http://www.orangeforum.or.jp/#" data-url=3D"https://web.archive.=
+org/web/20120730003401/http://www.orangeforum.or.jp/" title=3D"Share on Twi=
+tter" style=3D"margin-right:5px;" target=3D"_blank"><span class=3D"iconochi=
+ve-twitter" style=3D"color:#1dcaff;font-size:160%;"></span></a>
+      </div>
+      <div style=3D"padding-right:2px;text-align:right;white-space:nowrap;"=
+>
+        <a id=3D"wm-expand" class=3D"wm-btn wm-closed" href=3D"https://web.=
+archive.org/web/20120730003401/http://www.orangeforum.or.jp/#expand"><span =
+id=3D"wm-expand-icon" class=3D"iconochive-down-solid"></span> <span class=
+=3D"xxs" style=3D"font-size:80%;">About this capture</span></a>
+      </div>
+    </div>
+  </div>
+    <div id=3D"wm-capinfo" style=3D"border-top:1px solid #777;display:none;=
+ overflow: hidden">
+        <div id=3D"wm-capinfo-notice" source=3D"api"></div>
+                <div id=3D"wm-capinfo-collected-by">
+    <div style=3D"background-color:#666;color:#fff;font-weight:bold;text-al=
+ign:center;padding:2px 0;">COLLECTED BY</div>
+    <div style=3D"padding:3px;position:relative" id=3D"wm-collected-by-cont=
+ent">
+            <div style=3D"display:inline-block;vertical-align:top;width:50%=
+;">
+			<span class=3D"c-logo" style=3D"background-image:url(https://archive.org=
+/services/img/webwidecrawl);"></span>
+		Organization: <a style=3D"color:#33f;" href=3D"https://archive.org/detail=
+s/webwidecrawl" target=3D"_new"><span class=3D"wm-title">Internet Archive</=
+span></a>
+		<div style=3D"max-height:75px;overflow:hidden;position:relative;">
+	  <div style=3D"position:absolute;top:0;left:0;width:100%;height:75px;back=
+ground:linear-gradient(to bottom,rgba(255,255,255,0) 0%,rgba(255,255,255,0)=
+ 90%,rgba(255,255,255,255) 100%);"></div>
+	  The Internet Archive discovers and captures web pages through many diffe=
+rent web crawls.
+
+At any given time several distinct crawls are running, some for months, and=
+ some every day or longer.
+
+View the web archive through the <a href=3D"http://archive.org/web/web.php"=
+>Wayback Machine</a>.
+	</div>
+	      </div>
+      <div style=3D"display:inline-block;vertical-align:top;width:49%;">
+			<span class=3D"c-logo" style=3D"background-image:url(https://archive.org=
+/services/img/wide00005)"></span>
+		<div>Collection: <a style=3D"color:#33f;" href=3D"https://archive.org/det=
+ails/wide00005" target=3D"_new"><span class=3D"wm-title">Wide Crawl started=
+ April 2012</span></a></div>
+		<div style=3D"max-height:75px;overflow:hidden;position:relative;">
+	  <div style=3D"position:absolute;top:0;left:0;width:100%;height:75px;back=
+ground:linear-gradient(to bottom,rgba(255,255,255,0) 0%,rgba(255,255,255,0)=
+ 90%,rgba(255,255,255,255) 100%);"></div>
+	  Web wide crawl with initial seedlist and crawler configuration from Apri=
+l 2012.
+	</div>
+	      </div>
+    </div>
+    </div>
+    <div id=3D"wm-capinfo-timestamps">
+    <div style=3D"background-color:#666;color:#fff;font-weight:bold;text-al=
+ign:center;padding:2px 0;" title=3D"Timestamps for the elements of this pag=
+e">TIMESTAMPS</div>
+    <div>
+      <div id=3D"wm-capresources" style=3D"margin:0 5px 5px 5px;max-height:=
+250px;overflow-y:scroll !important"></div>
+      <div id=3D"wm-capresources-loading" style=3D"text-align:left;margin:0=
+ 20px 5px 5px;display:none"><img src=3D"https://web-static.archive.org/_sta=
+tic/images/loading.gif" alt=3D"loading"></div>
+    </div>
+    </div>
+  </div></div></div><link rel=3D"stylesheet" type=3D"text/css" href=3D"http=
+s://web-static.archive.org/_static/css/banner-styles.css?v=3D1utQkbB3"><lin=
+k rel=3D"stylesheet" type=3D"text/css" href=3D"https://web-static.archive.o=
+rg/_static/css/iconochive.css?v=3D3PDvdIFv"><div class=3D"wb-autocomplete-s=
+uggestions " style=3D"left: 135px; top: 22px; width: 915px;"></div></templa=
+te>
+</div><div id=3D"wm-ipp-print">The Wayback Machine - https://web.archive.or=
+g/web/20120730003401/http://www.orangeforum.or.jp/</div>
+
+<!-- END WAYBACK TOOLBAR INSERT -->
+ </div>
+<iframe id=3D"playback" src=3D"cid:frame-DD2DBE615FC4408124928D2D9EC6E402@m=
+html.blink" frameborder=3D"0" style=3D"flex:1 0">
+</iframe>
+
+
+</body></html>
+------MultipartBoundary--NOo4mjfLoiq6hjtlxBr3f5zDzsTBQMzhrBFplzoUj6----
+Content-Type: image/gif
+Content-Transfer-Encoding: base64
+Content-Location: https://web-static.archive.org/_static/images/loading.gif
+
+R0lGODlhFAAUAOMIAAAAABoaGjMzM0xMTGZmZoCAgJmZmbKysv//////////////////////////
+/////yH/C05FVFNDQVBFMi4wAwEAAAAh+QQBCgAIACwAAAAAFAAUAAAEUxDJSau9CADMteZTEEje
+hhzHJYqkiaLWOlZvGs8WDO6UIPAGw8TnAwWDEuKPcxQml0YnjzcYYAqFS7VqwWItWyuCQJB4s2Ax
+mWxGg9bl6YQtl0cAACH5BAEKAA8ALAAAAAAUABQAAART8MlJq70vBMy15pMgSN72AMAliqSJotY6
+Vm8azxYM7tQw8IfDxOcDBYMS4o9zFCaXRiePRyBgDIZLtWrBYi1b66NQkHizYDGZbEaD1uXphC2X
+RwAAIfkEAQoADwAsAAAAABQAFAAABFPwyUmrvU8IzLXm0zBI3vYEwSWKpImi1jpWbxrPFgzuFEHw
+AMDE5wMFgxLij3MUJpdGJ49XKGAOh0u1asFiLVvrw2CQeLNgMZlsRoPW5emELZdHAAAh+QQBCgAP
+ACwAAAAAFAAUAAAEU/DJSau9bwzMteYTQUje9gjCJYqkiaLWOlZvGs8WDO5UUfCBwMTnAwWDEuKP
+cxQml0Ynj2cwYACAS7VqwWItW+vjcJB4s2AxmWxGg9bl6YQtl0cAACH5BAEKAA8ALAAAAAAUABQA
+AART8MlJq72PEMy15lNRSN72DMMliqSJotY6Vm8azxYM7pRh8ALBxOcDBYMS4o9zFCaXRiePdzhg
+AoFLtWrBYi1b6wMAkHizYDGZbEaD1uXphC2XRwAAIfkEAQoADwAsAAAAABQAFAAABFPwyUmrva8U
+zLXmk2FI3vYQxCWKpImi1jpWbxrPFgzu1HHwg8HE5wMFgxLij3MUJpdGJ48HAGAEgku1asFiLVvr
+IxCQeLNgMZlsRoPW5emELZdHAAAh+QQBCgAPACwAAAAAFAAUAAAEU/DJSau9zxjMtebTcUje9hTF
+JYqkiaLWOlZvGs8WDO4UAPAEwsTnAwWDEuKPcxQml0YnjxcIYAaDS7VqwWItW+tDIJB4s2AxmWxG
+g9bl6YQtl0cAACH5BAEKAA8ALAAAAAAUABQAAART8MlJq73vHMy15hMASN72GMYliqSJotY6Vm8a
+zxYM7lQQ8IXCxOcDBYMS4o9zFCaXRiePJxBgCIRLtWrBYi1b62MwkHizYDGZbEaD1uXphC2XRwAA
+Ow==
+
+------MultipartBoundary--NOo4mjfLoiq6hjtlxBr3f5zDzsTBQMzhrBFplzoUj6----
+Content-Type: image/png
+Content-Transfer-Encoding: base64
+Content-Location: https://web-static.archive.org/_static/images/toolbar/wayback-toolbar-logo-200.png
+
+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
+
+------MultipartBoundary--NOo4mjfLoiq6hjtlxBr3f5zDzsTBQMzhrBFplzoUj6----
+Content-Type: text/css
+Content-Transfer-Encoding: quoted-printable
+Content-Location: https://web-static.archive.org/_static/css/iconochive.css?v=3PDvdIFv
+
+@charset "utf-8";
+
+@font-face { font-family: Iconochive-Regular; src: url("../fonts/Iconochive=
+-Regular.woff") format("woff"), url("../fonts/Iconochive-Regular.ttf") form=
+at("truetype"); font-weight: normal; font-style: normal; }
+
+[class^=3D"iconochive-"], [class*=3D" iconochive-"] { speak: none; font-sty=
+le: normal; font-weight: normal; font-variant: normal; text-transform: none=
+; line-height: 1; -webkit-font-smoothing: antialiased; font-family: Iconoch=
+ive-Regular !important; }
+
+.iconochive-Uplevel::before { content: "=E2=86=B5"; }
+
+.iconochive-exit::before { content: "=F0=9F=9A=A3"; }
+
+.iconochive-beta::before { content: "=CE=B2"; }
+
+.iconochive-logo::before { content: "=F0=9F=8F=9B"; }
+
+.iconochive-audio::before { content: "=F0=9F=95=A8"; }
+
+.iconochive-movies::before { content: "=F0=9F=8E=9E"; }
+
+.iconochive-software::before { content: "=F0=9F=92=BE"; }
+
+.iconochive-texts::before { content: "=F0=9F=95=AE"; }
+
+.iconochive-etree::before { content: "=F0=9F=8E=A4"; }
+
+.iconochive-image::before { content: "=F0=9F=96=BC"; }
+
+.iconochive-web::before { content: "=F0=9F=97=94"; }
+
+.iconochive-collection::before { content: "=E2=88=91"; }
+
+.iconochive-folder::before { content: "=F0=9F=93=82"; }
+
+.iconochive-data::before { content: "=F0=9F=97=83"; }
+
+.iconochive-tv::before { content: "=F0=9F=93=BA"; }
+
+.iconochive-article::before { content: "=F0=9F=97=8F"; }
+
+.iconochive-question::before { content: "=E2=8D=B0"; }
+
+.iconochive-question-dark::before { content: "?"; }
+
+.iconochive-info::before { content: "i"; }
+
+.iconochive-info-small::before { content: "=E2=93=98"; }
+
+.iconochive-comment::before { content: "=F0=9F=97=A9"; }
+
+.iconochive-comments::before { content: "=F0=9F=97=AA"; }
+
+.iconochive-person::before { content: "=F0=9F=91=A4"; }
+
+.iconochive-people::before { content: "=F0=9F=91=A5"; }
+
+.iconochive-eye::before { content: "=F0=9F=91=81"; }
+
+.iconochive-rss::before { content: "=E2=88=9E"; }
+
+.iconochive-time::before { content: "=F0=9F=95=91"; }
+
+.iconochive-quote::before { content: "=E2=9D=9D"; }
+
+.iconochive-disc::before { content: "=F0=9F=92=BF"; }
+
+.iconochive-tv-commercial::before { content: "=F0=9F=92=B0"; }
+
+.iconochive-search::before { content: "=F0=9F=94=8D"; }
+
+.iconochive-search-star::before { content: "=E2=9C=BD"; }
+
+.iconochive-tiles::before { content: "=E2=8A=9E"; }
+
+.iconochive-list::before { content: "=E2=87=B6"; }
+
+.iconochive-list-bulleted::before { content: "=E2=8C=97"; }
+
+.iconochive-latest::before { content: "=E2=88=88"; }
+
+.iconochive-left::before { content: "=CB=82"; }
+
+.iconochive-right::before { content: "=CB=83"; }
+
+.iconochive-left-solid::before { content: "=E2=97=82"; }
+
+.iconochive-right-solid::before { content: "=E2=96=B8"; }
+
+.iconochive-up-solid::before { content: "=E2=96=B4"; }
+
+.iconochive-down-solid::before { content: "=E2=96=BE"; }
+
+.iconochive-dot::before { content: "=E2=8F=A4"; }
+
+.iconochive-dots::before { content: "=E2=96=A6"; }
+
+.iconochive-columns::before { content: "=E2=96=AF"; }
+
+.iconochive-sort::before { content: "=E2=87=95"; }
+
+.iconochive-atoz::before { content: "=F0=9F=94=A4"; }
+
+.iconochive-ztoa::before { content: "=F0=9F=94=A5"; }
+
+.iconochive-upload::before { content: "=F0=9F=93=A4"; }
+
+.iconochive-download::before { content: "=F0=9F=93=A5"; }
+
+.iconochive-favorite::before { content: "=E2=98=85"; }
+
+.iconochive-heart::before { content: "=E2=99=A5"; }
+
+.iconochive-play::before { content: "=E2=96=B6"; }
+
+.iconochive-play-framed::before { content: "=F0=9F=8E=AC"; }
+
+.iconochive-fullscreen::before { content: "=E2=9B=B6"; }
+
+.iconochive-mute::before { content: "=F0=9F=94=87"; }
+
+.iconochive-unmute::before { content: "=F0=9F=94=8A"; }
+
+.iconochive-share::before { content: "=F0=9F=8E=81"; }
+
+.iconochive-edit::before { content: "=E2=9C=8E"; }
+
+.iconochive-reedit::before { content: "=E2=9C=90"; }
+
+.iconochive-gear::before { content: "=E2=9A=99"; }
+
+.iconochive-remove-circle::before { content: "=E2=9D=8E"; }
+
+.iconochive-plus-circle::before { content: "=F0=9F=97=96"; }
+
+.iconochive-minus-circle::before { content: "=F0=9F=97=95"; }
+
+.iconochive-x::before { content: "=F0=9F=97=99"; }
+
+.iconochive-fork::before { content: "=E2=8B=94"; }
+
+.iconochive-trash::before { content: "=F0=9F=97=91"; }
+
+.iconochive-warning::before { content: "=E2=9A=A0"; }
+
+.iconochive-flash::before { content: "=F0=9F=97=B2"; }
+
+.iconochive-world::before { content: "=F0=9F=97=BA"; }
+
+.iconochive-lock::before { content: "=F0=9F=94=92"; }
+
+.iconochive-unlock::before { content: "=F0=9F=94=93"; }
+
+.iconochive-twitter::before { content: "=F0=9F=90=A6"; }
+
+.iconochive-facebook::before { content: "f"; }
+
+.iconochive-googleplus::before { content: "g"; }
+
+.iconochive-reddit::before { content: "=F0=9F=91=BD"; }
+
+.iconochive-tumblr::before { content: "T"; }
+
+.iconochive-pinterest::before { content: "=F0=9D=93=9F"; }
+
+.iconochive-popcorn::before { content: "=F0=9F=92=A5"; }
+
+.iconochive-email::before { content: "=F0=9F=93=A7"; }
+
+.iconochive-embed::before { content: "=F0=9F=94=97"; }
+
+.iconochive-gamepad::before { content: "=F0=9F=95=B9"; }
+
+.iconochive-Zoom_In::before { content: "+"; }
+
+.iconochive-Zoom_Out::before { content: "-"; }
+
+.iconochive-RSS::before { content: "=F0=9F=93=A8"; }
+
+.iconochive-Light_Bulb::before { content: "=F0=9F=92=A1"; }
+
+.iconochive-Add::before { content: "=E2=8A=95"; }
+
+.iconochive-Tab_Activity::before { content: "=E2=8C=98"; }
+
+.iconochive-Forward::before { content: "=E2=8F=A9"; }
+
+.iconochive-Backward::before { content: "=E2=8F=AA"; }
+
+.iconochive-No_Audio::before { content: "=F0=9F=94=88"; }
+
+.iconochive-Pause::before { content: "=E2=8F=B8"; }
+
+.iconochive-No_Favorite::before { content: "=E2=98=86"; }
+
+.iconochive-Unike::before { content: "=E2=99=A1"; }
+
+.iconochive-Song::before { content: "=E2=99=AB"; }
+
+.iconochive-No_Flag::before { content: "=E2=9A=90"; }
+
+.iconochive-Flag::before { content: "=E2=9A=91"; }
+
+.iconochive-Done::before { content: "=E2=9C=93"; }
+
+.iconochive-Check::before { content: "=E2=9C=94"; }
+
+.iconochive-Refresh::before { content: "=E2=9F=B3"; }
+
+.iconochive-Headphones::before { content: "=F0=9F=8E=A7"; }
+
+.iconochive-Chart::before { content: "=F0=9F=93=88"; }
+
+.iconochive-Bookmark::before { content: "=F0=9F=93=91"; }
+
+.iconochive-Documents::before { content: "=F0=9F=93=9A"; }
+
+.iconochive-Newspaper::before { content: "=F0=9F=93=B0"; }
+
+.iconochive-Podcast::before { content: "=F0=9F=93=B6"; }
+
+.iconochive-Radio::before { content: "=F0=9F=93=BB"; }
+
+.iconochive-Cassette::before { content: "=F0=9F=93=BC"; }
+
+.iconochive-Shuffle::before { content: "=F0=9F=94=80"; }
+
+.iconochive-Loop::before { content: "=F0=9F=94=81"; }
+
+.iconochive-Low_Audio::before { content: "=F0=9F=94=89"; }
+
+.iconochive-First::before { content: "=F0=9F=8E=96"; }
+
+.iconochive-Invisible::before { content: "=F0=9F=95=B6"; }
+
+.iconochive-Computer::before { content: "=F0=9F=96=B3"; }
+------MultipartBoundary--NOo4mjfLoiq6hjtlxBr3f5zDzsTBQMzhrBFplzoUj6----
+Content-Type: image/svg+xml
+Content-Transfer-Encoding: quoted-printable
+Content-Location: https://web-static.archive.org/_static/images/web-screenshot.svg
+
+<svg height=3D"20" viewBox=3D"0 0 24 20" width=3D"24" xmlns=3D"http://www.w=
+3.org/2000/svg"><g fill=3D"none" fill-rule=3D"evenodd"><path d=3D"m0 0h24v2=
+0h-24z" fill=3D"#fff"/><path d=3D"m18.5721525 15.8731314h-2.213751v-2.16100=
+43h2.213751zm-3.2647703 0h-2.2149026v-2.1610043h2.2149026zm3.1265692-11.569=
+96429v5.82540599 1.5252793h-16.86629045v-1.5252793-5.82540599zm-6.4790971 1=
+1.56996429h-10.35448576v-2.1160889h10.35448576zm-11.9548543-13.0731314v6.74=
+421283 7.72244617h20v-7.72244617-6.74421283z" fill=3D"#333" fill-rule=3D"no=
+nzero" transform=3D"matrix(1 0 0 -1 0 18.067)"/><rect fill=3D"#333" height=
+=3D"10" rx=3D"1" stroke=3D"#333" width=3D"14.906" x=3D"8" y=3D"9"/><circle =
+cx=3D"15.453" cy=3D"14" fill=3D"#fff" r=3D"3.491"/><circle cx=3D"15.453" cy=
+=3D"14" fill=3D"#333" r=3D"1.604"/></g></svg>
+------MultipartBoundary--NOo4mjfLoiq6hjtlxBr3f5zDzsTBQMzhrBFplzoUj6----
+Content-Type: text/css
+Content-Transfer-Encoding: quoted-printable
+Content-Location: https://web-static.archive.org/_static/css/banner-styles.css?v=1utQkbB3
+
+@charset "utf-8";
+
+:root { --wm-toolbar-height: 65px; }
+
+#wm-ipp-base { height: 65px; padding: 0px; margin: 0px; border: none; backg=
+round: none transparent; }
+
+#wm-ipp { z-index: 2147483647; }
+
+#wm-ipp, #wm-ipp * { font-family: "Lucida Grande", Helvetica, Arial, sans-s=
+erif; font-size: 12px; line-height: 1.2; letter-spacing: 0px; width: auto; =
+height: auto; max-width: none; max-height: none; min-height: 0px; outline: =
+none; float: none; text-align: left; border: none; color: rgb(0, 0, 0); tex=
+t-indent: 0px; position: initial; background: none; min-width: 0px !importa=
+nt; }
+
+#wm-ipp div, #wm-ipp canvas { display: block; }
+
+#wm-ipp div, #wm-ipp tr, #wm-ipp td, #wm-ipp a, #wm-ipp form { padding: 0px=
+; margin: 0px; border: none; border-radius: 0px; background-color: transpar=
+ent; background-image: none; height: auto; }
+
+#wm-ipp table { border: none; border-collapse: collapse; margin: 0px; paddi=
+ng: 0px; width: auto; font-size: inherit; }
+
+#wm-ipp form input { height: auto; display: inline; margin: 0px; color: rgb=
+(0, 0, 0); background: none rgb(255, 255, 255); border: 1px solid rgb(102, =
+102, 102); padding: 1px !important; }
+
+#wm-ipp form input[type=3D"submit"] { padding: 0px 8px !important; margin: =
+1px 0px 1px 5px !important; width: auto !important; border: 1px solid rgb(0=
+, 0, 0) !important; background: rgb(255, 255, 255) !important; color: rgb(0=
+, 0, 0) !important; }
+
+#wm-ipp form input[type=3D"submit"]:hover { background: rgb(238, 238, 238) =
+!important; cursor: pointer !important; }
+
+#wm-ipp form input[type=3D"submit"]:active { transform: translateY(1px); }
+
+#wm-ipp a { display: inline; }
+
+#wm-ipp a:hover { text-decoration: underline; }
+
+#wm-ipp a.wm-btn:hover { text-decoration: none; color: rgb(255, 255, 0) !im=
+portant; }
+
+#wm-ipp a.wm-btn:hover span { color: rgb(255, 255, 0) !important; }
+
+#wm-ipp #wm-ipp-inside { margin: 0px 6px; border-right: 5px solid rgb(0, 0,=
+ 0); border-bottom: 5px solid rgb(0, 0, 0); border-left: 5px solid rgb(0, 0=
+, 0); border-image: initial; border-top: none; background-color: rgba(255, =
+255, 255, 0.9); box-shadow: rgb(51, 51, 51) 1px 1px 4px; border-radius: 0px=
+ 0px 8px 8px; }
+
+#wm-ipp #wm-logo { padding: 0px 10px; vertical-align: middle; min-width: 10=
+0px; flex: 0 0 100px; }
+
+#wm-ipp .c { padding-left: 4px; }
+
+#wm-ipp .c .u { margin-top: 4px !important; }
+
+#wm-ipp .n { vertical-align: bottom; padding: 0px 0px 0px 5px !important; }
+
+#wm-ipp .n a { text-decoration: none; color: rgb(51, 51, 255); font-weight:=
+ bold; }
+
+#wm-ipp .n .b { overflow: visible; white-space: nowrap; color: rgb(153, 153=
+, 170); vertical-align: middle; padding: 0px 6px 0px 0px !important; text-a=
+lign: right !important; }
+
+#wm-ipp .n .y .b { padding: 0px 6px 2px 0px !important; }
+
+#wm-ipp .n .c { background: rgb(0, 0, 0); color: rgb(255, 255, 0); font-wei=
+ght: bold; text-align: center; padding: 0px !important; }
+
+#wm-ipp .n .d span.ta { display: inline-block; width: 0px; height: 0px; bor=
+der-color: transparent rgb(153, 153, 170); border-style: solid; }
+
+#wm-ipp .n .d .b span.ta { border-width: 8px 14px 8px 0px; }
+
+#wm-ipp .n .d .f span.ta { border-width: 8px 0px 8px 14px; }
+
+#wm-ipp .n .d a span.ta { border-color: transparent rgb(51, 51, 255); }
+
+#wm-ipp .n .d a span.ta:hover { border-color: transparent rgb(119, 119, 255=
+); }
+
+#wm-ipp.hi .n td.c { color: rgb(236, 0, 140); }
+
+#wm-ipp .n td.f { overflow: visible; white-space: nowrap; color: rgb(153, 1=
+53, 170); vertical-align: middle; padding: 0px 0px 0px 6px !important; text=
+-align: left !important; }
+
+#wm-ipp .n tr.m td { text-transform: uppercase; white-space: nowrap; paddin=
+g: 2px 0px; }
+
+#wm-ipp .c .s { vertical-align: bottom; padding: 0px 5px 0px 0px !important=
+; }
+
+#wm-ipp #wm-nav-captures { white-space: nowrap; }
+
+#wm-ipp .c .s a.t { color: rgb(51, 51, 255); font-weight: bold; line-height=
+: 1.8; }
+
+#wm-ipp .c .s div.r { color: rgb(102, 102, 102); font-size: 9px; white-spac=
+e: nowrap; }
+
+#wm-ipp .c .k { padding-bottom: 1px; }
+
+#wm-ipp .c .s { padding: 0px 5px 2px 0px !important; }
+
+#wm-ipp td#displayMonthEl { padding: 2px 0px !important; }
+
+#wm-ipp td#displayYearEl { padding: 0px 0px 2px !important; }
+
+div#wm-ipp-sparkline { position: relative; white-space: nowrap; background-=
+color: rgb(255, 255, 255); cursor: pointer; line-height: 0.9; }
+
+#sparklineImgId, #wm-sparkline-canvas { position: relative; z-index: 9012; =
+max-width: none; }
+
+#wm-ipp-sparkline div.yt { position: absolute; top: 0px; z-index: 9010 !imp=
+ortant; background-color: rgb(255, 255, 0) !important; }
+
+#wm-ipp-sparkline div.mt { position: absolute; top: 0px; z-index: 9013 !imp=
+ortant; background-color: rgb(236, 0, 140) !important; }
+
+#wm-ipp .r { margin-left: 4px; }
+
+#wm-ipp .r a { color: rgb(51, 51, 255); border: none; position: relative; b=
+ackground-color: transparent; text-decoration: none; background-repeat: no-=
+repeat !important; background-position: 100% 100% !important; }
+
+#wm-ipp #wm-capinfo { border-radius: 0px 0px 4px 4px; }
+
+#wm-ipp #wm-capinfo .c-logo { display: block; float: left; margin-right: 3p=
+x; width: 90px; min-height: 90px; max-height: 290px; border-radius: 45px; o=
+verflow: hidden; background-position: 50% center; background-size: auto 90p=
+x; box-shadow: rgb(208, 208, 208) 0px 0px 2px 2px inset; }
+
+#wm-ipp #wm-capinfo .c-logo span { display: inline-block; }
+
+#wm-ipp #wm-capinfo .c-logo img { height: 90px; position: relative; left: -=
+50%; }
+
+#wm-ipp #wm-capinfo .wm-title { font-size: 130%; }
+
+#wm-ipp #wm-capinfo a.wm-selector { display: inline-block; color: rgb(170, =
+170, 170); padding: 2px 8px; text-decoration: none !important; }
+
+#wm-ipp #wm-capinfo a.wm-selector.selected { background-color: rgb(102, 102=
+, 102); }
+
+#wm-ipp #wm-capinfo a.wm-selector:hover { color: rgb(255, 255, 255); }
+
+#wm-ipp #wm-capinfo.notice-only #wm-capinfo-collected-by, #wm-ipp #wm-capin=
+fo.notice-only #wm-capinfo-timestamps { display: none; }
+
+#wm-ipp #wm-capinfo #wm-capinfo-notice .wm-capinfo-content { background-col=
+or: rgb(255, 255, 0); padding: 5px; font-size: 14px; text-align: center; }
+
+#wm-ipp #wm-capinfo #wm-capinfo-notice .wm-capinfo-content * { font-size: 1=
+4px; text-align: center; }
+
+#wm-ipp #wm-expand { right: 1px; bottom: -1px; color: rgb(255, 255, 255); b=
+ackground-color: rgb(102, 102, 102) !important; padding: 0px 5px 0px 3px !i=
+mportant; border-radius: 3px 3px 0px 0px !important; }
+
+#wm-ipp #wm-expand span { color: rgb(255, 255, 255); }
+
+#wm-ipp #wm-expand #wm-expand-icon { display: inline-block; transition: tra=
+nsform 0.5s; transform-origin: 50% 45%; }
+
+#wm-ipp #wm-expand.wm-open #wm-expand-icon { transform: rotate(180deg); }
+
+#wm-ipp #wmtb { text-align: right; }
+
+#wm-ipp #wmtb #wmtbURL { width: calc(100% - 45px); }
+
+#wm-ipp #wm-graph-anchor { border-right: 1px solid rgb(204, 204, 204); }
+
+html.wb-highlight { box-shadow: rgb(165, 14, 58) 0px 0px 0px 3px inset !imp=
+ortant; }
+
+.wb-highlight { outline: rgb(165, 14, 58) solid 3px !important; }
+
+#wm-ipp-print { display: none !important; }
+
+@media print {
+  #wm-ipp-base { display: none !important; }
+  #wm-ipp-print { white-space: nowrap; overflow: hidden; text-overflow: ell=
+ipsis; display: block !important; }
+}
+
+@media (max-width: 414px) {
+  #wm-ipp .xxs { display: none !important; }
+}
+
+@media (min-width: 1055px) {
+  #wm-ipp #wm-graph-anchor { display: block !important; }
+}
+
+@media (max-width: 1054px) {
+  #wm-ipp #wm-graph-anchor { display: none !important; }
+}
+
+@media (max-width: 1163px) {
+  #wm-logo { display: none !important; }
+}
+
+#wm-btns { white-space: nowrap; margin-top: -2px; }
+
+#wm-btns #wm-save-snapshot-open { margin-right: 7px; top: -6px; }
+
+#wm-btns #wm-sign-in { box-sizing: content-box; display: none; margin-right=
+: 7px; top: -8px; border: 2px solid rgb(0, 0, 0); border-radius: 14px; padd=
+ing-right: 2px; padding-bottom: 2px; width: 11px; height: 11px; }
+
+#wm-btns #wm-sign-in > .iconochive-person { font-size: 12.5px; }
+
+#wm-save-snapshot-open > .iconochive-web { color: rgb(0, 0, 0); font-size: =
+160%; }
+
+#wm-ipp #wm-share { display: flex; align-items: flex-end; justify-content: =
+space-between; }
+
+#wm-share > #wm-screenshot { display: inline-block; margin-right: 3px; visi=
+bility: hidden; }
+
+#wm-screenshot > .iconochive-image { color: rgb(0, 0, 0); font-size: 160%; =
+}
+
+#wm-share > #wm-video { display: inline-block; margin-right: 3px; visibilit=
+y: hidden; }
+
+#wm-video > .iconochive-movies { color: rgb(0, 0, 0); display: inline-block=
+; font-size: 150%; margin-bottom: 2px; }
+
+#wm-btns #wm-save-snapshot-in-progress { display: none; font-size: 160%; op=
+acity: 0.5; position: relative; margin-right: 7px; top: -5px; }
+
+#wm-btns #wm-save-snapshot-success { display: none; color: green; position:=
+ relative; top: -7px; }
+
+#wm-btns #wm-save-snapshot-fail { display: none; color: red; position: rela=
+tive; top: -7px; }
+
+.wm-icon-screen-shot { display: inline-block; background: url("../images/we=
+b-screenshot.svg") 0% 0% / contain no-repeat !important; width: 22px !impor=
+tant; height: 19px !important; }
+
+#donato { height: 0px; margin: 0px; padding: 0px; border-bottom: 1px solid =
+rgb(153, 153, 153) !important; }
+
+body.wm-modal { height: auto !important; overflow: hidden !important; }
+
+#donato #donato-base { width: 100%; height: 100%; margin: 0px; padding: 0px=
+; position: absolute; z-index: 2147483639; }
+
+body.wm-modal #donato #donato-base { position: fixed; inset: 0px; z-index: =
+2147483640; }
+
+.wb-autocomplete-suggestions { font-family: "Lucida Grande", Helvetica, Ari=
+al, sans-serif; font-size: 12px; text-align: left; cursor: default; border-=
+width: 0px 1px 1px; border-right-style: solid; border-bottom-style: solid; =
+border-left-style: solid; border-right-color: rgb(204, 204, 204); border-bo=
+ttom-color: rgb(204, 204, 204); border-left-color: rgb(204, 204, 204); bord=
+er-image: initial; border-top-style: initial; border-top-color: initial; ba=
+ckground: rgb(255, 255, 255); box-shadow: rgba(0, 0, 0, 0.1) -1px 1px 3px; =
+position: absolute; display: none; z-index: 2147483647; max-height: 254px; =
+overflow: hidden auto; box-sizing: border-box; }
+
+.wb-autocomplete-suggestion { position: relative; padding: 0px 0.6em; line-=
+height: 23px; white-space: nowrap; overflow: hidden; text-overflow: ellipsi=
+s; font-size: 1.02em; color: rgb(51, 51, 51); }
+
+.wb-autocomplete-suggestion b { font-weight: bold; }
+
+.wb-autocomplete-suggestion.selected { background: rgb(240, 240, 240); }
+------MultipartBoundary--NOo4mjfLoiq6hjtlxBr3f5zDzsTBQMzhrBFplzoUj6----
+Content-Type: text/css
+Content-Transfer-Encoding: quoted-printable
+Content-Location: cid:css-9bf0f876-ac3e-4cfc-87f3-76bb0573e6d8@mhtml.blink
+
+@charset "windows-1252";
+=0A
+------MultipartBoundary--NOo4mjfLoiq6hjtlxBr3f5zDzsTBQMzhrBFplzoUj6----
+Content-Type: text/html
+Content-ID: <frame-DDE182594923C6E3E58D7411C2D79B8D@mhtml.blink>
+Content-Transfer-Encoding: quoted-printable
+Content-Location: https://archive.org/includes/donate.php?as_page=1&platform=wb&referer=https%3A//web.archive.org/web/20120730003401/http%3A//www.orangeforum.or.jp/
+
+<html><head><meta http-equiv=3D"Content-Type" content=3D"text/html; charset=
+=3DUTF-8"><link rel=3D"stylesheet" type=3D"text/css" href=3D"cid:css-e91763=
+2e-e3a4-4a23-994e-9fb71ba425c5@mhtml.blink" /></head><body></body></html>
+------MultipartBoundary--NOo4mjfLoiq6hjtlxBr3f5zDzsTBQMzhrBFplzoUj6----
+Content-Type: text/css
+Content-Transfer-Encoding: quoted-printable
+Content-Location: cid:css-e917632e-e3a4-4a23-994e-9fb71ba425c5@mhtml.blink
+
+@charset "utf-8";
+=0A
+------MultipartBoundary--NOo4mjfLoiq6hjtlxBr3f5zDzsTBQMzhrBFplzoUj6----
+Content-Type: text/html
+Content-ID: <frame-DD2DBE615FC4408124928D2D9EC6E402@mhtml.blink>
+Content-Transfer-Encoding: quoted-printable
+Content-Location: https://web.archive.org/web/20120730003401if_/http://www.orangeforum.or.jp/
+
+<html><head><meta http-equiv=3D"Content-Type" content=3D"text/html; charset=
+=3DShift_JIS"><link rel=3D"stylesheet" type=3D"text/css" href=3D"cid:css-b7=
+90499d-f783-4712-b8c4-67954a8fc1fc@mhtml.blink" />
+
+
+
+
+<link rel=3D"stylesheet" type=3D"text/css" href=3D"https://web-static.archi=
+ve.org/_static/css/banner-styles.css?v=3D1utQkbB3">
+<link rel=3D"stylesheet" type=3D"text/css" href=3D"https://web-static.archi=
+ve.org/_static/css/iconochive.css?v=3D3PDvdIFv">
+<!-- End Wayback Rewrite JS Include -->
+
+
+<title>Welcome to Orange Forum Web Site</title>
+</head>
+
+<frameset cols=3D"150,*" border=3D"0" framespacing=3D"0" frameborder=3D"NO"=
+>
+<frame src=3D"cid:frame-A3FBD5F49410FF829536A1BF3BC85562@mhtml.blink" name=
+=3D"title" noresize=3D"" scrolling=3D"NO" marginwidth=3D"0" leftmargin=3D"0=
+" marginheight=3D"0" topmargin=3D"0" data-ruffle-polyfilled=3D"">
+
+<frameset rows=3D"71,*" border=3D"0" framespacing=3D"0" frameborder=3D"NO">
+<frame src=3D"cid:frame-B6177C3385AEC0E757BC6E331C3F938F@mhtml.blink" name=
+=3D"menu" noresize=3D"" scrolling=3D"NO" marginwidth=3D"0" leftmargin=3D"0"=
+ marginheight=3D"0" topmargin=3D"0" data-ruffle-polyfilled=3D"">
+<frame src=3D"cid:frame-3B8C4FBA5EF8D2AD12AA207ADBCA6F00@mhtml.blink" name=
+=3D"main" noresize=3D"" marginwidth=3D"10" leftmargin=3D"10" marginheight=
+=3D"0" topmargin=3D"0" data-ruffle-polyfilled=3D"">
+
+</frameset>
+</frameset>
+
+<noframes>
+<body>
+<center>
+Welcome to Orange Forum Web Site<br>
+=83t=83=8C=81[=83=80=91=CE=89=9E=83u=83=89=83E=83U=82=C5=82=B2=97=97=82=AD=
+=82=BE=82=B3=82=A2=81B
+</center>
+</body>
+</noframes>
+
+
+</html><!--
+     FILE ARCHIVED ON 00:34:01 Jul 30, 2012 AND RETRIEVED FROM THE
+     INTERNET ARCHIVE ON 21:10:28 May 10, 2026.
+     JAVASCRIPT APPENDED BY WAYBACK MACHINE, COPYRIGHT INTERNET ARCHIVE.
+
+     ALL OTHER CONTENT MAY ALSO BE PROTECTED BY COPYRIGHT (17 U.S.C.
+     SECTION 108(a)(3)).
+--><!--
+playback timings (ms):
+  capture_cache.get: 28.662
+  captures_list: 0.681
+  exclusion.robots: 0.047
+  exclusion.robots.policy: 0.034
+  esindex: 0.012
+  cdx.remote: 17.197
+  LoadShardBlock: 195.787 (3)
+  PetaboxLoader3.datanode: 199.305 (4)
+  PetaboxLoader3.resolve: 76.636 (2)
+  load_resource: 115.503
+-->
+------MultipartBoundary--NOo4mjfLoiq6hjtlxBr3f5zDzsTBQMzhrBFplzoUj6----
+Content-Type: text/css
+Content-Transfer-Encoding: quoted-printable
+Content-Location: cid:css-b790499d-f783-4712-b8c4-67954a8fc1fc@mhtml.blink
+
+@charset "shift_jis";
+=0A
+------MultipartBoundary--NOo4mjfLoiq6hjtlxBr3f5zDzsTBQMzhrBFplzoUj6----
+Content-Type: text/html
+Content-ID: <frame-A3FBD5F49410FF829536A1BF3BC85562@mhtml.blink>
+Content-Transfer-Encoding: quoted-printable
+Content-Location: https://web.archive.org/web/20120801170714fw_/http://www.orangeforum.or.jp/j/title.html
+
+<html><head><meta http-equiv=3D"Content-Type" content=3D"text/html; charset=
+=3DShift_JIS"><link rel=3D"stylesheet" type=3D"text/css" href=3D"cid:css-28=
+e67ab4-b414-4e16-87fb-140ffdc3b97e@mhtml.blink" />
+
+
+
+
+<link rel=3D"stylesheet" type=3D"text/css" href=3D"https://web-static.archi=
+ve.org/_static/css/banner-styles.css?v=3D1utQkbB3">
+<link rel=3D"stylesheet" type=3D"text/css" href=3D"https://web-static.archi=
+ve.org/_static/css/iconochive.css?v=3D3PDvdIFv">
+<!-- End Wayback Rewrite JS Include -->
+
+	=09
+		<title>Orange Forum Title</title>
+		</head><body marginwidth=3D"0" marginheight=3D"0" bgcolor=3D"white" topma=
+rgin=3D"0" leftmargin=3D"0"><csscriptdict>
+		=09
+		</csscriptdict>
+		<csactiondict>
+		=09
+
+		</csactiondict>
+=09
+
+
+<table border=3D"0" cellpadding=3D"0" cellspacing=3D"0" width=3D"150">
+			<tbody><tr>
+				<td width=3D"80" rowspan=3D"2" valign=3D"top"><img height=3D"170" width=
+=3D"80" src=3D"https://web.archive.org/web/20120801170714im_/http://www.ora=
+ngeforum.or.jp/image/title_a.gif"></td>
+				<td valign=3D"top" bgcolor=3D"black" align=3D"right"><csobj w=3D"54" h=
+=3D"45" t=3D"Button" ht=3D"image/home_w.gif" cl=3D"image/home_w.gif"><a hre=
+f=3D"https://web.archive.org/web/20120801170714fw_/http://www.orangeforum.o=
+r.jp/j/index.html" target=3D"_top"><img border=3D"0" src=3D"https://web.arc=
+hive.org/web/20120801170714im_/http://www.orangeforum.or.jp/j/image/space.g=
+if" width=3D"54" height=3D"45" align=3D"left" alt=3D"home"></a></csobj></td=
+>
+			</tr>
+			<tr>
+				<td valign=3D"top" width=3D"70"><img height=3D"125" width=3D"70" src=3D=
+"https://web.archive.org/web/20120801170714im_/http://www.orangeforum.or.jp=
+/image/title_b.gif"></td>
+			</tr>
+			<tr>
+				<td colspan=3D"2" valign=3D"top"><img height=3D"85" width=3D"150" src=
+=3D"https://web.archive.org/web/20120801170714im_/http://www.orangeforum.or=
+.jp/image/title_c.gif"></td>
+			</tr>
+			<tr>
+				<td colspan=3D"2" valign=3D"top"><img height=3D"45" width=3D"150" src=
+=3D"https://web.archive.org/web/20120801170714im_/http://www.orangeforum.or=
+.jp/j/image/title_mailto_J.gif"></td>
+			</tr>
+			<tr>
+			=09
+    <td colspan=3D"2" valign=3D"top"><csobj w=3D"150" h=3D"25" t=3D"Button"=
+ ht=3D"image/title_eng_Y.gif" cl=3D"image/title_eng_Y.gif"><a href=3D"https=
+://web.archive.org/web/20120801170714/http://www.orangeforum.or.jp/e/index.=
+htm" target=3D"_top"><img name=3D"english" border=3D"0" src=3D"https://web.=
+archive.org/web/20120801170714im_/http://www.orangeforum.or.jp/j/image/titl=
+e_eng_O.gif" width=3D"150" height=3D"25"></a></csobj></td>
+			</tr>
+			<tr>
+				<td colspan=3D"2" valign=3D"top"><img height=3D"100" width=3D"150" src=
+=3D"https://web.archive.org/web/20120801170714im_/http://www.orangeforum.or=
+.jp/image/title_d.gif"></td>
+			</tr>
+		</tbody></table>
+=09
+
+
+
+</body></html><!--
+     FILE ARCHIVED ON 17:07:14 Aug 01, 2012 AND RETRIEVED FROM THE
+     INTERNET ARCHIVE ON 21:10:30 May 10, 2026.
+     JAVASCRIPT APPENDED BY WAYBACK MACHINE, COPYRIGHT INTERNET ARCHIVE.
+
+     ALL OTHER CONTENT MAY ALSO BE PROTECTED BY COPYRIGHT (17 U.S.C.
+     SECTION 108(a)(3)).
+--><!--
+playback timings (ms):
+  capture_cache.get: 8.45
+  load_resource: 708.156
+  PetaboxLoader3.resolve: 617.526
+  PetaboxLoader3.datanode: 36.937
+-->
+------MultipartBoundary--NOo4mjfLoiq6hjtlxBr3f5zDzsTBQMzhrBFplzoUj6----
+Content-Type: image/gif
+Content-Transfer-Encoding: base64
+Content-Location: https://web.archive.org/web/20120801170714im_/http://www.orangeforum.or.jp/image/title_d.gif
+
+R0lGODlhlgBkAMQAAP/17/9wEP+DMP+zgP/Pr/95IP+MQP/Gn/+fYP+pcP/s3//iz//Zv/+WUP+8
+j/9mAP///wAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACH5BAAA
+AAAALAAAAACWAGQAQAX/4COOZGmeaKqubOuWBQDNdG3feD6/fO//wIBMRywagcik0jUwOp/EpXT6
+S0CvWBx1yx0Js+BwrUv+CYbitLrMPp3V8Pi4vQ0s5Pj8nM4LEPSAgTZ8Jn6Ch4hadQNoiY6PiiwB
+jJCVlpeYmZaEnGxNm52hSn+aEKKnLgilkaitDwerR66cn7FXs11vtmu4QKq7gb0qAbDAlb0CCsa7
+fAUMy9CsPgEO0dZYJgjP19x5wt8qBqDg5CLb4+W9DaXpuDGx7agByszxnHbQ9nTv1vpk691M+ZtC
+KuCOgUh+GRyEkIeuhdIaumkEMYfEEwYoVoxy8dVGMAgbaPx4q11GknLA/yEYiZIXKmctE3UyFPNY
+GQP0amaaYuCcTlvTKP28pqLAAZZDiRoolrSp05odXRV0FBVVzkdVQxXAlJWTFa5d6UxFF5bLF01l
+yShEm3aLT7ZtlwgAFnfJ2FV1kTysl7fHXaB9X4jrF1jSHaKFVXzllhjFXsSNvRw2GHkE04WV10Js
+PJhk4ccb+4L+WHe057SmUZZN3bKr5qZVaz092JDm7D3+WDsduPh2RHAFJvu2mK73cB3kBAg/zhGX
+beZOcMmG/qRVAqTUm3MSmV2MV+zdo7eZHt57lwJ/y5uf0uCq+pRKjL4/FETofPovJoG/j0eSff6Q
+oLAUgOyIMIl7BGaCYAiCDDbo4C4hAAA7
+
+------MultipartBoundary--NOo4mjfLoiq6hjtlxBr3f5zDzsTBQMzhrBFplzoUj6----
+Content-Type: image/gif
+Content-Transfer-Encoding: base64
+Content-Location: https://web.archive.org/web/20120801170714im_/http://www.orangeforum.or.jp/j/image/title_eng_O.gif
+
+R0lGODlhlgAZALMAAP+vef/07f9wEP+ALP/Gn//Zv/5mAPljAP1lAPZiAP////9mAAAAAAAAAAAA
+AAAAACH5BAAAAAAALAAAAACWABkAQASdcMlJq7046827/xOgjGRpniaormzrYkKAznT63njexnXv
+68CgcCHyGX/DpBI4OB6X0OiH53QapNjsolntjrTgsITrRYnPUWrZjG4H1Wu2e+6Cx+X0vId8r+n/
+G3x9foCFKgWDX4aLHASJioyRFo6PCpKXIZWQmIxFmpyRnp+ghqKjpH+mp6h0lJolrHmuryQJBwix
+aIi0NrlnMrwmEQA7
+
+------MultipartBoundary--NOo4mjfLoiq6hjtlxBr3f5zDzsTBQMzhrBFplzoUj6----
+Content-Type: image/gif
+Content-Transfer-Encoding: base64
+Content-Location: https://web.archive.org/web/20120801170714im_/http://www.orangeforum.or.jp/j/image/title_mailto_J.gif
+
+R0lGODlhlgAtALMAAPpkAOteAP/iz/+zgP+pcP/u4v+MQP9wEP/Io/95IP+ZVf+DMP+8j//Zv///
+//9mACH5BAAAAAAALAAAAACWAC0AQATv8MlJq7046827/+BjOGRpkmGqrmyrnnDpznRtY0esO3fv
+/x3CbgcsGmcAymLIPDqfoRFzCq1aVTnqdcvFTGXd8Hb5BYvPvUBFUD6h3z5EOwavuwpzon3/kzf5
+gDUDX4GFLYOEhoogiImLjxp+ZZCUF2xzlYtJFAl5KJmUQp48oI94o6SlhaKoqap7Wa2fr6CNerSZ
+p0O4mQqOvI8Nv8CGUlrEisLDyHzGx8yAl8vQcL5t1IC609hiDHncdZ3f4G/S1+RXmxOsmOhWahPi
+nu5h5u30TvAS3qj4V9b9/EGJFVCgE22jDDqR1EqhEVutIgAAOw==
+
+------MultipartBoundary--NOo4mjfLoiq6hjtlxBr3f5zDzsTBQMzhrBFplzoUj6----
+Content-Type: image/gif
+Content-Transfer-Encoding: base64
+Content-Location: https://web.archive.org/web/20120801170714im_/http://www.orangeforum.or.jp/image/title_c.gif
+
+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
+Ow==
+
+------MultipartBoundary--NOo4mjfLoiq6hjtlxBr3f5zDzsTBQMzhrBFplzoUj6----
+Content-Type: image/gif
+Content-Transfer-Encoding: base64
+Content-Location: https://web.archive.org/web/20120801170714im_/http://www.orangeforum.or.jp/image/title_b.gif
+
+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
+JIxsMKNEpjgHNUokfWl0o0gMIceIcAIwCAA7
+
+------MultipartBoundary--NOo4mjfLoiq6hjtlxBr3f5zDzsTBQMzhrBFplzoUj6----
+Content-Type: image/gif
+Content-Transfer-Encoding: base64
+Content-Location: https://web.archive.org/web/20120801170714im_/http://www.orangeforum.or.jp/j/image/space.gif
+
+R0lGODlhAQABAID/AMDAwAAAACH5BAEAAAAALAAAAAABAAEAQAICRAEAOw==
+
+------MultipartBoundary--NOo4mjfLoiq6hjtlxBr3f5zDzsTBQMzhrBFplzoUj6----
+Content-Type: image/gif
+Content-Transfer-Encoding: base64
+Content-Location: https://web.archive.org/web/20120801170714im_/http://www.orangeforum.or.jp/image/title_a.gif
+
+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
+
+------MultipartBoundary--NOo4mjfLoiq6hjtlxBr3f5zDzsTBQMzhrBFplzoUj6----
+Content-Type: text/css
+Content-Transfer-Encoding: quoted-printable
+Content-Location: cid:css-28e67ab4-b414-4e16-87fb-140ffdc3b97e@mhtml.blink
+
+@charset "shift_jis";
+=0A
+------MultipartBoundary--NOo4mjfLoiq6hjtlxBr3f5zDzsTBQMzhrBFplzoUj6----
+Content-Type: text/html
+Content-ID: <frame-B6177C3385AEC0E757BC6E331C3F938F@mhtml.blink>
+Content-Transfer-Encoding: quoted-printable
+Content-Location: https://web.archive.org/web/20120801185500fw_/http://www.orangeforum.or.jp/j/menu_top.html
+
+<html><head><meta http-equiv=3D"Content-Type" content=3D"text/html; charset=
+=3DShift_JIS"><link rel=3D"stylesheet" type=3D"text/css" href=3D"cid:css-a3=
+812667-76cc-4e7c-ae32-4275baa9211f@mhtml.blink" />
+
+<meta name=3D"robots" content=3D"noindex">
+<title>Orange Forum Menu</title>
+</head>
+
+<body topmargin=3D"0" marginheight=3D"0" leftmargin=3D"0" marginwidth=3D"0"=
+ background=3D"https://web.archive.org/web/20120801185500fw_/http://www.ora=
+ngeforum.or.jp/image/bg_menu.gif">
+=81@=81@
+
+</body></html>
+------MultipartBoundary--NOo4mjfLoiq6hjtlxBr3f5zDzsTBQMzhrBFplzoUj6----
+Content-Type: image/gif
+Content-Transfer-Encoding: base64
+Content-Location: https://web.archive.org/web/20120801185500fw_/http://www.orangeforum.or.jp/image/bg_menu.gif
+
+R0lGODlhAQDgLpH/AP/MAAAAAMDAwAAAACH5BAEAAAIALAAAAAABAOAuQAKXjA8py+0Po5y02ouz
+3rz7D4biSJbmiabqyrbuC8fyTNf2jef6zvf+/zggAMCi8YhMKpfMpvMJjUqn1Kr1is3yhFxD4qsN
+i8fksvmMTqvX7Lb7DY/L5/S6/Y7P6/f8vv8f0iU4GPBlCAaYqLjI2Oj4CBkpOUlZaXmJmam5ydnp
++QkaKjpKWmp6ipqqusra6voKGys7S1tVAAA7
+
+------MultipartBoundary--NOo4mjfLoiq6hjtlxBr3f5zDzsTBQMzhrBFplzoUj6----
+Content-Type: text/css
+Content-Transfer-Encoding: quoted-printable
+Content-Location: cid:css-a3812667-76cc-4e7c-ae32-4275baa9211f@mhtml.blink
+
+@charset "shift_jis";
+=0A
+------MultipartBoundary--NOo4mjfLoiq6hjtlxBr3f5zDzsTBQMzhrBFplzoUj6----
+Content-Type: text/html
+Content-ID: <frame-3B8C4FBA5EF8D2AD12AA207ADBCA6F00@mhtml.blink>
+Content-Transfer-Encoding: quoted-printable
+Content-Location: https://web.archive.org/web/20120801181031fw_/http://www.orangeforum.or.jp/j/top.html
+
+<html><head><meta http-equiv=3D"Content-Type" content=3D"text/html; charset=
+=3DShift_JIS"><link rel=3D"stylesheet" type=3D"text/css" href=3D"cid:css-f5=
+d7625f-3994-499d-93a1-c553ac856803@mhtml.blink" />
+
+
+
+
+<link rel=3D"stylesheet" type=3D"text/css" href=3D"https://web-static.archi=
+ve.org/_static/css/banner-styles.css?v=3D1utQkbB3">
+<link rel=3D"stylesheet" type=3D"text/css" href=3D"https://web-static.archi=
+ve.org/_static/css/iconochive.css?v=3D3PDvdIFv">
+<!-- End Wayback Rewrite JS Include -->
+
+
+<title>Orange Forum Top</title>
+</head>
+<body bgcolor=3D"#ffffff" marginwidth=3D"10" marginheight=3D"0">
+<table border=3D"0" cellpadding=3D"0" cellspacing=3D"0" width=3D"580">
+  <tbody><tr>=20
+	<td><img height=3D"30" width=3D"200" src=3D"https://web.archive.org/web/20=
+120801181031im_/http://www.orangeforum.or.jp/image/space.gif"><br>
+	  <table border=3D"0" width=3D"80%" cellpadding=3D"5" align=3D"center">
+		<tbody><tr>=20
+		  <td align=3D"left" width=3D"4%" valign=3D"top"><font color=3D"#ff6600">=
+<b>=81E</b></font></td>
+		  <td align=3D"left" width=3D"96%" bgcolor=3D"#FFFFFF"><font size=3D"+1">=
+<b><font color=3D"#FF0000">=83I=83=8C=83=93=83W=83t=83H=81[=83=89=83=80=82=
+=CD2001=94N4=8C=8E=82=C9=94=AD=91=AB=82=B5=82=BDCDs21=83\=83=8A=83=85=81[=
+=83V=83=87=83=93=83Y=82=C9=93=9D=8D=87=82=B3=82=EA=81A=8A=88=93=AE=82=F0=91=
+=B1=82=AF=82=C4=82=A2=82=DC=82=B7</font></b>=81B</font></td>
+		</tr>
+		<tr>=20
+		  <td align=3D"left" width=3D"4%" valign=3D"top"><font color=3D"#ff6600">=
+<b>=81E</b></font></td>
+		  <td align=3D"left" width=3D"96%"><font size=3D"+1">Orange Forum still c=
+ontinues=20
+			its activity as before upon being integrated into CDs21 Solutions=20
+			which was set up in April 2001.</font></td>
+		</tr>
+		<tr>=20
+		  <td align=3D"left" width=3D"4%" valign=3D"top">=81@</td>
+		  <td align=3D"left" width=3D"96%">=20
+			<p><b>CDs21 Solutions</b><br>
+			  URL=81F<a href=3D"https://web.archive.org/web/20120801181031/http://ww=
+w.cds21solutions.org/" target=3D"_top">http://www.cds21solutions.org</a><br=
+>
+			  <br>
+			  <b>Orange Forum</b><br>
+			  URL=81F<a href=3D"https://web.archive.org/web/20120801181031/http://ww=
+w.cds21solutions.org/index_library.htm" target=3D"_top">http://www.cds21sol=
+utions.org/index_library.htm</a><br>
+			  <br>
+			  <br>
+			  <br>
+			</p>
+		  </td>
+		</tr>
+		<tr>=20
+		  <td align=3D"left" width=3D"4%" valign=3D"top"><font color=3D"#ff6600">=
+<b>=81E</b></font></td>
+		  <td align=3D"left" width=3D"96%">=20
+			<div align=3D"left"><font color=3D"#000000" size=3D"+1"><b><font color=
+=3D"#FF0000">Disc=20
+			  ID Method=82=CC=8F=EE=95=F1=82=CDCDs21=83\=83=8A=83=85=81[=83V=83=87=
+=83=93=83Y=82=CC=83z=81[=83=80=83y=81[=83W=82=C9=88=DA=8A=C7=82=B3=82=EA=82=
+=DC=82=B5=82=BD=81B</font></b></font></div>
+		  </td>
+		</tr>
+		<tr>=20
+		  <td align=3D"left" width=3D"4%" valign=3D"top"><font color=3D"#ff6600">=
+<b>=81E</b></font></td>
+		  <td align=3D"left" width=3D"96%"><font color=3D"#ff6600" size=3D"+1"><f=
+ont color=3D"#000000">The=20
+			information on Disc ID Method has been transferred to CDs21 Solutions=20
+			Web site. </font></font></td>
+		</tr>
+		<tr>=20
+		  <td align=3D"left">=81@</td>
+		  <td align=3D"left"><font color=3D"#000000"><b class=3D"mk1">Disc ID Met=
+hod</b></font><br>
+			URL=81F<a href=3D"https://web.archive.org/web/20120801181031/http://www.=
+cds21solutions.org/index_discid.htm" target=3D"_top">http://www.cds21soluti=
+ons.org/index_discid.htm</a></td>
+		</tr>
+	  </tbody></table>
+	  <div align=3D"center"> <img height=3D"10" width=3D"200" src=3D"https://w=
+eb.archive.org/web/20120801181031im_/http://www.orangeforum.or.jp/image/spa=
+ce.gif"></div>
+	</td>
+  </tr>
+  <tr>=20
+	<td align=3D"center">=81@</td>
+  </tr>
+  <tr>=20
+	<td align=3D"center">=81@</td>
+  </tr>
+  <tr>=20
+	<td align=3D"center" bgcolor=3D"#ff6600"><font color=3D"white" size=3D"1">=
+<img height=3D"20" width=3D"10" src=3D"https://web.archive.org/web/20120801=
+181031im_/http://www.orangeforum.or.jp/image/space.gif" align=3D"middle">Co=
+pyright=20
+	  2000 the Orange Forum Office All right reserved.<img height=3D"20" width=
+=3D"10" src=3D"https://web.archive.org/web/20120801181031im_/http://www.ora=
+ngeforum.or.jp/image/space.gif" align=3D"middle"></font></td>
+  </tr>
+</tbody></table>
+
+
+
+</body></html><!--
+     FILE ARCHIVED ON 18:10:31 Aug 01, 2012 AND RETRIEVED FROM THE
+     INTERNET ARCHIVE ON 21:10:32 May 10, 2026.
+     JAVASCRIPT APPENDED BY WAYBACK MACHINE, COPYRIGHT INTERNET ARCHIVE.
+
+     ALL OTHER CONTENT MAY ALSO BE PROTECTED BY COPYRIGHT (17 U.S.C.
+     SECTION 108(a)(3)).
+--><!--
+playback timings (ms):
+  capture_cache.get: 0.424
+  load_resource: 280.387
+  PetaboxLoader3.resolve: 240.266
+  PetaboxLoader3.datanode: 19.128
+-->
+------MultipartBoundary--NOo4mjfLoiq6hjtlxBr3f5zDzsTBQMzhrBFplzoUj6----
+Content-Type: image/gif
+Content-Transfer-Encoding: base64
+Content-Location: https://web.archive.org/web/20120801181031im_/http://www.orangeforum.or.jp/image/space.gif
+
+R0lGODlhAQABAID/AMDAwAAAACH5BAEAAAAALAAAAAABAAEAQAICRAEAOw==
+
+------MultipartBoundary--NOo4mjfLoiq6hjtlxBr3f5zDzsTBQMzhrBFplzoUj6----
+Content-Type: text/css
+Content-Transfer-Encoding: quoted-printable
+Content-Location: cid:css-f5d7625f-3994-499d-93a1-c553ac856803@mhtml.blink
+
+@charset "shift_jis";
+=0A
+------MultipartBoundary--NOo4mjfLoiq6hjtlxBr3f5zDzsTBQMzhrBFplzoUj6------

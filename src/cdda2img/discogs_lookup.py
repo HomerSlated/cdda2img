@@ -12,7 +12,7 @@ import importlib.metadata
 import logging
 import os
 
-from cdda2img.lookup_result import DiscMeta
+from cdda2img.lookup_result import DiscMeta, TrackMeta
 from cdda2img.mb_lookup import _classify_remaster, _parse_year
 
 log = logging.getLogger(__name__)
@@ -76,10 +76,12 @@ def _parse_result(r) -> DiscMeta:
     barcodes: list = data.get("barcode") or []
     barcode = barcodes[0] if barcodes else ""
 
+    release_id = data.get("id") or getattr(r, "id", None)
     return DiscMeta(
         album=album or None,
         artist=artist or None,
         catalog=barcode or None,
+        discogs_release_id=int(release_id) if release_id else None,
         release_date=year,
         country=str(country) if country else None,
         label=str(label) if label else None,
@@ -87,6 +89,103 @@ def _parse_result(r) -> DiscMeta:
         remastered_source=_classify_remaster(album, None, _parse_year(year)),
         source="discogs",
     )
+
+
+def _discogs_join_artists(artists: list) -> str:
+    """Build a display name from a Discogs artists list (full release shape)."""
+    parts: list[str] = []
+    for a in artists:
+        if not isinstance(a, dict):
+            continue
+        parts.append(a.get("anv") or a.get("name") or "")
+        join = a.get("join") or ""
+        if join == ",":
+            parts.append(", ")
+        elif join:
+            parts.append(f" {join.strip()} ")
+    return "".join(parts).strip().rstrip(",").strip()
+
+
+def _discogs_parse_tracklist(tracklist: list) -> list[TrackMeta]:
+    """Convert a Discogs full-release tracklist to TrackMeta objects."""
+    tracks: list[TrackMeta] = []
+    seq = 0
+    for t in tracklist:
+        if not isinstance(t, dict) or t.get("type_") == "heading":
+            continue
+        seq += 1
+        pos = t.get("position") or ""
+        try:
+            number = int(pos)
+        except (ValueError, TypeError):
+            number = seq  # vinyl-style positions (A1, B2) → sequential fallback
+        tracks.append(TrackMeta(number=number, title=t.get("title") or None))
+    return tracks
+
+
+def _parse_full_release(r) -> DiscMeta:
+    """Parse a full Discogs Release object (fetched by ID, not from search).
+
+    Full releases have a separate artists list and a flat tracklist, unlike search
+    stubs which encode "Artist - Album" in a single title field with no tracklist.
+    """
+    data: dict = getattr(r, "data", {}) or {}
+
+    album = data.get("title") or ""
+    artist = _discogs_join_artists(data.get("artists") or [])
+
+    year_raw = data.get("year")
+    year = str(int(year_raw)) if year_raw else None
+
+    country = data.get("country") or None
+
+    labels: list = data.get("labels") or []
+    label = ""
+    catalog_number = ""
+    if labels and isinstance(labels[0], dict):
+        label = labels[0].get("name") or ""
+        catalog_number = labels[0].get("catno") or ""
+
+    barcode = next(
+        (
+            ident.get("value") or ""
+            for ident in (data.get("identifiers") or [])
+            if isinstance(ident, dict)
+            and (ident.get("type") or "").lower() == "barcode"
+        ),
+        "",
+    )
+
+    return DiscMeta(
+        album=album or None,
+        artist=artist or None,
+        catalog=barcode or None,
+        discogs_release_id=int(data["id"]) if data.get("id") else None,
+        release_date=year,
+        country=str(country) if country else None,
+        label=str(label) if label else None,
+        catalog_number=catalog_number or None,
+        remastered_source=_classify_remaster(album, None, _parse_year(year)),
+        source="discogs",
+        tracks=_discogs_parse_tracklist(data.get("tracklist") or []),
+    )
+
+
+def fetch_release(release_id: int) -> DiscMeta | None:
+    """Fetch a full Discogs release by integer ID and return its complete metadata.
+
+    Returns None when the token is absent, the library is unavailable, or on error.
+    Use this after the user selects a search stub to populate the track listing.
+    """
+    client = _get_client()
+    if not client:
+        return None
+    try:
+        r = client.release(release_id)
+        return _parse_full_release(r)
+    except Exception as exc:
+        log.debug("Discogs release fetch failed for %d: %s", release_id, exc)
+        return None
 
 
 def search_releases(query: str, limit: int = 25) -> list[DiscMeta]:

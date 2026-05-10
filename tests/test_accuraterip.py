@@ -163,7 +163,7 @@ def test_ar_checksums_first_track_boundary_inclusive() -> None:
     # mult=2940 (frame 2939): included (2940 >= 2940 and 2940 <= 2941)
     # mult=2941 (frame 2940): included (2941 >= 2940 and 2941 <= 2941)
     # Only frame 2940 is non-zero: product = 1 * 2941
-    v1, v2 = _ar_checksums(array.array("I", vals), track=1, total_tracks=2)
+    v1, _v2 = _ar_checksums(array.array("I", vals), track=1, total_tracks=2)
     assert v1 == 2941
 
 

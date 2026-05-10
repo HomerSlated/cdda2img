@@ -80,5 +80,5 @@ The core tension in CDDA archival is that the spec assumes a benign, well-behave
 - [Optical Disc Drives: CD Compatibility Technical Details — Redump Wiki](http://wiki.redump.org/index.php?title=Optical_Disc_Drives:_CD_Compatibility_Technical_Details)
 - [Redumper — Redump Wiki](http://wiki.redump.org/index.php?title=Redumper)
 - [superg/redumper — GitHub](https://github.com/superg/redumper)
-- `private/ABHOOD.md` §5.4 — CD Drive Technical Requirements for Accurate Dumping (summarises Redump drive criteria)
-- `private/spoons-audio-guide-cd-ripping.txt` — practical notes on drive offset correction and secure ripping
+- `docs/research/ABHOOD.md` §5.4 — CD Drive Technical Requirements for Accurate Dumping (summarises Redump drive criteria)
+- `docs/research/spoons-audio-guide-cd-ripping.txt` — practical notes on drive offset correction and secure ripping
