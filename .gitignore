@@ -69,6 +69,7 @@ rips/
 
 # Machine-local Claude Code context (see CLAUDE.md for the committed portion)
 CLAUDE.local.md
+.claude/
 
 # OS generated files #
 ######################
