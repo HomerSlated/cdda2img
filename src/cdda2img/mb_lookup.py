@@ -135,10 +135,16 @@ def _parse_release(release: dict) -> DiscMeta:
     for medium in release.get("medium-list") or []:
         for track in medium.get("track-list") or []:
             recording = track.get("recording") or {}
+            num_str = track.get("number") or ""
             try:
-                number = int(track.get("number", 0))
+                number = int(num_str) or None
             except (ValueError, TypeError):
-                number = None
+                # vinyl-style positions (A1, B2): fall back to sequential position
+                pos_str = track.get("position") or ""
+                try:
+                    number = int(pos_str) or None
+                except (ValueError, TypeError):
+                    number = None
             isrc_list = recording.get("isrc-list") or []
             length = recording.get("length")
             tracks.append(
@@ -385,6 +391,52 @@ def _merge_into_disc(meta: DiscMeta, disc: RBIDisc) -> RBIDisc:
             else disc.remastered_source
         ),
         mb_release_id=disc.mb_release_id or meta.mb_release_id or None,
+    )
+
+
+def _overwrite_disc(meta: DiscMeta, disc: RBIDisc) -> RBIDisc:
+    """Return a new RBIDisc with all non-None *meta* fields replacing disc fields.
+
+    Unlike _merge_into_disc (which keeps existing disc values), this always
+    prefers meta's values when set — used for the 'Overwrite All' apply mode.
+    """
+    meta_by_num = {t.number: t for t in meta.tracks if t.number is not None}
+    new_tracks: list[RBITocEntry] = []
+    for entry in disc.tracks:
+        mt = meta_by_num.get(entry.track_number)
+        if mt:
+            new_tracks.append(
+                RBITocEntry(
+                    track_number=entry.track_number,
+                    title=mt.title or entry.title,
+                    performer=mt.performer or entry.performer,
+                    start_frame=entry.start_frame,
+                    duration_frames=entry.duration_frames,
+                    pregap_frames=entry.pregap_frames,
+                    isrc=mt.isrc or entry.isrc,
+                )
+            )
+        else:
+            new_tracks.append(entry)
+
+    return RBIDisc(
+        album=meta.album or disc.album,
+        artist=meta.artist or disc.artist,
+        disc_number=disc.disc_number,
+        disc_total=disc.disc_total,
+        catalog=meta.catalog or disc.catalog,
+        disc_id=disc.disc_id,
+        tracks=new_tracks,
+        release_date=meta.release_date or disc.release_date or None,
+        original_release_date=meta.original_release_date
+        or disc.original_release_date
+        or None,
+        remastered_source=(
+            meta.remastered_source
+            if meta.remastered_source != REMASTERED_UNKNOWN
+            else disc.remastered_source
+        ),
+        mb_release_id=meta.mb_release_id or disc.mb_release_id or None,
     )
 
 

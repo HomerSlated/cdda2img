@@ -76,6 +76,18 @@ def _prompt_edit(label: str, current: str) -> str:
     return val if val else current
 
 
+def _prompt_search_fields(artist: str, title: str) -> tuple[str, str]:
+    """Prompt for artist and title search fields; at least one must remain non-blank."""
+    while True:
+        new_artist = _prompt(f"  Artist [{artist}]: ").strip()
+        new_title = _prompt(f"  Title  [{title}]: ").strip()
+        result_artist = new_artist if new_artist else artist
+        result_title = new_title if new_title else title
+        if result_artist or result_title:
+            return result_artist, result_title
+        print("  At least one field (artist or title) must be non-blank.")
+
+
 # ---------------------------------------------------------------------------
 # Disc display
 # ---------------------------------------------------------------------------
@@ -220,16 +232,29 @@ def _show_diff(meta: DiscMeta, disc: RBIDisc) -> None:
             print(line)
 
 
-def _confirm_apply(meta: DiscMeta, disc: RBIDisc) -> bool:
-    """Show diff and ask the user to confirm applying *meta* to *disc*."""
+def _confirm_apply(meta: DiscMeta, disc: RBIDisc) -> str | None:
+    """Show diff and ask how to apply *meta* to *disc*.
+
+    Returns 'update' (fill blanks only), 'overwrite' (replace all), or None (cancel).
+    """
     _header("Preview changes")
     _print_meta_summary(meta)
     print()
-    print("  Fields that would change:")
+    print("  Missing fields that would change:")
     _show_diff(meta, disc)
     print()
-    choice = _prompt("  Apply? [y/n]: ").strip().lower()
-    return choice == "y"
+    print("  [u]  Update missing fields only")
+    print("  [o]  Overwrite all fields (replace existing metadata)")
+    print("  [b]  Cancel")
+    while True:
+        choice = _prompt("  > ").strip().lower()
+        if choice == "u":
+            return "update"
+        if choice == "o":
+            return "overwrite"
+        if choice == "b":
+            return None
+        print("  Unknown command.")
 
 
 # ---------------------------------------------------------------------------
@@ -237,29 +262,38 @@ def _confirm_apply(meta: DiscMeta, disc: RBIDisc) -> bool:
 # ---------------------------------------------------------------------------
 
 
-def _mb_search_menu(disc: RBIDisc, mb_rg_id: str | None) -> tuple[RBIDisc, str | None]:
+def _mb_search_menu(
+    disc: RBIDisc,
+    mb_rg_id: str | None,
+    seed_artist: str = "",
+    seed_title: str = "",
+) -> tuple[RBIDisc, str | None]:
     from cdda2img.mb_lookup import (
         _merge_into_disc,
+        _overwrite_disc,
         build_mb_search_query,
         lookup_release,
         search_releases,
     )
 
-    query = build_mb_search_query(disc.artist, disc.album)
+    artist_q = disc.artist or seed_artist
+    title_q = disc.album or seed_title
     while True:
         _header("MusicBrainz Search")
-        print(f"  Query: {query}")
+        print(f"  Artist: {artist_q or '(none)'}")
+        print(f"  Title:  {title_q or '(none)'}")
         print()
-        print("  [s]  Search with current query")
-        print("  [e]  Edit search query")
+        print("  [s]  Search with current fields")
+        print("  [e]  Edit artist / title")
         print("  [b]  Back")
         choice = _prompt("  > ").strip().lower()
 
         if choice == "b":
             return disc, mb_rg_id
         elif choice == "e":
-            query = _prompt_edit("Search query", query)
+            artist_q, title_q = _prompt_search_fields(artist_q, title_q)
         elif choice == "s":
+            query = build_mb_search_query(artist_q, title_q)
             print(f"\n  Searching MusicBrainz for {query!r} ...")
             results = search_releases(query)
             if not results:
@@ -268,13 +302,18 @@ def _mb_search_menu(disc: RBIDisc, mb_rg_id: str | None) -> tuple[RBIDisc, str |
             selected = _select_from_results(results, "MusicBrainz Results")
             if selected is None:
                 continue
-            if _confirm_apply(selected, disc):
+            mode = _confirm_apply(selected, disc)
+            if mode:
                 if selected.mb_release_id and not selected.tracks:
                     print("  Fetching full track listing from MusicBrainz...")
                     full = lookup_release(selected.mb_release_id)
-                    if full:
+                    if full and (full.album or full.tracks):
                         selected = full
-                disc = _merge_into_disc(selected, disc)
+                disc = (
+                    _merge_into_disc(selected, disc)
+                    if mode == "update"
+                    else _overwrite_disc(selected, disc)
+                )
                 mb_rg_id = selected.mb_release_group_id or mb_rg_id
                 print("  Applied.")
         else:
@@ -286,34 +325,50 @@ def _mb_search_menu(disc: RBIDisc, mb_rg_id: str | None) -> tuple[RBIDisc, str |
 # ---------------------------------------------------------------------------
 
 
-def _discogs_execute_search(disc: RBIDisc, query: str, use_barcode: bool) -> RBIDisc:
-    """Run one Discogs search (text or barcode) and apply if confirmed."""
+def _discogs_execute_search(
+    disc: RBIDisc,
+    use_barcode: bool,
+    *,
+    artist: str = "",
+    release_title: str = "",
+) -> RBIDisc:
+    """Run one Discogs search (barcode or structured artist/title) and apply if confirmed."""
     from cdda2img import discogs_lookup
-    from cdda2img.mb_lookup import _merge_into_disc
+    from cdda2img.mb_lookup import _merge_into_disc, _overwrite_disc
 
     if use_barcode and disc.catalog:
         label = f"barcode {disc.catalog!r}"
         results = discogs_lookup.search_by_barcode(disc.catalog)
     else:
-        label = repr(query)
-        results = discogs_lookup.search_releases(query)
+        label = f"artist={artist!r} title={release_title!r}"
+        results = discogs_lookup.search_releases(
+            artist=artist, release_title=release_title
+        )
     print(f"\n  Searching Discogs for {label} ...")
     if not results:
         print("  No results found.")
         return disc
     selected = _select_from_results(results, "Discogs Results")
-    if selected is not None and _confirm_apply(selected, disc):
-        if selected.discogs_release_id and not selected.tracks:
-            print("  Fetching full track listing from Discogs...")
-            full = discogs_lookup.fetch_release(selected.discogs_release_id)
-            if full and (full.album or full.tracks):
-                selected = full
-        disc = _merge_into_disc(selected, disc)
-        print("  Applied.")
+    if selected is not None:
+        mode = _confirm_apply(selected, disc)
+        if mode:
+            if selected.discogs_release_id and not selected.tracks:
+                print("  Fetching full track listing from Discogs...")
+                full = discogs_lookup.fetch_release(selected.discogs_release_id)
+                if full and (full.album or full.tracks):
+                    selected = full
+            disc = (
+                _merge_into_disc(selected, disc)
+                if mode == "update"
+                else _overwrite_disc(selected, disc)
+            )
+            print("  Applied.")
     return disc
 
 
-def _discogs_menu(disc: RBIDisc) -> RBIDisc:
+def _discogs_menu(
+    disc: RBIDisc, seed_artist: str = "", seed_title: str = ""
+) -> RBIDisc:
     from cdda2img import discogs_lookup
 
     if not discogs_lookup.is_available():
@@ -324,13 +379,16 @@ def _discogs_menu(disc: RBIDisc) -> RBIDisc:
         _prompt("  [Enter to return] ")
         return disc
 
-    query = f"{disc.artist} {disc.album}".strip()
+    artist_q = disc.artist or seed_artist
+    title_q = disc.album or seed_title
+
     while True:
         _header("Discogs Search")
-        print(f"  Query: {query}")
+        print(f"  Artist: {artist_q or '(none)'}")
+        print(f"  Title:  {title_q or '(none)'}")
         print()
-        print("  [s]  Search with current query")
-        print("  [e]  Edit search query")
+        print("  [s]  Search with current fields")
+        print("  [e]  Edit artist / title")
         if disc.catalog:
             print("  [c]  Search by barcode/catalog number")
         print("  [b]  Back")
@@ -339,11 +397,13 @@ def _discogs_menu(disc: RBIDisc) -> RBIDisc:
         if choice == "b":
             return disc
         elif choice == "e":
-            query = _prompt_edit("Search query", query)
+            artist_q, title_q = _prompt_search_fields(artist_q, title_q)
         elif choice == "s":
-            disc = _discogs_execute_search(disc, query, use_barcode=False)
+            disc = _discogs_execute_search(
+                disc, use_barcode=False, artist=artist_q, release_title=title_q
+            )
         elif choice == "c" and disc.catalog:
-            disc = _discogs_execute_search(disc, query, use_barcode=True)
+            disc = _discogs_execute_search(disc, use_barcode=True)
         else:
             print("  Unknown command.")
 
@@ -394,7 +454,7 @@ def _acoustid_run_one(
     Returns the (possibly updated) disc; identity unchanged means no change applied.
     """
     from cdda2img import acoustid_lookup
-    from cdda2img.mb_lookup import _merge_into_disc, lookup_release
+    from cdda2img.mb_lookup import _merge_into_disc, _overwrite_disc, lookup_release
 
     print(f"  Fingerprinting {wav_path.name}... (may take a few seconds)")
     results = acoustid_lookup.fingerprint_and_lookup(wav_path, verbose=True)
@@ -409,15 +469,21 @@ def _acoustid_run_one(
             if len(result.tracks) == 1 and result.tracks[0].number is None:
                 result.tracks[0].number = track_number
     selected = _select_from_results(results, "AcoustID Matches")
-    if selected is not None and _confirm_apply(selected, disc):
-        if selected.mb_release_id and len(selected.tracks) < len(disc.tracks):
-            print("  Fetching full track listing from MusicBrainz...")
-            full = lookup_release(selected.mb_release_id)
-            if full:
-                selected = full
-        updated = _merge_into_disc(selected, disc)
-        print("  Applied.")
-        return updated
+    if selected is not None:
+        mode = _confirm_apply(selected, disc)
+        if mode:
+            if selected.mb_release_id and len(selected.tracks) < len(disc.tracks):
+                print("  Fetching full track listing from MusicBrainz...")
+                full = lookup_release(selected.mb_release_id)
+                if full and (full.album or full.tracks):
+                    selected = full
+            updated = (
+                _merge_into_disc(selected, disc)
+                if mode == "update"
+                else _overwrite_disc(selected, disc)
+            )
+            print("  Applied.")
+            return updated
     return disc
 
 
@@ -549,6 +615,8 @@ def _fetch_menu(
     mb_rg_id: str | None,
     source_pcm: Path | None = None,
     source_wavs: list[Path] | None = None,
+    seed_artist: str = "",
+    seed_title: str = "",
 ) -> tuple[RBIDisc, str | None]:
     while True:
         _header("Fetch Metadata")
@@ -561,9 +629,11 @@ def _fetch_menu(
         if choice == "b":
             return disc, mb_rg_id
         elif choice == "m":
-            disc, mb_rg_id = _mb_search_menu(disc, mb_rg_id)
+            disc, mb_rg_id = _mb_search_menu(
+                disc, mb_rg_id, seed_artist=seed_artist, seed_title=seed_title
+            )
         elif choice == "d":
-            disc = _discogs_menu(disc)
+            disc = _discogs_menu(disc, seed_artist=seed_artist, seed_title=seed_title)
         elif choice == "a":
             disc = _acoustid_menu(disc, source_pcm=source_pcm, source_wavs=source_wavs)
         else:
@@ -772,6 +842,8 @@ def run_metadata_menu(
         return disc
 
     _original_disc = copy.deepcopy(disc)  # savepoint for Reset
+    seed_artist = disc.artist or ""  # immutable anchor for search fields
+    seed_title = disc.album or ""
     mb_rg_id: str | None = None  # MB release group ID, threaded across sub-menus
 
     while True:
@@ -791,7 +863,12 @@ def run_metadata_menu(
             return disc
         elif choice == "f":
             disc, mb_rg_id = _fetch_menu(
-                disc, mb_rg_id, source_pcm=source_pcm, source_wavs=source_wavs
+                disc,
+                mb_rg_id,
+                source_pcm=source_pcm,
+                source_wavs=source_wavs,
+                seed_artist=seed_artist,
+                seed_title=seed_title,
             )
         elif choice == "e":
             disc = _edit_menu(disc)

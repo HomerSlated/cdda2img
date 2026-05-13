@@ -189,13 +189,30 @@ def fetch_release(release_id: int) -> DiscMeta | None:
         return None
 
 
-def search_releases(query: str, limit: int = 25) -> list[DiscMeta]:
-    """Text search for releases on Discogs. Returns [] if token not set or on error."""
+def search_releases(
+    query: str = "",
+    *,
+    artist: str = "",
+    release_title: str = "",
+    limit: int = 25,
+) -> list[DiscMeta]:
+    """Search for releases on Discogs.
+
+    When *artist* or *release_title* are provided they are passed as structured
+    field parameters (``artist=``, ``release_title=``), which produce more precise
+    results than the free-text ``q=`` form.  Falls back to ``q=query`` when
+    neither structured field is set.
+    """
     client = _get_client()
     if not client:
         return []
     try:
-        results = client.search(query, type="release")
+        if artist or release_title:
+            results = client.search(
+                type="release", artist=artist, release_title=release_title
+            )
+        else:
+            results = client.search(query, type="release")
         page1 = results.page(1)
         return [_parse_result(r) for r in page1[:limit]]
     except Exception as exc:
