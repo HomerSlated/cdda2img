@@ -447,7 +447,7 @@ def test_acoustid_run_one_assigns_track_number_to_single_track_result():
             "cdda2img.acoustid_lookup.fingerprint_and_lookup",
             return_value=[result_no_number],
         ),
-        patch("cdda2img.metadata_menu._prompt", side_effect=["1", "y"]),
+        patch("cdda2img.metadata_menu._prompt", side_effect=["1", "u"]),
         patch("cdda2img.acoustid_lookup.is_available", return_value=True),
     ):
         updated = _acoustid_run_one(disc, Path("/fake/t.wav"), track_number=1)
@@ -478,7 +478,7 @@ def test_acoustid_run_one_without_track_number_does_not_apply_title():
             "cdda2img.acoustid_lookup.fingerprint_and_lookup",
             return_value=[result_no_number],
         ),
-        patch("cdda2img.metadata_menu._prompt", side_effect=["1", "y"]),
+        patch("cdda2img.metadata_menu._prompt", side_effect=["1", "u"]),
         patch("cdda2img.acoustid_lookup.is_available", return_value=True),
     ):
         updated = _acoustid_run_one(disc, Path("/fake/t.wav"))
