@@ -59,7 +59,7 @@ packages = ["src/cdda2img"]
 
 [tool.ty.environment]
 python = "./.venv"
-python-version = "3.13"
+python-version = "3.14"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -182,6 +182,7 @@ def fetch_release(release_id: int) -> DiscMeta | None:
         return None
     try:
         r = client.release(release_id)
+        r.refresh()  # client.release() returns a stub; refresh() fetches the full data
         return _parse_full_release(r)
     except Exception as exc:
         log.debug("Discogs release fetch failed for %d: %s", release_id, exc)

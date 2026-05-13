@@ -306,7 +306,7 @@ def _discogs_execute_search(disc: RBIDisc, query: str, use_barcode: bool) -> RBI
         if selected.discogs_release_id and not selected.tracks:
             print("  Fetching full track listing from Discogs...")
             full = discogs_lookup.fetch_release(selected.discogs_release_id)
-            if full:
+            if full and (full.album or full.tracks):
                 selected = full
         disc = _merge_into_disc(selected, disc)
         print("  Applied.")
