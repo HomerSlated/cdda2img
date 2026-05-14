@@ -124,6 +124,7 @@ def rip_disc(
     output_pcm: Path,
     *,
     paranoia: str = "overlap",
+    drive_offset: int = 0,
 ) -> RipInfo:
     """Rip all audio from *device* to *output_pcm* (raw s16le PCM).
 
@@ -131,6 +132,9 @@ def rip_disc(
       "off"     — single raw read, no correction (fastest)
       "overlap" — overlap + verify, standard jitter correction (default)
       "full"    — full paranoia with retry cap (slowest, best for damaged discs)
+
+    *drive_offset* is applied via cd-paranoia's ``-O`` flag so the output PCM
+    is offset-corrected at rip time (corrected audio stored directly in the RBI).
 
     Returns a RipInfo with the skeleton RBIDisc and raw TOC data for CDDB lookup.
     cd-paranoia progress output passes through to the terminal directly.
@@ -147,11 +151,20 @@ def rip_disc(
     )
 
     mode_flags = _PARANOIA_FLAGS.get(paranoia, _PARANOIA_FLAGS["overlap"])
+    offset_flags = ["-O", str(drive_offset)] if drive_offset != 0 else []
     wav_path = output_pcm.with_suffix(".paranoia.wav")
+    cmd = [
+        "cd-paranoia",
+        "-d",
+        device,
+        *mode_flags,
+        *offset_flags,
+        "--",
+        "1-",
+        str(wav_path),
+    ]  # LINT-012
     try:
-        result = subprocess.run(  # noqa: S603  # LINT-012
-            ["cd-paranoia", "-d", device, *mode_flags, "--", "1-", str(wav_path)],  # noqa: S607  # LINT-012
-        )
+        result = subprocess.run(cmd)  # noqa: S603  # LINT-012
         if result.returncode != 0:
             msg = f"cd-paranoia exited with code {result.returncode} — rip failed or incomplete"
             raise RuntimeError(msg)

@@ -536,8 +536,13 @@ def _resolve_drive_offset(
     return cfg.drive_offset, drive_name
 
 
-def _rip_with_fallback(device: str, output_pcm: Path):
-    """Try cdrdao read-cd first; fall back to cd-paranoia (full) on failure."""
+def _rip_with_fallback(device: str, output_pcm: Path, drive_offset: int = 0):
+    """Try cdrdao read-cd first; fall back to cd-paranoia (full) on failure.
+
+    *drive_offset* is passed through to cd-paranoia via ``-O`` so that the
+    fallback path stores offset-corrected PCM.  The cdrdao path returns raw
+    PCM; the caller applies ``apply_drive_offset`` after this function returns.
+    """
     from cdda2img.cdrdao_ripper import rip_cdrdao
     from cdda2img.disc_reader import rip_disc
 
@@ -547,7 +552,24 @@ def _rip_with_fallback(device: str, output_pcm: Path):
     except RuntimeError as exc:
         print(f"  cdrdao failed: {exc}")
         print("  Falling back to cd-paranoia (paranoia=full) ...")
-        return rip_disc(device, output_pcm, paranoia="full"), "cd-paranoia"
+        return rip_disc(
+            device, output_pcm, paranoia="full", drive_offset=drive_offset
+        ), "cd-paranoia"
+
+
+def _ar_has_partial_mismatch(results: list) -> bool:
+    """True when some (but not all) disc-in-database tracks have AR mismatches.
+
+    All-tracks mismatch means offset misconfiguration; partial mismatch means
+    sector read errors — only the latter benefits from a cd-paranoia re-rip.
+    """
+    in_db = [r for r in results if r.max_confidence is not None]
+    if not in_db:
+        return False
+    n_ok = sum(
+        1 for r in in_db if r.confidence_v1 is not None or r.confidence_v2 is not None
+    )
+    return 0 < n_ok < len(in_db)
 
 
 def rip_image(
@@ -566,7 +588,7 @@ def rip_image(
     temp_base = resolve_temp_dir()
     temp = TempFiles(temp_base)
     try:
-        info, rip_type = _rip_with_fallback(device, temp.pcm_file)
+        info, rip_type = _rip_with_fallback(device, temp.pcm_file, drive_offset)
 
         track_count = len(info.disc.tracks)
         total_s = info.disc.total_seconds
@@ -575,19 +597,57 @@ def rip_image(
             f"{int(total_s) // 60}:{int(total_s) % 60:02d} total"
         )
 
+        # cdrdao has no native offset flag; correct the PCM after ripping.
+        # cd-paranoia applied -O at rip time, so its PCM is already corrected.
+        if rip_type == "cdrdao" and drive_offset != 0:
+            from cdda2img.offset_correct import apply_drive_offset
+
+            apply_drive_offset(temp.pcm_file, drive_offset)
+
         disc = prepopulate_from_cddb(
             info.disc, info.track_lsns, info.disc_last_lsn, server=cfg.cddb_server
         )
 
         cddb_id = int(compute_cddb_disc_id(info.track_lsns, info.disc_last_lsn), 16)
+        # PCM is now offset-corrected for both paths; verify_rip reads from correct positions.
         ar_results = verify_rip(
             temp.pcm_file,
             info.track_lsns,
             info.disc_last_lsn,
-            drive_offset=drive_offset,
+            drive_offset=0,
             cddb_id=cddb_id,
         )
         print_ar_report(ar_results, drive_offset=drive_offset)
+
+        # AR-triggered fallback: partial mismatch → read error on specific tracks.
+        # Re-rip with cd-paranoia full paranoia; keep disc metadata from cdrdao scan
+        # (cdrdao captures ISRC/MCN/CD-Text from subchannel; cd-paranoia -Q does not).
+        if rip_type == "cdrdao" and _ar_has_partial_mismatch(ar_results):
+            from cdda2img.disc_reader import rip_disc
+
+            n_bad = sum(
+                1
+                for r in ar_results
+                if r.max_confidence is not None
+                and r.confidence_v1 is None
+                and r.confidence_v2 is None
+            )
+            print(
+                f"  {n_bad} track(s) failed AccurateRip — "
+                "re-ripping with cd-paranoia (full paranoia) ..."
+            )
+            paranoia_info = rip_disc(
+                device, temp.pcm_file, paranoia="full", drive_offset=drive_offset
+            )
+            rip_type = "cd-paranoia"
+            ar_results = verify_rip(
+                temp.pcm_file,
+                paranoia_info.track_lsns,
+                paranoia_info.disc_last_lsn,
+                drive_offset=0,
+                cddb_id=cddb_id,
+            )
+            print_ar_report(ar_results, drive_offset=drive_offset)
 
         output_stem = sanitize_title(disc.album) or device.lstrip("/").replace("/", "_")
         provenance: dict[str, str] = {
