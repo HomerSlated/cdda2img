@@ -29,11 +29,11 @@ This is an active prototype. A Rust reimplementation is planned once the design 
   trimming (−55 dBFS) and 2-second Red Book inter-track gaps
 - **Physical disc ripping** — `r` subcommand rips directly from `/dev/sr0` (or any
   optical drive); primary path uses cdrdao (captures MCN, ISRC, and CD-Text in one pass);
-  fallback uses libcdio-paranoia with three paranoia modes: `off` (raw), `overlap`
-  (jitter correction, default), `full` (full correction with per-sector retry cap)
+  fallback uses libcdio-paranoia (full paranoia correction) when cdrdao fails
 - **AccurateRip v1/v2 verification** — per-track checksum computed against the AccurateRip
   database after every rip; matches against all drive-offset groups; reports confidence
-  and mismatch status per track. Drive offset is resolved automatically before each rip:
+  and mismatch status per track; results are stored in an ARIP block inside the RBI
+  container for future reference. Drive offset is resolved automatically before each rip:
   checks the per-drive `[[drives]]` config entries first, then queries the AccurateRip drive
   offset catalog (auto-applied at ≥ 3 submissions, interactive prompt below that threshold),
   then falls back to the global `drive_offset` setting. Confirmed offsets are persisted to
@@ -63,13 +63,19 @@ This is an active prototype. A Rust reimplementation is planned once the design 
 - **Multi-disc bin-packing** — four strategies, including global optimisation via
   OR-Tools CP-SAT (`ball`), which minimises total disc count across an entire collection
   in a single pass
-- **Extract to FLAC + CUE** or raw s16le PCM + TOC, or both; optional EBU R128
-  normalisation at −18 LUFS on extract (mutually exclusive with ReplayGain tags)
-- **List and verify** — `l` prints the full container index with offsets and sizes;
-  `t` runs 23 structural and checksum checks, exits non-zero on failure
-- **SHA-256 checksums** for TOC, ReplayGain, and PCM blocks — stored in the fixed header,
-  verified on every extract and test
-- **Open, documented format** — `docs/rbi_spec.md` fully specifies every field
+- **Flexible extraction** — `x` flags are additive; omitting all is equivalent to `--all`:
+  - `--tracks` — per-track FLAC + CUE to `extracted/<artist>/<album>/`
+  - `--raw` — TOC + BIN (disc-native s16be) to `extracted/raw/`
+  - `--rg` — ReplayGain block as `.rg.json`
+  - `--ar` — AccurateRip report as `.accurip`
+  - `--log` — rip log as `.log`
+  - `--normalize` — EBU R128 normalisation at −18 LUFS on extracted FLACs
+- **List and verify** — `l` prints container structure, track index, and optional block
+  content (`--info`, `--rg`, `--ar`, `--log` flags); `t` runs 27 structural and checksum
+  checks, exits non-zero on failure
+- **SHA-256 checksums** for all blocks — stored in the block directory, verified on every
+  extract and test
+- **Open, documented format** — `docs/reference/rbi_spec.md` fully specifies every field
 
 ### Planned
 
@@ -83,19 +89,23 @@ This is an active prototype. A Rust reimplementation is planned once the design 
 
 ## RBI Format
 
-A single binary file. Fixed-size header containing the magic bytes `RBIMAGE\x00`,
-format version (v3.0), uint64 offsets, and SHA-256 checksums for three variable-length
-blocks:
+A single binary file. 40-byte fixed header containing the magic bytes `RBIMAGE\x00`,
+format version (v4.0), track count, disc number/total, PCM parameters, and a pointer
+to the block directory appended at the end of the file. Variable-length blocks:
 
 | Block | Contents |
 |-------|----------|
-| TOC | cdrdao-format text TOC; per-track pre-gap durations, ISRC, and CATALOG (MCN) |
-| ReplayGain | 17 + 12×N bytes: per-track and album gain, peak, and LRA values |
-| PCM | Raw s16le — no WAV wrapper; parameters stored in the fixed header |
+| TOC   | cdrdao-format text TOC; per-track pre-gap durations, ISRC, and CATALOG (MCN) |
+| PROV  | Provenance key=value text: creator, mode, source, ripper, drive |
+| RGDB  | 17 + 12×N bytes: per-track and album EBU R128 gain, peak, and LRA values |
+| ARIP  | AccurateRip v1/v2 checksums and confidence per track |
+| RLOG  | Structured rip log: drive, engine, offsets, per-track AR results, SHA-256 self-seal |
+| PCM   | Raw s16le — no WAV wrapper; parameters stored in the fixed header |
 
-Pre-gap audio is stored contiguously in the PCM block; the TOC records the pre-gap
-duration separately so extraction skips it cleanly. The ReplayGain block is optional
-and signalled by a flag. Full specification: `docs/rbi_spec.md`.
+Each block has a SHA-256 checksum stored in the block directory. All blocks except TOC
+and PCM are optional. Pre-gap audio is stored contiguously in the PCM block; the TOC
+records the pre-gap duration separately so extraction skips it cleanly.
+Full specification: `docs/reference/rbi_spec.md`.
 
 ## Installation
 
@@ -108,9 +118,8 @@ uv sync
 ## Usage
 
 ```bash
-# Rip a disc (CDDB + MusicBrainz auto-identification, default jitter correction)
+# Rip a disc (CDDB + MusicBrainz auto-identification)
 cdda2img r
-cdda2img r /dev/sr0 --paranoia full     # maximum correction for damaged discs
 cdda2img r --loudness none              # skip ReplayGain analysis
 
 # Create — remaster mode with ReplayGain, globally optimal disc packing
@@ -119,11 +128,16 @@ cdda2img c /music/album --mode remaster --loudness rg --strategy ball
 # Create — master mode (transcode only, no processing, no ReplayGain)
 cdda2img c /music/album --mode master --loudness none
 
-# Extract to per-track FLAC files + CUE sheet (default)
+# Extract everything (default — equivalent to --all)
 cdda2img x album.rbi
 
-# Extract to raw PCM + TOC, with EBU R128 normalisation applied
-cdda2img x album.rbi --raw --normalize
+# Extract only FLACs + CUE; or only TOC + BIN; or pick individual blocks
+cdda2img x album.rbi --tracks
+cdda2img x album.rbi --raw
+cdda2img x album.rbi --tracks --rg --ar
+
+# Extract FLACs normalised to −18 LUFS instead of embedding RG tags
+cdda2img x album.rbi --tracks --normalize
 
 # Import a DDP 2.0 mastering image (GEAR Pro; master mode, 1:1)
 cdda2img i /path/to/ddp_dir
@@ -133,8 +147,9 @@ cdda2img i /path/to/ddp_dir --output mydisc.rbi
 cdda2img i disc.toc
 cdda2img i disc.toc --loudness none --output mydisc.rbi
 
-# Inspect a container; verify all checksums
+# Inspect a container; show AccurateRip report; verify all checksums
 cdda2img l album.rbi
+cdda2img l album.rbi --ar
 cdda2img t album.rbi
 ```
 

@@ -22,7 +22,13 @@ cdda2img \- create and extract RBI audio CD archive images
 .RI [ options ]
 .I SOURCE
 .br
+.B "cdda2img w"
+.RI [ options ]
+.I FILE.rbi
+.RI [ DEVICE ]
+.br
 .B "cdda2img l"
+.RI [ options ]
 .I FILE.rbi
 .br
 .B "cdda2img t"
@@ -35,9 +41,10 @@ cdda2img \- create and extract RBI audio CD archive images
 archives CD\-DA (Red Book audio) discs and collections of audio files
 as RBI (Red Book Image) container images.
 An RBI file stores the disc\(cqs raw PCM audio (signed 16\-bit little\-endian,
-44100\~Hz stereo), an embedded cdrdao\-format TOC, an optional EBU\~R128
-ReplayGain block, and SHA\-256 integrity checksums in a single self\-contained file.
-The current format version is RBI v3.0.
+44100\~Hz stereo), an embedded cdrdao\-format TOC, optional blocks for EBU\~R128
+ReplayGain data, AccurateRip verification results, rip provenance, and rip log,
+and per\-block SHA\-256 integrity checksums in a single self\-contained file.
+The current format version is RBI v4.0.
 .PP
 Metadata \(em album title, artist, per\-track titles, ISRC codes, and remaster
 provenance \(em is sourced interactively from MusicBrainz, AcoustID, and Discogs
@@ -96,22 +103,6 @@ Output
 .B .rbi
 file path.
 Default: derived from the album title.
-.TP
-.BI \-\-paranoia " {off|overlap|full}"
-.RS
-.TP
-.B off
-Single raw read per sector, no jitter correction.
-Fastest, but may produce audible glitches on worn or dirty discs.
-.TP
-.B overlap
-Overlap and verify reads with standard jitter correction.
-This is the default.
-.TP
-.B full
-Full paranoia correction with a per-sector retry cap.
-Slowest; recommended for physically damaged or heavily worn discs.
-.RE
 .\"
 .SS c \(em Create
 Creates one or more RBI images from a directory of audio files.
@@ -180,42 +171,57 @@ Disables silence trimming in remaster mode.
 Preserves pre\-gaps in remaster mode (no\-op for audio\-file input).
 .\"
 .SS x \(em Extract
-Extracts audio and metadata from an RBI image.
-The default output mode is
-.B \-\-tracks
-if neither
-.B \-\-tracks
-nor
-.B \-\-raw
-is specified.
+Extracts one or more block types from an RBI image.
+Output is written to an
+.I extracted/
+directory beneath the current working directory.
+All flags are additive; omitting all flags is equivalent to
+.BR \-\-all .
 .PP
 .BI "cdda2img x " "[options] FILE.rbi"
 .TP
 .B \-\-tracks
-Writes per\-track FLAC files with embedded metadata and a CUE sheet.
+Writes per\-track FLAC files with embedded metadata and a CUE sheet to
+.IR extracted/<artist>/<album>/ .
 ReplayGain Vorbis comment tags are embedded when an RG block is present,
 unless
 .B \-\-normalize
 is also given.
+If no RG block is present, loudness is measured from the extracted FLACs
+and embedded post\-extraction.
 .TP
 .B \-\-raw
-Writes a raw PCM file
-.RI ( .s16le ),
-the embedded TOC
-.RI ( .toc ),
-and (when present) a ReplayGain JSON sidecar
+Writes the embedded TOC
+.RI ( .toc )
+and PCM audio
+.RI ( .bin ,
+disc\-native s16be byte order) to
+.IR extracted/raw/ .
+.TP
+.B \-\-rg
+Writes the ReplayGain block as a JSON sidecar
 .RI ( .rg.json ).
+.TP
+.B \-\-ar
+Writes the AccurateRip verification report
+.RI ( .accurip ).
+.TP
+.B \-\-log
+Writes the rip log
+.RI ( .log ).
+.TP
+.B \-\-all
+Extracts all block types.
+This is the default when no flags are given.
 .TP
 .B \-\-normalize
 Applies EBU\~R128 normalisation to each extracted FLAC at \-18\~LUFS.
-Requires
-.BR \-\-tracks .
-Mutually exclusive with ReplayGain tag embedding.
-.PP
+Active when
 .B \-\-tracks
-and
-.B \-\-raw
-may be combined.
+or
+.B \-\-all
+is set.
+Mutually exclusive with ReplayGain tag embedding.
 .\"
 .SS i \(em Import
 Imports a foreign disc image into an RBI container.
@@ -247,19 +253,57 @@ Output
 file path.
 Default: derived from the album title.
 .\"
-.SS l \(em List
-Prints a section table and numbered track listing for an RBI image.
-The section table shows byte offsets, sizes, and checksums for the fixed header,
-TOC block, optional ReplayGain block, and PCM audio block.
+.SS w \(em Write (burn)
+Burns an RBI image to a blank CD\-DA disc via cdrdao.
+Applies write offset correction to the disc stream before burning when a
+.B write_offset
+is configured for the drive in
+.BR [[drives]] .
 .PP
-.B "cdda2img l"
-.I FILE.rbi
+.BI "cdda2img w " "[options] FILE.rbi [DEVICE]"
+.PP
+.I DEVICE
+is the optical drive device node (default:
+.BR /dev/sr0 ).
+.TP
+.BI \-\-speed " N"
+Burn speed in CD\-DA drive units (default: 4).
+.TP
+.BI \-\-write\-offset " N"
+Write offset override in samples.
+Overrides the per\-drive
+.B write_offset
+from configuration.
+.TP
+.B \-\-yes
+Skip the confirmation prompt before burning.
+.\"
+.SS l \(em List
+Prints container information for an RBI image.
+All flags are additive; omitting all flags is equivalent to
+.BR \-\-info .
+.PP
+.BI "cdda2img l " "[options] FILE.rbi"
+.TP
+.B \-\-info
+Prints the block directory with byte offsets, sizes, and checksums,
+followed by a numbered track listing.
+This is the default when no flags are given.
+.TP
+.B \-\-rg
+Renders the ReplayGain block as text.
+.TP
+.B \-\-ar
+Renders the AccurateRip verification report.
+.TP
+.B \-\-log
+Renders the rip log.
 .\"
 .SS t \(em Test
 Verifies the integrity and spec\-conformance of an RBI image.
-Runs 23 checks covering magic bytes, format version, flags, section
-layout continuity, file size, UTF\-8 metadata, SHA\-256 checksums for all
-three blocks, TOC parse, and track\-count consistency.
+Runs 27 checks covering magic bytes, format version, flags, block directory
+structure, file size, UTF\-8 metadata, SHA\-256 checksums for all blocks,
+TOC parse, and track\-count consistency.
 Exits with status 1 if any check fails.
 .PP
 .B "cdda2img t"
@@ -385,7 +429,8 @@ They can also be set manually:
 .nf
 [[drives]]
 name = "PLEXTOR DVDR PX-716A"
-offset = 30
+read_offset = 30
+write_offset = -30
 .fi
 .RE
 .PP
@@ -403,21 +448,21 @@ The
 .BR c ,
 .BR x ,
 .BR l ,
+.BR t ,
 and
-.B t
-subcommands operate entirely on files and require no special hardware access.
-The
 .B i
-subcommand reads existing image files from disk and likewise requires no
-hardware access.
+subcommands operate entirely on files and require no special hardware access.
 .PP
 The
 .B r
-subcommand rips a physical disc using cdrdao (primary) or
-libcdio\-paranoia (fallback).
+and
+.B w
+subcommands access a physical disc drive.
 The optical drive device
 .RI ( /dev/sr0
-or similar) must be readable by the user.
+or similar) must be readable (and writable for
+.BR w )
+by the user.
 On Linux this requires membership in the
 .B cdrom
 group:

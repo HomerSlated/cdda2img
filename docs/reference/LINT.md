@@ -66,21 +66,16 @@ Format per entry:
 
 ---
 
-## LINT-003 — PyAV `add_stream(template=)`: missing stub overload
+## LINT-003 — PyAV `add_stream(template=)`: missing stub overload — RESOLVED
 
 - **Rule:** `ty: no-matching-overload` / `call-overload`
-- **Location:** `replaygain.py:244` — `out_c.add_stream(template=in_stream)`
-- **Rationale:** `add_stream(template=<AudioStream>)` is the documented PyAV API for
-  stream-copy remux (re-muxing packets without re-encoding). The `template=` keyword
-  parameter is not present in any of the three typed overloads in `av/container/output.pyi`,
-  making this a stub gap, not a code error. The PyAV documentation and source explicitly
-  support this call pattern.
-- **Alternatives:**
-  - *`out_c.add_stream(codec_name=in_stream.codec_context.name, rate=...)`* — **rejected**.
-    Using `codec_name=` would trigger re-encoding rather than stream copy, which is the
-    wrong behaviour (we want bitwise-identical audio packets, just with updated metadata).
-  - *Contribute the `template=` overload to PyAV stubs* — correct long-term fix.
-- **Decision:** `# type: ignore[call-overload]` is correct.
+- **Former location:** `replaygain.py:244` — `out_c.add_stream(template=in_stream)`
+- **Resolution:** PyAV 16.0.1 removed `template=` support from `add_stream()` entirely
+  (the Python API no longer accepts it; the Cython signature is `add_stream(codec_name, rate=None)`).
+  `embed_rg_tags()` was rewritten to use mutagen instead: `mutagen.flac.FLAC` patches the
+  Vorbis comment block in-place without any audio re-encoding, which is both simpler and
+  correct. The `add_stream(template=)` call and its `# type: ignore[call-overload]` are
+  gone entirely.
 
 ---
 

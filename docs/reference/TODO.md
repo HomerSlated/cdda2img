@@ -1,5 +1,34 @@
 # TODO
 
+## ✅ DONE — RBI v4.0, ARIP/RLOG blocks, x/l refactor, embed_rg_tags fix (2026-05-14)
+
+275 tests; ruff + ty clean.
+
+- [x] **RBI v4.0** — 40-byte fixed header; block directory at end of file; block types:
+  TOC, PROV, RGDB, ARIP, RLOG, PCM. SHA-256 per-block checksum in directory entries.
+  Old 169-byte v3.0 header retired; `BLOCK_FLAG_SKIP` signals blocks safe to ignore.
+  `verify_container` updated to 27 rules. `read_header` returns `RBIHeader` with
+  `find_block(type_id)` helper; `build_container` writes directory after all blocks.
+- [x] **ARIP block** — `accuraterip.py:pack_arip_block()` / `unpack_arip_block()`;
+  stores disc IDs (id1/id2/cddb_id), per-track v1/v2 CRCs, confidence, status, and db_total
+  in a compact binary format. Written by `rip_image()` after `verify_rip`; readable via
+  `cdda2img l --ar` and `cdda2img x --ar`. `format_arip_text()` renders CUETools-style report.
+- [x] **RLOG block** — `rip_log.py:RipLogBuilder`: structured rip log (drive name, engine
+  version, read offset, per-track AR results); SHA-256 self-seal; written by `rip_image()`
+  and `import_image()`. Readable via `cdda2img l --log` and `cdda2img x --log`.
+- [x] **Remaster auto-guess heuristic** — `metadata_menu.py` auto-sets `remastered_source`
+  to `YES`/`POSSIBLE`/`NO` from MB release title keywords and first-release-date comparison.
+- [x] **x/l refactor** — `x`: `--tracks`, `--raw`, `--rg`, `--ar`, `--log`, `--all`
+  (default); output to `extracted/`; `ExtractOptions` dataclass. `l`: `--info`, `--rg`,
+  `--ar`, `--log`; all output to stdout (no pager).
+- [x] **embed_rg_tags fix** — PyAV 16 dropped `add_stream(template=)`. Replaced PyAV
+  stream-copy remux with mutagen in-place Vorbis comment patch — no audio re-encoding.
+  LINT-003 resolved.
+- [x] **cdrdao version probe fix** — `rip_log.py` now uses `cdrdao version` (subcommand)
+  instead of `cdrdao --version` (illegal command that returned error text as version string).
+
+---
+
 ## ✅ DONE — Write offset measurement tool (2026-05-10)
 
 PX-716A write offset confirmed: **−30 samples** (3 cycles, 100% confidence).
@@ -727,22 +756,20 @@ libraries: `libcdio-paranoia` (reading) and `libburn` (writing).
 
 - [x] Test Plextor PX-716A on arrival: subchannel P–W ✅, lead-in ✅, C2 ⏳ (needs
   scratched disc), lead-out ⏳ (needs different test approach); see `private/DRIVES.md`
-- [ ] New `r` subcommand: `cdda2img r /dev/sr0` — rip disc to RBI via cdrdao
-  **Note**: cdrdao BIN output is s16be (raw sector byte order). Byte-swap to s16le
-  using `cdrdao_reader.convert_cdrdao_bin_to_wav()` (already implemented and tested);
-  then `wav_to_raw_pcm()` for the container. Reuse `import_image()` internals directly.
+- [x] New `r` subcommand: `cdda2img r /dev/sr0` — rip disc to RBI via cdrdao;
+  cdrdao BIN (s16be) byte-swapped to s16le; AccurateRip verified post-rip; ARIP and
+  RLOG blocks written to container.
 - [x] Implement AccurateRip v1/v2 checksum computation (own code, no third-party) — `accuraterip.py`
 - [x] Implement AccurateRip database lookup and verify rip — informational only; no paranoia
   fallback on mismatch by design (AccurateRip CRC is a safety net, not a pass/fail gate)
 - [ ] Write thin ctypes/cffi wrapper around `libcdio-paranoia` for paranoia fallback
 - [ ] Parse subchannel Q data for MCN and CD-TEXT (see `private/libmirage/mirage/cdtext-coder.c`)
-- [ ] New `b` subcommand: burn RBI to physical disc via `cdrdao write`
-  - Apply write offset correction (`−write_offset` samples) to full disc stream before burn
-  - Read `write_offset` from `[[drives]]` config (new field alongside `offset`)
-  - Embed burn provenance in TOC comments (drive name, offsets, correction applied)
+- [x] New `w` subcommand: burn RBI to physical disc via `cdrdao write`; applies write
+  offset correction; reads `write_offset` from `[[drives]]` config; `--speed`, `--write-offset`,
+  `--yes` options.
 - [ ] `drive` subcommand: unified drive management (read offset from AR catalog + write
   offset from `measure_write_offset.py` cycles; store both in `[[drives]]`)
-- [ ] Extend `[[drives]]` TOML schema with `write_offset` field in `config.py`
+- [x] Extend `[[drives]]` TOML schema with `write_offset` field in `config.py`
 
 ### MCN (Media Catalogue Number)
 MCN is a physical disc property (EAN-13 barcode); omit silently when the input does
@@ -844,7 +871,7 @@ a panel on the extract screen.
 
 - [x] Find loudest 10-second window (peak-frame centring via PyAV + numpy)
 - [x] Extract clip and prepare all three variants (PyAV + FFmpegNormalize + pyebur128)
-- [x] Embed REPLAYGAIN_* tags in the RG variant (PyAV stream copy via `replaygain.embed_rg_tags()`)
+- [x] Embed REPLAYGAIN_* tags in the RG variant (mutagen in-place patch via `replaygain.embed_rg_tags()`)
 - [x] Interruptible looping playback (ffplay subprocess, SIGSTOP/SIGCONT for pause)
 - [ ] Integrate into TUI extract panel (replaces standalone CLI module)
 
@@ -900,29 +927,12 @@ and consistent), but `pyebur128` is the correct choice if true-peak accuracy mat
 
 ---
 
-### Call 3: FLAC tag stream-copy — `replaygain.py:embed_rg_tags()`
+### Call 3: FLAC tag stream-copy — `replaygain.py:embed_rg_tags()` — RESOLVED
 
-Currently: `subprocess.run(["ffmpeg", "-y", "-i", ..., "-c", "copy", "-metadata", ...])`.
-Used because mutagen normalises all Vorbis comment keys to lowercase.
-
-**Option A — PyAV stream copy** (preferred)
-`av.open(out, "w").add_stream(template=in_stream)` creates a stream-copy mux path;
-metadata is written via `out_c.metadata.update(tags)` which goes through libavformat
-and preserves uppercase, exactly as the `extract_tracks()` path already does.
-- Removes the subprocess and the temp-file/replace dance
-- Needs empirical testing: FLAC stream copy in PyAV requires the STREAMINFO block to
-  be handled correctly by the muxer; lossy formats are more commonly tested
-
-**Option B — Direct Vorbis comment block manipulation**
-Parse the FLAC file's `METADATA_BLOCK_VORBIS_COMMENT` block directly using Python
-`struct` and rewrite it. Preserves exact case. No external dependencies.
-- Very low-level; fragile if the block doesn't exist yet or needs to be created
-
-Recommendation: try Option A first; fall back to Option B only if PyAV stream copy
-proves unreliable for FLAC.
-
-- [x] Probe PyAV FLAC stream copy: verify STREAMINFO is preserved and tags are uppercase
-- [x] Replace `embed_rg_tags()` subprocess with PyAV stream copy if probe passes
+- [x] **Resolved with mutagen** — PyAV 16 removed `add_stream(template=)` support entirely.
+  `embed_rg_tags()` now uses `mutagen.flac.FLAC` to patch the Vorbis comment block in-place;
+  no audio re-encoding, no temp-file dance. Simpler than either PyAV stream-copy option.
+  mutagen was already a project dependency (used in `metadata.py`).
 
 ---
 
@@ -1012,9 +1022,9 @@ Continue evaluating the spec for improvements as the implementation matures.
 Borrow ideas from other formats (CUE/BIN, MDS, CloneCD) where they address gaps.
 
 - [x] Define `flags` bit 0 (`FLAG_RG_PRESENT`) and bit 2 (`FLAG_MASTER_MODE`)
-- [ ] Define remaining `flags` bit assignments: CD-TEXT present, MCN present, AccurateRip verified
-- [ ] Consider embedding AccurateRip checksums in the container (new optional block
-  after PCM, signalled by a flag)
+- [ ] Define remaining `flags` bit assignments: CD-TEXT present, MCN present
+- [x] Embed AccurateRip checksums in the container — ARIP block; `pack_arip_block()` /
+  `unpack_arip_block()`; written after every rip, readable via `l --ar` / `x --ar`.
 - [ ] Evaluate whether CD-TEXT block should be a separate optional section or
   encoded within the TOC text
 
