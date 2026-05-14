@@ -95,6 +95,27 @@ assert RG_BLOCK_FIXED_SIZE == 17, (  # noqa: S101  # LINT-005
 RG_TRACK_STRUCT: str = "<fff"
 RG_TRACK_SIZE: int = struct.calcsize(RG_TRACK_STRUCT)  # 12 bytes
 
+# ARIP block structs (see rbi_spec.md §6.5)
+# Header: arip_version(B), disc_id1(L), disc_id2(L), cddb_id(L)
+ARIP_HEADER_STRUCT: str = "<BLLL"
+ARIP_HEADER_SIZE: int = struct.calcsize(ARIP_HEADER_STRUCT)  # 13 bytes
+
+# Per-track: v1_crc(L), v2_crc(L), v1_confidence(H), v2_confidence(H), db_total(H), status(B)
+ARIP_TRACK_STRUCT: str = "<LLHHHB"
+ARIP_TRACK_SIZE: int = struct.calcsize(ARIP_TRACK_STRUCT)  # 15 bytes
+
+assert ARIP_HEADER_SIZE == 13, (  # noqa: S101  # LINT-005
+    f"ARIP_HEADER_STRUCT size {ARIP_HEADER_SIZE} != 13"
+)
+assert ARIP_TRACK_SIZE == 15, (  # noqa: S101  # LINT-005
+    f"ARIP_TRACK_STRUCT size {ARIP_TRACK_SIZE} != 15"
+)
+
+ARIP_BLOCK_VERSION: int = 1
+ARIP_STATUS_NOT_IN_DB: int = 0
+ARIP_STATUS_MISMATCH: int = 1
+ARIP_STATUS_OK: int = 2
+
 # Placeholder checksum used when pre-writing directory entries
 CHECKSUM_SIZE: int = 32  # SHA-256 digest length in bytes
 CHECKSUM_PLACEHOLDER: bytes = b"\x00" * CHECKSUM_SIZE
@@ -187,6 +208,29 @@ class RBIReplayGain:
     track_gain: list[float] = field(default_factory=list)  # dB; one per track
     track_peak: list[float] = field(default_factory=list)  # linear; one per track
     track_range: list[float] = field(default_factory=list)  # LU; one per track
+
+
+@dataclass
+class RBIAripTrack:
+    """Per-track entry from an ARIP block (rbi_spec.md §6.5)."""
+
+    v1_crc: int  # uint32; computed AR v1 CRC (0 if not in DB)
+    v2_crc: int  # uint32; computed AR v2 CRC (0 if not in DB)
+    v1_confidence: int  # uint16; submissions matching v1; 0 = no match
+    v2_confidence: int  # uint16; submissions matching v2; 0 = no match
+    db_total: int  # uint16; total AR submissions for this track; 0 = not in DB
+    status: int  # uint8; ARIP_STATUS_* constant
+
+
+@dataclass
+class RBIArip:
+    """Parsed ARIP block from an RBI container."""
+
+    arip_version: int  # uint8; current value: 1
+    disc_id1: int  # uint32 LE
+    disc_id2: int  # uint32 LE
+    cddb_id: int  # uint32 LE
+    tracks: list[RBIAripTrack] = field(default_factory=list)
 
 
 @dataclass

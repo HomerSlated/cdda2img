@@ -20,6 +20,8 @@ from cdda2img.container import (
     wav_to_raw_pcm,
 )
 from cdda2img.rbi_format import (
+    ARIP_STATUS_OK,
+    BLOCK_TYPE_ARIP,
     BLOCK_TYPE_PROV,
     BLOCK_TYPE_RGDB,
     BLOCK_TYPE_TOC,
@@ -359,3 +361,63 @@ def test_directory_structure(built_containers):
             sorted_entries[i].offset + sorted_entries[i].length
             <= sorted_entries[i + 1].offset
         )
+
+
+# ---------------------------------------------------------------------------
+# ARIP block
+# ---------------------------------------------------------------------------
+
+
+def test_arip_block_roundtrip(tmp_path_factory, wav_tracks):
+    """ARIP block survives build→embed→read→unpack; fields match original results."""
+    from cdda2img.accuraterip import ARTrackResult, pack_arip_block, unpack_arip_block
+
+    tmp = tmp_path_factory.mktemp("arip")
+    pcm = tmp / "all.pcm"
+    concat_wav(wav_tracks, tmp / "all.wav")
+    wav_to_raw_pcm(tmp / "all.wav", pcm)
+
+    disc = RBIDisc(album="ARIP Test", artist="Test Artist")
+    durations = get_track_durations(wav_tracks)
+    disc.tracks = build_toc_entries(_EXAMPLE_TRACKS, durations, disc)
+    toc_data = generate_toc(disc)
+
+    n = len(_EXAMPLE_TRACKS)
+    track_lsns = [0, 10000]
+    disc_last_lsn = 20000
+    cddb_id = 0xDEADBEEF
+
+    ar_results = [
+        ARTrackResult(
+            track=i + 1,
+            v1_crc=f"{0x11111111 * (i + 1):08x}",
+            v2_crc=f"{0x22222222 * (i + 1):08x}",
+            confidence_v1=14 + i,
+            confidence_v2=None,
+            max_confidence=136,
+            total_confidence=150,
+        )
+        for i in range(n)
+    ]
+    arip_block = pack_arip_block(ar_results, track_lsns, disc_last_lsn, cddb_id)
+
+    rbi = tmp / "arip_test.rbi"
+    build_container(pcm, toc_data, disc, rbi, arip_block=arip_block)
+
+    h = read_header(rbi)
+    arip_entry = h.find_block(BLOCK_TYPE_ARIP)
+    assert arip_entry is not None
+    assert arip_entry.is_skippable
+
+    with open(rbi, "rb") as f:
+        f.seek(arip_entry.offset)
+        arip_raw = f.read(arip_entry.length)
+
+    arip = unpack_arip_block(arip_raw, n)
+    assert arip.cddb_id == cddb_id
+    assert len(arip.tracks) == n
+    for i, t in enumerate(arip.tracks):
+        assert t.status == ARIP_STATUS_OK
+        assert t.v1_crc == int(ar_results[i].v1_crc, 16)
+        assert t.v1_confidence == 14 + i
+        assert t.db_total == 150

@@ -6,6 +6,7 @@ Sections:
   2. _ar_checksums — per-track CRC accumulator (middle/first/last/overflow/padding)
   3. _parse_dbar   — AccurateRip binary response parser
   4. verify_rip    — integration: disc-not-found early return, zero-padding
+  5. pack/unpack_arip_block — ARIP block serialisation round-trip
 """
 
 from __future__ import annotations
@@ -16,9 +17,12 @@ from pathlib import Path
 from unittest.mock import patch
 
 from cdda2img.accuraterip import (
+    ARTrackResult,
     _ar_checksums,
     _ar_disc_ids,
     _parse_dbar,
+    pack_arip_block,
+    unpack_arip_block,
     verify_rip,
 )
 
@@ -351,3 +355,171 @@ def test_verify_rip_last_track_zero_padding(tmp_path: Path) -> None:
         "last track should match the zero-padded CRC; "
         "if confidence_v1 is None, the buffer was clipped instead of padded"
     )
+
+
+# ---------------------------------------------------------------------------
+# 5. pack_arip_block / unpack_arip_block
+# ---------------------------------------------------------------------------
+
+_TRACK_LSNS = [0, 15000, 30000]
+_DISC_LAST_LSN = 44999
+_CDDB_ID = 0xABCD1234
+
+
+def _make_result(
+    track: int,
+    v1: str,
+    v2: str,
+    conf_v1: int | None,
+    conf_v2: int | None,
+    max_conf: int | None,
+    total_conf: int | None,
+) -> ARTrackResult:
+    return ARTrackResult(
+        track=track,
+        v1_crc=v1,
+        v2_crc=v2,
+        confidence_v1=conf_v1,
+        confidence_v2=conf_v2,
+        max_confidence=max_conf,
+        total_confidence=total_conf,
+    )
+
+
+def test_arip_pack_not_in_db() -> None:
+    """NOT_IN_DB status: CRCs are 0, confidences are 0, db_total is 0."""
+    from cdda2img.rbi_format import ARIP_STATUS_NOT_IN_DB
+
+    results = [
+        _make_result(i + 1, "00000000", "00000000", None, None, None, None)
+        for i in range(3)
+    ]
+    data = pack_arip_block(results, _TRACK_LSNS, _DISC_LAST_LSN, _CDDB_ID)
+    arip = unpack_arip_block(data, 3)
+
+    assert arip.arip_version == 1
+    assert arip.cddb_id == _CDDB_ID
+    for t in arip.tracks:
+        assert t.status == ARIP_STATUS_NOT_IN_DB
+        assert t.v1_crc == 0
+        assert t.v2_crc == 0
+        assert t.v1_confidence == 0
+        assert t.v2_confidence == 0
+        assert t.db_total == 0
+
+
+def test_arip_pack_ok_v1() -> None:
+    """OK status when v1 matches; CRCs preserved; confidences correct."""
+    from cdda2img.rbi_format import ARIP_STATUS_OK
+
+    results = [
+        _make_result(1, "deadbeef", "cafebabe", 14, None, 136, 150),
+        _make_result(2, "11223344", "aabbccdd", 14, None, 136, 150),
+    ]
+    data = pack_arip_block(results, [0, 20000], 39999, _CDDB_ID)
+    arip = unpack_arip_block(data, 2)
+
+    for i, t in enumerate(arip.tracks):
+        assert t.status == ARIP_STATUS_OK
+        assert t.v1_crc == int(results[i].v1_crc, 16)
+        assert t.v2_crc == int(results[i].v2_crc, 16)
+        assert t.v1_confidence == 14
+        assert t.v2_confidence == 0
+        assert t.db_total == 150
+
+
+def test_arip_pack_ok_v2() -> None:
+    """OK status when only v2 matches."""
+    from cdda2img.rbi_format import ARIP_STATUS_OK
+
+    results = [_make_result(1, "aabbccdd", "11223344", None, 7, 50, 60)]
+    data = pack_arip_block(results, [0], 29999, _CDDB_ID)
+    arip = unpack_arip_block(data, 1)
+
+    assert arip.tracks[0].status == ARIP_STATUS_OK
+    assert arip.tracks[0].v1_confidence == 0
+    assert arip.tracks[0].v2_confidence == 7
+
+
+def test_arip_pack_mismatch() -> None:
+    """MISMATCH status when disc is in DB but CRC matches nothing."""
+    from cdda2img.rbi_format import ARIP_STATUS_MISMATCH
+
+    results = [_make_result(1, "deadbeef", "cafebabe", None, None, 136, 136)]
+    data = pack_arip_block(results, [0], 29999, _CDDB_ID)
+    arip = unpack_arip_block(data, 1)
+
+    t = arip.tracks[0]
+    assert t.status == ARIP_STATUS_MISMATCH
+    assert t.v1_crc == int("deadbeef", 16)
+    assert t.v2_crc == int("cafebabe", 16)
+    assert t.v1_confidence == 0
+    assert t.v2_confidence == 0
+    assert t.db_total == 136
+
+
+def test_arip_disc_ids_in_block() -> None:
+    """disc_id1/disc_id2 in block header match _ar_disc_ids computation."""
+    lsns = [0, 12000]
+    last_lsn = 24000
+
+    id1_hex, id2_hex = _ar_disc_ids(lsns, last_lsn)
+    results = [
+        _make_result(i + 1, "00000000", "00000000", None, None, None, None)
+        for i in range(2)
+    ]
+    data = pack_arip_block(results, lsns, last_lsn, _CDDB_ID)
+    arip = unpack_arip_block(data, 2)
+
+    assert arip.disc_id1 == int(id1_hex, 16)
+    assert arip.disc_id2 == int(id2_hex, 16)
+
+
+def test_arip_uint16_clamp() -> None:
+    """Confidence values larger than 65535 are clamped, not overflowed."""
+    results = [_make_result(1, "12345678", "87654321", 70000, 80000, 90000, 100000)]
+    data = pack_arip_block(results, [0], 29999, 0)
+    arip = unpack_arip_block(data, 1)
+
+    assert arip.tracks[0].v1_confidence == 0xFFFF
+    assert arip.tracks[0].v2_confidence == 0xFFFF
+    assert arip.tracks[0].db_total == 0xFFFF
+
+
+def test_arip_block_size() -> None:
+    """Block size is exactly 13 + 15 x N bytes."""
+    for n in (1, 5, 22, 99):
+        results = [
+            _make_result(i + 1, "00000000", "00000000", None, None, None, None)
+            for i in range(n)
+        ]
+        data = pack_arip_block(results, list(range(n)), n * 300, 0)
+        assert len(data) == 13 + 15 * n
+
+
+def test_arip_unpack_too_short() -> None:
+    """unpack_arip_block raises ValueError on truncated input."""
+    import pytest
+
+    data = bytes(10)  # way too short for even 1 track
+    with pytest.raises(ValueError):
+        unpack_arip_block(data, 1)
+
+
+def test_verify_rip_total_confidence(tmp_path: Path) -> None:
+    """total_confidence sums all dBAR blocks; max_confidence tracks the maximum."""
+    n_sectors = 10 * 75  # 10 seconds
+    pcm_data = bytes(n_sectors * 2352)
+    pcm_path = tmp_path / "disc.pcm"
+    pcm_path.write_bytes(pcm_data)
+
+    # Two dBAR blocks: conf=14 and conf=130 — total should be 144, max should be 130
+    dbar = struct.pack("<BLLL", 1, 0, 0, 0) + struct.pack("<BLL", 14, 0, 0)
+    dbar += struct.pack("<BLLL", 1, 0, 0, 0) + struct.pack("<BLL", 130, 0, 0)
+
+    with patch("cdda2img.accuraterip._fetch_ar", return_value=dbar):
+        results = verify_rip(pcm_path, track_lsns=[0], disc_last_lsn=n_sectors - 1)
+
+    assert len(results) == 1
+    assert results[0].max_confidence == 130
+    assert results[0].total_confidence == 144

@@ -4,6 +4,8 @@ accuraterip.py — AccurateRip checksum computation and database verification.
 Public interface:
     verify_rip(pcm_path, track_lsns, disc_last_lsn, drive_offset, cddb_id) -> list[ARTrackResult]
     print_ar_report(results) -> None
+    pack_arip_block(results, track_lsns, disc_last_lsn, cddb_id) -> bytes
+    unpack_arip_block(data, track_count) -> RBIArip
 """
 
 from __future__ import annotations
@@ -15,6 +17,10 @@ import urllib.error
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from cdda2img.rbi_format import RBIArip
 
 import numpy as np
 
@@ -37,9 +43,14 @@ class ARTrackResult:
     track: int
     v1_crc: str  # 8-char hex
     v2_crc: str  # 8-char hex
-    confidence_v1: int | None
-    confidence_v2: int | None
-    max_confidence: int | None  # None = disc not in AR database
+    confidence_v1: int | None  # None = no CRC match for v1
+    confidence_v2: int | None  # None = no CRC match for v2
+    max_confidence: (
+        int | None
+    )  # None = disc not in AR database; highest single-block conf
+    total_confidence: int | None = (
+        None  # None = not in DB; sum of all dBAR block confidences
+    )
 
 
 def _ar_checksums(
@@ -213,6 +224,7 @@ def verify_rip(
             conf_v1: int | None = None
             conf_v2: int | None = None
             max_conf: int | None = None
+            total_conf: int = 0
             for resp in responses:
                 entry = resp[i]
                 max_conf = (
@@ -220,6 +232,7 @@ def verify_rip(
                     if max_conf is not None
                     else entry["conf"]
                 )
+                total_conf += entry["conf"]
                 if entry["v1"] == v1:
                     conf_v1 = (
                         max(conf_v1, entry["conf"])
@@ -241,6 +254,7 @@ def verify_rip(
                     confidence_v1=conf_v1,
                     confidence_v2=conf_v2,
                     max_confidence=max_conf,
+                    total_confidence=total_conf if total_conf > 0 else None,
                 )
             )
 
@@ -286,3 +300,103 @@ def print_ar_report(results: list[ARTrackResult], read_offset: int = 0) -> None:
         print(f"    {n}/{n} tracks verified (min confidence {min(confs)})")
     else:
         print(f"    {n_ok}/{n} tracks verified ({n - n_ok} mismatch)")
+
+
+# ---------------------------------------------------------------------------
+# ARIP block serialisation
+# ---------------------------------------------------------------------------
+
+
+def pack_arip_block(
+    results: list[ARTrackResult],
+    track_lsns: list[int],
+    disc_last_lsn: int,
+    cddb_id: int,
+) -> bytes:
+    """Serialise AccurateRip verification results into an ARIP block (rbi_spec.md §6.5).
+
+    disc_id1/disc_id2 are recomputed from track_lsns/disc_last_lsn so that the
+    block is self-describing (stores the exact AR URL parameters used).
+    """
+    from cdda2img.rbi_format import (
+        ARIP_BLOCK_VERSION,
+        ARIP_HEADER_STRUCT,
+        ARIP_STATUS_MISMATCH,
+        ARIP_STATUS_NOT_IN_DB,
+        ARIP_STATUS_OK,
+        ARIP_TRACK_STRUCT,
+    )
+
+    id1_hex, id2_hex = _ar_disc_ids(track_lsns, disc_last_lsn)
+    disc_id1 = int(id1_hex, 16)
+    disc_id2 = int(id2_hex, 16)
+
+    header = struct.pack(
+        ARIP_HEADER_STRUCT, ARIP_BLOCK_VERSION, disc_id1, disc_id2, cddb_id
+    )
+
+    tracks_bytes = bytearray()
+    for r in results:
+        if r.max_confidence is None:
+            status = ARIP_STATUS_NOT_IN_DB
+        elif r.confidence_v1 is not None or r.confidence_v2 is not None:
+            status = ARIP_STATUS_OK
+        else:
+            status = ARIP_STATUS_MISMATCH
+
+        v1 = int(r.v1_crc, 16)
+        v2 = int(r.v2_crc, 16)
+        conf_v1 = min(r.confidence_v1 or 0, 0xFFFF)
+        conf_v2 = min(r.confidence_v2 or 0, 0xFFFF)
+        db_total = min(r.total_confidence or 0, 0xFFFF)
+
+        tracks_bytes += struct.pack(
+            ARIP_TRACK_STRUCT, v1, v2, conf_v1, conf_v2, db_total, status
+        )
+
+    return header + bytes(tracks_bytes)
+
+
+def unpack_arip_block(data: bytes, track_count: int) -> RBIArip:
+    """Deserialise an ARIP block into an RBIArip dataclass."""
+    from cdda2img.rbi_format import (
+        ARIP_HEADER_SIZE,
+        ARIP_HEADER_STRUCT,
+        ARIP_TRACK_SIZE,
+        ARIP_TRACK_STRUCT,
+        RBIArip,
+        RBIAripTrack,
+    )
+
+    if len(data) < ARIP_HEADER_SIZE + ARIP_TRACK_SIZE * track_count:
+        msg = f"ARIP block too short: {len(data)} bytes for {track_count} tracks"
+        raise ValueError(msg)
+
+    arip_version, disc_id1, disc_id2, cddb_id = struct.unpack_from(
+        ARIP_HEADER_STRUCT, data, 0
+    )
+
+    tracks: list[RBIAripTrack] = []
+    for i in range(track_count):
+        offset = ARIP_HEADER_SIZE + i * ARIP_TRACK_SIZE
+        v1, v2, conf_v1, conf_v2, db_total, status = struct.unpack_from(
+            ARIP_TRACK_STRUCT, data, offset
+        )
+        tracks.append(
+            RBIAripTrack(
+                v1_crc=v1,
+                v2_crc=v2,
+                v1_confidence=conf_v1,
+                v2_confidence=conf_v2,
+                db_total=db_total,
+                status=status,
+            )
+        )
+
+    return RBIArip(
+        arip_version=arip_version,
+        disc_id1=disc_id1,
+        disc_id2=disc_id2,
+        cddb_id=cddb_id,
+        tracks=tracks,
+    )

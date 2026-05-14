@@ -142,12 +142,13 @@ def build_container(
     disc: RBIDisc,
     output_file: Path,
     rg_block: bytes | None = None,
+    arip_block: bytes | None = None,
     prov_data: dict[str, str] | None = None,
     extra_flags: int = 0,
 ) -> None:
     """Assemble and write an RBI v4.0 container from raw PCM and TOC data.
 
-    Blocks are written in order: TOC → PROV → RGDB → PCM.  The block
+    Blocks are written in order: TOC → PROV → RGDB → ARIP → PCM.  The block
     directory is appended last, and ``dir_offset`` is patched into the fixed
     header via a seek after all data is written.
 
@@ -160,6 +161,8 @@ def build_container(
     if prov_block is not None:
         dir_count += 1
     if rg_block is not None:
+        dir_count += 1
+    if arip_block is not None:
         dir_count += 1
 
     header = struct.pack(
@@ -219,6 +222,18 @@ def build_container(
                 rg_offset,
                 len(rg_block),
                 sha256_bytes(rg_block),
+            ))
+
+        # ARIP block
+        if arip_block is not None:
+            arip_offset = out.tell()
+            out.write(arip_block)
+            dir_entries.append((
+                BLOCK_TYPE_ARIP,
+                BLOCK_FLAG_SKIP,
+                arip_offset,
+                len(arip_block),
+                sha256_bytes(arip_block),
             ))
 
         # PCM block (streaming to avoid loading the whole file into memory)
@@ -611,7 +626,7 @@ def _print_provenance(provenance: dict[str, str]) -> None:
         print(f"Remaster:  {label}{extra}")
 
 
-def list_container(rbi_file: Path) -> None:
+def list_container(rbi_file: Path) -> None:  # noqa: C901
     """Print a human-readable listing of an RBI file's blocks and tracks."""
     from cdda2img.toc_parser import parse_toc
 
@@ -674,6 +689,40 @@ def list_container(rbi_file: Path) -> None:
             f"{name:<{col_w}}  {entry.offset:>14,}  {_fmt_size(entry.length):>14}{extra_str}"
         )
 
+    # AccurateRip summary from ARIP block
+    arip_entry = header.find_block(BLOCK_TYPE_ARIP)
+    if arip_entry is not None:
+        from cdda2img.accuraterip import unpack_arip_block
+        from cdda2img.rbi_format import (
+            ARIP_STATUS_MISMATCH,
+            ARIP_STATUS_NOT_IN_DB,
+            ARIP_STATUS_OK,
+        )
+
+        with open(rbi_file, "rb") as f:
+            f.seek(arip_entry.offset)
+            arip_raw = f.read(arip_entry.length)
+        try:
+            arip = unpack_arip_block(arip_raw, header.track_count)
+            statuses = [t.status for t in arip.tracks]
+            n = len(statuses)
+            if all(s == ARIP_STATUS_NOT_IN_DB for s in statuses):
+                print("AccurateRip:         not in database")
+            elif all(s == ARIP_STATUS_OK for s in statuses):
+                min_conf = min(
+                    max(t.v1_confidence, t.v2_confidence) for t in arip.tracks
+                )
+                print(f"AccurateRip:         {n}/{n} tracks OK  (min conf {min_conf})")
+            elif all(s == ARIP_STATUS_MISMATCH for s in statuses):
+                max_total = max(t.db_total for t in arip.tracks)
+                print(
+                    f"AccurateRip:         in DB (max total {max_total}) but no CRC match"
+                )
+            else:
+                n_ok = sum(1 for s in statuses if s == ARIP_STATUS_OK)
+                print(f"AccurateRip:         {n_ok}/{n} tracks verified")
+        except ValueError:
+            pass
     print()
 
     with open(rbi_file, "rb") as f:

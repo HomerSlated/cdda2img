@@ -447,6 +447,7 @@ def _finalize_import(
     output_stem: str,
     loudness: str,
     output: Path | None,
+    arip_block: bytes | None = None,
 ) -> None:
     """Shared post-rip/import pipeline: MB lookup → metadata menu → TOC → RG → container."""
     import sys
@@ -486,6 +487,7 @@ def _finalize_import(
         disc,
         output,
         rg_block=rg_block,
+        arip_block=arip_block,
         prov_data=provenance,
         extra_flags=FLAG_MASTER_MODE,
     )
@@ -618,7 +620,7 @@ def rip_image(
     loudness: str = "rg",
     output: Path | None = None,
 ) -> None:
-    from cdda2img.accuraterip import print_ar_report, verify_rip
+    from cdda2img.accuraterip import pack_arip_block, print_ar_report, verify_rip
     from cdda2img.cddb import compute_cddb_disc_id, prepopulate_from_cddb
     from cdda2img.config import load_config
     from cdda2img.toc import sanitize_title
@@ -650,11 +652,15 @@ def rip_image(
         )
 
         cddb_id = int(compute_cddb_disc_id(info.track_lsns, info.disc_last_lsn), 16)
+        # Track which LSNs fed the final verify_rip call — may change if paranoia fallback fires.
+        final_track_lsns = info.track_lsns
+        final_disc_last_lsn = info.disc_last_lsn
+
         # PCM is now offset-corrected for both paths; verify_rip reads from correct positions.
         ar_results = verify_rip(
             temp.pcm_file,
-            info.track_lsns,
-            info.disc_last_lsn,
+            final_track_lsns,
+            final_disc_last_lsn,
             read_offset=0,
             cddb_id=cddb_id,
         )
@@ -681,14 +687,20 @@ def rip_image(
                 device, temp.pcm_file, paranoia="full", read_offset=read_offset
             )
             rip_type = "cd-paranoia"
+            final_track_lsns = paranoia_info.track_lsns
+            final_disc_last_lsn = paranoia_info.disc_last_lsn
             ar_results = verify_rip(
                 temp.pcm_file,
-                paranoia_info.track_lsns,
-                paranoia_info.disc_last_lsn,
+                final_track_lsns,
+                final_disc_last_lsn,
                 read_offset=0,
                 cddb_id=cddb_id,
             )
             print_ar_report(ar_results, read_offset=read_offset)
+
+        arip_block = pack_arip_block(
+            ar_results, final_track_lsns, final_disc_last_lsn, cddb_id
+        )
 
         output_stem = sanitize_title(disc.album) or device.lstrip("/").replace("/", "_")
         provenance: dict[str, str] = {
@@ -699,7 +711,15 @@ def rip_image(
         if drive_name is not None:
             provenance["drive_name"] = drive_name
             provenance["drive_read_offset"] = f"{read_offset:+d}"
-        _finalize_import(disc, temp.pcm_file, provenance, output_stem, loudness, output)
+        _finalize_import(
+            disc,
+            temp.pcm_file,
+            provenance,
+            output_stem,
+            loudness,
+            output,
+            arip_block=arip_block,
+        )
     finally:
         temp.cleanup()
 
