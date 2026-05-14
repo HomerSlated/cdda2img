@@ -230,9 +230,17 @@ def _rewrite_config_write_offset(text: str, offset: int) -> str:
         else:
             lines_out.append(line)
     if not replaced:
-        result = "".join(lines_out).rstrip("\n")
-        result = (result + "\n" if result else "") + new_line
-        return result
+        # Insert before the first section header so the key stays top-level.
+        # Appending at EOF would place it inside the last [[...]] table block.
+        insert_at = next(
+            (i for i, ln in enumerate(lines_out) if ln.strip().startswith("[")),
+            None,
+        )
+        if insert_at is not None:
+            lines_out.insert(insert_at, new_line)
+        else:
+            result = "".join(lines_out).rstrip("\n")
+            return (result + "\n" if result else "") + new_line
     return "".join(lines_out)
 
 
