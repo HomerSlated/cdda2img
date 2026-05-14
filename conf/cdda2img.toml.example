@@ -7,6 +7,12 @@
 # Default: 0 (no offset correction)
 drive_offset = 30
 
+# CD drive write offset in samples.  Run tools/measure_write_offset.py to measure.
+# Positive: drive burns late (trim samples from start before burning).
+# Negative: drive burns early (prepend silence before burning).
+# Default: 0 (no correction)
+# write_offset = 0
+
 # CDDB server for disc metadata lookup (host:port).
 # Default: cddb.retrobridge.org:888
 # cddb_server = "cddb.retrobridge.org:888"

@@ -76,6 +76,11 @@ def parse_args() -> argparse.Namespace:
               Note: import always uses master mode (1:1 conversion; s16be→s16le only)
               Accepts: cdrdao .toc file, or a DDP 2.0 image directory (must contain DDPID)
 
+            burn options:
+              --speed N             Burn speed in CD-DA drive units (default: 4)
+              --write-offset N      Write offset override in samples (default: from config)
+              --yes                 Skip confirmation prompt (non-interactive burn)
+
             examples:
               cdda2img r
               cdda2img r /dev/sr0 --loudness none --output mydisc.rbi
@@ -91,6 +96,9 @@ def parse_args() -> argparse.Namespace:
               cdda2img i disc.toc --loudness none --output mydisc.rbi
               cdda2img i /path/to/ddp_dir
               cdda2img i /path/to/ddp_dir --output mydisc.rbi
+              cdda2img w album.rbi
+              cdda2img w album.rbi /dev/sr0 --speed 8
+              cdda2img w album.rbi --write-offset -30 --yes
               cdda2img l album.rbi
               cdda2img t album.rbi
         """),
@@ -190,6 +198,37 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=None,
         help="Output .rbi file path (default: derived from album title)",
+    )
+
+    w_cmd = sub.add_parser(
+        "w", help="Burn an RBI image to a blank CD-DA disc via cdrdao"
+    )
+    w_cmd.add_argument("rbi_file", type=Path, help="RBI file to burn")
+    w_cmd.add_argument(
+        "device",
+        nargs="?",
+        default="/dev/sr0",
+        help="CD drive device (default: /dev/sr0)",
+    )
+    w_cmd.add_argument(
+        "--speed",
+        type=int,
+        default=4,
+        metavar="N",
+        help="Burn speed in CD-DA drive units (default: 4)",
+    )
+    w_cmd.add_argument(
+        "--write-offset",
+        type=int,
+        default=None,
+        dest="write_offset",
+        metavar="N",
+        help="Write offset override in samples (default: from config)",
+    )
+    w_cmd.add_argument(
+        "--yes",
+        action="store_true",
+        help="Skip confirmation prompt",
     )
 
     return parser.parse_args()
@@ -750,6 +789,27 @@ def extract_image(
             print(" done")
 
 
+def burn_image(
+    rbi_file: Path,
+    device: str = "/dev/sr0",
+    write_offset_override: int | None = None,
+    speed: int = 4,
+    yes: bool = False,
+) -> None:
+    from cdda2img.config import load_config
+    from cdda2img.disc_writer import burn_disc
+
+    cfg = load_config()
+    if write_offset_override is not None:
+        write_offset = write_offset_override
+        log.debug("write_offset=%d (CLI override)", write_offset)
+    else:
+        write_offset = cfg.write_offset
+        if write_offset != 0:
+            log.debug("write_offset=%d (config)", write_offset)
+    burn_disc(rbi_file, device=device, write_offset=write_offset, speed=speed, yes=yes)
+
+
 def _dispatch(args: argparse.Namespace) -> None:
     if args.cmd == "c":
         create_image(
@@ -780,6 +840,14 @@ def _dispatch(args: argparse.Namespace) -> None:
 
         if not verify_container(args.rbi_file):
             raise SystemExit(1)
+    elif args.cmd == "w":
+        burn_image(
+            args.rbi_file,
+            device=args.device,
+            write_offset_override=args.write_offset,
+            speed=args.speed,
+            yes=args.yes,
+        )
 
 
 def main() -> None:

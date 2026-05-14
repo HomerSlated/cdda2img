@@ -421,8 +421,32 @@ def main() -> int:
         print(f"  Variance:     {s['variance']}")
         print(f"  Confidence:   {s['confidence']}%")
         print(f"\n  Results saved to {results_path}")
+        if s["confidence"] >= 80:
+            _offer_save_config(s["write_offset"])
 
     return 0
+
+
+def _offer_save_config(write_offset: int) -> None:
+    """Offer to persist *write_offset* to the cdda2img config file."""
+    try:
+        answer = (
+            input(f"\n  Save write_offset={write_offset:+d} to config? [y/N] ")
+            .strip()
+            .lower()
+        )
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return
+    if answer != "y":
+        return
+    try:
+        from cdda2img.config import config_path, save_write_offset
+
+        save_write_offset(write_offset)
+        print(f"  Saved to {config_path()}")
+    except Exception as exc:
+        print(f"  WARNING: could not save to config: {exc}")
 
 
 if __name__ == "__main__":

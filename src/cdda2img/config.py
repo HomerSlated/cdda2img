@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import shutil
 import sys
 from dataclasses import dataclass, field
@@ -89,6 +90,7 @@ class Config:
     """Validated cdda2img configuration with typed fields and defaults."""
 
     drive_offset: int = 0
+    write_offset: int = 0
     cddb_server: str = "cddb.retrobridge.org:888"
     database_backups: int = 3
     database_backup_frequency: str = "1d"
@@ -128,6 +130,13 @@ def load_config() -> Config:
         log.warning("Invalid drive_offset %r in config; defaulting to 0", raw)
         offset = 0
 
+    raw_wo = data.get("write_offset", 0)
+    try:
+        write_offset = int(raw_wo)
+    except (ValueError, TypeError):
+        log.warning("Invalid write_offset %r in config; defaulting to 0", raw_wo)
+        write_offset = 0
+
     cddb_server = str(data.get("cddb_server", "cddb.retrobridge.org:888"))
 
     raw_backups = data.get("database_backups", 3)
@@ -144,6 +153,7 @@ def load_config() -> Config:
 
     return Config(
         drive_offset=offset,
+        write_offset=write_offset,
         cddb_server=cddb_server,
         database_backups=database_backups,
         database_backup_frequency=database_backup_frequency,
@@ -194,6 +204,57 @@ def _rewrite_config_drives(text: str, drives: list[DriveConfig]) -> str:
         result += f"offset = {drive.offset}\n"
 
     return result
+
+
+def _rewrite_config_write_offset(text: str, offset: int) -> str:
+    """Return *text* with the top-level write_offset entry set to *offset*.
+
+    Scans line-by-line and replaces the first write_offset line (including
+    commented-out variants) that appears before any TOML section header.
+    Appends if not present.
+    """
+    new_line = f"write_offset = {offset}\n"
+    lines_out: list[str] = []
+    in_section = False
+    replaced = False
+    for line in text.splitlines(keepends=True):
+        if line.strip().startswith("["):
+            in_section = True
+        if (
+            not replaced
+            and not in_section
+            and re.match(r"^#?\s*write_offset\s*=", line.strip())
+        ):
+            lines_out.append(new_line)
+            replaced = True
+        else:
+            lines_out.append(line)
+    if not replaced:
+        result = "".join(lines_out).rstrip("\n")
+        result = (result + "\n" if result else "") + new_line
+        return result
+    return "".join(lines_out)
+
+
+def save_write_offset(offset: int, path: Path | None = None) -> None:
+    """Write *offset* as the top-level ``write_offset`` entry in the config file.
+
+    Replaces an existing ``write_offset`` line (including commented-out variants
+    that appear before any ``[[...]]`` section) or appends it if absent.
+    Writes are atomic (temp + rename).
+    """
+    cfg_path = path or config_path()
+
+    try:
+        text = cfg_path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        text = ""
+
+    new_text = _rewrite_config_write_offset(text, offset)
+    cfg_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = cfg_path.with_name(cfg_path.name + ".tmp")
+    tmp.write_text(new_text, encoding="utf-8")
+    tmp.replace(cfg_path)
 
 
 def save_drive(drive: DriveConfig, path: Path | None = None) -> None:
