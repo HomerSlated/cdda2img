@@ -51,6 +51,9 @@ docs/source
 *.rbi
 *.wav
 *.flac
+*.jpg
+*.jpeg
+*.cue
 *.toc
 *.bin
 *.s16le
