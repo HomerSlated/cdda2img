@@ -6,6 +6,10 @@ import tempfile
 import textwrap
 import wave
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from cdda2img.rip_log import RipLogBuilder
 
 from cdda2img.concat import concat_wav
 from cdda2img.container import (
@@ -448,6 +452,7 @@ def _finalize_import(
     loudness: str,
     output: Path | None,
     arip_block: bytes | None = None,
+    rlog_builder: "RipLogBuilder | None" = None,
 ) -> None:
     """Shared post-rip/import pipeline: MB lookup → metadata menu → TOC → RG → container."""
     import sys
@@ -457,6 +462,10 @@ def _finalize_import(
 
     disc = prepopulate_from_mb(disc, verbose=sys.stdin.isatty())
     disc = run_metadata_menu(disc, source_pcm=pcm_file)
+
+    rlog_block: bytes | None = None
+    if rlog_builder is not None:
+        rlog_block = rlog_builder.finalize(disc)
 
     _add_release_provenance(provenance, disc)
     toc_data = generate_toc(disc)
@@ -488,6 +497,7 @@ def _finalize_import(
         output,
         rg_block=rg_block,
         arip_block=arip_block,
+        rlog_block=rlog_block,
         prov_data=provenance,
         extra_flags=FLAG_MASTER_MODE,
     )
@@ -702,6 +712,16 @@ def rip_image(
             ar_results, final_track_lsns, final_disc_last_lsn, cddb_id
         )
 
+        from cdda2img.rip_log import RipLogBuilder
+
+        rlog_builder = RipLogBuilder(
+            rip_type=rip_type,
+            drive_name=drive_name,
+            read_offset=read_offset,
+        )
+        rlog_builder.ar_results = ar_results
+        rlog_builder.cddb_id = cddb_id
+
         output_stem = sanitize_title(disc.album) or device.lstrip("/").replace("/", "_")
         provenance: dict[str, str] = {
             "mode": "r",
@@ -719,6 +739,7 @@ def rip_image(
             loudness,
             output,
             arip_block=arip_block,
+            rlog_builder=rlog_builder,
         )
     finally:
         temp.cleanup()

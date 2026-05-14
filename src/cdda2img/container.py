@@ -143,12 +143,13 @@ def build_container(
     output_file: Path,
     rg_block: bytes | None = None,
     arip_block: bytes | None = None,
+    rlog_block: bytes | None = None,
     prov_data: dict[str, str] | None = None,
     extra_flags: int = 0,
 ) -> None:
     """Assemble and write an RBI v4.0 container from raw PCM and TOC data.
 
-    Blocks are written in order: TOC → PROV → RGDB → ARIP → PCM.  The block
+    Blocks are written in order: TOC → PROV → RGDB → ARIP → RLOG → PCM.  The block
     directory is appended last, and ``dir_offset`` is patched into the fixed
     header via a seek after all data is written.
 
@@ -163,6 +164,8 @@ def build_container(
     if rg_block is not None:
         dir_count += 1
     if arip_block is not None:
+        dir_count += 1
+    if rlog_block is not None:
         dir_count += 1
 
     header = struct.pack(
@@ -234,6 +237,18 @@ def build_container(
                 arip_offset,
                 len(arip_block),
                 sha256_bytes(arip_block),
+            ))
+
+        # RLOG block
+        if rlog_block is not None:
+            rlog_offset = out.tell()
+            out.write(rlog_block)
+            dir_entries.append((
+                BLOCK_TYPE_RLOG,
+                BLOCK_FLAG_SKIP,
+                rlog_offset,
+                len(rlog_block),
+                sha256_bytes(rlog_block),
             ))
 
         # PCM block (streaming to avoid loading the whole file into memory)
