@@ -26,9 +26,10 @@ log = logging.getLogger(__name__)
 def _get_engine_version(rip_type: str) -> str:
     """Return '<engine> <version>' or '<engine> (version unknown)' on failure."""
     cmd = "cdrdao" if rip_type == "cdrdao" else "cd-paranoia"
+    args = [cmd, "version"] if rip_type == "cdrdao" else [cmd, "--version"]
     try:
         result = subprocess.run(  # noqa: S603
-            [cmd, "--version"],
+            args,
             capture_output=True,
             text=True,
             timeout=5,
