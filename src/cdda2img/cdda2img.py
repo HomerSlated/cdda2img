@@ -76,8 +76,8 @@ def parse_args() -> argparse.Namespace:
             list options:
               --info                Show container structure and track index (default)
               --rg                  Render ReplayGain block
-              --ar                  Render AccurateRip report (piped to $PAGER)
-              --log                 Render rip log (piped to $PAGER)
+              --ar                  Render AccurateRip report
+              --log                 Render rip log
               (flags are additive)
 
             rip options:
@@ -202,15 +202,9 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Show disc/block/track summary (default if no flags)",
     )
-    l_cmd.add_argument(
-        "--rg", action="store_true", help="Show ReplayGain data (piped to $PAGER)"
-    )
-    l_cmd.add_argument(
-        "--ar", action="store_true", help="Show AccurateRip report (piped to $PAGER)"
-    )
-    l_cmd.add_argument(
-        "--log", action="store_true", help="Show rip log (piped to $PAGER)"
-    )
+    l_cmd.add_argument("--rg", action="store_true", help="Show ReplayGain data")
+    l_cmd.add_argument("--ar", action="store_true", help="Show AccurateRip report")
+    l_cmd.add_argument("--log", action="store_true", help="Show rip log")
 
     t_cmd = sub.add_parser("t", help="Test/validate an RBI image against the spec")
     t_cmd.add_argument("rbi_file", type=Path, help="RBI file to validate")

@@ -9,10 +9,8 @@ import importlib.metadata
 import json
 import os
 import re
-import shlex
 import shutil
 import struct
-import subprocess
 import sys
 import tempfile
 import wave
@@ -397,20 +395,6 @@ def _copy_bytes_swapped(f_in, f_out, length: int) -> None:
 def _warn_checksum(label: str, computed: bytes, expected: bytes) -> None:
     if computed != expected:
         print(f"Warning: {label} checksum mismatch — file may be corrupt")
-
-
-def _page_or_print(text: str) -> None:
-    """Pipe text to $PAGER if set; fall back to stdout."""
-    pager = os.environ.get("PAGER")
-    paged = False
-    if pager:
-        try:
-            subprocess.run(shlex.split(pager), input=text.encode(), check=False)  # noqa: S603
-            paged = True
-        except OSError:
-            pass
-    if not paged:
-        print(text)
 
 
 @dataclass
@@ -886,7 +870,7 @@ def list_container(  # noqa: C901
     """Print a human-readable listing of an RBI file.
 
     Flags are additive. If none of rg/ar/log are set, info defaults to True.
-    Block content (rg/ar/log) is piped to $PAGER if set; info is always printed.
+    All output goes to stdout; pipe to a pager yourself if needed.
     """
     parts: list[str] = []
 
@@ -943,11 +927,7 @@ def list_container(  # noqa: C901
         else:
             parts.append("(No rip log block in this container)")
 
-    full_output = "\n\n".join(parts)
-    if rg or ar or log:
-        _page_or_print(full_output)
-    else:
-        print(full_output)
+    print("\n\n".join(parts))
 
 
 # ---------------------------------------------------------------------------
