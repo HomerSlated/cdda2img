@@ -806,12 +806,15 @@ def verify_container(rbi_file: Path) -> bool:  # noqa: C901
     ) = struct.unpack(HEADER_STRUCT, raw)
 
     # Rules 1-8
-    check("1. Magic bytes", magic == MAGIC, f"got {magic!r}")
-    check(
+    magic_ok = check("1. Magic bytes", magic == MAGIC, f"got {magic!r}")
+    version_ok = check(
         "2. Format version major == 4",
         version_major == VERSION_MAJOR,
         f"major version {version_major} unsupported (need {VERSION_MAJOR})",
     )
+    if not (magic_ok and version_ok):
+        print(f"\n  {len(failed)} check(s) FAILED — cannot continue.")
+        return False
     if version_minor > VERSION_MINOR:
         print(
             f"  [WARN] 3. Minor version {version_minor} > {VERSION_MINOR} — proceeding (minor increments are backwards-compatible)"
@@ -860,9 +863,14 @@ def verify_container(rbi_file: Path) -> bool:  # noqa: C901
     )
 
     # Read directory entries
-    with open(rbi_file, "rb") as f:
-        f.seek(dir_offset)
-        dir_raw = f.read(dir_count * DIR_ENTRY_SIZE)
+    try:
+        with open(rbi_file, "rb") as f:
+            f.seek(dir_offset)
+            dir_raw = f.read(dir_count * DIR_ENTRY_SIZE)
+    except OSError as exc:
+        check("Directory readable", False, str(exc))
+        print(f"\n  {len(failed)} check(s) FAILED — cannot continue.")
+        return False
 
     if len(dir_raw) < dir_count * DIR_ENTRY_SIZE:
         check("Directory readable", False, "truncated")
@@ -963,6 +971,13 @@ def verify_container(rbi_file: Path) -> bool:  # noqa: C901
         type_name = _BLOCK_NAMES.get(
             entry.type_id, entry.type_id.decode("ascii", errors="replace")
         )
+        if entry.offset >= file_size or entry.offset + entry.length > file_size:
+            check(
+                f"20. {type_name} block checksum (SHA-256)",
+                False,
+                "block out of file bounds",
+            )
+            continue
         with open(rbi_file, "rb") as f:
             f.seek(entry.offset)
             computed = _stream_sha256(f, entry.length)

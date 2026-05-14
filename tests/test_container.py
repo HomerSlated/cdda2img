@@ -7,6 +7,7 @@ no-RG-block code path.
 """
 
 import hashlib
+import struct
 from pathlib import Path
 
 import av
@@ -17,6 +18,7 @@ from cdda2img.container import (
     build_container,
     extract_data,
     read_header,
+    verify_container,
     wav_to_raw_pcm,
 )
 from cdda2img.rbi_format import (
@@ -26,6 +28,8 @@ from cdda2img.rbi_format import (
     BLOCK_TYPE_RGDB,
     BLOCK_TYPE_TOC,
     FLAG_MASTER_MODE,
+    HEADER_STRUCT,
+    MAGIC,
     PCM_BIT_DEPTH,
     PCM_CHANNELS,
     PCM_SAMPLE_RATE,
@@ -421,3 +425,61 @@ def test_arip_block_roundtrip(tmp_path_factory, wav_tracks):
         assert t.v1_crc == int(ar_results[i].v1_crc, 16)
         assert t.v1_confidence == 14 + i
         assert t.db_total == 150
+
+
+# ---------------------------------------------------------------------------
+# verify_container — robustness against malformed / wrong-version input
+# ---------------------------------------------------------------------------
+
+
+def _write_fake_rbi(path: Path, version_major: int = 3, version_minor: int = 0) -> None:
+    """Write a 40-byte RBI header with the given version and otherwise valid-looking fields."""
+    raw = struct.pack(
+        HEADER_STRUCT,
+        MAGIC,
+        version_major,
+        version_minor,
+        0,  # flags
+        1,  # track_count
+        1,  # disc_number
+        1,  # disc_total
+        44100,  # pcm_sample_rate
+        2,  # pcm_channels
+        16,  # pcm_bit_depth
+        40,  # dir_offset (points past fixed header)
+        2,  # dir_count
+        b"\x00" * 7,  # reserved
+    )
+    path.write_bytes(raw)
+
+
+def test_verify_container_wrong_version_returns_false_no_crash(tmp_path):
+    """verify_container on a v3.0 file must return False without raising."""
+    rbi = tmp_path / "fake_v3.rbi"
+    _write_fake_rbi(rbi, version_major=3)
+    result = verify_container(rbi)
+    assert result is False
+
+
+def test_verify_container_bad_magic_returns_false_no_crash(tmp_path):
+    """verify_container on a file with wrong magic must return False without raising."""
+    rbi = tmp_path / "not_an_rbi.rbi"
+    raw = struct.pack(
+        HEADER_STRUCT,
+        b"NOTMAGIC",
+        VERSION_MAJOR,
+        VERSION_MINOR,
+        0,
+        1,
+        1,
+        1,
+        44100,
+        2,
+        16,
+        40,
+        2,
+        b"\x00" * 7,
+    )
+    rbi.write_bytes(raw)
+    result = verify_container(rbi)
+    assert result is False
