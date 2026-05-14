@@ -86,9 +86,9 @@ def parse_toc(toc_bytes: bytes) -> ParsedDisc:
             try:
                 track_title = json.loads(unicode_m.group(1))
             except (json.JSONDecodeError, ValueError):
-                track_title = _first(_TITLE_RE, block, disc_title)
+                track_title = _first(_TITLE_RE, block)
         else:
-            track_title = _first(_TITLE_RE, block, disc_title)
+            track_title = _first(_TITLE_RE, block)
 
         slot_frames = frames_from_timestamp(file_m.group(2))
         start_m = _START_RE.search(block)
