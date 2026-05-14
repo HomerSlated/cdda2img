@@ -224,37 +224,25 @@ def pack_rg_block(result: RGResult) -> bytes:
 def embed_rg_tags(result: RGResult, flac_paths: list[Path]) -> None:
     """Write ReplayGain 2.0 Vorbis comment tags into existing FLAC files.
 
-    Reads each file's existing container metadata, merges the RG tags (uppercase,
-    per Vorbis comment convention), and remuxes the audio stream unchanged via
-    PyAV stream copy. The original file is replaced atomically.
+    Uses mutagen to patch the Vorbis comment block in-place without re-encoding.
     """
+    from mutagen.flac import FLAC
+
     for idx, path in enumerate(flac_paths):
         t = result.tracks[idx]
         rg_tags = {
-            "REPLAYGAIN_TRACK_GAIN": f"{t.gain:+.2f} dB",
-            "REPLAYGAIN_TRACK_PEAK": f"{t.peak:.6f}",
-            "REPLAYGAIN_TRACK_RANGE": f"{t.lra:.2f} LU",
-            "REPLAYGAIN_ALBUM_GAIN": f"{result.album_gain:+.2f} dB",
-            "REPLAYGAIN_ALBUM_PEAK": f"{result.album_peak:.6f}",
-            "REPLAYGAIN_ALBUM_RANGE": f"{result.album_lra:.2f} LU",
-            "REPLAYGAIN_REFERENCE_LOUDNESS": f"{result.reference:.2f} LUFS",
+            "REPLAYGAIN_TRACK_GAIN": [f"{t.gain:+.2f} dB"],
+            "REPLAYGAIN_TRACK_PEAK": [f"{t.peak:.6f}"],
+            "REPLAYGAIN_TRACK_RANGE": [f"{t.lra:.2f} LU"],
+            "REPLAYGAIN_ALBUM_GAIN": [f"{result.album_gain:+.2f} dB"],
+            "REPLAYGAIN_ALBUM_PEAK": [f"{result.album_peak:.6f}"],
+            "REPLAYGAIN_ALBUM_RANGE": [f"{result.album_lra:.2f} LU"],
+            "REPLAYGAIN_REFERENCE_LOUDNESS": [f"{result.reference:.2f} LUFS"],
         }
-        tmp = path.with_suffix(".rgtag.flac")
-        try:
-            with av.open(str(path)) as in_c:
-                in_stream = in_c.streams.audio[0]
-                merged = {**in_c.metadata, **rg_tags}  # preserve existing tags; add RG
-                with av.open(str(tmp), "w") as out_c:
-                    out_c.metadata.update(merged)
-                    out_stream = out_c.add_stream(template=in_stream)  # type: ignore[call-overload]  # LINT-003: template= is documented PyAV stream-copy API; missing from stubs
-                    for packet in in_c.demux(in_stream):
-                        if packet.dts is None:
-                            continue
-                        packet.stream = out_stream
-                        out_c.mux(packet)
-            tmp.replace(path)
-        finally:
-            tmp.unlink(missing_ok=True)
+        flac = FLAC(str(path))
+        for key, value in rg_tags.items():
+            flac[key] = value
+        flac.save()
 
 
 def unpack_rg_block(data: bytes, track_count: int) -> RBIReplayGain:

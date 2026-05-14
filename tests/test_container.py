@@ -15,6 +15,7 @@ import pytest
 
 from cdda2img.concat import concat_wav
 from cdda2img.container import (
+    ExtractOptions,
     build_container,
     extract_data,
     read_header,
@@ -232,7 +233,7 @@ def test_flac_extraction_rg_tags(tmp_path, built_containers):
         toc_bytes = f.read(toc_entry.length)
     parsed_disc = parse_toc(toc_bytes)
 
-    extract_data(rbi, raw_dir=None, tracks=True, base_dir=tmp_path, embed_rg=True)
+    extract_data(rbi, ExtractOptions(tracks=True), base_dir=tmp_path)
 
     flac_paths = collect_track_flac_paths(
         parsed_disc, h.disc_number, h.disc_total, tmp_path

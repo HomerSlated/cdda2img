@@ -9,10 +9,14 @@ import importlib.metadata
 import json
 import os
 import re
+import shlex
 import shutil
 import struct
+import subprocess
+import sys
 import tempfile
 import wave
+from dataclasses import dataclass
 from pathlib import Path
 
 from cdda2img.rbi_format import (
@@ -395,8 +399,49 @@ def _warn_checksum(label: str, computed: bytes, expected: bytes) -> None:
         print(f"Warning: {label} checksum mismatch — file may be corrupt")
 
 
-def _write_rg_json(path: Path, rg_data: RBIReplayGain) -> None:
-    rg_json = {
+def _page_or_print(text: str) -> None:
+    """Pipe text to $PAGER if set; fall back to stdout."""
+    pager = os.environ.get("PAGER")
+    paged = False
+    if pager:
+        try:
+            subprocess.run(shlex.split(pager), input=text.encode(), check=False)  # noqa: S603
+            paged = True
+        except OSError:
+            pass
+    if not paged:
+        print(text)
+
+
+@dataclass
+class ExtractOptions:
+    raw: bool = False
+    tracks: bool = False
+    rg: bool = False
+    ar: bool = False
+    log: bool = False
+    normalize: bool = False
+    warn_missing: bool = True
+
+
+def _write_bin_format_hint(raw_dir: Path) -> None:
+    hint = (
+        "BIN file format\n"
+        "===============\n"
+        "The .bin file contains raw CD-DA audio in disc-native byte order (s16be).\n"
+        "Sample rate: 44100 Hz, stereo (2 channels), 16-bit signed integer.\n"
+        "Byte order: big-endian (s16be) — byte-swapped from the s16le stored in the RBI.\n"
+        "\n"
+        "To burn with cdrdao:\n"
+        "  cdrdao write --device /dev/sr0 <stem>.toc\n"
+        "\n"
+        "The .toc file references the .bin by name; both must be in the same directory.\n"
+    )
+    (raw_dir / "bin_format.txt").write_text(hint, encoding="utf-8")
+
+
+def _rg_json_str(rg_data: RBIReplayGain) -> str:
+    rg_dict = {
         "reference_loudness_lufs": rg_data.rg_reference,
         "algorithm": "ITU-R BS.1770-3",
         "album_gain_db": round(rg_data.album_gain, 6),
@@ -412,18 +457,24 @@ def _write_rg_json(path: Path, rg_data: RBIReplayGain) -> None:
             for i in range(len(rg_data.track_gain))
         ],
     }
-    path.write_text(json.dumps(rg_json, indent=2))
+    return json.dumps(rg_dict, indent=2)
+
+
+def _write_rg_json(path: Path, rg_data: RBIReplayGain) -> None:
+    path.write_text(_rg_json_str(rg_data))
     print(f"RG data saved: {path}")
 
 
 def extract_data(  # noqa: C901
     container_file: Path,
-    raw_dir: Path | None,
-    tracks: bool,
-    base_dir: Path,
-    embed_rg: bool = True,
+    opts: ExtractOptions,
+    base_dir: Path | None = None,
 ) -> None:
-    """Extract TOC and/or per-track FLACs from an RBI container."""
+    """Extract blocks from an RBI container according to opts.
+
+    base_dir is the root of the extraction output tree (default: cwd/extracted).
+    Layout: raw/ for TOC+BIN, <artist>/<album>/ for FLACs, stem.* for single files.
+    """
     from cdda2img.replaygain import analyse, embed_rg_tags, unpack_rg_block
     from cdda2img.toc_parser import parse_toc
     from cdda2img.track_extract import (
@@ -431,6 +482,9 @@ def extract_data(  # noqa: C901
         extract_tracks,
         write_cue,
     )
+
+    if base_dir is None:
+        base_dir = Path.cwd() / "extracted"
 
     header = read_header(container_file)
     stem = container_file.stem
@@ -450,7 +504,6 @@ def extract_data(  # noqa: C901
     _warn_checksum("TOC", sha256_bytes(toc_data), toc_entry.checksum)
     _warn_checksum("PCM", pcm_checksum, pcm_entry.checksum)
 
-    # Parse PROV block once; used for comment synthesis and provenance display
     prov: dict[str, str] = {}
     prov_entry = header.find_block(BLOCK_TYPE_PROV)
     if prov_entry is not None:
@@ -478,28 +531,25 @@ def extract_data(  # noqa: C901
 
     disc = parse_toc(toc_data)
 
-    if raw_dir is not None:
+    if opts.raw:
+        raw_dir = base_dir / "raw"
         raw_dir.mkdir(parents=True, exist_ok=True)
 
-        # Patch the FILE references in the TOC from .s16le to .bin before writing.
         toc_text = toc_data.decode("utf-8").replace(f'"{stem}.s16le"', f'"{stem}.bin"')
-        toc_path = raw_dir / f"{stem}.toc"
-        toc_path.write_text(toc_text, encoding="utf-8")
-        print(f"TOC saved: {toc_path}")
+        (raw_dir / f"{stem}.toc").write_text(toc_text, encoding="utf-8")
+        print(f"TOC saved: {raw_dir / f'{stem}.toc'}")
 
         bin_path = raw_dir / f"{stem}.bin"
         with open(container_file, "rb") as f_in, open(bin_path, "wb") as f_out:
             f_in.seek(pcm_entry.offset)
             _copy_bytes_swapped(f_in, f_out, pcm_entry.length)
         print(f"BIN saved: {bin_path}  (s16le → s16be, disc-native byte order)")
+        _write_bin_format_hint(raw_dir)
         if comment:
             print(f"Created:   {comment}")
         _print_provenance(prov)
 
-        if rg_data is not None:
-            _write_rg_json(raw_dir / f"{stem}.rg.json", rg_data)
-
-    if tracks:
+    if opts.tracks:
         print(f"\nExtracting {header.track_count} tracks...")
         extract_tracks(
             disc=disc,
@@ -512,10 +562,10 @@ def extract_data(  # noqa: C901
             bit_depth=header.pcm_bit_depth,
             comment=comment,
             base=base_dir,
-            rg_data=rg_data if embed_rg else None,
+            rg_data=rg_data if not opts.normalize else None,
         )
         write_cue(disc, header.disc_number, header.disc_total, base_dir)
-        if embed_rg:
+        if not opts.normalize:
             if rg_data is not None:
                 print("ReplayGain tags embedded.")
             else:
@@ -535,6 +585,51 @@ def extract_data(  # noqa: C901
                 )
                 embed_rg_tags(rg_result, flac_paths)
                 print("ReplayGain tags embedded (computed post-extraction).")
+
+    if opts.rg:
+        if rg_data is not None:
+            _write_rg_json(base_dir / f"{stem}.rg.json", rg_data)
+        elif opts.warn_missing:
+            print(
+                f"Warning: no ReplayGain block in {container_file.name}",
+                file=sys.stderr,
+            )
+
+    if opts.ar:
+        arip_entry = header.find_block(BLOCK_TYPE_ARIP)
+        if arip_entry is not None:
+            from cdda2img.accuraterip import format_arip_text, unpack_arip_block
+
+            with open(container_file, "rb") as f:
+                f.seek(arip_entry.offset)
+                arip_raw = f.read(arip_entry.length)
+            try:
+                arip = unpack_arip_block(arip_raw, header.track_count)
+                ar_path = base_dir / f"{stem}.accurip"
+                ar_path.write_text(format_arip_text(arip), encoding="utf-8")
+                print(f"AccurateRip report saved: {ar_path}")
+            except ValueError as exc:
+                print(f"Warning: could not parse ARIP block: {exc}", file=sys.stderr)
+        elif opts.warn_missing:
+            print(
+                f"Warning: no AccurateRip block in {container_file.name}",
+                file=sys.stderr,
+            )
+
+    if opts.log:
+        rlog_entry = header.find_block(BLOCK_TYPE_RLOG)
+        if rlog_entry is not None:
+            with open(container_file, "rb") as f:
+                f.seek(rlog_entry.offset)
+                rlog_raw = f.read(rlog_entry.length)
+            log_path = base_dir / f"{stem}.log"
+            log_path.write_bytes(rlog_raw)
+            print(f"Rip log saved: {log_path}")
+        elif opts.warn_missing:
+            print(
+                f"Warning: no rip log block in {container_file.name}",
+                file=sys.stderr,
+            )
 
 
 def wav_to_raw_pcm(wav_path: Path, pcm_path: Path) -> None:
@@ -641,14 +736,13 @@ def _print_provenance(provenance: dict[str, str]) -> None:
         print(f"Remaster:  {label}{extra}")
 
 
-def list_container(rbi_file: Path) -> None:  # noqa: C901
-    """Print a human-readable listing of an RBI file's blocks and tracks."""
+def _list_info(rbi_file: Path) -> str:  # noqa: C901
+    """Build the --info section for list_container as a string."""
     from cdda2img.toc_parser import parse_toc
 
     header = read_header(rbi_file)
     file_size = rbi_file.stat().st_size
 
-    # Collect provenance from PROV block
     prov: dict[str, str] = {}
     prov_entry = header.find_block(BLOCK_TYPE_PROV)
     if prov_entry is not None:
@@ -674,20 +768,46 @@ def list_container(rbi_file: Path) -> None:  # noqa: C901
         else creator or created or "(unknown)"
     )
 
-    print(f"RBI Image: {rbi_file.name}  ({_fmt_size(file_size)})")
-    print(
-        f"Format:    v{header.version_major}.{header.version_minor}  |  "
-        f"disc {header.disc_number}/{header.disc_total}  |  "
-        f"{header.track_count} tracks  |  {flags_str}"
-    )
-    print(f"Created:   {created_str}")
-    _print_provenance(prov)
-    print()
+    lines: list[str] = [
+        f"RBI Image: {rbi_file.name}  ({_fmt_size(file_size)})",
+        (
+            f"Format:    v{header.version_major}.{header.version_minor}  |  "
+            f"disc {header.disc_number}/{header.disc_total}  |  "
+            f"{header.track_count} tracks  |  {flags_str}"
+        ),
+        f"Created:   {created_str}",
+    ]
+
+    # Provenance detail lines
+    mode = prov.get("mode", "")
+    if mode:
+        mode_label = {"r": "r (rip)", "i": "i (import)", "c": "c (create)"}.get(
+            mode, mode
+        )
+        lines.append(f"Mode:      {mode_label}")
+    if source := prov.get("source"):
+        lines.append(f"Source:    {source}")
+    if ripper := prov.get("ripper"):
+        lines.append(f"Ripper:    {ripper}")
+    if drive_name := prov.get("drive_name"):
+        offset_str = prov.get("drive_read_offset", "?")
+        lines.append(f"Drive:     {drive_name}  (offset {offset_str})")
+    if rms := prov.get("remastered"):
+        label = _REMASTER_LABELS.get(rms, rms)
+        extra = ""
+        if rd := prov.get("release_date"):
+            extra += f"  (this release: {rd}"
+            if od := prov.get("original_release_date"):
+                extra += f", original: {od}"
+            extra += ")"
+        lines.append(f"Remaster:  {label}{extra}")
+
+    lines.append("")
 
     col_w = len("Provenance block") + 2
     hdr_line = f"{'Block':<{col_w}}  {'Offset':>14}  {'Size':>14}"
-    print(hdr_line)
-    print("-" * len(hdr_line))
+    lines.append(hdr_line)
+    lines.append("-" * len(hdr_line))
 
     for entry in header.directory:
         name = _BLOCK_NAMES.get(
@@ -700,11 +820,10 @@ def list_container(rbi_file: Path) -> None:  # noqa: C901
                 PCM_SAMPLE_RATE * PCM_CHANNELS * (PCM_BIT_DEPTH // 8)
             )
             extra_str = f"  ({_fmt_duration(pcm_seconds)})"
-        print(
+        lines.append(
             f"{name:<{col_w}}  {entry.offset:>14,}  {_fmt_size(entry.length):>14}{extra_str}"
         )
 
-    # AccurateRip summary from ARIP block
     arip_entry = header.find_block(BLOCK_TYPE_ARIP)
     if arip_entry is not None:
         from cdda2img.accuraterip import unpack_arip_block
@@ -722,33 +841,113 @@ def list_container(rbi_file: Path) -> None:  # noqa: C901
             statuses = [t.status for t in arip.tracks]
             n = len(statuses)
             if all(s == ARIP_STATUS_NOT_IN_DB for s in statuses):
-                print("AccurateRip:         not in database")
+                lines.append("AccurateRip:         not in database")
             elif all(s == ARIP_STATUS_OK for s in statuses):
                 min_conf = min(
                     max(t.v1_confidence, t.v2_confidence) for t in arip.tracks
                 )
-                print(f"AccurateRip:         {n}/{n} tracks OK  (min conf {min_conf})")
+                lines.append(
+                    f"AccurateRip:         {n}/{n} tracks OK  (min conf {min_conf})"
+                )
             elif all(s == ARIP_STATUS_MISMATCH for s in statuses):
                 max_total = max(t.db_total for t in arip.tracks)
-                print(
+                lines.append(
                     f"AccurateRip:         in DB (max total {max_total}) but no CRC match"
                 )
             else:
                 n_ok = sum(1 for s in statuses if s == ARIP_STATUS_OK)
-                print(f"AccurateRip:         {n_ok}/{n} tracks verified")
+                lines.append(f"AccurateRip:         {n_ok}/{n} tracks verified")
         except ValueError:
             pass
-    print()
+
+    lines.append("")
 
     with open(rbi_file, "rb") as f:
         f.seek(toc_entry.offset)
         toc_bytes = f.read(toc_entry.length)
     disc = parse_toc(toc_bytes)
-    print(f"Tracks:  {disc.performer} — {disc.title}")
-    print()
+    lines.append(f"Tracks:  {disc.performer} — {disc.title}")
+    lines.append("")
     for track in disc.tracks:
         dur = _fmt_duration(track.duration_frames / CD_FRAMES_PER_SECOND)
-        print(f"  {track.track_number:2d}  {track.title:<52}  {dur:>5}")
+        lines.append(f"  {track.track_number:2d}  {track.title:<52}  {dur:>5}")
+
+    return "\n".join(lines)
+
+
+def list_container(  # noqa: C901
+    rbi_file: Path,
+    *,
+    info: bool = True,
+    rg: bool = False,
+    ar: bool = False,
+    log: bool = False,
+) -> None:
+    """Print a human-readable listing of an RBI file.
+
+    Flags are additive. If none of rg/ar/log are set, info defaults to True.
+    Block content (rg/ar/log) is piped to $PAGER if set; info is always printed.
+    """
+    parts: list[str] = []
+
+    if info:
+        parts.append(_list_info(rbi_file))
+
+    if rg:
+        header = read_header(rbi_file)
+        rg_entry = header.find_block(BLOCK_TYPE_RGDB)
+        if rg_entry is not None:
+            from cdda2img.replaygain import unpack_rg_block
+
+            with open(rbi_file, "rb") as f:
+                f.seek(rg_entry.offset)
+                rg_raw = f.read(rg_entry.length)
+            if sha256_bytes(rg_raw) == rg_entry.checksum:
+                rg_data = unpack_rg_block(rg_raw, header.track_count)
+                parts.append(_rg_json_str(rg_data))
+            else:
+                parts.append(
+                    "(ReplayGain block checksum mismatch — data may be corrupt)"
+                )
+        else:
+            parts.append("(No ReplayGain block in this container)")
+
+    if ar:
+        header = read_header(rbi_file)
+        arip_entry = header.find_block(BLOCK_TYPE_ARIP)
+        if arip_entry is not None:
+            from cdda2img.accuraterip import format_arip_text, unpack_arip_block
+
+            with open(rbi_file, "rb") as f:
+                f.seek(arip_entry.offset)
+                arip_raw = f.read(arip_entry.length)
+            try:
+                arip_obj = unpack_arip_block(arip_raw, header.track_count)
+                parts.append(format_arip_text(arip_obj))
+            except ValueError as exc:
+                parts.append(f"(Could not parse ARIP block: {exc})")
+        else:
+            parts.append("(No AccurateRip block in this container)")
+
+    if log:
+        header = read_header(rbi_file)
+        rlog_entry = header.find_block(BLOCK_TYPE_RLOG)
+        if rlog_entry is not None:
+            with open(rbi_file, "rb") as f:
+                f.seek(rlog_entry.offset)
+                rlog_raw = f.read(rlog_entry.length)
+            try:
+                parts.append(rlog_raw.decode("utf-8"))
+            except UnicodeDecodeError:
+                parts.append("(RLOG block is not valid UTF-8)")
+        else:
+            parts.append("(No rip log block in this container)")
+
+    full_output = "\n\n".join(parts)
+    if rg or ar or log:
+        _page_or_print(full_output)
+    else:
+        print(full_output)
 
 
 # ---------------------------------------------------------------------------

@@ -63,11 +63,22 @@ def parse_args() -> argparse.Namespace:
               --preserve-pregaps    Preserve pre-gaps in remaster mode (no-op for audio-file sources)
 
             extract options:
-              --tracks              Write per-track FLAC files and CUE sheet (default)
-              --raw                 Write raw PCM (.s16le) and TOC; .rg.json sidecar if RG block present
+              --tracks              Write per-track FLAC files and CUE sheet
+              --raw                 Write TOC + BIN (s16be) to extracted/raw/
+              --rg                  Write ReplayGain block as .rg.json sidecar
+              --ar                  Write AccurateRip report as .accurip
+              --log                 Write rip log as .log
+              --all                 Extract all block types (default when no flags given)
               --normalize           Normalise extracted FLACs to -18 LUFS (EBU R128);
-                                    mutually exclusive with RG tag embedding
-              (--tracks and --raw may be combined; --normalize requires --tracks)
+                                    applies with --tracks/--all; skips RG tag embedding
+              (flags are additive; omitting all flags is equivalent to --all)
+
+            list options:
+              --info                Show container structure and track index (default)
+              --rg                  Render ReplayGain block
+              --ar                  Render AccurateRip report (piped to $PAGER)
+              --log                 Render rip log (piped to $PAGER)
+              (flags are additive)
 
             rip options:
               --loudness {rg|none}  rg: embed EBU R128 ReplayGain block (default); none: skip
@@ -93,8 +104,9 @@ def parse_args() -> argparse.Namespace:
               cdda2img c /music/album --strategy ball
               cdda2img c /music/album --no-trim-silence
               cdda2img x album.rbi
+              cdda2img x album.rbi --tracks
               cdda2img x album.rbi --raw
-              cdda2img x album.rbi --tracks --raw
+              cdda2img x album.rbi --tracks --raw --rg
               cdda2img x album.rbi --normalize
               cdda2img i disc.toc
               cdda2img i disc.toc --loudness none --output mydisc.rbi
@@ -104,6 +116,7 @@ def parse_args() -> argparse.Namespace:
               cdda2img w album.rbi /dev/sr0 --speed 8
               cdda2img w album.rbi --write-offset -30 --yes
               cdda2img l album.rbi
+              cdda2img l album.rbi --ar
               cdda2img t album.rbi
         """),
     )
@@ -147,20 +160,57 @@ def parse_args() -> argparse.Namespace:
         help="Preserve pre-gaps in remaster mode (default: disabled; no-op for audio-file sources)",
     )
 
-    x = sub.add_parser("x", help="Extract TOC and audio from an RBI image")
+    x = sub.add_parser("x", help="Extract blocks from an RBI image")
     x.add_argument("rbi_file", type=Path, help="RBI file to extract")
-    x.add_argument("--raw", action="store_true", help="Write raw PCM (.s16le) and TOC")
     x.add_argument(
-        "--tracks", action="store_true", help="Write per-track FLAC files and CUE"
+        "--raw", action="store_true", help="Extract TOC + BIN (s16be) to extracted/raw/"
+    )
+    x.add_argument(
+        "--tracks",
+        action="store_true",
+        help="Extract per-track FLAC + CUE to extracted/<artist>/<album>/",
+    )
+    x.add_argument(
+        "--rg",
+        action="store_true",
+        help="Extract ReplayGain block to extracted/<stem>.rg.json",
+    )
+    x.add_argument(
+        "--ar",
+        action="store_true",
+        help="Extract AccurateRip report to extracted/<stem>.accurip",
+    )
+    x.add_argument(
+        "--log", action="store_true", help="Extract rip log to extracted/<stem>.log"
+    )
+    x.add_argument(
+        "--all",
+        action="store_true",
+        dest="all_blocks",
+        help="Extract all blocks (default when no flags given)",
     )
     x.add_argument(
         "--normalize",
         action="store_true",
-        help="Apply EBU R128 normalisation to extracted FLACs (mutually exclusive with RG tag embedding)",
+        help="Apply EBU R128 normalisation to extracted FLACs (modifier for --tracks/--all; skips RG tag embedding)",
     )
 
     l_cmd = sub.add_parser("l", help="List the contents of an RBI image")
     l_cmd.add_argument("rbi_file", type=Path, help="RBI file to list")
+    l_cmd.add_argument(
+        "--info",
+        action="store_true",
+        help="Show disc/block/track summary (default if no flags)",
+    )
+    l_cmd.add_argument(
+        "--rg", action="store_true", help="Show ReplayGain data (piped to $PAGER)"
+    )
+    l_cmd.add_argument(
+        "--ar", action="store_true", help="Show AccurateRip report (piped to $PAGER)"
+    )
+    l_cmd.add_argument(
+        "--log", action="store_true", help="Show rip log (piped to $PAGER)"
+    )
 
     t_cmd = sub.add_parser("t", help="Test/validate an RBI image against the spec")
     t_cmd.add_argument("rbi_file", type=Path, help="RBI file to validate")
@@ -785,50 +835,59 @@ def _normalize_flac(path: Path) -> None:
 
 
 def extract_image(
-    rbi_file: Path, raw: bool, tracks: bool, normalize: bool = False
+    rbi_file: Path,
+    raw: bool,
+    tracks: bool,
+    rg: bool,
+    ar: bool,
+    log: bool,
+    all_blocks: bool,
+    normalize: bool = False,
 ) -> None:
-    from cdda2img.container import read_header
+    from cdda2img.container import ExtractOptions
     from cdda2img.toc_parser import parse_toc
-    from cdda2img.track_extract import collect_tracks_output_paths
+    from cdda2img.track_extract import collect_track_flac_paths
 
-    if not raw and not tracks:
-        tracks = True  # default
-
-    if normalize and not tracks:
-        print("Note: --normalize has no effect without --tracks.")
-        normalize = False
-
-    header = read_header(rbi_file)
-    toc_entry = header.find_block(b"TOC ")
-    if toc_entry is None:
-        msg = f"{rbi_file}: no TOC block in container"
-        raise ValueError(msg)
-    with open(rbi_file, "rb") as f:
-        f.seek(toc_entry.offset)
-        toc_data = f.read(toc_entry.length)
-    disc = parse_toc(toc_data)
-
-    stem = rbi_file.stem
-    base_dir = Path.cwd()
-    raw_dir = Path(f"{stem}.extracted") if raw else None
-
-    # Collect all paths that will be written and check for overwrites
-    output_paths: list[Path] = []
-    if raw_dir is not None:
-        output_paths += [raw_dir / f"{stem}.toc", raw_dir / f"{stem}.bin"]
-    if tracks:
-        output_paths += collect_tracks_output_paths(
-            disc, header.disc_number, header.disc_total, base_dir
+    use_all = all_blocks or not (raw or tracks or rg or ar or log)
+    if use_all:
+        opts = ExtractOptions(
+            raw=True,
+            tracks=True,
+            rg=True,
+            ar=True,
+            log=True,
+            normalize=normalize,
+            warn_missing=False,
+        )
+    else:
+        opts = ExtractOptions(
+            raw=raw,
+            tracks=tracks,
+            rg=rg,
+            ar=ar,
+            log=log,
+            normalize=normalize,
+            warn_missing=True,
         )
 
-    if not _confirm_overwrite(output_paths):
-        print("Aborted.")
-        return
+    base_dir = Path.cwd() / "extracted"
+    extract_data(rbi_file, opts, base_dir=base_dir)
 
-    extract_data(rbi_file, raw_dir, tracks, base_dir, embed_rg=not normalize)
+    if normalize and opts.tracks:
+        from cdda2img.container import read_header
 
-    if normalize and tracks:
-        flac_paths = [p for p in output_paths if p.suffix == ".flac"]
+        header = read_header(rbi_file)
+        with open(rbi_file, "rb") as f:
+            from cdda2img.rbi_format import BLOCK_TYPE_TOC
+
+            toc_entry = header.find_block(BLOCK_TYPE_TOC)
+            assert toc_entry is not None  # noqa: S101
+            f.seek(toc_entry.offset)
+            toc_data = f.read(toc_entry.length)
+        disc = parse_toc(toc_data)
+        flac_paths = collect_track_flac_paths(
+            disc, header.disc_number, header.disc_total, base_dir
+        )
         print(f"\nNormalising {len(flac_paths)} tracks to -18 LUFS...")
         for p in flac_paths:
             print(f"  {p.name}", end="", flush=True)
@@ -902,12 +961,22 @@ def _dispatch(args: argparse.Namespace) -> None:
         import_image(args.source, loudness=args.loudness, output=args.output)
     elif args.cmd == "x":
         extract_image(
-            args.rbi_file, raw=args.raw, tracks=args.tracks, normalize=args.normalize
+            args.rbi_file,
+            raw=args.raw,
+            tracks=args.tracks,
+            rg=args.rg,
+            ar=args.ar,
+            log=args.log,
+            all_blocks=args.all_blocks,
+            normalize=args.normalize,
         )
     elif args.cmd == "l":
         from cdda2img.container import list_container
 
-        list_container(args.rbi_file)
+        show_info = args.info or not (args.rg or args.ar or args.log)
+        list_container(
+            args.rbi_file, info=show_info, rg=args.rg, ar=args.ar, log=args.log
+        )
     elif args.cmd == "t":
         from cdda2img.container import verify_container
 

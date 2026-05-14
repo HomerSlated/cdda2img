@@ -357,6 +357,40 @@ def pack_arip_block(
     return header + bytes(tracks_bytes)
 
 
+def format_arip_text(arip: RBIArip) -> str:
+    """Render an ARIP block as a human-readable AccurateRip report (CUETools-style).
+
+    disc_id1/disc_id2/cddb_id reconstruct the original AR lookup fingerprint.
+    """
+    from cdda2img.rbi_format import (
+        ARIP_STATUS_NOT_IN_DB,
+        ARIP_STATUS_OK,
+    )
+
+    lines = [
+        f"AccurateRip [ID: {arip.disc_id1:08x}-{arip.disc_id2:08x}-{arip.cddb_id:08x}]",
+        "Track   [  CRC V1  |  CRC V2  ]   Status",
+    ]
+    for i, t in enumerate(arip.tracks):
+        v1_str = f"{t.v1_crc:08x}"
+        v2_str = f"{t.v2_crc:08x}"
+        if t.status == ARIP_STATUS_NOT_IN_DB:
+            status_str = "Not in database"
+        elif t.status == ARIP_STATUS_OK:
+            c1, c2 = t.v1_confidence, t.v2_confidence
+            if c1 > 0 and c2 > 0:
+                conf_str = f"{c1:03d}+{c2:03d}/{t.db_total}"
+            elif c1 > 0:
+                conf_str = f"{c1:03d}/{t.db_total}"
+            else:
+                conf_str = f"V2:{c2:03d}/{t.db_total}"
+            status_str = f"({conf_str}) Accurately ripped"
+        else:  # MISMATCH
+            status_str = f"(000/{t.db_total}) No match"
+        lines.append(f" {i + 1:02d}     [{v1_str}|{v2_str}]   {status_str}")
+    return "\n".join(lines)
+
+
 def unpack_arip_block(data: bytes, track_count: int) -> RBIArip:
     """Deserialise an ARIP block into an RBIArip dataclass."""
     from cdda2img.rbi_format import (
