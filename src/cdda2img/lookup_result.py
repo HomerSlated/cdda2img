@@ -15,6 +15,15 @@ REMASTERED_YES = "YES"
 # Conservative Loudness War inflection point for CD
 LOUDNESS_WAR_YEAR = 1994
 
+# Substrings in album titles that strongly suggest a remaster release
+REMASTER_KEYWORDS: frozenset[str] = frozenset({
+    "remaster",
+    "deluxe",
+    "anniversary",
+    "reissue",
+    "expanded",
+})
+
 
 @dataclass
 class TrackMeta:

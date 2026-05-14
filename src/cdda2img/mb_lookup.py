@@ -19,6 +19,7 @@ import musicbrainzngs  # type: ignore[import-untyped]
 
 from cdda2img.lookup_result import (
     LOUDNESS_WAR_YEAR,
+    REMASTER_KEYWORDS,
     REMASTERED_NO,
     REMASTERED_POSSIBLE,
     REMASTERED_UNKNOWN,
@@ -104,6 +105,27 @@ def _classify_remaster(
         return REMASTERED_NO
     if current_year and current_year >= LOUDNESS_WAR_YEAR:
         return REMASTERED_YES if has_keyword else REMASTERED_POSSIBLE
+    return REMASTERED_UNKNOWN
+
+
+def guess_remaster_status(disc: RBIDisc) -> str:
+    """Auto-guess remaster status from the disc's populated metadata.
+
+    Called when disc.remastered_source is UNKNOWN after pre-population.
+    Makes no network requests.
+    """
+    title_lower = (disc.album or "").lower()
+    has_keyword = any(kw in title_lower for kw in REMASTER_KEYWORDS)
+    release_year = _parse_year(disc.release_date)
+    original_year = _parse_year(disc.original_release_date)
+    if has_keyword:
+        return REMASTERED_YES
+    if original_year and release_year and original_year < release_year:
+        return REMASTERED_YES
+    if release_year and release_year >= LOUDNESS_WAR_YEAR:
+        return REMASTERED_POSSIBLE
+    if release_year and release_year < LOUDNESS_WAR_YEAR:
+        return REMASTERED_NO
     return REMASTERED_UNKNOWN
 
 

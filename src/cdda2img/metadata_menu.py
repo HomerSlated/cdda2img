@@ -838,6 +838,11 @@ def run_metadata_menu(
     Returns the (possibly updated) RBIDisc. Returns *disc* unchanged when stdin
     is not a TTY (batch/scripted mode).
     """
+    if disc.remastered_source == REMASTERED_UNKNOWN:
+        from cdda2img.mb_lookup import guess_remaster_status
+
+        disc.remastered_source = guess_remaster_status(disc)
+
     if not sys.stdin.isatty():
         return disc
 

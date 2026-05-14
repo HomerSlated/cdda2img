@@ -25,6 +25,7 @@ from cdda2img.mb_lookup import (
     _parse_year,
     compute_disc_id,
     disc_id_from_rbi,
+    guess_remaster_status,
     lookup_disc_id,
     prepopulate_from_mb,
 )
@@ -175,6 +176,52 @@ def test_parse_year(date_str, expected):
 )
 def test_classify_remaster(title, orig_year, current_year, expected):
     assert _classify_remaster(title, orig_year, current_year) == expected
+
+
+# ---------------------------------------------------------------------------
+# guess_remaster_status
+# ---------------------------------------------------------------------------
+
+
+def _disc_with(
+    album: str | None = None,
+    release_date: str | None = None,
+    original_release_date: str | None = None,
+) -> RBIDisc:
+    return RBIDisc(
+        album=album or "",
+        artist="Artist",
+        release_date=release_date,
+        original_release_date=original_release_date,
+    )
+
+
+@pytest.mark.parametrize(
+    "album,release,original,expected",
+    [
+        # Keyword match → YES regardless of dates
+        ("Album (Remastered)", "2003", None, REMASTERED_YES),
+        ("Deluxe Edition", "1990", None, REMASTERED_YES),
+        ("25th Anniversary", None, None, REMASTERED_YES),
+        ("Reissue 2010", "2010", None, REMASTERED_YES),
+        ("Expanded Edition", "2020", "1985", REMASTERED_YES),
+        # Original year earlier than release year, no keyword → YES
+        ("Album", "2003", "1985", REMASTERED_YES),
+        # Release post-LOUDNESS_WAR_YEAR, no original, no keyword → POSSIBLE
+        ("Album", "2005", None, REMASTERED_POSSIBLE),
+        ("Album", "1994", None, REMASTERED_POSSIBLE),
+        # Release pre-LOUDNESS_WAR_YEAR, no keyword → NO
+        ("Album", "1990", None, REMASTERED_NO),
+        ("Album", "1993", None, REMASTERED_NO),
+        # No release date → UNKNOWN
+        ("Album", None, None, REMASTERED_UNKNOWN),
+        # Empty / None album with no dates → UNKNOWN
+        ("", None, None, REMASTERED_UNKNOWN),
+    ],
+)
+def test_guess_remaster_status(album, release, original, expected):
+    disc = _disc_with(album=album, release_date=release, original_release_date=original)
+    assert guess_remaster_status(disc) == expected
 
 
 # ---------------------------------------------------------------------------
