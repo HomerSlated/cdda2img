@@ -18,6 +18,8 @@ from cdda2img.drive_info import (
     _parse_drive_offsets_html,
     ensure_drive_offsets,
     find_drive_offset,
+    find_drive_write_offset,
+    import_eac_drives_xml,
     probe_drive_name,
 )
 
@@ -338,4 +340,262 @@ def test_find_drive_offset_exact_match_required(tmp_path: Path) -> None:
     # Partial name should not match
     result = find_drive_offset(conn, "PLEXTOR")
     assert result is None
+    conn.close()
+
+
+# ---------------------------------------------------------------------------
+# EAC XML helpers — shared fixture XML
+# ---------------------------------------------------------------------------
+
+_EAC_XML_MINIMAL = """\
+<?xml version="1.0" encoding="UTF-8"?>
+<offsetbase>
+  <drive>
+    <brand>Plextor</brand>
+    <model>708A</model>
+    <firmware>?</firmware>
+    <accurate_stream>Yes</accurate_stream>
+    <audio_caching>No</audio_caching>
+    <c2_error_retrieval>No</c2_error_retrieval>
+    <read_command>?</read_command>
+    <read_offset_correction>+30</read_offset_correction>
+    <eac_write>Yes</eac_write>
+    <write_offset>-30</write_offset>
+  </drive>
+  <drive>
+    <brand>Acer</brand>
+    <model>CD-636A</model>
+    <firmware>1.0</firmware>
+    <accurate_stream>Yes</accurate_stream>
+    <audio_caching>No</audio_caching>
+    <c2_error_retrieval>No</c2_error_retrieval>
+    <read_command>?</read_command>
+    <read_offset_correction>+686</read_offset_correction>
+    <eac_write>No</eac_write>
+    <write_offset>-</write_offset>
+  </drive>
+</offsetbase>
+"""
+
+_EAC_XML_CONFLICT = """\
+<?xml version="1.0" encoding="UTF-8"?>
+<offsetbase>
+  <drive>
+    <brand>Yamaha</brand>
+    <model>CRW4416</model>
+    <firmware>?</firmware>
+    <accurate_stream>Yes</accurate_stream>
+    <audio_caching>No</audio_caching>
+    <c2_error_retrieval>No</c2_error_retrieval>
+    <read_command>?</read_command>
+    <read_offset_correction>+168</read_offset_correction>
+    <eac_write>No</eac_write>
+    <write_offset>+13</write_offset>
+  </drive>
+  <drive>
+    <brand>Yamaha</brand>
+    <model>CRW4416</model>
+    <firmware>?</firmware>
+    <accurate_stream>Yes</accurate_stream>
+    <audio_caching>No</audio_caching>
+    <c2_error_retrieval>No</c2_error_retrieval>
+    <read_command>?</read_command>
+    <read_offset_correction>+171</read_offset_correction>
+    <eac_write>No</eac_write>
+    <write_offset>+9</write_offset>
+  </drive>
+</offsetbase>
+"""
+
+_EAC_XML_UPGRADE = """\
+<?xml version="1.0" encoding="UTF-8"?>
+<offsetbase>
+  <drive>
+    <brand>Teac</brand>
+    <model>CD-W54E</model>
+    <firmware>1.0</firmware>
+    <accurate_stream>Yes</accurate_stream>
+    <audio_caching>No</audio_caching>
+    <c2_error_retrieval>?</c2_error_retrieval>
+    <read_command>?</read_command>
+    <read_offset_correction>-582</read_offset_correction>
+    <eac_write>No</eac_write>
+    <write_offset>-</write_offset>
+  </drive>
+</offsetbase>
+"""
+
+
+def _xml_file(tmp_path: Path, content: str, name: str = "test.xml") -> Path:
+    p = tmp_path / name
+    p.write_text(content, encoding="utf-8")
+    return p
+
+
+# ---------------------------------------------------------------------------
+# import_eac_drives_xml
+# ---------------------------------------------------------------------------
+
+
+def test_import_eac_inserts_new_entries(tmp_path: Path) -> None:
+    conn = _open_test_db(tmp_path)
+    xml = _xml_file(tmp_path, _EAC_XML_MINIMAL)
+
+    result, conflicts = import_eac_drives_xml(conn, xml)
+
+    assert result.inserted == 2
+    assert result.upgraded == 0
+    assert result.skipped == 0
+    assert result.conflicts == 0
+    assert conflicts == []
+    assert conn.execute("SELECT COUNT(*) FROM eac_drives").fetchone()[0] == 2
+    conn.close()
+
+
+def test_import_eac_parses_offsets(tmp_path: Path) -> None:
+    conn = _open_test_db(tmp_path)
+    xml = _xml_file(tmp_path, _EAC_XML_MINIMAL)
+    import_eac_drives_xml(conn, xml)
+
+    row = conn.execute(
+        "SELECT read_offset, write_offset FROM eac_drives WHERE brand='Plextor'"
+    ).fetchone()
+    assert row["read_offset"] == 30
+    assert row["write_offset"] == -30
+
+    row2 = conn.execute(
+        "SELECT read_offset, write_offset FROM eac_drives WHERE brand='Acer'"
+    ).fetchone()
+    assert row2["read_offset"] == 686
+    assert row2["write_offset"] is None  # "-" → None
+    conn.close()
+
+
+def test_import_eac_idempotent_on_second_run(tmp_path: Path) -> None:
+    conn = _open_test_db(tmp_path)
+    xml = _xml_file(tmp_path, _EAC_XML_MINIMAL)
+
+    import_eac_drives_xml(conn, xml)
+    result2, conflicts = import_eac_drives_xml(conn, xml)
+
+    assert result2.inserted == 0
+    assert result2.skipped == 2
+    assert result2.conflicts == 0
+    assert conn.execute("SELECT COUNT(*) FROM eac_drives").fetchone()[0] == 2
+    conn.close()
+
+
+def test_import_eac_conflict_excluded_and_returned(tmp_path: Path) -> None:
+    conn = _open_test_db(tmp_path)
+    xml = _xml_file(tmp_path, _EAC_XML_CONFLICT)
+
+    result, conflicts = import_eac_drives_xml(conn, xml)
+
+    assert result.inserted == 1  # first entry inserted
+    assert result.conflicts == 1  # second entry conflicts
+    assert len(conflicts) == 1
+    assert conflicts[0]["brand"] == "Yamaha"
+    assert conflicts[0]["read_offset_correction"] == "+171"
+    assert conn.execute("SELECT COUNT(*) FROM eac_drives").fetchone()[0] == 1
+    conn.close()
+
+
+def test_import_eac_upgrade_fills_nulls(tmp_path: Path) -> None:
+    conn = _open_test_db(tmp_path)
+    # Pre-insert a row with c2_error_retrieval as NULL
+    conn.execute(
+        "INSERT INTO eac_drives (brand, model, firmware, accurate_stream,"
+        " audio_caching, c2_error_retrieval, read_command, read_offset, eac_write, write_offset)"
+        " VALUES ('Teac', 'CD-W54E', '1.0', 'Yes', 'No', NULL, NULL, -582, 'No', NULL)"
+    )
+    conn.commit()
+
+    # XML has c2_error_retrieval=? → still no-data, no upgrade expected
+    xml = _xml_file(tmp_path, _EAC_XML_UPGRADE)
+    result, conflicts = import_eac_drives_xml(conn, xml)
+
+    assert result.skipped == 1
+    assert result.upgraded == 0
+    assert result.conflicts == 0
+    conn.close()
+
+
+def test_import_eac_upgrade_when_null_in_db(tmp_path: Path) -> None:
+    conn = _open_test_db(tmp_path)
+    # Pre-insert a row with read_offset NULL — the XML has the value
+    conn.execute(
+        "INSERT INTO eac_drives (brand, model, firmware, accurate_stream,"
+        " audio_caching, c2_error_retrieval, read_command, read_offset, eac_write, write_offset)"
+        " VALUES ('Teac', 'CD-W54E', '1.0', 'Yes', 'No', NULL, NULL, NULL, 'No', NULL)"
+    )
+    conn.commit()
+
+    xml = _xml_file(tmp_path, _EAC_XML_UPGRADE)
+    result, conflicts = import_eac_drives_xml(conn, xml)
+
+    assert result.upgraded == 1
+    assert result.conflicts == 0
+    row = conn.execute(
+        "SELECT read_offset FROM eac_drives WHERE brand='Teac'"
+    ).fetchone()
+    assert row["read_offset"] == -582
+    conn.close()
+
+
+# ---------------------------------------------------------------------------
+# find_drive_write_offset
+# ---------------------------------------------------------------------------
+
+
+def _db_with_eac(tmp_path: Path) -> sqlite3.Connection:
+    conn = _open_test_db(tmp_path)
+    conn.executemany(
+        "INSERT INTO eac_drives (brand, model, firmware, accurate_stream, audio_caching,"
+        " c2_error_retrieval, read_command, read_offset, eac_write, write_offset)"
+        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        [
+            ("Plextor", "708A", "?", "Yes", "No", "No", "?", 30, "Yes", -30),
+            ("Acer", "CD-636A", "1.0", "Yes", "No", "No", "?", 686, "No", None),
+            ("Yamaha", "CRW8424S", "?", "Yes", "No", "No", "?", 99, "Yes", 6),
+        ],
+    )
+    conn.commit()
+    return conn
+
+
+def test_find_drive_write_offset_exact_brand_model(tmp_path: Path) -> None:
+    conn = _db_with_eac(tmp_path)
+    result = find_drive_write_offset(conn, "PLEXTOR DVDR PX-708A")
+    assert result == -30
+    conn.close()
+
+
+def test_find_drive_write_offset_returns_none_when_null(tmp_path: Path) -> None:
+    conn = _db_with_eac(tmp_path)
+    result = find_drive_write_offset(conn, "ACER CD-636A SLIM")
+    assert result is None
+    conn.close()
+
+
+def test_find_drive_write_offset_returns_none_when_no_match(tmp_path: Path) -> None:
+    conn = _db_with_eac(tmp_path)
+    result = find_drive_write_offset(conn, "SAMSUNG SH-S223")
+    assert result is None
+    conn.close()
+
+
+def test_find_drive_write_offset_prefers_most_specific(tmp_path: Path) -> None:
+    conn = _open_test_db(tmp_path)
+    conn.executemany(
+        "INSERT INTO eac_drives (brand, model, firmware, accurate_stream, audio_caching,"
+        " c2_error_retrieval, read_command, read_offset, eac_write, write_offset)"
+        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        [
+            ("Yamaha", "CRW", "?", "Yes", "No", "No", "?", None, "Yes", 6),
+            ("Yamaha", "CRW8424S", "?", "Yes", "No", "No", "?", 99, "Yes", 9),
+        ],
+    )
+    conn.commit()
+    result = find_drive_write_offset(conn, "YAMAHA CRW8424S")
+    assert result == 9  # longer model string wins
     conn.close()

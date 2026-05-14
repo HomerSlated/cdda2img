@@ -817,6 +817,24 @@ def burn_image(
                         "write_offset=%d (config, drive %s)", write_offset, drive_name
                     )
                     break
+            else:
+                from cdda2img import db as _db
+                from cdda2img.drive_info import find_drive_write_offset
+
+                _conn = _db.open_drive_offsets_db(cfg)
+                try:
+                    eac_wo = find_drive_write_offset(_conn, drive_name)
+                finally:
+                    _conn.close()
+                if eac_wo is not None:
+                    log.info(
+                        "EAC OffsetBase suggests write_offset=%d for %s;"
+                        " add `write_offset = %d` to the [[drives]] entry in"
+                        " ~/.config/cdda2img/cdda2img.toml to apply it",
+                        eac_wo,
+                        drive_name,
+                        eac_wo,
+                    )
     burn_disc(rbi_file, device=device, write_offset=write_offset, speed=speed, yes=yes)
 
 

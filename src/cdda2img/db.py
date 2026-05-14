@@ -39,6 +39,13 @@ _PRAGMAS = (
 # fetch_state: key/value store for HTTP cache headers (Last-Modified, ETag)
 # so that conditional requests (If-Modified-Since / If-None-Match) can avoid
 # re-downloading the full page on every check.
+#
+# eac_drives: EAC OffsetBase catalog (eac-audio.de, archived 2004).
+# Authoritative for write offsets; read_offset here is informational only —
+# the ar_drives table (large, current AccurateRip data) is authoritative for
+# read offsets.  Uniqueness on (brand, model, firmware) is enforced at import
+# time, not by a DB constraint, so partial-null upgrades can be handled in
+# application code.
 _CREATE_TABLES = """\
 CREATE TABLE IF NOT EXISTS ar_drives (
     id          INTEGER PRIMARY KEY,
@@ -62,6 +69,22 @@ CREATE TABLE IF NOT EXISTS fetch_state (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS eac_drives (
+    id               INTEGER PRIMARY KEY,
+    brand            TEXT    NOT NULL,
+    model            TEXT    NOT NULL,
+    firmware         TEXT,
+    accurate_stream  TEXT,
+    audio_caching    TEXT,
+    c2_error_retrieval TEXT,
+    read_command     TEXT,
+    read_offset      INTEGER,
+    eac_write        TEXT,
+    write_offset     INTEGER
+);
+
+CREATE INDEX IF NOT EXISTS idx_eac_drives_name ON eac_drives(brand, model);
 """
 
 

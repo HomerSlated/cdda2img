@@ -1,12 +1,14 @@
 """
-drive_info.py — sysfs drive probe + AccurateRip drive offset catalog.
+drive_info.py — sysfs drive probe + AccurateRip + EAC drive offset catalogs.
 
-Manages the ar_drives table in the local SQLite database (see db.py).
+Manages the ar_drives and eac_drives tables in the local SQLite database (see db.py).
 
 Public interface:
     probe_drive_name(device) -> str | None
     ensure_drive_offsets(conn) -> None
     find_drive_offset(conn, drive_name) -> tuple[int, int] | None
+    find_drive_write_offset(conn, drive_name) -> int | None
+    import_eac_drives_xml(conn, xml_path) -> tuple[ImportResult, list[dict]]
 """
 
 from __future__ import annotations
@@ -16,10 +18,11 @@ import re
 import sqlite3
 import urllib.error
 import urllib.request
+import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta, timezone
 from html.parser import HTMLParser
 from pathlib import Path
-from typing import ClassVar
+from typing import ClassVar, NamedTuple
 
 log = logging.getLogger(__name__)
 
@@ -298,3 +301,234 @@ def find_drive_offset(
     if not row:
         return None
     return (row["offset"], row["submissions"])
+
+
+# ---------------------------------------------------------------------------
+# EAC OffsetBase catalog helpers
+# ---------------------------------------------------------------------------
+
+
+class ImportResult(NamedTuple):
+    """Counters returned by import_eac_drives_xml."""
+
+    inserted: int
+    upgraded: int
+    skipped: int
+    conflicts: int
+
+
+_EAC_TEXT_FIELDS = (
+    "accurate_stream",
+    "audio_caching",
+    "c2_error_retrieval",
+    "read_command",
+    "eac_write",
+)
+
+
+def _parse_offset_str(s: str | None) -> int | None:
+    """Parse an EAC offset string like "+30", "-30", or "-"/"?" into int or None."""
+    if not s:
+        return None
+    s = s.strip()
+    if s in {"-", "?", ""}:
+        return None
+    try:
+        return int(s)
+    except ValueError:
+        return None
+
+
+def _has_data(v: object) -> bool:
+    """Return True when *v* represents a meaningful value (not None/unknown/dash)."""
+    if v is None:
+        return False
+    return not (isinstance(v, str) and v.strip() in {"", "?", "-"})
+
+
+def _eac_entry_raw(el: ET.Element) -> dict[str, str | None] | None:
+    """Parse a ``<drive>`` element into a raw string dict; return None if brand/model missing.
+
+    Preserves original XML field names (including ``read_offset_correction``) so that
+    the dict can be written back to XML verbatim for conflict reporting.
+    """
+
+    def _text(tag: str) -> str | None:
+        v = (el.findtext(tag) or "").strip()
+        return v if v else None
+
+    brand = _text("brand") or ""
+    model = _text("model") or ""
+    if not brand or not model:
+        return None
+    return {
+        "brand": brand,
+        "model": model,
+        "firmware": _text("firmware"),
+        "accurate_stream": _text("accurate_stream"),
+        "audio_caching": _text("audio_caching"),
+        "c2_error_retrieval": _text("c2_error_retrieval"),
+        "read_command": _text("read_command"),
+        "read_offset_correction": _text("read_offset_correction"),
+        "eac_write": _text("eac_write"),
+        "write_offset": _text("write_offset"),
+    }
+
+
+def import_eac_drives_xml(
+    conn: sqlite3.Connection,
+    xml_path: Path,
+) -> tuple[ImportResult, list[dict[str, str | None]]]:
+    """Import an EAC OffsetBase XML file into the ``eac_drives`` table.
+
+    For each ``<drive>`` element:
+
+    - **Insert**: no existing row with the same (brand, model, firmware) key.
+    - **Skip**: existing row whose non-null fields all agree with the incoming entry.
+    - **Upgrade**: existing row that has null/unknown values where the incoming entry
+      has data, and no fields conflict.
+    - **Conflict**: any non-null field in the incoming entry disagrees with the
+      corresponding non-null field in the existing row.  The whole entry is
+      excluded from the import and returned in the conflict list.
+
+    The firmware key uses SQLite ``IS`` semantics so NULL == NULL.
+
+    Returns ``(stats, conflict_entries)`` where *conflict_entries* are raw string
+    dicts (with original XML field names) suitable for writing to ``offsets_check.xml``.
+    """
+    tree = ET.parse(xml_path)  # noqa: S314
+    root = tree.getroot()
+
+    # Load all existing rows into memory to handle within-XML duplicates consistently.
+    _EacKey = tuple[str | None, str | None, str | None]
+    seen: dict[_EacKey, dict[str, object]] = {}
+    for row in conn.execute("SELECT * FROM eac_drives"):
+        key: _EacKey = (row["brand"], row["model"], row["firmware"])
+        seen[key] = {
+            **{f: row[f] for f in _EAC_TEXT_FIELDS},
+            "read_offset": row["read_offset"],
+            "write_offset": row["write_offset"],
+        }
+
+    inserted = upgraded = skipped = 0
+    conflict_entries: list[dict[str, str | None]] = []
+    pending_inserts: list[tuple[object, ...]] = []
+    pending_updates: list[tuple[dict[str, object], _EacKey]] = []
+
+    for d_el in root.findall("drive"):
+        raw = _eac_entry_raw(d_el)
+        if raw is None:
+            continue
+
+        key = (raw["brand"], raw["model"], raw["firmware"])
+        read_offset = _parse_offset_str(raw["read_offset_correction"])
+        write_offset_val = _parse_offset_str(raw["write_offset"])
+
+        # Parsed incoming values keyed by DB column name.
+        incoming: dict[str, object] = {
+            **{f: raw[f] for f in _EAC_TEXT_FIELDS},
+            "read_offset": read_offset,
+            "write_offset": write_offset_val,
+        }
+
+        if key not in seen:
+            pending_inserts.append((
+                raw["brand"],
+                raw["model"],
+                raw["firmware"],
+                raw["accurate_stream"],
+                raw["audio_caching"],
+                raw["c2_error_retrieval"],
+                raw["read_command"],
+                read_offset,
+                raw["eac_write"],
+                write_offset_val,
+            ))
+            seen[key] = incoming
+            inserted += 1
+            continue
+
+        ex = seen[key]
+
+        # Check for any field-level conflict (entry-level semantics: whole entry excluded).
+        has_conflict = any(
+            _has_data(ex[f]) and _has_data(incoming[f]) and ex[f] != incoming[f]
+            for f in _EAC_TEXT_FIELDS
+        ) or any(
+            ex[f] is not None and incoming[f] is not None and ex[f] != incoming[f]
+            for f in ("read_offset", "write_offset")
+        )
+
+        if has_conflict:
+            conflict_entries.append(raw)
+            continue
+
+        # No conflicts — collect fields that can be upgraded (null → non-null).
+        upd: dict[str, object] = {
+            f: incoming[f]
+            for f in (*_EAC_TEXT_FIELDS, "read_offset", "write_offset")
+            if not _has_data(ex[f]) and _has_data(incoming[f])  # type: ignore[arg-type]
+        }
+
+        if upd:
+            pending_updates.append((upd, key))
+            seen[key] = {**ex, **upd}
+            upgraded += 1
+        else:
+            skipped += 1
+
+    with conn:
+        conn.executemany(
+            "INSERT INTO eac_drives"
+            " (brand, model, firmware, accurate_stream, audio_caching,"
+            "  c2_error_retrieval, read_command, read_offset, eac_write, write_offset)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            pending_inserts,
+        )
+        for upd_dict, (brand, model, firmware) in pending_updates:
+            set_clause = ", ".join(f"{k}=?" for k in upd_dict)
+            conn.execute(
+                f"UPDATE eac_drives SET {set_clause}"  # noqa: S608
+                " WHERE brand=? AND model=? AND firmware IS ?",
+                [*upd_dict.values(), brand, model, firmware],
+            )
+
+    log.debug(
+        "EAC import: %d inserted, %d upgraded, %d skipped, %d conflicts",
+        inserted,
+        upgraded,
+        skipped,
+        len(conflict_entries),
+    )
+    return (
+        ImportResult(
+            inserted=inserted,
+            upgraded=upgraded,
+            skipped=skipped,
+            conflicts=len(conflict_entries),
+        ),
+        conflict_entries,
+    )
+
+
+def find_drive_write_offset(conn: sqlite3.Connection, drive_name: str) -> int | None:
+    """Return the EAC write offset for *drive_name* using fuzzy brand+model matching.
+
+    Both the brand and model strings must appear as substrings of the normalised
+    sysfs drive name (case-insensitive).  The most-specific match (longest combined
+    brand+model) is preferred.  Returns None when no match is found or the best
+    matching entry has no write_offset.
+
+    Note: this is a best-effort lookup.  ``cfg.drives`` entries are authoritative
+    and take precedence in all callers.
+    """
+    row = conn.execute(
+        "SELECT write_offset FROM eac_drives"
+        " WHERE write_offset IS NOT NULL"
+        "   AND INSTR(UPPER(?), UPPER(brand)) > 0"
+        "   AND INSTR(UPPER(?), UPPER(model)) > 0"
+        " ORDER BY LENGTH(brand) + LENGTH(model) DESC"
+        " LIMIT 1",
+        (drive_name, drive_name),
+    ).fetchone()
+    return row["write_offset"] if row else None

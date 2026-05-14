@@ -231,6 +231,7 @@ def test_schema_tables_exist(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) ->
     assert "ar_drives" in tables
     assert "fetch_log" in tables
     assert "fetch_state" in tables
+    assert "eac_drives" in tables
 
 
 def test_schema_index_exists(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
