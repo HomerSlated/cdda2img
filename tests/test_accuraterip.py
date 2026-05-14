@@ -343,7 +343,7 @@ def test_verify_rip_last_track_zero_padding(tmp_path: Path) -> None:
             pcm_path,
             track_lsns=[0],
             disc_last_lsn=n_sectors - 1,
-            drive_offset=drive_offset,
+            read_offset=drive_offset,
         )
 
     assert len(results) == 1

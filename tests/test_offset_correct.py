@@ -1,5 +1,5 @@
 """
-test_offset_correct.py — Unit tests for offset_correct.apply_drive_offset.
+test_offset_correct.py — Unit tests for offset_correct.apply_offset.
 
 Sections:
   1. No-op (offset=0)
@@ -16,7 +16,7 @@ import pytest
 from cdda2img.offset_correct import (
     _BYTES_PER_FRAME,
     _BYTES_PER_SAMPLE,
-    apply_drive_offset,
+    apply_offset,
 )
 
 # ---------------------------------------------------------------------------
@@ -49,7 +49,7 @@ def _make_pcm(tmp_path, n_frames: int, fill: bytes | None = None) -> tuple:
 
 def test_noop_offset_zero(tmp_path) -> None:
     p, original = _make_pcm(tmp_path, 4)
-    apply_drive_offset(p, 0)
+    apply_offset(p, 0)
     assert p.read_bytes() == original
 
 
@@ -63,7 +63,7 @@ def test_positive_offset_drops_start_pads_end(tmp_path) -> None:
     shift = offset * _SAMPLE
     p, original = _make_pcm(tmp_path, 4)
 
-    apply_drive_offset(p, offset)
+    apply_offset(p, offset)
 
     result = p.read_bytes()
     assert len(result) == len(original)
@@ -75,7 +75,7 @@ def test_positive_offset_drops_start_pads_end(tmp_path) -> None:
 
 def test_positive_offset_preserves_size(tmp_path) -> None:
     p, original = _make_pcm(tmp_path, 3)
-    apply_drive_offset(p, 100)
+    apply_offset(p, 100)
     assert len(p.read_bytes()) == len(original)
 
 
@@ -89,7 +89,7 @@ def test_negative_offset_pads_start_drops_end(tmp_path) -> None:
     shift = abs(offset) * _SAMPLE
     p, original = _make_pcm(tmp_path, 4)
 
-    apply_drive_offset(p, offset)
+    apply_offset(p, offset)
 
     result = p.read_bytes()
     assert len(result) == len(original)
@@ -101,7 +101,7 @@ def test_negative_offset_pads_start_drops_end(tmp_path) -> None:
 
 def test_negative_offset_preserves_size(tmp_path) -> None:
     p, original = _make_pcm(tmp_path, 3)
-    apply_drive_offset(p, -100)
+    apply_offset(p, -100)
     assert len(p.read_bytes()) == len(original)
 
 
@@ -112,8 +112,8 @@ def test_negative_offset_preserves_size(tmp_path) -> None:
 
 def test_roundtrip_positive_then_negative(tmp_path) -> None:
     p, original = _make_pcm(tmp_path, 5)
-    apply_drive_offset(p, 30)
-    apply_drive_offset(p, -30)
+    apply_offset(p, 30)
+    apply_offset(p, -30)
     # The first 30*4 bytes will be zeros (they were padded on the +30 pass and
     # not recovered), but everything from byte 120 onward matches original.
     shift = 30 * _SAMPLE
@@ -122,8 +122,8 @@ def test_roundtrip_positive_then_negative(tmp_path) -> None:
 
 def test_roundtrip_negative_then_positive(tmp_path) -> None:
     p, original = _make_pcm(tmp_path, 5)
-    apply_drive_offset(p, -30)
-    apply_drive_offset(p, 30)
+    apply_offset(p, -30)
+    apply_offset(p, 30)
     shift = 30 * _SAMPLE
     # Last shift bytes will be zeros; everything before matches.
     assert p.read_bytes()[:-shift] == original[:-shift]
@@ -138,10 +138,10 @@ def test_non_aligned_size_raises(tmp_path) -> None:
     p = tmp_path / "bad.pcm"
     p.write_bytes(bytes(2352 * 3 + 1))  # one byte too many
     with pytest.raises(ValueError, match="not a multiple of"):
-        apply_drive_offset(p, 30)
+        apply_offset(p, 30)
 
 
 def test_aligned_size_does_not_raise(tmp_path) -> None:
     p = tmp_path / "ok.pcm"
     p.write_bytes(bytes(2352 * 3))
-    apply_drive_offset(p, 30)  # should not raise
+    apply_offset(p, 30)  # should not raise

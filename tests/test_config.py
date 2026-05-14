@@ -16,6 +16,8 @@ from cdda2img.config import (
     _toml_quote,
     load_config,
     save_drive,
+    save_drive_read_offset,
+    save_drive_write_offset,
 )
 
 # ---------------------------------------------------------------------------
@@ -45,29 +47,43 @@ def test_toml_quote_newline() -> None:
 
 
 def test_parse_drives_valid() -> None:
-    raw = [{"name": "PLEXTOR DVDR PX-716A", "offset": 30}]
+    raw = [{"name": "PLEXTOR DVDR PX-716A", "read_offset": 30}]
     result = _parse_drives(raw)
-    assert result == [DriveConfig(name="PLEXTOR DVDR PX-716A", offset=30)]
+    assert result == [DriveConfig(name="PLEXTOR DVDR PX-716A", read_offset=30)]
 
 
 def test_parse_drives_negative_offset() -> None:
-    raw = [{"name": "TEAC CD-W54E", "offset": -582}]
-    assert _parse_drives(raw) == [DriveConfig(name="TEAC CD-W54E", offset=-582)]
+    raw = [{"name": "TEAC CD-W54E", "read_offset": -582}]
+    assert _parse_drives(raw) == [DriveConfig(name="TEAC CD-W54E", read_offset=-582)]
+
+
+def test_parse_drives_with_write_offset() -> None:
+    raw = [{"name": "PLEXTOR DVDR PX-716A", "read_offset": 30, "write_offset": -30}]
+    result = _parse_drives(raw)
+    assert result == [
+        DriveConfig(name="PLEXTOR DVDR PX-716A", read_offset=30, write_offset=-30)
+    ]
+
+
+def test_parse_drives_write_offset_none_when_absent() -> None:
+    raw = [{"name": "My Drive", "read_offset": 6}]
+    result = _parse_drives(raw)
+    assert result[0].write_offset is None
 
 
 def test_parse_drives_multiple() -> None:
     raw = [
-        {"name": "Drive A", "offset": 10},
-        {"name": "Drive B", "offset": -5},
+        {"name": "Drive A", "read_offset": 10},
+        {"name": "Drive B", "read_offset": -5},
     ]
     assert _parse_drives(raw) == [
-        DriveConfig(name="Drive A", offset=10),
-        DriveConfig(name="Drive B", offset=-5),
+        DriveConfig(name="Drive A", read_offset=10),
+        DriveConfig(name="Drive B", read_offset=-5),
     ]
 
 
 def test_parse_drives_missing_name_skipped(caplog: pytest.LogCaptureFixture) -> None:
-    raw = [{"offset": 30}]
+    raw = [{"read_offset": 30}]
     with caplog.at_level(logging.WARNING, logger="cdda2img.config"):
         result = _parse_drives(raw)
     assert result == []
@@ -75,11 +91,22 @@ def test_parse_drives_missing_name_skipped(caplog: pytest.LogCaptureFixture) -> 
 
 
 def test_parse_drives_bad_offset_skipped(caplog: pytest.LogCaptureFixture) -> None:
-    raw = [{"name": "X Drive", "offset": "not-a-number"}]
+    raw = [{"name": "X Drive", "read_offset": "not-a-number"}]
     with caplog.at_level(logging.WARNING, logger="cdda2img.config"):
         result = _parse_drives(raw)
     assert result == []
-    assert any("invalid offset" in r.message for r in caplog.records)
+    assert any("invalid read_offset" in r.message for r in caplog.records)
+
+
+def test_parse_drives_bad_write_offset_ignored(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Invalid write_offset is ignored (logged), drive still parsed with write_offset=None."""
+    raw = [{"name": "X Drive", "read_offset": 6, "write_offset": "bad"}]
+    with caplog.at_level(logging.WARNING, logger="cdda2img.config"):
+        result = _parse_drives(raw)
+    assert result == [DriveConfig(name="X Drive", read_offset=6, write_offset=None)]
+    assert any("invalid write_offset" in r.message for r in caplog.records)
 
 
 def test_parse_drives_not_a_list_returns_empty() -> None:
@@ -104,48 +131,60 @@ def test_rewrite_empty_text_appends_drives() -> None:
     result = _rewrite_config_drives("", drives)
     assert "[[drives]]" in result
     assert 'name = "PLEXTOR DVDR PX-716A"' in result
-    assert "offset = 30" in result
+    assert "read_offset = 30" in result
+
+
+def test_rewrite_write_offset_emitted_when_set() -> None:
+    drives = [DriveConfig("My Drive", 30, write_offset=-30)]
+    result = _rewrite_config_drives("", drives)
+    assert "write_offset = -30" in result
+
+
+def test_rewrite_write_offset_omitted_when_none() -> None:
+    drives = [DriveConfig("My Drive", 30, write_offset=None)]
+    result = _rewrite_config_drives("", drives)
+    assert "write_offset" not in result
 
 
 def test_rewrite_removes_existing_drives_block() -> None:
-    text = 'drive_offset = 30\n\n[[drives]]\nname = "Old Drive"\noffset = 99\n'
+    text = 'cddb_server = "a"\n\n[[drives]]\nname = "Old Drive"\nread_offset = 99\n'
     result = _rewrite_config_drives(text, [])
     assert "[[drives]]" not in result
     assert "Old Drive" not in result
-    assert "drive_offset = 30" in result
+    assert 'cddb_server = "a"' in result
 
 
 def test_rewrite_replaces_drives_appends_at_end() -> None:
-    text = 'drive_offset = 30\n\n[[drives]]\nname = "Old Drive"\noffset = 99\n'
+    text = 'cddb_server = "a"\n\n[[drives]]\nname = "Old Drive"\nread_offset = 99\n'
     new_drive = DriveConfig("New Drive", 6)
     result = _rewrite_config_drives(text, [new_drive])
     assert "Old Drive" not in result
     assert "New Drive" in result
-    assert result.index("drive_offset") < result.index("[[drives]]")
+    assert result.index("cddb_server") < result.index("[[drives]]")
 
 
 def test_rewrite_preserves_other_settings() -> None:
-    text = 'drive_offset = 30\ncddb_server = "cddb.example.com:888"\n'
+    text = 'cddb_server = "cddb.example.com:888"\n'
     result = _rewrite_config_drives(text, [DriveConfig("X", 0)])
     assert 'cddb_server = "cddb.example.com:888"' in result
 
 
 def test_rewrite_multiple_drives_blocks_stripped() -> None:
     text = (
-        "drive_offset = 0\n"
-        '\n[[drives]]\nname = "A"\noffset = 1\n'
-        '\n[[drives]]\nname = "B"\noffset = 2\n'
+        'cddb_server = "a"\n'
+        '\n[[drives]]\nname = "A"\nread_offset = 1\n'
+        '\n[[drives]]\nname = "B"\nread_offset = 2\n'
     )
     result = _rewrite_config_drives(text, [])
     assert "[[drives]]" not in result
-    assert "drive_offset = 0" in result
+    assert 'cddb_server = "a"' in result
 
 
 def test_rewrite_drives_block_mid_file() -> None:
     """[[drives]] in middle of file: stripped, other sections preserved."""
     text = (
-        "drive_offset = 0\n"
-        '\n[[drives]]\nname = "Old"\noffset = 1\n'
+        'cddb_server = "a"\n'
+        '\n[[drives]]\nname = "Old"\nread_offset = 1\n'
         "\n[section]\nfoo = 1\n"
     )
     result = _rewrite_config_drives(text, [DriveConfig("New", 2)])
@@ -164,21 +203,25 @@ def test_rewrite_round_trips_two_drives() -> None:
     assert text == text2
 
 
+def test_rewrite_round_trips_drive_with_write_offset() -> None:
+    drives = [DriveConfig("Drive A", 30, write_offset=-30)]
+    text = _rewrite_config_drives("", drives)
+    text2 = _rewrite_config_drives(text, drives)
+    assert text == text2
+
+
 # ---------------------------------------------------------------------------
 # save_drive / load_config integration
 # ---------------------------------------------------------------------------
 
 
-def test_save_drive_creates_file(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_save_drive_creates_file(tmp_path: Path) -> None:
     cfg = tmp_path / "cdda2img.toml"
     save_drive(DriveConfig("PLEXTOR DVDR PX-716A", 30), path=cfg)
     assert cfg.exists()
 
 
 def test_save_drive_round_trip(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
     cfg = tmp_path / "cdda2img" / "cdda2img.toml"
     drive = DriveConfig("PLEXTOR DVDR PX-716A", 30)
 
@@ -189,7 +232,18 @@ def test_save_drive_round_trip(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) 
     assert config.drives == [drive]
 
 
-def test_save_drive_upsert_updates_offset(
+def test_save_drive_with_write_offset_round_trip(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cfg = tmp_path / "cfg.toml"
+    drive = DriveConfig("My Drive", 30, write_offset=-30)
+    save_drive(drive, path=cfg)
+    monkeypatch.setattr("cdda2img.config.config_path", lambda: cfg)
+    config = load_config()
+    assert config.drives == [drive]
+
+
+def test_save_drive_upsert_updates_read_offset(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     cfg = tmp_path / "cfg.toml"
@@ -200,7 +254,7 @@ def test_save_drive_upsert_updates_offset(
     config = load_config()
 
     assert len(config.drives) == 1
-    assert config.drives[0].offset == 6
+    assert config.drives[0].read_offset == 6
 
 
 def test_save_drive_adds_new_alongside_existing(
@@ -219,12 +273,11 @@ def test_save_drive_adds_new_alongside_existing(
 
 def test_save_drive_preserves_other_settings(tmp_path: Path) -> None:
     cfg = tmp_path / "cfg.toml"
-    cfg.write_text('drive_offset = 42\ncddb_server = "example.com:888"\n')
+    cfg.write_text('cddb_server = "example.com:888"\n')
 
     save_drive(DriveConfig("X Drive", 0), path=cfg)
     text = cfg.read_text()
 
-    assert "drive_offset = 42" in text
     assert 'cddb_server = "example.com:888"' in text
 
 
@@ -235,11 +288,106 @@ def test_save_drive_atomic_temp_file_cleaned_up(tmp_path: Path) -> None:
     assert not tmp.exists()
 
 
+# ---------------------------------------------------------------------------
+# save_drive_read_offset — merge-safe partial update
+# ---------------------------------------------------------------------------
+
+
+def test_save_drive_read_offset_creates_entry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cfg = tmp_path / "cfg.toml"
+    save_drive_read_offset("My Drive", 30, path=cfg)
+    monkeypatch.setattr("cdda2img.config.config_path", lambda: cfg)
+    config = load_config()
+    assert config.drives[0].read_offset == 30
+    assert config.drives[0].write_offset is None
+
+
+def test_save_drive_read_offset_preserves_write_offset(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cfg = tmp_path / "cfg.toml"
+    save_drive(DriveConfig("My Drive", 0, write_offset=-30), path=cfg)
+    save_drive_read_offset("My Drive", 30, path=cfg)
+    monkeypatch.setattr("cdda2img.config.config_path", lambda: cfg)
+    config = load_config()
+    assert config.drives[0].read_offset == 30
+    assert config.drives[0].write_offset == -30
+
+
+def test_save_drive_read_offset_round_trip_order(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """save_drive_read_offset then save_drive_write_offset yields both fields."""
+    cfg = tmp_path / "cfg.toml"
+    save_drive_read_offset("My Drive", 30, path=cfg)
+    save_drive_write_offset("My Drive", -30, path=cfg)
+    monkeypatch.setattr("cdda2img.config.config_path", lambda: cfg)
+    config = load_config()
+    assert config.drives[0].read_offset == 30
+    assert config.drives[0].write_offset == -30
+
+
+# ---------------------------------------------------------------------------
+# save_drive_write_offset — merge-safe partial update
+# ---------------------------------------------------------------------------
+
+
+def test_save_drive_write_offset_creates_entry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cfg = tmp_path / "cfg.toml"
+    save_drive_write_offset("My Drive", -30, path=cfg)
+    monkeypatch.setattr("cdda2img.config.config_path", lambda: cfg)
+    config = load_config()
+    assert config.drives[0].write_offset == -30
+    assert config.drives[0].read_offset == 0  # default when no prior entry
+
+
+def test_save_drive_write_offset_preserves_read_offset(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cfg = tmp_path / "cfg.toml"
+    save_drive(DriveConfig("My Drive", 30), path=cfg)
+    save_drive_write_offset("My Drive", -30, path=cfg)
+    monkeypatch.setattr("cdda2img.config.config_path", lambda: cfg)
+    config = load_config()
+    assert config.drives[0].read_offset == 30
+    assert config.drives[0].write_offset == -30
+
+
+def test_save_drive_write_offset_reverse_order(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """save_drive_write_offset then save_drive_read_offset yields both fields."""
+    cfg = tmp_path / "cfg.toml"
+    save_drive_write_offset("My Drive", -30, path=cfg)
+    save_drive_read_offset("My Drive", 30, path=cfg)
+    monkeypatch.setattr("cdda2img.config.config_path", lambda: cfg)
+    config = load_config()
+    assert config.drives[0].read_offset == 30
+    assert config.drives[0].write_offset == -30
+
+
+def test_save_drive_write_offset_only_key_absent_from_config(tmp_path: Path) -> None:
+    """Drive with only read_offset in config must not acquire spurious write_offset=0."""
+    cfg = tmp_path / "cfg.toml"
+    save_drive(DriveConfig("My Drive", 30), path=cfg)
+    text = cfg.read_text()
+    assert "write_offset" not in text
+
+
+# ---------------------------------------------------------------------------
+# load_config — no drives field
+# ---------------------------------------------------------------------------
+
+
 def test_load_config_no_drives_field_returns_empty(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     cfg = tmp_path / "cfg.toml"
-    cfg.write_text("drive_offset = 30\n")
+    cfg.write_text('cddb_server = "example.com:888"\n')
     monkeypatch.setattr("cdda2img.config.config_path", lambda: cfg)
     config = load_config()
     assert config.drives == []

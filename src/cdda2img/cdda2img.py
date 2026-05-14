@@ -491,26 +491,30 @@ def _finalize_import(
     )
 
 
-def _resolve_drive_offset(
+def _resolve_drive_offsets(
     device: str, cfg
-) -> tuple[int, str | None]:  # cfg: Config (inline import avoids top-level dep)
-    """Return ``(offset, drive_name)`` for *device*.
+) -> tuple[
+    int, int | None, str | None
+]:  # cfg: Config (inline import avoids top-level dep)
+    """Return ``(read_offset, write_offset, drive_name)`` for *device*.
 
     *drive_name* is the normalised sysfs name (e.g. ``"PLEXTOR DVDR PX-716A"``),
     or ``None`` when the sysfs probe fails.
 
-    Resolution order for *offset*:
+    Resolution order for *read_offset*:
       1. Per-drive entry in cfg.drives (user-confirmed; always takes precedence).
       2. AccurateRip catalog (auto-applied when submissions >= _MIN_AR_CONFIDENCE;
          prompts the user when confidence is lower).
-      3. cfg.drive_offset (global fallback).
+      3. 0 with a warning when the drive is not configured.
 
-    Confirmed offsets are persisted to [[drives]] in cdda2img.toml so that
+    *write_offset* comes from cfg.drives only; ``None`` when not configured.
+
+    Confirmed read offsets are persisted to [[drives]] in cdda2img.toml so that
     subsequent rips skip the catalog lookup entirely.
     """
     import sys
 
-    from cdda2img.config import DriveConfig, save_drive
+    from cdda2img.config import save_drive_read_offset
     from cdda2img.db import open_drive_offsets_db
     from cdda2img.drive_info import (
         ensure_drive_offsets,
@@ -520,18 +524,16 @@ def _resolve_drive_offset(
 
     drive_name = probe_drive_name(device)
     if drive_name is None:
-        print(
-            f"  Drive: unknown (sysfs probe failed); using offset {cfg.drive_offset:+d}"
-        )
-        return cfg.drive_offset, None
+        print("  Drive: unknown (sysfs probe failed); using read_offset=0")
+        return 0, None, None
 
     print(f"  Drive: {drive_name}")
 
     # 1. User-confirmed per-drive entry in config takes precedence over AR catalog.
     for d in cfg.drives:
         if d.name == drive_name:
-            print(f"  Offset: {d.offset:+d} samples (from config)")
-            return d.offset, drive_name
+            print(f"  Read offset: {d.read_offset:+d} samples (from config)")
+            return d.read_offset, d.write_offset, drive_name
 
     # 2. AccurateRip catalog lookup.
     conn = open_drive_offsets_db(cfg)
@@ -559,26 +561,26 @@ def _resolve_drive_offset(
 
         if use_it:
             print(
-                f"  Offset: {offset:+d} samples (AccurateRip, {submissions} submission(s))"
+                f"  Read offset: {offset:+d} samples (AccurateRip, {submissions} submission(s))"
             )
             try:
-                save_drive(DriveConfig(name=drive_name, offset=offset))
+                save_drive_read_offset(drive_name, offset)
             except OSError as exc:
-                log.warning("Could not persist drive offset to config: %s", exc)
-            return offset, drive_name
+                log.warning("Could not persist drive read offset to config: %s", exc)
+            return offset, None, drive_name
 
-    # 3. Global config fallback.
+    # 3. Drive not configured — warn and use 0.
     if ar is None:
-        print(f"  Drive not in AccurateRip catalog; using offset {cfg.drive_offset:+d}")
+        print("  Drive not in AccurateRip catalog; using read_offset=0")
     else:
-        print(f"  AccurateRip match not applied; using offset {cfg.drive_offset:+d}")
-    return cfg.drive_offset, drive_name
+        print("  AccurateRip match not applied; using read_offset=0")
+    return 0, None, drive_name
 
 
-def _rip_with_fallback(device: str, output_pcm: Path, drive_offset: int = 0):
+def _rip_with_fallback(device: str, output_pcm: Path, read_offset: int = 0):
     """Try cdrdao read-cd first; fall back to cd-paranoia (full) on failure.
 
-    *drive_offset* is passed through to cd-paranoia via ``-O`` so that the
+    *read_offset* is passed through to cd-paranoia via ``-O`` so that the
     fallback path stores offset-corrected PCM.  The cdrdao path returns raw
     PCM; the caller applies ``apply_drive_offset`` after this function returns.
     """
@@ -592,7 +594,7 @@ def _rip_with_fallback(device: str, output_pcm: Path, drive_offset: int = 0):
         print(f"  cdrdao failed: {exc}")
         print("  Falling back to cd-paranoia (paranoia=full) ...")
         return rip_disc(
-            device, output_pcm, paranoia="full", drive_offset=drive_offset
+            device, output_pcm, paranoia="full", read_offset=read_offset
         ), "cd-paranoia"
 
 
@@ -622,12 +624,12 @@ def rip_image(
     from cdda2img.toc import sanitize_title
 
     cfg = load_config()
-    drive_offset, drive_name = _resolve_drive_offset(device, cfg)
+    read_offset, _write_offset, drive_name = _resolve_drive_offsets(device, cfg)
 
     temp_base = resolve_temp_dir()
     temp = TempFiles(temp_base)
     try:
-        info, rip_type = _rip_with_fallback(device, temp.pcm_file, drive_offset)
+        info, rip_type = _rip_with_fallback(device, temp.pcm_file, read_offset)
 
         track_count = len(info.disc.tracks)
         total_s = info.disc.total_seconds
@@ -638,10 +640,10 @@ def rip_image(
 
         # cdrdao has no native offset flag; correct the PCM after ripping.
         # cd-paranoia applied -O at rip time, so its PCM is already corrected.
-        if rip_type == "cdrdao" and drive_offset != 0:
-            from cdda2img.offset_correct import apply_drive_offset
+        if rip_type == "cdrdao" and read_offset != 0:
+            from cdda2img.offset_correct import apply_offset
 
-            apply_drive_offset(temp.pcm_file, drive_offset)
+            apply_offset(temp.pcm_file, read_offset)
 
         disc = prepopulate_from_cddb(
             info.disc, info.track_lsns, info.disc_last_lsn, server=cfg.cddb_server
@@ -653,10 +655,10 @@ def rip_image(
             temp.pcm_file,
             info.track_lsns,
             info.disc_last_lsn,
-            drive_offset=0,
+            read_offset=0,
             cddb_id=cddb_id,
         )
-        print_ar_report(ar_results, drive_offset=drive_offset)
+        print_ar_report(ar_results, read_offset=read_offset)
 
         # AR-triggered fallback: partial mismatch → read error on specific tracks.
         # Re-rip with cd-paranoia full paranoia; keep disc metadata from cdrdao scan
@@ -676,17 +678,17 @@ def rip_image(
                 "re-ripping with cd-paranoia (full paranoia) ..."
             )
             paranoia_info = rip_disc(
-                device, temp.pcm_file, paranoia="full", drive_offset=drive_offset
+                device, temp.pcm_file, paranoia="full", read_offset=read_offset
             )
             rip_type = "cd-paranoia"
             ar_results = verify_rip(
                 temp.pcm_file,
                 paranoia_info.track_lsns,
                 paranoia_info.disc_last_lsn,
-                drive_offset=0,
+                read_offset=0,
                 cddb_id=cddb_id,
             )
-            print_ar_report(ar_results, drive_offset=drive_offset)
+            print_ar_report(ar_results, read_offset=read_offset)
 
         output_stem = sanitize_title(disc.album) or device.lstrip("/").replace("/", "_")
         provenance: dict[str, str] = {
@@ -696,7 +698,7 @@ def rip_image(
         }
         if drive_name is not None:
             provenance["DRIVE_NAME"] = drive_name
-            provenance["DRIVE_OFFSET"] = f"{drive_offset:+d}"
+            provenance["DRIVE_READ_OFFSET"] = f"{read_offset:+d}"
         _finalize_import(disc, temp.pcm_file, provenance, output_stem, loudness, output)
     finally:
         temp.cleanup()
@@ -798,15 +800,23 @@ def burn_image(
 ) -> None:
     from cdda2img.config import load_config
     from cdda2img.disc_writer import burn_disc
+    from cdda2img.drive_info import probe_drive_name
 
     cfg = load_config()
     if write_offset_override is not None:
         write_offset = write_offset_override
         log.debug("write_offset=%d (CLI override)", write_offset)
     else:
-        write_offset = cfg.write_offset
-        if write_offset != 0:
-            log.debug("write_offset=%d (config)", write_offset)
+        write_offset = 0
+        drive_name = probe_drive_name(device)
+        if drive_name is not None:
+            for d in cfg.drives:
+                if d.name == drive_name and d.write_offset is not None:
+                    write_offset = d.write_offset
+                    log.debug(
+                        "write_offset=%d (config, drive %s)", write_offset, drive_name
+                    )
+                    break
     burn_disc(rbi_file, device=device, write_offset=write_offset, speed=speed, yes=yes)
 
 

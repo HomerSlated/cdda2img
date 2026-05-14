@@ -144,7 +144,7 @@ def verify_rip(
     pcm_path: Path,
     track_lsns: list[int],
     disc_last_lsn: int,
-    drive_offset: int = 0,
+    read_offset: int = 0,
     cddb_id: int = 0,
 ) -> list[ARTrackResult]:
     """Verify a ripped disc against the AccurateRip database.
@@ -152,7 +152,7 @@ def verify_rip(
     Returns per-track results. Never raises — network or I/O errors yield results
     with max_confidence=None (disc not in database or unreachable).
 
-    drive_offset: CD drive read offset in samples (4 bytes/sample). Applied as a
+    read_offset: CD drive read offset in samples (4 bytes/sample). Applied as a
     byte shift to each track's read window in the PCM file before checksum computation.
     cddb_id: 32-bit integer CDDB disc ID, used to construct the AccurateRip URL.
     """
@@ -179,7 +179,7 @@ def verify_rip(
         ]
 
     # Drive offset shifts the read window by offset_bytes relative to track boundaries.
-    offset_bytes = drive_offset * 4
+    offset_bytes = read_offset * 4
     pcm_size = pcm_path.stat().st_size
     results: list[ARTrackResult] = []
 
@@ -247,7 +247,7 @@ def verify_rip(
     return results
 
 
-def print_ar_report(results: list[ARTrackResult], drive_offset: int = 0) -> None:
+def print_ar_report(results: list[ARTrackResult], read_offset: int = 0) -> None:
     """Print a per-track AccurateRip verification report to stdout."""
     if not results:
         return
@@ -266,9 +266,9 @@ def print_ar_report(results: list[ARTrackResult], drive_offset: int = 0) -> None
         max_conf = max(r.max_confidence or 0 for r in results)
         print(
             f"  AccurateRip: disc found (max confidence {max_conf}) but no CRC match"
-            f" at drive_offset={drive_offset}"
+            f" at read_offset={read_offset}"
         )
-        print("    Set drive_offset in ~/.config/cdda2img/cdda2img.toml")
+        print("    Add a [[drives]] entry in ~/.config/cdda2img/cdda2img.toml")
         return
 
     print("  AccurateRip:")

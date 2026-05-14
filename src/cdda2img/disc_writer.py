@@ -14,7 +14,7 @@ import wave
 from pathlib import Path
 
 from cdda2img.container import read_header
-from cdda2img.offset_correct import apply_drive_offset
+from cdda2img.offset_correct import apply_offset
 
 _FILE_NAME_RE = re.compile(r'(FILE\s+)"[^"]*"')
 
@@ -84,7 +84,7 @@ def burn_disc(
 
         if write_offset != 0:
             try:
-                apply_drive_offset(pcm_path, write_offset)
+                apply_offset(pcm_path, write_offset)
             except ValueError as exc:
                 msg = f"Cannot apply write offset: {exc}"
                 raise RuntimeError(msg) from exc

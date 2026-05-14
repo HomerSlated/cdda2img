@@ -345,6 +345,29 @@ def _run_one_cycle(
     return input("Another disc? [Enter / q]: ").strip().lower() != "q"
 
 
+def _probe_drive(
+    device: str, read_offset_override: int | None
+) -> tuple[str | None, int]:
+    """Return ``(drive_name, read_offset)`` for *device*.
+
+    *drive_name* is ``None`` when the sysfs probe fails.
+    *read_offset* comes from *read_offset_override* when given, otherwise from
+    the cdda2img config entry for the detected drive (falls back to 0).
+    """
+    from cdda2img.config import load_config
+    from cdda2img.drive_info import probe_drive_name
+
+    drive_name = probe_drive_name(device)
+    if read_offset_override is not None:
+        return drive_name, read_offset_override
+    cfg = load_config()
+    if drive_name is not None:
+        for d in cfg.drives:
+            if d.name == drive_name:
+                return drive_name, d.read_offset
+    return drive_name, 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(
         description="Measure CD burn drive write offset via burn-and-read-back.",
@@ -363,9 +386,9 @@ def main() -> int:
     ap.add_argument(
         "--read-offset",
         type=int,
-        default=0,
+        default=None,
         metavar="N",
-        help="Drive read offset in samples — check cdda2img config (default: 0)",
+        help="Drive read offset in samples (default: auto-detected from cdda2img config)",
     )
     ap.add_argument(
         "--speed",
@@ -375,6 +398,12 @@ def main() -> int:
         help="Burn speed (default: 4)",
     )
     args = ap.parse_args()
+
+    drive_name, read_offset = _probe_drive(args.device, args.read_offset)
+    if drive_name:
+        print(f"Drive: {drive_name}  read_offset={read_offset:+d}")
+    else:
+        print(f"Drive: unknown  read_offset={read_offset:+d}")
 
     work = Path("rips/write_offset")
     results_path = Path("rips/write_offset_results.toml")
@@ -388,7 +417,8 @@ def main() -> int:
         _generate_test_signal(wav, toc)
 
     results = _load(results_path)
-    results.setdefault("drive", {})["read_offset"] = args.read_offset
+    results.setdefault("drive", {})["name"] = drive_name or ""
+    results["drive"]["read_offset"] = read_offset
 
     if results["cycles"]:
         s = results.get("summary", {})
@@ -402,7 +432,7 @@ def main() -> int:
         while _run_one_cycle(
             results,
             args.device,
-            args.read_offset,
+            read_offset,
             args.speed,
             toc,
             ripped_bin,
@@ -422,16 +452,19 @@ def main() -> int:
         print(f"  Confidence:   {s['confidence']}%")
         print(f"\n  Results saved to {results_path}")
         if s["confidence"] >= 80:
-            _offer_save_config(s["write_offset"])
+            _offer_save_config(drive_name, s["write_offset"])
 
     return 0
 
 
-def _offer_save_config(write_offset: int) -> None:
+def _offer_save_config(drive_name: str | None, write_offset: int) -> None:
     """Offer to persist *write_offset* to the cdda2img config file."""
+    if drive_name is None:
+        print("  Cannot save: drive name unknown (sysfs probe failed)")
+        return
     try:
         answer = (
-            input(f"\n  Save write_offset={write_offset:+d} to config? [y/N] ")
+            input(f"\n  Save write_offset={write_offset:+d} for {drive_name!r}? [y/N] ")
             .strip()
             .lower()
         )
@@ -441,9 +474,9 @@ def _offer_save_config(write_offset: int) -> None:
     if answer != "y":
         return
     try:
-        from cdda2img.config import config_path, save_write_offset
+        from cdda2img.config import config_path, save_drive_write_offset
 
-        save_write_offset(write_offset)
+        save_drive_write_offset(drive_name, write_offset)
         print(f"  Saved to {config_path()}")
     except Exception as exc:
         print(f"  WARNING: could not save to config: {exc}")

@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import logging
 import os
-import re
 import shutil
 import sys
 from dataclasses import dataclass, field
@@ -82,15 +81,14 @@ class DriveConfig:
     """Per-drive offset configuration stored in ``[[drives]]`` TOML blocks."""
 
     name: str
-    offset: int
+    read_offset: int
+    write_offset: int | None = None
 
 
 @dataclass
 class Config:
     """Validated cdda2img configuration with typed fields and defaults."""
 
-    drive_offset: int = 0
-    write_offset: int = 0
     cddb_server: str = "cddb.retrobridge.org:888"
     database_backups: int = 3
     database_backup_frequency: str = "1d"
@@ -111,31 +109,34 @@ def _parse_drives(raw_drives: object) -> list[DriveConfig]:
         if not name or not isinstance(name, str):
             log.warning("Skipping drive entry with missing/invalid name: %r", entry)
             continue
-        offset_raw = d.get("offset")
+        read_offset_raw = d.get("read_offset")
         try:
-            result.append(DriveConfig(name=name, offset=int(offset_raw)))
+            read_offset = int(read_offset_raw)  # type: ignore[arg-type]
         except (ValueError, TypeError):
-            log.warning("Skipping drive %r: invalid offset %r", name, offset_raw)
+            log.warning(
+                "Skipping drive %r: invalid read_offset %r", name, read_offset_raw
+            )
+            continue
+        write_offset: int | None = None
+        write_offset_raw = d.get("write_offset")
+        if write_offset_raw is not None:
+            try:
+                write_offset = int(write_offset_raw)  # type: ignore[arg-type]
+            except (ValueError, TypeError):
+                log.warning(
+                    "Drive %r: invalid write_offset %r; ignoring",
+                    name,
+                    write_offset_raw,
+                )
+        result.append(
+            DriveConfig(name=name, read_offset=read_offset, write_offset=write_offset)
+        )
     return result
 
 
 def load_config() -> Config:
     """Load and return the user configuration from the TOML file."""
     data = _load_raw()
-
-    raw = data.get("drive_offset", 0)
-    try:
-        offset = int(raw)
-    except (ValueError, TypeError):
-        log.warning("Invalid drive_offset %r in config; defaulting to 0", raw)
-        offset = 0
-
-    raw_wo = data.get("write_offset", 0)
-    try:
-        write_offset = int(raw_wo)
-    except (ValueError, TypeError):
-        log.warning("Invalid write_offset %r in config; defaulting to 0", raw_wo)
-        write_offset = 0
 
     cddb_server = str(data.get("cddb_server", "cddb.retrobridge.org:888"))
 
@@ -152,8 +153,6 @@ def load_config() -> Config:
     drives = _parse_drives(data.get("drives", []))
 
     return Config(
-        drive_offset=offset,
-        write_offset=write_offset,
         cddb_server=cddb_server,
         database_backups=database_backups,
         database_backup_frequency=database_backup_frequency,
@@ -201,94 +200,79 @@ def _rewrite_config_drives(text: str, drives: list[DriveConfig]) -> str:
     for drive in drives:
         result += "\n[[drives]]\n"
         result += f"name = {_toml_quote(drive.name)}\n"
-        result += f"offset = {drive.offset}\n"
+        result += f"read_offset = {drive.read_offset}\n"
+        if drive.write_offset is not None:
+            result += f"write_offset = {drive.write_offset}\n"
 
     return result
 
 
-def _rewrite_config_write_offset(text: str, offset: int) -> str:
-    """Return *text* with the top-level write_offset entry set to *offset*.
-
-    Scans line-by-line and replaces the first write_offset line (including
-    commented-out variants) that appears before any TOML section header.
-    Appends if not present.
-    """
-    new_line = f"write_offset = {offset}\n"
-    lines_out: list[str] = []
-    in_section = False
-    replaced = False
-    for line in text.splitlines(keepends=True):
-        if line.strip().startswith("["):
-            in_section = True
-        if (
-            not replaced
-            and not in_section
-            and re.match(r"^#?\s*write_offset\s*=", line.strip())
-        ):
-            lines_out.append(new_line)
-            replaced = True
-        else:
-            lines_out.append(line)
-    if not replaced:
-        # Insert before the first section header so the key stays top-level.
-        # Appending at EOF would place it inside the last [[...]] table block.
-        insert_at = next(
-            (i for i, ln in enumerate(lines_out) if ln.strip().startswith("[")),
-            None,
-        )
-        if insert_at is not None:
-            lines_out.insert(insert_at, new_line)
-        else:
-            result = "".join(lines_out).rstrip("\n")
-            return (result + "\n" if result else "") + new_line
-    return "".join(lines_out)
-
-
-def save_write_offset(offset: int, path: Path | None = None) -> None:
-    """Write *offset* as the top-level ``write_offset`` entry in the config file.
-
-    Replaces an existing ``write_offset`` line (including commented-out variants
-    that appear before any ``[[...]]`` section) or appends it if absent.
-    Writes are atomic (temp + rename).
-    """
-    cfg_path = path or config_path()
-
+def _read_config_text(path: Path) -> str:
     try:
-        text = cfg_path.read_text(encoding="utf-8")
+        return path.read_text(encoding="utf-8")
     except FileNotFoundError:
-        text = ""
+        return ""
 
-    new_text = _rewrite_config_write_offset(text, offset)
-    cfg_path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = cfg_path.with_name(cfg_path.name + ".tmp")
-    tmp.write_text(new_text, encoding="utf-8")
-    tmp.replace(cfg_path)
+
+def _parse_config_text(text: str) -> dict:
+    try:
+        return tomllib.loads(text)
+    except Exception:
+        return {}
+
+
+def _write_config(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(text, encoding="utf-8")
+    tmp.replace(path)
+
+
+def save_drive_read_offset(
+    name: str, read_offset: int, path: Path | None = None
+) -> None:
+    """Upsert ``read_offset`` for drive *name*, preserving any existing ``write_offset``."""
+    cfg_path = path or config_path()
+    text = _read_config_text(cfg_path)
+    existing = _parse_drives(_parse_config_text(text).get("drives", []))
+    old = next((d for d in existing if d.name == name), None)
+    drive = DriveConfig(
+        name=name,
+        read_offset=read_offset,
+        write_offset=old.write_offset if old else None,
+    )
+    updated = [d for d in existing if d.name != name]
+    updated.append(drive)
+    _write_config(cfg_path, _rewrite_config_drives(text, updated))
+
+
+def save_drive_write_offset(
+    name: str, write_offset: int, path: Path | None = None
+) -> None:
+    """Upsert ``write_offset`` for drive *name*, preserving any existing ``read_offset``."""
+    cfg_path = path or config_path()
+    text = _read_config_text(cfg_path)
+    existing = _parse_drives(_parse_config_text(text).get("drives", []))
+    old = next((d for d in existing if d.name == name), None)
+    drive = DriveConfig(
+        name=name,
+        read_offset=old.read_offset if old else 0,
+        write_offset=write_offset,
+    )
+    updated = [d for d in existing if d.name != name]
+    updated.append(drive)
+    _write_config(cfg_path, _rewrite_config_drives(text, updated))
 
 
 def save_drive(drive: DriveConfig, path: Path | None = None) -> None:
     """Upsert *drive* into the ``[[drives]]`` section of the config file.
 
-    If a ``[[drives]]`` entry with the same name already exists it is replaced;
-    otherwise the new entry is appended.  Writes are atomic (temp + rename).
+    Replaces any existing entry with the same name; preserves all other content.
+    Writes are atomic (temp + rename).
     """
     cfg_path = path or config_path()
-
-    try:
-        text = cfg_path.read_text(encoding="utf-8")
-    except FileNotFoundError:
-        text = ""
-
-    try:
-        data = tomllib.loads(text)
-    except Exception:
-        data = {}
-
-    existing = _parse_drives(data.get("drives", []))
+    text = _read_config_text(cfg_path)
+    existing = _parse_drives(_parse_config_text(text).get("drives", []))
     updated = [d for d in existing if d.name != drive.name]
     updated.append(drive)
-
-    new_text = _rewrite_config_drives(text, updated)
-    cfg_path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = cfg_path.with_name(cfg_path.name + ".tmp")
-    tmp.write_text(new_text, encoding="utf-8")
-    tmp.replace(cfg_path)
+    _write_config(cfg_path, _rewrite_config_drives(text, updated))

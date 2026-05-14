@@ -2,17 +2,6 @@
 # Copy to $XDG_CONFIG_HOME/cdda2img/cdda2img.toml
 # (default: ~/.config/cdda2img/cdda2img.toml)
 
-# CD drive read offset in samples (4 bytes per sample, stereo).
-# Find your drive at https://www.accuraterip.com/driveoffsets.htm
-# Default: 0 (no offset correction)
-drive_offset = 30
-
-# CD drive write offset in samples.  Run tools/measure_write_offset.py to measure.
-# Positive: drive burns late (trim samples from start before burning).
-# Negative: drive burns early (prepend silence before burning).
-# Default: 0 (no correction)
-# write_offset = 0
-
 # CDDB server for disc metadata lookup (host:port).
 # Default: cddb.retrobridge.org:888
 # cddb_server = "cddb.retrobridge.org:888"
@@ -25,9 +14,12 @@ drive_offset = 30
 # Default: 1d
 # database_backup_frequency = "1d"
 
-# Per-drive read offset, stored automatically after AccurateRip confirmation.
+# Per-drive read and write offsets.
+# read_offset is stored automatically after AccurateRip confirmation.
+# write_offset is stored automatically by tools/measure_write_offset.py.
 # You can also add entries manually:
 #
 # [[drives]]
 # name = "PLEXTOR DVDR PX-716A"
-# offset = 30
+# read_offset = 30
+# write_offset = -30
