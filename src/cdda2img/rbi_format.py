@@ -1,7 +1,7 @@
 """
 rbi_format.py — RBI (Red Book Image) file format definition.
 
-This module is the canonical Python reference for the RBI format (v3.0).
+This module is the canonical Python reference for the RBI format (v4.0).
 It contains only constants, struct definitions, and dataclasses.
 No I/O. No business logic. Translatable directly to C structs, Rust structs, etc.
 
@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 # ---------------------------------------------------------------------------
 
 MAGIC: bytes = b"RBIMAGE\x00"  # 8 bytes; null byte prevents text false-matches
-VERSION_MAJOR: int = 3
+VERSION_MAJOR: int = 4
 VERSION_MINOR: int = 0
 
 # ---------------------------------------------------------------------------
@@ -39,7 +39,7 @@ CD_FRAMES_PER_SECOND: int = 75  # Red Book frame rate
 # Offset  Size  Type          Field
 # ------  ----  ----          -----
 #      0     8  bytes         magic             b'RBIMAGE\x00'
-#      8     1  uint8         version_major     2
+#      8     1  uint8         version_major     4
 #      9     1  uint8         version_minor     0
 #     10     4  uint32 LE     flags             feature bitmask
 #     14     1  uint8         track_count       1-99
@@ -48,64 +48,41 @@ CD_FRAMES_PER_SECOND: int = 75  # Red Book frame rate
 #     17     4  uint32 LE     pcm_sample_rate   44100
 #     21     1  uint8         pcm_channels      2
 #     22     1  uint8         pcm_bit_depth     16
-#     23     8  uint64 LE     toc_start         byte offset to TOC block
-#     31     8  uint64 LE     toc_end           byte offset past TOC block
-#     39     8  uint64 LE     pcm_start         byte offset to PCM block
-#     47     8  uint64 LE     pcm_end           byte offset past PCM block (== file size)
-#     55    32  bytes         toc_checksum      SHA-256 of TOC block
-#     87    32  bytes         pcm_checksum      SHA-256 of raw PCM bytes
-#    119     2  uint16 LE     metadata_len      length of following UTF-8 string
-#    121     8  uint64 LE     rg_start          byte offset to RG block; 0 if absent
-#    129     8  uint64 LE     rg_end            byte offset past RG block; 0 if absent
-#    137    32  bytes         rg_checksum       SHA-256 of RG block; zeros if absent
-#    169     ?  UTF-8         metadata          creation string (metadata_len bytes)
-#  169+n     ?  UTF-8         TOC block         (toc_end - toc_start bytes)
-#    ...     ?  bytes         RG block          optional; in gap between toc_end and pcm_start
-#    ...     ?  bytes         PCM block         raw s16le interleaved (pcm_end - pcm_start bytes)
+#     23     8  uint64 LE     dir_offset        byte offset to block directory
+#     31     2  uint16 LE     dir_count         number of directory entries
+#     33     7  bytes         reserved          all zeros
 
-OFFSET_MAGIC: int = 0
-OFFSET_VERSION_MAJOR: int = 8
-OFFSET_VERSION_MINOR: int = 9
-OFFSET_FLAGS: int = 10
-OFFSET_TRACK_COUNT: int = 14
-OFFSET_DISC_NUMBER: int = 15
-OFFSET_DISC_TOTAL: int = 16
-OFFSET_PCM_SAMPLE_RATE: int = 17
-OFFSET_PCM_CHANNELS: int = 21
-OFFSET_PCM_BIT_DEPTH: int = 22
-OFFSET_TOC_START: int = 23
-OFFSET_TOC_END: int = 31
-OFFSET_PCM_START: int = 39
-OFFSET_PCM_END: int = 47
-OFFSET_TOC_CHECKSUM: int = 55
-OFFSET_PCM_CHECKSUM: int = 87
-OFFSET_METADATA_LEN: int = 119
-OFFSET_RG_START: int = 121
-OFFSET_RG_END: int = 129
-OFFSET_RG_CHECKSUM: int = 137
-OFFSET_METADATA: int = 169
+OFFSET_DIR_OFFSET: int = 23
+OFFSET_DIR_COUNT: int = 31
 
-HEADER_FIXED_SIZE: int = 169  # bytes 0-168 inclusive
+HEADER_FIXED_SIZE: int = 40
 
 # ---------------------------------------------------------------------------
 # Struct format strings (all little-endian)
 # ---------------------------------------------------------------------------
 
-# Full fixed header (excluding variable metadata), written/read in one call.
+# Full fixed header, written/read in one call.
 # Fields: magic(8s), version_major(B), version_minor(B), flags(I),
 #         track_count(B), disc_number(B), disc_total(B),
 #         pcm_sample_rate(I), pcm_channels(B), pcm_bit_depth(B),
-#         toc_start(Q), toc_end(Q), pcm_start(Q), pcm_end(Q),
-#         toc_checksum(32s), pcm_checksum(32s), metadata_len(H),
-#         rg_start(Q), rg_end(Q), rg_checksum(32s)
-HEADER_STRUCT: str = "<8sBBIBBBIBBQQQQ32s32sHQQ32s"
+#         dir_offset(Q), dir_count(H), reserved(7s)
+HEADER_STRUCT: str = "<8sBBIBBBIBBQH7s"
 HEADER_STRUCT_SIZE: int = struct.calcsize(HEADER_STRUCT)  # must equal HEADER_FIXED_SIZE
 
 assert HEADER_STRUCT_SIZE == HEADER_FIXED_SIZE, (  # noqa: S101  # LINT-005
     f"HEADER_STRUCT size {HEADER_STRUCT_SIZE} != HEADER_FIXED_SIZE {HEADER_FIXED_SIZE}"
 )
 
-# RG block fixed fields (N-dependent arrays follow; see rbi_spec.md §7.2)
+# Directory entry struct.
+# Fields: type_id(4s), block_flags(H), offset(Q), length(Q), checksum(32s)
+DIR_ENTRY_STRUCT: str = "<4sHQQ32s"
+DIR_ENTRY_SIZE: int = struct.calcsize(DIR_ENTRY_STRUCT)  # must equal 54
+
+assert DIR_ENTRY_SIZE == 54, (  # noqa: S101  # LINT-005
+    f"DIR_ENTRY_STRUCT size {DIR_ENTRY_SIZE} != 54"
+)
+
+# RG block fixed fields (N-dependent arrays follow; see rbi_spec.md §6.4)
 # Fields: rg_version(B), rg_reference(f), album_gain(f), album_peak(f), album_range(f)
 RG_BLOCK_FIXED_STRUCT: str = "<Bffff"
 RG_BLOCK_FIXED_SIZE: int = struct.calcsize(RG_BLOCK_FIXED_STRUCT)  # 17 bytes
@@ -118,19 +95,21 @@ assert RG_BLOCK_FIXED_SIZE == 17, (  # noqa: S101  # LINT-005
 RG_TRACK_STRUCT: str = "<fff"
 RG_TRACK_SIZE: int = struct.calcsize(RG_TRACK_STRUCT)  # 12 bytes
 
-# Placeholder checksums and offsets used when first writing the header
+# Placeholder checksum used when pre-writing directory entries
 CHECKSUM_SIZE: int = 32  # SHA-256 digest length in bytes
 CHECKSUM_PLACEHOLDER: bytes = b"\x00" * CHECKSUM_SIZE
-OFFSET_PLACEHOLDER: int = 0
 
 # ---------------------------------------------------------------------------
-# Constraints
+# Block type identifiers (4 bytes each; trailing space is part of the identifier)
 # ---------------------------------------------------------------------------
 
-MAX_METADATA_LEN: int = 1024  # enforced on read and write
-FLAGS_RESERVED_MASK: int = (
-    0xFFFFFFFA  # all bits except FLAG_RG_PRESENT and FLAG_MASTER_MODE are reserved
-)
+BLOCK_TYPE_TOC: bytes = b"TOC "
+BLOCK_TYPE_PCM: bytes = b"PCM "
+BLOCK_TYPE_PROV: bytes = b"PROV"
+BLOCK_TYPE_RGDB: bytes = b"RGDB"
+BLOCK_TYPE_ARIP: bytes = b"ARIP"
+BLOCK_TYPE_RLOG: bytes = b"RLOG"
+BLOCK_TYPE_CTDB: bytes = b"CTDB"
 
 # ---------------------------------------------------------------------------
 # Flags bitmask
@@ -138,10 +117,14 @@ FLAGS_RESERVED_MASK: int = (
 # Even bit positions = "safe to ignore if unknown"
 # Odd bit positions  = "must understand to read correctly"
 
-FLAG_RG_PRESENT: int = 0x00000001  # bit 0 (even): RG block present in gap
+BLOCK_FLAG_SKIP: int = (
+    0x0001  # bit 0 (even): reader MAY skip this block if unrecognised
+)
+
 FLAG_MASTER_MODE: int = (
     0x00000004  # bit 2 (even): created in master mode (no silence trim)
 )
+FLAGS_RESERVED_MASK: int = 0xFFFFFFFB  # all bits except FLAG_MASTER_MODE are reserved
 
 # ---------------------------------------------------------------------------
 # Dataclasses
@@ -149,8 +132,23 @@ FLAG_MASTER_MODE: int = (
 
 
 @dataclass
+class RBIDirEntry:
+    """One entry in the block directory appended at the end of the RBI file."""
+
+    type_id: bytes  # 4 bytes, e.g. b"TOC "
+    block_flags: int  # uint16; BLOCK_FLAG_SKIP etc.
+    offset: int  # uint64; byte offset to start of block
+    length: int  # uint64; byte length of block
+    checksum: bytes  # 32-byte SHA-256 digest of block content
+
+    @property
+    def is_skippable(self) -> bool:
+        return bool(self.block_flags & BLOCK_FLAG_SKIP)
+
+
+@dataclass
 class RBIHeader:
-    """Parsed representation of a validated RBI file header."""
+    """Parsed representation of a validated RBI v4.0 file header."""
 
     version_major: int  # uint8
     version_minor: int  # uint8
@@ -161,40 +159,20 @@ class RBIHeader:
     pcm_sample_rate: int  # uint32; Hz
     pcm_channels: int  # uint8
     pcm_bit_depth: int  # uint8
-    toc_start: int  # uint64; byte offset
-    toc_end: int  # uint64; byte offset
-    pcm_start: int  # uint64; byte offset
-    pcm_end: int  # uint64; byte offset
-    toc_checksum: bytes  # 32-byte SHA-256 digest
-    pcm_checksum: bytes  # 32-byte SHA-256 digest
-    metadata: str  # decoded UTF-8 creation string
-    rg_start: int  # uint64; byte offset; 0 if absent
-    rg_end: int  # uint64; byte offset; 0 if absent
-    rg_checksum: bytes  # 32-byte SHA-256 digest; zeros if absent
-
-    @property
-    def toc_length(self) -> int:
-        return self.toc_end - self.toc_start
-
-    @property
-    def pcm_length(self) -> int:
-        return self.pcm_end - self.pcm_start
-
-    @property
-    def rg_length(self) -> int:
-        return self.rg_end - self.rg_start
-
-    @property
-    def header_size(self) -> int:
-        return HEADER_FIXED_SIZE + len(self.metadata.encode("utf-8"))
-
-    @property
-    def has_rg(self) -> bool:
-        return bool(self.flags & FLAG_RG_PRESENT)
+    dir_offset: int  # uint64; byte offset to block directory
+    dir_count: int  # uint16; number of directory entries
+    directory: list[RBIDirEntry] = field(default_factory=list)
 
     @property
     def is_master(self) -> bool:
         return bool(self.flags & FLAG_MASTER_MODE)
+
+    def find_block(self, type_id: bytes) -> "RBIDirEntry | None":
+        """Return the first directory entry matching type_id, or None."""
+        for entry in self.directory:
+            if entry.type_id == type_id:
+                return entry
+        return None
 
 
 @dataclass

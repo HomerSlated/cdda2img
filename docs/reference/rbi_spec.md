@@ -1,20 +1,27 @@
 # RBI Format Specification
 ## Red Book Image — CD-DA Archive Container
-### Version 3.0 · Format version `major=3, minor=0`
+### Version 4.0 · Format version `major=4, minor=0`
 
 ---
 
 ## 1. Introduction
 
-RBI (Red Book Image) is an open, single-file container format for archiving and mastering Red Book standard (IEC 60908:1999) CD-DA audio discs. It stores a human-readable TOC and a raw PCM audio payload in a single binary file, with SHA-256 integrity verification for all sections.
+RBI (Red Book Image) is an open, single-file container format for archiving and mastering Red Book standard (IEC 60908:1999) CD-DA audio discs. It stores a human-readable TOC, raw PCM audio, and optional metadata blocks in a single binary file, with SHA-256 integrity verification for every block.
 
 RBI is deliberately CD-DA-only. It does not attempt to represent raw physical sectors, subchannel data, copy-protection artefacts, or data tracks. This makes it unsuitable as a bit-for-bit clone format, but well-suited as a high-fidelity audio archive and mastering source.
 
 ### Backwards compatibility
 
-**RBI v3.0 is not backwards-compatible with v2.0.** The fixed header size is unchanged (169 bytes), but the TOC now records per-track pre-gap durations (`pregap_frames`) and ISRC codes that v2.0 readers do not understand. A v2.0 reader extracting a v3.0 file would silently mis-slice PCM — slicing from `start_frame` instead of `start_frame + pregap_frames` — producing audio that begins mid-pre-gap. A v3.0 reader **MUST** reject any file with `version_major != 3`. This break is intentional: the format is under active development and has no established userbase at the time of this revision.
+**RBI v4.0 is not backwards-compatible with v3.0.** The fixed header is redesigned (40 bytes vs. 169 bytes) around an extensible block-directory model; v3.0 files use hard-coded per-block offsets in the header. A v4.0 reader **MUST** reject any file with `version_major != 4`.
 
-**RBI v2.0 was not backwards-compatible with v1.x.** The fixed header grew from 121 to 169 bytes at v2.0.
+**Version history:**
+
+| Version | Change summary |
+|---------|---------------|
+| v1.x    | Initial format; 121-byte fixed header |
+| v2.0    | Header grew to 169 bytes; added RG block in TOC/PCM gap |
+| v3.0    | Added per-track pre-gap storage and ISRC in TOC; breaking change from v2 |
+| v4.0    | Redesigned around extensible block directory; provenance moved out of TOC; new PROV, ARIP, RLOG block types |
 
 ---
 
@@ -27,7 +34,7 @@ RBI is deliberately CD-DA-only. It does not attempt to represent raw physical se
 | Magic / signature     | None          | None            | `MEDIA DESCRIPTOR`     | `NERO`/`NER5`   | **`RBIMAGE\x00`**           |
 | Endianness            | N/A           | N/A             | Little-endian          | Big-endian      | **Little-endian**           |
 | Specification status  | De facto      | Proprietary     | Proprietary            | Proprietary     | **Open**                    |
-| Integrity checking    | None          | None            | None                   | None            | **SHA-256 (TOC+PCM+RG)**    |
+| Integrity checking    | None          | None            | None                   | None            | **SHA-256 (per block)**     |
 | TOC format            | Plain text    | INI text        | Binary structs         | Binary chunks   | **Plain text (cdrdao-compatible)** |
 | Audio storage         | Raw sectors   | Raw sectors     | Raw sectors            | Raw sectors     | **Raw PCM (s16le)**         |
 | Subchannel data       | Optional      | Yes (.SUB)      | Optional               | No              | **No**                      |
@@ -35,16 +42,7 @@ RBI is deliberately CD-DA-only. It does not attempt to represent raw physical se
 | CD-TEXT               | Yes           | Yes             | No                     | Yes (CDTX chunk)| **Yes (in TOC)**            |
 | ISRC / MCN            | Yes           | Yes             | Yes                    | Yes             | **In TOC**                  |
 | Max file size (index) | —             | —               | 4 GB (uint32 offsets)  | 8 GB (v2 uint64)| **Unlimited (uint64)**      |
-
-### Notes on comparable formats
-
-**CUE/BIN** — The most widely supported format. The `.cue` sheet is a plain-text file loosely based on the cdrecord/cdrdao TOC syntax. No formal specification exists. No integrity checking. The `.bin` stores raw 2352-byte sectors (including sync, header, EDC/ECC bytes that are meaningless for CD-DA but present for compatibility).
-
-**CCD/IMG/SUB (CloneCD)** — Three files: an INI-style `.ccd` containing raw TOC entries (session/entry/track sections with LBA addresses, ADR/Control bytes, ISRC, CD-TEXT packs), a `.img` of raw 2352-byte sectors, and a `.sub` of 96-byte interleaved P-W subchannel blocks per sector. Proprietary but substantially reverse-engineered.
-
-**MDS/MDF (Alcohol 120%)** — Binary `.mds` descriptor with magic `MEDIA DESCRIPTOR\x01` (17 bytes), followed by a fixed header with little-endian offsets to session blocks, track blocks, and a per-track footer that contains the filename of the paired `.mdf` data file. Track blocks encode raw TOC point data (ADR/CTL, PMIN/PSEC/PFRAME, LBA, sector size). No checksums.
-
-**NRG (Nero Burning ROM)** — Single file. The actual data occupies the start; the footer (either 12-byte v1 or 16-byte v2) is appended at the end with an offset pointing back to a chain of big-endian length-prefixed chunks: `CUES`/`CUEX` (cue data), `DAOI`/`DAOX` (DAO track info with ISRC, index0/1/end offsets), `SINF` (session info), `CDTX` (CD-TEXT), `MTYP` (media type), `ETN2`/`ETNF` (track entries), `END!`/`END1`. Proprietary; no checksums.
+| Extensible metadata   | No            | No              | No                     | No              | **Yes (block directory)**   |
 
 ---
 
@@ -52,150 +50,118 @@ RBI is deliberately CD-DA-only. It does not attempt to represent raw physical se
 
 ```
 ┌─────────────────────────────────────────────────────────┐
-│  FIXED HEADER (169 bytes)                               │
+│  FIXED HEADER (40 bytes)                                │
 │    Magic (8) · Version (2) · Flags (4)                  │
 │    Track count (1) · Disc number (1) · Disc total (1)   │
-│    PCM sample rate (4) · Channels (1) · Bit depth (1)   │
-│    Offsets (32) · TOC checksum (32) · PCM checksum (32) │
-│    Metadata length (2)                                  │
-│    RG start (8) · RG end (8) · RG checksum (32)         │
+│    PCM parameters (6) · Dir offset (8) · Dir count (2)  │
+│    Reserved (7)                                         │
 ├─────────────────────────────────────────────────────────┤
-│  VARIABLE HEADER (metadata_len bytes, max 1024)         │
-│    Creation metadata string (UTF-8)                     │
+│  BLOCK AREA (variable, blocks in any order)             │
+│    TOC block   — cdrdao-compatible plain-text TOC       │
+│    PCM block   — raw interleaved audio (s16le)          │
+│    PROV block  — provenance key=value text (optional)   │
+│    RGDB block  — EBU R128 ReplayGain data (optional)    │
+│    ARIP block  — AccurateRip results (optional)         │
+│    RLOG block  — rip log text (optional)                │
+│    CTDB block  — CUETools DB results (optional, reserved) │
 ├─────────────────────────────────────────────────────────┤
-│  TOC BLOCK (variable)                                   │
-│    cdrdao-compatible plain-text TOC (UTF-8)             │
-├─────────────────────────────────────────────────────────┤
-│  RG BLOCK (optional, 17 + 12×N bytes)                   │
-│    Present only when FLAG_RG_PRESENT is set             │
-│    Located in gap between toc_end and pcm_start         │
-├─────────────────────────────────────────────────────────┤
-│  PCM BLOCK (variable)                                   │
-│    Raw interleaved PCM audio (s16le, stereo, 44100 Hz)  │
+│  BLOCK DIRECTORY (dir_count × 54 bytes)                 │
+│    One entry per block: type_id, flags, offset, length, │
+│    SHA-256 checksum                                     │
 └─────────────────────────────────────────────────────────┘
 ```
 
-The TOC block begins at `toc_start`. An optional RG block may occupy the gap between `toc_end` and `pcm_start`; its position is given by `rg_start` and `rg_end`. The PCM block begins at `pcm_start`. A reader that does not understand the RG block **MUST** skip from `toc_end` to `pcm_start` to locate the audio — `pcm_start` is always authoritative.
+The fixed header contains the minimum information needed to locate and authenticate all data: audio parameters for direct playback, and a pointer to the block directory. The block directory is the authoritative manifest of all content; it is always appended after all blocks so that it can be written in a single pass. Directory entries **SHOULD** be ordered by ascending block offset, but readers **MUST** be prepared to process entries in any order.
+
+Readers locate the directory by seeking to `dir_offset`, then read `dir_count` directory entries. All block locations and checksums are in the directory. Readers that encounter an unrecognised block type with `BLOCK_FLAG_SKIP` set **MAY** ignore it; readers encountering an unrecognised block type without `BLOCK_FLAG_SKIP` **MUST** reject the file.
 
 ---
 
-## 4. Binary Header Layout
+## 4. Fixed Header
+
+### 4.1 Binary layout
 
 All multi-byte integer fields are **little-endian** unless otherwise noted.
 
 | Offset | Size (bytes) | Type      | Field             | Description |
 |--------|-------------|-----------|-------------------|-------------|
 | 0      | 8           | bytes     | `magic`           | `RBIMAGE\x00` (0x52 0x42 0x49 0x4D 0x41 0x47 0x45 0x00) |
-| 8      | 1           | uint8     | `version_major`   | Format major version; current value: `3` |
+| 8      | 1           | uint8     | `version_major`   | Format major version; current value: `4` |
 | 9      | 1           | uint8     | `version_minor`   | Format minor version; current value: `0` |
-| 10     | 4           | uint32 LE | `flags`           | Feature bitmask (see §5.3); `FLAG_RG_PRESENT = 0x00000001` |
+| 10     | 4           | uint32 LE | `flags`           | Feature bitmask (see §4.2); currently only `FLAG_MASTER_MODE` defined |
 | 14     | 1           | uint8     | `track_count`     | Number of audio tracks (1–99) |
 | 15     | 1           | uint8     | `disc_number`     | This disc's position in a set (1-based; `1` for single discs) |
 | 16     | 1           | uint8     | `disc_total`      | Total discs in set (`1` for single discs) |
 | 17     | 4           | uint32 LE | `pcm_sample_rate` | Audio sample rate in Hz; Red Book standard: `44100` |
 | 21     | 1           | uint8     | `pcm_channels`    | Number of audio channels; Red Book standard: `2` |
 | 22     | 1           | uint8     | `pcm_bit_depth`   | Bits per sample; Red Book standard: `16` |
-| 23     | 8           | uint64 LE | `toc_start`       | Byte offset from file start to beginning of TOC block |
-| 31     | 8           | uint64 LE | `toc_end`         | Byte offset from file start to end of TOC block |
-| 39     | 8           | uint64 LE | `pcm_start`       | Byte offset from file start to beginning of PCM block |
-| 47     | 8           | uint64 LE | `pcm_end`         | Byte offset from file start to end of PCM block |
-| 55     | 32          | bytes     | `toc_checksum`    | SHA-256 digest of TOC block bytes |
-| 87     | 32          | bytes     | `pcm_checksum`    | SHA-256 digest of PCM block bytes |
-| 119    | 2           | uint16 LE | `metadata_len`    | Byte length of the following metadata string |
-| 121    | 8           | uint64 LE | `rg_start`        | Byte offset from file start to beginning of RG block; `0` if absent |
-| 129    | 8           | uint64 LE | `rg_end`          | Byte offset from file start to end of RG block; `0` if absent |
-| 137    | 32          | bytes     | `rg_checksum`     | SHA-256 digest of RG block bytes; 32 zero bytes if absent |
-| 169    | variable    | UTF-8     | `metadata`        | Creation metadata string; length = `metadata_len` |
+| 23     | 8           | uint64 LE | `dir_offset`      | Byte offset from file start to beginning of block directory |
+| 31     | 2           | uint16 LE | `dir_count`       | Number of entries in block directory |
+| 33     | 7           | bytes     | `reserved`        | Must be `0x00 × 7`; reserved for future inline fields |
 
-**Fixed header size:** 169 bytes
-**Total header size:** `169 + metadata_len` bytes
-**TOC block begins at:** `toc_start` (== `169 + metadata_len` in a v3.0 file with no preceding sections)
-**PCM block begins at:** `pcm_start` (>= `toc_end`)
+**Fixed header size:** 40 bytes
 
-Note: `metadata_len` is at offset 119, and the `metadata` string it describes begins at offset 169. The 48-byte RG location fields (`rg_start`, `rg_end`, `rg_checksum`) are interleaved in the fixed header between these two fields. This layout preserves the position of all pre-existing fields from v1.x while keeping all fixed-width fields in a single contiguous struct.
-
-The offset fields at bytes 23–54 and 121–168 are written as `0x0000000000000000` / zero-byte placeholders initially, then patched once all block sizes are known.
-
----
-
-## 5. Field Specifications
-
-### 5.1 `magic`
-- Fixed value: `b'RBIMAGE\x00'` (8 bytes)
-- The null byte prevents false matches in plain-text files and is consistent with the convention used by PNG (`\x89PNG\r\n\x1a\n`) and others.
-- A file not beginning with exactly these 8 bytes is not an RBI file.
-
-### 5.2 `version_major` and `version_minor`
-- Two independent `uint8` fields encoding the format version.
-- Current values: `version_major = 3`, `version_minor = 0`.
-- The code version (`cdda2img` release) is separate. Format changes increment these fields; tool releases do not.
-- A reader encountering `version_major != 3` **MUST** reject the file. RBI v3.0 is not backwards-compatible with v2.0 (the TOC encodes pre-gap durations that v2.0 readers do not understand; see §1). It is also not forwards-compatible (the content of a `version_major = 4` file is unknown).
-- A reader encountering `version_minor > 0` **SHOULD** attempt to read the file and warn, as minor increments are intended to be backwards-compatible within a major version.
-
-### 5.3 `flags`
-- Unsigned 32-bit little-endian bitmask.
-- Defined bits:
+### 4.2 Flags
 
 | Bit | Mask         | Name               | Description |
 |-----|--------------|--------------------|-------------|
-| 0   | `0x00000001` | `FLAG_RG_PRESENT`  | RG block is present in the gap; `rg_start`, `rg_end`, and `rg_checksum` are valid |
-| 2   | `0x00000004` | `FLAG_MASTER_MODE` | Container was created in master mode (no silence trimming or inter-track gap was applied to the source audio) |
+| 2   | `0x00000004` | `FLAG_MASTER_MODE` | Container was created in master mode (no silence trimming or inter-track gap was applied to the source audio). Affects pre-gap interpretation in TOC. |
 
-- All other bits are currently reserved and **MUST** be `0` in v3.0 files.
-- Even-numbered bits (including bits 0 and 2) indicate "safe to ignore if not understood." A reader that does not implement a given even-bit feature **MAY** proceed without it.
-- Odd-numbered bits indicate "must understand to read correctly." A reader encountering an unknown flag bit at an odd position **MUST** reject the file.
-
-### 5.4 `track_count`
-- Number of audio tracks on this disc (1–99, per Red Book §3.1.2).
-- Allows fast inspection without parsing the TOC block.
-- **MUST** match the number of `TRACK AUDIO` entries in the TOC block.
-
-### 5.5 `disc_number` and `disc_total`
-- Support for multi-disc sets. Both are `1` for single-disc releases.
-- `disc_number` is 1-based. `disc_number > disc_total` is invalid.
-- Multi-disc sets are stored as separate RBI files; these fields identify each file's place in the set.
-
-### 5.6 `pcm_sample_rate`, `pcm_channels`, `pcm_bit_depth`
-- Explicitly encode the audio parameters of the PCM block.
-- Red Book standard values: `44100`, `2`, `16`.
-- A v3.0 reader **SHOULD** reject files where these differ from Red Book values, as no other values are currently defined.
-- These fields exist to enable future format variants (e.g. 24-bit archival quality) without a major version bump.
-
-### 5.7 Offset fields (`toc_start`, `toc_end`, `pcm_start`, `pcm_end`)
-- All are unsigned 64-bit little-endian integers giving byte offsets from the start of the file.
-- `toc_start >= 169 + metadata_len` (TOC begins after the full fixed header and variable metadata).
-- `pcm_start >= toc_end` (PCM begins at or after the end of the TOC; a gap is permitted and used for the RG block when present).
-- `pcm_end == file_size` (PCM block extends to end of file).
-- When `FLAG_RG_PRESENT` is set: `rg_start >= toc_end` and `rg_end <= pcm_start`.
-
-### 5.8 `toc_checksum` and `pcm_checksum`
-- SHA-256 digests (32 bytes each), computed over the raw bytes of each block.
-- `pcm_checksum` covers the raw PCM bytes only — no RIFF/WAV wrapper.
-- Stored unconditionally. Readers **MUST** verify both on extraction and **SHOULD** warn (not hard-fail by default) on mismatch.
-
-### 5.9 `metadata_len`
-- Unsigned 16-bit little-endian integer.
-- Maximum valid value: 1024. A reader encountering a larger value **MUST** reject the file.
-- A value of 0 is valid (no metadata string follows).
-
-### 5.10 RG location fields (`rg_start`, `rg_end`, `rg_checksum`)
-- `rg_start` and `rg_end` are unsigned 64-bit little-endian integers; `rg_checksum` is a 32-byte SHA-256 digest.
-- When `FLAG_RG_PRESENT` is **not** set: `rg_start == 0`, `rg_end == 0`, and `rg_checksum` is 32 zero bytes. A reader **MUST** enforce these values when the flag is absent.
-- When `FLAG_RG_PRESENT` **is** set: `rg_start` and `rg_end` delimit the RG block within the gap between `toc_end` and `pcm_start`; `rg_checksum` is the SHA-256 digest of that block.
-
-### 5.11 `metadata`
-- UTF-8 encoded string, `metadata_len` bytes long. Not null-terminated.
-- Canonical format: `Created by cdda2img vX.Y.Z (format 3.0) on ISO8601_DATETIME`
-- Example: `Created by cdda2img v0.1.4 (format 3.0) on 2026-05-03T21:46:52`
-- A reader that cannot decode this field as valid UTF-8 **MUST** reject the file.
+All other bits are currently reserved and **MUST** be `0` in v4.0 files. Even-numbered bits indicate "safe to ignore if not understood"; odd-numbered bits indicate "must understand to read correctly." A reader encountering an unknown odd-position flag **MUST** reject the file.
 
 ---
 
-## 6. TOC Block
+## 5. Block Directory
 
-The TOC block is a UTF-8 encoded plain-text file in cdrdao TOC format. It is self-contained and human-readable.
+### 5.1 Location and structure
 
-### 6.1 Structure
+The block directory begins at `dir_offset` bytes from the start of the file. It consists of exactly `dir_count` consecutive entries, each 54 bytes. The directory is always written last, after all blocks; `dir_offset` is patched into the fixed header once all block offsets are known.
+
+`dir_offset + dir_count × 54 == file_size` in all well-formed v4.0 files.
+
+### 5.2 Directory entry layout
+
+| Offset | Size (bytes) | Type      | Field          | Description |
+|--------|-------------|-----------|----------------|-------------|
+| 0      | 4           | bytes     | `type_id`      | 4-byte ASCII block type identifier (see §5.4) |
+| 4      | 2           | uint16 LE | `block_flags`  | Block-level flags (see §5.3) |
+| 6      | 8           | uint64 LE | `offset`       | Byte offset from file start to first byte of block |
+| 14     | 8           | uint64 LE | `length`       | Block length in bytes |
+| 22     | 32          | bytes     | `checksum`     | SHA-256 digest of block content (`length` bytes at `offset`) |
+
+**Directory entry size:** 54 bytes
+
+### 5.3 Block flags
+
+| Bit | Mask     | Name                 | Description |
+|-----|----------|----------------------|-------------|
+| 0   | `0x0001` | `BLOCK_FLAG_SKIP`    | A reader that does not recognise `type_id` **MAY** skip this block and proceed. |
+
+All other bits are reserved and **MUST** be `0`. The required blocks (`TOC ` and `PCM `) **MUST NOT** set `BLOCK_FLAG_SKIP`. All optional blocks **MUST** set `BLOCK_FLAG_SKIP`.
+
+### 5.4 Block type identifiers
+
+| `type_id`    | Name             | Required | `BLOCK_FLAG_SKIP` | Description |
+|--------------|------------------|----------|-------------------|-------------|
+| `b"TOC "`    | TOC block        | Yes      | No                | cdrdao-compatible plain-text TOC (UTF-8) |
+| `b"PCM "`    | PCM block        | Yes      | No                | Raw interleaved s16le audio |
+| `b"PROV"`    | Provenance block | No       | Yes               | Rip provenance and extended metadata (key=value UTF-8) |
+| `b"RGDB"`    | ReplayGain block | No       | Yes               | EBU R128 / ReplayGain 2.0 data (binary) |
+| `b"ARIP"`    | AccurateRip block| No       | Yes               | AccurateRip verification results (binary) |
+| `b"RLOG"`    | Rip log block    | No       | Yes               | Structured rip log text (UTF-8) |
+| `b"CTDB"`    | CUETools DB      | No       | Yes               | CUETools database results (RESERVED — format not yet defined) |
+
+A conforming v4.0 writer **MUST NOT** write more than one entry of a given `type_id`. A conforming reader **MUST** reject a file containing duplicate `type_id` entries for any required block (`TOC ` or `PCM `); for optional blocks, it **SHOULD** use the first entry and warn.
+
+---
+
+## 6. Block Definitions
+
+### 6.1 TOC Block (`b"TOC "`)
+
+The TOC block is a UTF-8 encoded plain-text file in cdrdao TOC format. It is self-contained and human-readable. Comments (`//`) **MAY** appear for human readability but **MUST NOT** carry cdda2img-specific metadata; all proprietary cdda2img data belongs in the PROV block.
+
+#### 6.1.1 Structure
 
 ```
 CD_DA
@@ -228,16 +194,7 @@ FILE "<album>.pcm" MM:SS:FF MM:SS:FF
 
 // Track 2 (with pre-gap)
 TRACK AUDIO
-NO COPY
-NO PRE_EMPHASIS
-TWO_CHANNEL_AUDIO
-ISRC "GBAYE9300136"
-CD_TEXT {
-  LANGUAGE 0 {
-    TITLE "<track title>"
-    PERFORMER "<track artist>"
-  }
-}
+...
 FILE "<album>.pcm" MM:SS:FF MM:SS:FF
 START MM:SS:FF
 
@@ -245,34 +202,34 @@ START MM:SS:FF
 ...
 ```
 
-The `CATALOG` line is optional; it is included only when an MCN (Media Catalogue Number / EAN-13) is available from the source material. All-zeros MCNs (`0000000000000`) are treated as absent and omitted.
+The `CATALOG` line is optional; included only when an MCN (Media Catalogue Number / EAN-13) is available. All-zeros MCNs are treated as absent and omitted.
 
-The `ISRC` line is optional per track; it is included when an ISO 3901 ISRC code is available.
+The `ISRC` line is optional per track; included when an ISO 3901 ISRC code is available.
 
-The `START` line is optional per track; it is present only for tracks that have a pre-gap (see §6.5).
+The `START` line is optional per track; present only for tracks that have a pre-gap.
 
-### 6.2 Timestamp format
+#### 6.1.2 Timestamp format
 
 CD-DA frame timestamps use the format `MM:SS:FF` where:
 - `MM` = minutes (00–79)
 - `SS` = seconds (00–59)
 - `FF` = frames (00–74); 1 frame = 1/75 second
 
-The first `MM:SS:FF` in each `FILE` line is the start position within the PCM blob (the start of the slot, which includes any pre-gap); the second is the total slot duration (pre-gap + audio). When no `START` line is present, the slot is entirely audio.
+The first `MM:SS:FF` in each `FILE` line is the start position within the PCM block (the start of the slot, which includes any pre-gap); the second is the total slot duration (pre-gap + audio). When no `START` line is present, the slot is entirely audio.
 
 Conversion: `total_frames = MM × 75 × 60 + SS × 75 + FF`
 
-### 6.3 FILE reference
+#### 6.1.3 FILE reference
 
-The filename in each `FILE` line uses the extension `.pcm` to reflect that the payload is raw PCM, not a WAV file. The stem is the sanitised album title. When extracting, a WAV file is reconstructed from the raw PCM using the audio parameters in the fixed header.
+The filename in each `FILE` line uses the extension `.pcm` to reflect that the payload is raw PCM. The stem is the sanitised album title. On extraction, a WAV file is reconstructed from the raw PCM using the audio parameters in the fixed header.
 
-### 6.4 ISRC
+#### 6.1.4 ISRC
 
-The `ISRC` line contains the ISO 3901 International Standard Recording Code for the track (12 characters: country code 2, registrant 3, year 2, designation 5). It is written immediately after `TWO_CHANNEL_AUDIO` and before the `CD_TEXT` block. Absent when the source did not provide an ISRC.
+The `ISRC` line contains the ISO 3901 International Standard Recording Code (12 characters: country code 2, registrant 3, year 2, designation 5). Written immediately after `TWO_CHANNEL_AUDIO` and before the `CD_TEXT` block. Absent when the source did not provide an ISRC.
 
-### 6.5 Pre-gap storage
+#### 6.1.5 Pre-gap storage
 
-Tracks on a CD-DA disc may have a pre-gap: a period of silence (or, rarely, audio) preceding the track's INDEX 01 point. RBI v3.0 stores pre-gap audio contiguously in the PCM block as part of the following track's slot.
+Tracks on a CD-DA disc may have a pre-gap: a period of silence (or, rarely, audio) preceding the track's INDEX 01 point. RBI v4.0 stores pre-gap audio contiguously in the PCM block as part of the following track's slot.
 
 For a track with a pre-gap of duration P frames and audio of duration D frames:
 
@@ -281,11 +238,11 @@ For a track with a pre-gap of duration P frames and audio of duration D frames:
 - Audio-only offset: `audio_start_frame = start_frame + pregap_frames`
 - Audio-only duration: `duration_frames = slot_frames − pregap_frames`
 
-**Extraction rule**: when slicing PCM for a track, skip `pregap_frames` frames from `start_frame` before reading `duration_frames` frames of audio. Do not include the pre-gap in the extracted audio.
+**Extraction rule**: when slicing PCM for a track, skip `pregap_frames` frames from `start_frame` before reading `duration_frames` frames of audio.
 
-**Master mode**: pre-gaps are always preserved in the PCM block when the container was created in master mode (`FLAG_MASTER_MODE` set). The pre-gap bytes exist in the PCM at `start_frame * bytes_per_frame`; only the TOC interpretation changes.
+**Master mode**: pre-gaps are always preserved in the PCM block when `FLAG_MASTER_MODE` is set. The pre-gap bytes exist in the PCM at `start_frame * bytes_per_frame`.
 
-### 6.4 Character sanitisation
+#### 6.1.6 Character sanitisation
 
 Track and album titles are sanitised before embedding:
 - Curly quotes (`'`, `'`, `"`, `"`) → straight equivalents
@@ -296,50 +253,9 @@ Track and album titles are sanitised before embedding:
 
 ---
 
-## 7. RG Block
-
-The RG (ReplayGain) block stores EBU R128 / ReplayGain 2.0 loudness metadata for the disc and each of its tracks. It is present in the file only when `FLAG_RG_PRESENT` is set in the fixed header.
-
-### 7.1 Location
-
-The RG block occupies a contiguous byte range in the gap between `toc_end` and `pcm_start`. Its position is given by `rg_start` and `rg_end` in the fixed header.
-
-A reader that does not implement RG block parsing **MUST** seek to `pcm_start` to locate the audio, rather than reading past `toc_end`. The `pcm_start` offset is always authoritative.
-
-### 7.2 Binary Layout
-
-All float32 values are IEEE 754 single-precision, little-endian.
-
-| Offset     | Size (bytes) | Type      | Field           | Description |
-|------------|-------------|-----------|-----------------|-------------|
-| 0          | 1           | uint8     | `rg_version`    | RG block format version; current value: `1` |
-| 1          | 4           | float32 LE| `rg_reference`  | Reference loudness in LUFS; ReplayGain 2.0 standard: `−18.0` |
-| 5          | 4           | float32 LE| `album_gain`    | Album gain in dB |
-| 9          | 4           | float32 LE| `album_peak`    | Album true peak, linear scale |
-| 13         | 4           | float32 LE| `album_range`   | Album loudness range (LRA) in LU |
-| 17         | 4×N         | float32[] | `track_gain[N]` | Per-track gain in dB; N = `track_count` |
-| 17 + 4N    | 4×N         | float32[] | `track_peak[N]` | Per-track true peak, linear scale |
-| 17 + 8N    | 4×N         | float32[] | `track_range[N]`| Per-track LRA in LU |
-
-**Total block size:** `17 + 12 × N` bytes, where N is `track_count` from the fixed header.
-
-Track arrays are 0-indexed; `track_gain[0]` corresponds to track 1 in the TOC.
-
-### 7.3 Integrity
-
-`rg_checksum` in the fixed header is the SHA-256 digest of the RG block bytes (`rg_end - rg_start` bytes starting at `rg_start`). Readers **SHOULD** verify this checksum and warn on mismatch.
-
-### 7.4 Loudness measurement
-
-RG values are computed using the EBU R128 / ITU-R BS.1770-3 integrated loudness algorithm with true peak detection. The reference loudness is stored in `rg_reference` (nominally −18.0 LUFS, per ReplayGain 2.0). Gain values represent the adjustment required to bring the measured loudness to the reference: `gain = rg_reference − integrated_loudness`.
-
----
-
-## 8. PCM Block
+### 6.2 PCM Block (`b"PCM "`)
 
 The PCM block contains raw interleaved audio samples with no file wrapper.
-
-### 8.1 Audio parameters (Red Book compliant)
 
 | Parameter     | Value                  | IEC 60908 reference       |
 |---------------|------------------------|---------------------------|
@@ -349,46 +265,235 @@ The PCM block contains raw interleaved audio samples with no file wrapper.
 | Sample rate   | 44100 Hz               | §13                       |
 | Byte order    | Little-endian          | —                         |
 
-### 8.2 No WAV wrapper
-
-The PCM block contains only sample data — no RIFF header or chunk structure. The audio parameters needed to reconstruct a WAV file on extraction are stored in the fixed header (`pcm_sample_rate`, `pcm_channels`, `pcm_bit_depth`). This avoids redundancy and ensures `pcm_checksum` is a pure integrity check over audio data.
+The PCM block contains only sample data — no RIFF header or chunk structure. Audio parameters needed to reconstruct a WAV file on extraction are stored in the fixed header. This ensures the block checksum is a pure integrity check over audio data.
 
 ---
 
-## 9. Validation Rules
+### 6.3 PROV Block (`b"PROV"`)
 
-A conforming reader **MUST** enforce:
+The PROV block stores provenance and extended metadata that has no natural home in the standard cdrdao TOC format. It is UTF-8 encoded plain text: one `key=value` pair per line, terminated by `\n`. Lines beginning with `#` are comments and **MUST** be ignored by readers. A reader **MUST** ignore any key it does not recognise.
+
+#### 6.3.1 Key reference
+
+| Key                    | Description |
+|------------------------|-------------|
+| `creator`              | Tool and version that created the file, e.g. `cdda2img v0.2.0` |
+| `created`              | Creation timestamp (ISO 8601), e.g. `2026-05-14T16:30:00Z` |
+| `mode`                 | Workflow that produced the container: `r` (rip) \| `c` (create from files) \| `i` (import foreign image) |
+| `source`               | Human-readable origin path, device node, or source description |
+| `ripper`               | Extraction engine: `cdrdao` \| `cdparanoia` \| `file` \| `ddp` \| `toc` |
+| `drive_name`           | Human-readable drive name, e.g. `Plextor PX-716A` |
+| `drive_read_offset`    | Read offset applied during rip, as a signed integer string, e.g. `+30` or `-6` |
+| `drive_write_offset`   | Write offset for this drive (informational), e.g. `-30` |
+| `remastered`           | Remaster status guess: `UNKNOWN` \| `NO` \| `POSSIBLE` \| `YES` |
+| `release_date`         | Release date of this specific release (YYYY, YYYY-MM, or YYYY-MM-DD) |
+| `mb_release_id`        | MusicBrainz release UUID, e.g. `9d8f7a02-3851-4c49-9dc4-b08e7cb0ad7c` |
+| `original_release_date`| First-release date of the release group (YYYY, YYYY-MM, or YYYY-MM-DD) |
+| `discogs_release_id`   | Discogs release ID (integer as decimal string) |
+
+All keys are optional. A v4.0 writer **SHOULD** emit at minimum `creator` and `created`. A reader **MUST NOT** fail on a missing key.
+
+Values may contain any UTF-8 character except `\n`. Leading and trailing whitespace in values is significant and **MUST** be preserved.
+
+#### 6.3.2 Remaster status values
+
+| Value     | Meaning |
+|-----------|---------|
+| `UNKNOWN` | Default; no determination has been made |
+| `NO`      | No evidence of remastering; earliest known release |
+| `POSSIBLE`| Release date ≥ 1991 but no earlier version found; loudness war era |
+| `YES`     | Strong evidence: "remaster"/"deluxe"/"anniversary"/etc. keyword in metadata, or an earlier release of the same album exists |
+
+---
+
+### 6.4 RGDB Block (`b"RGDB"`)
+
+The RGDB block stores EBU R128 / ReplayGain 2.0 loudness metadata. All float32 values are IEEE 754 single-precision, little-endian.
+
+#### 6.4.1 Binary layout
+
+| Offset       | Size (bytes) | Type      | Field             | Description |
+|--------------|-------------|-----------|-------------------|-------------|
+| 0            | 1           | uint8     | `rgdb_version`    | RGDB block format version; current value: `1` |
+| 1            | 4           | float32 LE| `rg_reference`    | Reference loudness in LUFS; ReplayGain 2.0 standard: `−18.0` |
+| 5            | 4           | float32 LE| `album_gain`      | Album gain in dB |
+| 9            | 4           | float32 LE| `album_peak`      | Album true peak, linear scale |
+| 13           | 4           | float32 LE| `album_range`     | Album loudness range (LRA) in LU |
+| 17           | 4×N         | float32[] | `track_gain[N]`   | Per-track gain in dB; N = `track_count` |
+| 17 + 4N      | 4×N         | float32[] | `track_peak[N]`   | Per-track true peak, linear scale |
+| 17 + 8N      | 4×N         | float32[] | `track_range[N]`  | Per-track LRA in LU |
+
+**Total block size:** `17 + 12 × N` bytes, where N = `track_count` from the fixed header.
+
+Track arrays are 0-indexed; `track_gain[0]` corresponds to track 1 in the TOC.
+
+#### 6.4.2 Loudness measurement
+
+RG values are computed using the EBU R128 / ITU-R BS.1770-3 integrated loudness algorithm with true peak detection. `rg_reference` is nominally −18.0 LUFS (ReplayGain 2.0). Gain values represent the adjustment required to reach the reference: `gain = rg_reference − integrated_loudness`.
+
+---
+
+### 6.5 ARIP Block (`b"ARIP"`)
+
+The ARIP block stores AccurateRip verification results for the disc.
+
+#### 6.5.1 Binary layout
+
+**Block header (13 bytes):**
+
+| Offset | Size | Type      | Field          | Description |
+|--------|------|-----------|----------------|-------------|
+| 0      | 1    | uint8     | `arip_version` | ARIP block format version; current value: `1` |
+| 1      | 4    | uint32 LE | `disc_id1`     | AccurateRip disc ID 1 |
+| 5      | 4    | uint32 LE | `disc_id2`     | AccurateRip disc ID 2 |
+| 9      | 4    | uint32 LE | `cddb_id`      | CDDB disc ID (used in AccurateRip URL) |
+
+**Per-track entry (15 bytes × N, N = `track_count`):**
+
+| Offset | Size | Type      | Field             | Description |
+|--------|------|-----------|-------------------|-------------|
+| 0      | 4    | uint32 LE | `v1_crc`          | Computed AccurateRip v1 CRC; `0` if not in DB |
+| 4      | 4    | uint32 LE | `v2_crc`          | Computed AccurateRip v2 CRC; `0` if not in DB |
+| 8      | 2    | uint16 LE | `v1_confidence`   | Count of AR submissions matching v1 CRC; `0` if no match |
+| 10     | 2    | uint16 LE | `v2_confidence`   | Count of AR submissions matching v2 CRC; `0` if no match |
+| 12     | 2    | uint16 LE | `db_total`        | Total AR submissions for this track; `0` if not in DB |
+| 14     | 1    | uint8     | `status`          | Verification status (see §6.5.2) |
+
+**Total block size:** `13 + 15 × N` bytes.
+
+#### 6.5.2 Status codes
+
+| Value | Name         | Meaning |
+|-------|--------------|---------|
+| `0`   | `NOT_IN_DB`  | Disc not found in AccurateRip database |
+| `1`   | `MISMATCH`   | Disc found in database but computed CRC matches no entry |
+| `2`   | `OK`         | Computed v2 CRC (or v1 if v2 unavailable) matches a database entry |
+
+---
+
+### 6.6 RLOG Block (`b"RLOG"`)
+
+The RLOG block stores the complete structured rip log as UTF-8 text. The format follows the whipper log convention: human-readable, one logical section per topic, machine-parseable by line prefix. The final line is a SHA-256 self-seal (see §6.6.2).
+
+#### 6.6.1 Log structure
+
+```
+Log created by: cdda2img <version>
+Log creation date: <ISO 8601 datetime>
+
+Ripping phase information:
+  Drive: <drive name>
+  Extraction engine: <cdrdao|cdparanoia> <version>
+  Read offset correction: <N>
+  Gap detection: <method>
+
+CD metadata:
+  Artist: <artist>
+  Title: '<album title>'
+  CDDB Disc ID: <hex>
+  MusicBrainz Disc ID: <base64url>
+
+TOC:
+  <track number>:
+    Start: <MM:SS:FF>
+    Length: <MM:SS:FF>
+    Start sector: <N>
+    End sector: <N>
+  ...
+
+Tracks:
+  <track number>:
+    Peak level: <float>
+    Extraction quality: <float> %
+    Test CRC: <8 hex chars>
+    Copy CRC: <8 hex chars>
+    AccurateRip v1:
+      Result: <Found, exact match | Found, no match | Disc not present in database>
+      Confidence: <N>
+      Local CRC: <8 hex chars>
+      Remote CRC: <8 hex chars>
+    AccurateRip v2:
+      Result: <...>
+      Confidence: <N>
+      Local CRC: <8 hex chars>
+      Remote CRC: <8 hex chars>
+    Status: <Copy OK | ...>
+  ...
+
+Conclusive status report:
+  AccurateRip summary: <All tracks accurately ripped | N/M tracks accurately ripped | Disc not present in AccurateRip database>
+  Health status: <No errors occurred | N errors occurred>
+  EOF: End of status report
+
+SHA-256: <64 lowercase hex chars>
+```
+
+Sections are present only when the relevant data is available (e.g. AccurateRip sections are absent when the disc is not in the database).
+
+#### 6.6.2 SHA-256 self-seal
+
+The final line **MUST** be exactly:
+```
+SHA-256: <64 lowercase hex chars>
+```
+The hash is computed over all preceding bytes of the RLOG block (everything before this final line, including the preceding `\n`). A reader verifying the log integrity strips the last line, computes SHA-256 of the remainder, and compares against the stored hex string.
+
+The self-seal is independent of the block-level checksum in the directory entry. The directory checksum covers the entire RLOG block (including the SHA-256 line) and protects against accidental corruption. The in-log SHA-256 protects against deliberate modification after insertion and mirrors the convention established by Exact Audio Copy and whipper.
+
+---
+
+### 6.7 CTDB Block (`b"CTDB"`) — Reserved
+
+The `CTDB` type identifier is registered to store CUETools Database (CTDB) verification results. The binary layout is not yet defined. Implementations **MUST** set `BLOCK_FLAG_SKIP` on any `CTDB` block they write. Implementations **MUST NOT** write a `CTDB` block until the format is defined in a future revision of this specification.
+
+---
+
+## 7. Validation Rules
+
+A conforming v4.0 reader **MUST** enforce (27 rules):
 
 1. `magic == b'RBIMAGE\x00'`
-2. `version_major == 3` (reject if not equal)
-3. `flags & 0xFFFFFFFA == 0` (all bits except `FLAG_RG_PRESENT` and `FLAG_MASTER_MODE` are reserved); reject if any unknown odd-position flag bit is set
-4. `1 <= track_count <= 99`
-5. `1 <= disc_number <= disc_total`
-6. `pcm_sample_rate == 44100 and pcm_channels == 2 and pcm_bit_depth == 16`
-7. `metadata_len <= 1024`
-8. `metadata` decodes as valid UTF-8
-9. `toc_start == 169 + metadata_len`
-10. `pcm_start >= toc_end`
-11. `pcm_end == file_size`
-12. `sha256(toc_bytes) == toc_checksum`
-13. `sha256(pcm_bytes) == pcm_checksum`
-14. If `FLAG_RG_PRESENT` is **not** set: `rg_start == 0` and `rg_end == 0` and `rg_checksum == b'\x00' * 32`
-15. If `FLAG_RG_PRESENT` **is** set: `rg_start >= toc_end` and `rg_end == rg_start + 17 + 12 * track_count` and `rg_end <= pcm_start` and `sha256(rg_bytes) == rg_checksum`
-
-Rules 12, 13, and 15 are integrity checks: a conforming reader **SHOULD** warn on checksum mismatch rather than silently proceeding, but the severity policy is implementation-defined.
+2. `version_major == 4` (reject if not equal)
+3. `version_minor == 0` (warn if greater; MAY attempt to read as minor increments are intended to be backwards-compatible)
+4. `flags & ~0x00000004 == 0` (all bits except `FLAG_MASTER_MODE` reserved; reject if any unknown odd-position flag bit is set)
+5. `reserved == b'\x00' × 7`
+6. `1 <= track_count <= 99`
+7. `1 <= disc_number <= disc_total`
+8. `pcm_sample_rate == 44100 and pcm_channels == 2 and pcm_bit_depth == 16`
+9. `dir_count >= 2` (at minimum `TOC ` and `PCM ` must be present)
+10. `dir_count <= 256` (implementation-defined upper bound; reject if exceeded)
+11. `dir_offset >= 40` (directory does not overlap the fixed header)
+12. `dir_offset + dir_count × 54 == file_size`
+13. Exactly one `TOC ` entry in the directory
+14. Exactly one `PCM ` entry in the directory
+15. No duplicate `type_id` values in the directory for required blocks
+16. For every directory entry: `offset + length <= dir_offset` (blocks do not overlap the directory)
+17. For every directory entry: `offset >= 40` (blocks do not overlap the fixed header)
+18. No two directory entries have overlapping byte ranges
+19. Number of `TRACK AUDIO` entries in the TOC block **MUST** equal `track_count` in the fixed header
+20. `sha256(block_content) == directory_entry.checksum` for every block (integrity check; readers **SHOULD** warn on mismatch rather than hard-failing by default, unless policy requires strict verification)
+21. TOC block decodes as valid UTF-8
+22. PROV block (if present) decodes as valid UTF-8
+23. RLOG block (if present) decodes as valid UTF-8
+24. RGDB block (if present): `length == 17 + 12 × track_count`
+25. ARIP block (if present): `length == 13 + 15 × track_count`
+26. ARIP block (if present): all `status` values are in the range `0`–`2`
+27. RLOG block (if present): last line matches `SHA-256: [0-9a-f]{64}` (optional integrity check; warn on mismatch)
 
 ---
 
-## 10. Python Reference Definition
+## 8. Python Reference Definition
 
 See `src/cdda2img/rbi_format.py` for the canonical Python struct definitions, constants, and dataclasses that implement this specification.
 
 ---
 
-## 11. Normative References
+## 9. Normative References
 
 - IEC 60908:1999 — Audio recording — Compact disc digital audio system
 - ITU-R BS.1770-3 — Algorithms to measure audio programme loudness and true-peak audio level
 - EBU R128 — Loudness normalisation and permitted maximum level of audio signals
 - cdrdao TOC format — cdrdao(1) man page, `toc-file` section
 - RFC 4634 — SHA-2 specification
+- AccurateRip — http://www.accuraterip.com/ (checksum algorithm and database protocol)
+- CUETools Database — http://db.cuetools.net/ (whole-disc integrity verification)

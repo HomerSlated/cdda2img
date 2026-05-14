@@ -237,13 +237,13 @@ def parse_args() -> argparse.Namespace:
 def _add_release_provenance(provenance: dict, disc: RBIDisc) -> None:
     """Append release-intelligence fields to *provenance* if populated on *disc*."""
     if disc.remastered_source != "UNKNOWN":
-        provenance["REMASTERED_SOURCE"] = disc.remastered_source
+        provenance["remastered"] = disc.remastered_source
     if disc.release_date:
-        provenance["RELEASE_DATE"] = disc.release_date
+        provenance["release_date"] = disc.release_date
     if disc.original_release_date:
-        provenance["ORIGINAL_RELEASE_DATE"] = disc.original_release_date
+        provenance["original_release_date"] = disc.original_release_date
     if disc.mb_release_id:
-        provenance["MB_RELEASE_ID"] = disc.mb_release_id
+        provenance["mb_release_id"] = disc.mb_release_id
 
 
 def _unique_path(stem: str, ext: str) -> Path:
@@ -320,14 +320,12 @@ def create_image(
         source_rg = [read_source_rg_tags(p) for p in batch]
         raw_titles = [re.sub(r"^\d{2} ", "", p.stem) for p in batch]
         provenance = {
-            "MODE": "c",
-            "SOURCE": str(input_dir.resolve()),
-            "TYPE": "audio files",
+            "mode": "c",
+            "source": str(input_dir.resolve()),
+            "ripper": "file",
         }
         _add_release_provenance(provenance, disc)
-        toc_data = generate_toc(
-            disc, source_rg=source_rg, raw_titles=raw_titles, provenance=provenance
-        )
+        toc_data = generate_toc(disc, source_rg=source_rg, raw_titles=raw_titles)
 
         rg_block: bytes | None = None
         if loudness == "rg":
@@ -353,6 +351,7 @@ def create_image(
             disc,
             output_file,
             rg_block=rg_block,
+            prov_data=provenance,
             extra_flags=container_flags,
         )
         temp.cleanup()
@@ -399,9 +398,9 @@ def import_image(
             disc, _ = import_ddp(source, temp.pcm_file)
             output_stem = sanitize_title(disc.album) or source.name
             provenance = {
-                "MODE": "i",
-                "SOURCE": str(source.resolve()),
-                "TYPE": "Gear Pro DDP 2.0",
+                "mode": "i",
+                "source": str(source.resolve()),
+                "ripper": "ddp",
             }
         elif source.suffix.lower() == ".toc":
             from cdda2img.cdrdao_reader import (
@@ -426,9 +425,9 @@ def import_image(
             wav_to_raw_pcm(temp.pcm_pre, temp.pcm_file)
             output_stem = sanitize_title(disc.album) or source.stem
             provenance = {
-                "MODE": "i",
-                "SOURCE": str(source.resolve()),
-                "TYPE": "cdrdao TOC/BIN",
+                "mode": "i",
+                "source": str(source.resolve()),
+                "ripper": "toc",
             }
         else:
             msg = (
@@ -459,7 +458,7 @@ def _finalize_import(
     disc = run_metadata_menu(disc, source_pcm=pcm_file)
 
     _add_release_provenance(provenance, disc)
-    toc_data = generate_toc(disc, provenance=provenance)
+    toc_data = generate_toc(disc)
 
     rg_block: bytes | None = None
     if loudness == "rg":
@@ -487,6 +486,7 @@ def _finalize_import(
         disc,
         output,
         rg_block=rg_block,
+        prov_data=provenance,
         extra_flags=FLAG_MASTER_MODE,
     )
 
@@ -692,13 +692,13 @@ def rip_image(
 
         output_stem = sanitize_title(disc.album) or device.lstrip("/").replace("/", "_")
         provenance: dict[str, str] = {
-            "MODE": "r",
-            "SOURCE": device,
-            "TYPE": rip_type,
+            "mode": "r",
+            "source": device,
+            "ripper": rip_type,
         }
         if drive_name is not None:
-            provenance["DRIVE_NAME"] = drive_name
-            provenance["DRIVE_READ_OFFSET"] = f"{read_offset:+d}"
+            provenance["drive_name"] = drive_name
+            provenance["drive_read_offset"] = f"{read_offset:+d}"
         _finalize_import(disc, temp.pcm_file, provenance, output_stem, loudness, output)
     finally:
         temp.cleanup()
@@ -758,9 +758,13 @@ def extract_image(
         normalize = False
 
     header = read_header(rbi_file)
+    toc_entry = header.find_block(b"TOC ")
+    if toc_entry is None:
+        msg = f"{rbi_file}: no TOC block in container"
+        raise ValueError(msg)
     with open(rbi_file, "rb") as f:
-        f.seek(header.toc_start)
-        toc_data = f.read(header.toc_length)
+        f.seek(toc_entry.offset)
+        toc_data = f.read(toc_entry.length)
     disc = parse_toc(toc_data)
 
     stem = rbi_file.stem

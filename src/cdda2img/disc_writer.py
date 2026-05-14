@@ -40,9 +40,15 @@ def burn_disc(
     """
     header = read_header(rbi_file)
 
+    toc_entry = header.find_block(b"TOC ")
+    pcm_entry = header.find_block(b"PCM ")
+    if toc_entry is None or pcm_entry is None:
+        msg = "Missing required TOC or PCM block in container"
+        raise ValueError(msg)
+
     with open(rbi_file, "rb") as f:
-        f.seek(header.toc_start)
-        toc_bytes = f.read(header.toc_end - header.toc_start)
+        f.seek(toc_entry.offset)
+        toc_bytes = f.read(toc_entry.length)
 
     toc_text = toc_bytes.decode("utf-8")
 
@@ -70,7 +76,7 @@ def burn_disc(
             print("Aborted.")
             return
 
-    pcm_size = header.pcm_end - header.pcm_start
+    pcm_size = pcm_entry.length
 
     with tempfile.TemporaryDirectory() as tmp_dir:
         tmp = Path(tmp_dir)
@@ -79,7 +85,7 @@ def burn_disc(
         toc_path = tmp / "disc.toc"
 
         with open(rbi_file, "rb") as f_in, open(pcm_path, "wb") as f_out:
-            f_in.seek(header.pcm_start)
+            f_in.seek(pcm_entry.offset)
             _copy_bytes(f_in, f_out, pcm_size)
 
         if write_offset != 0:

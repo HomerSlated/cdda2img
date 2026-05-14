@@ -16,21 +16,29 @@ import wave
 from pathlib import Path
 
 from cdda2img.rbi_format import (
+    BLOCK_FLAG_SKIP,
+    BLOCK_TYPE_ARIP,
+    BLOCK_TYPE_CTDB,
+    BLOCK_TYPE_PCM,
+    BLOCK_TYPE_PROV,
+    BLOCK_TYPE_RGDB,
+    BLOCK_TYPE_RLOG,
+    BLOCK_TYPE_TOC,
     CD_FRAMES_PER_SECOND,
-    CHECKSUM_PLACEHOLDER,
-    FLAG_RG_PRESENT,
-    FLAGS_RESERVED_MASK,
+    DIR_ENTRY_SIZE,
+    DIR_ENTRY_STRUCT,
+    FLAG_MASTER_MODE,
     HEADER_FIXED_SIZE,
     HEADER_STRUCT,
     MAGIC,
-    MAX_METADATA_LEN,
     MAX_TRACKS,
-    OFFSET_PLACEHOLDER,
+    OFFSET_DIR_OFFSET,
     PCM_BIT_DEPTH,
     PCM_CHANNELS,
     PCM_SAMPLE_RATE,
     VERSION_MAJOR,
     VERSION_MINOR,
+    RBIDirEntry,
     RBIDisc,
     RBIHeader,
     RBIReplayGain,
@@ -105,6 +113,25 @@ class TempFiles:
 
 
 # ---------------------------------------------------------------------------
+# PROV block builder
+# ---------------------------------------------------------------------------
+
+
+def build_prov_block(data: dict[str, str]) -> bytes:
+    """Serialise a provenance dict as UTF-8 key=value text (one pair per line).
+
+    Always prepends ``creator`` and ``created``; caller-supplied values override
+    if those keys are present in *data*.
+    """
+    merged: dict[str, str] = {
+        "creator": f"cdda2img v{_TOOL_VERSION}",
+        "created": datetime.datetime.now(datetime.UTC).isoformat(),
+    }
+    merged.update(data)
+    return "\n".join(f"{k}={v}" for k, v in merged.items()).encode("utf-8")
+
+
+# ---------------------------------------------------------------------------
 # Container writer
 # ---------------------------------------------------------------------------
 
@@ -115,78 +142,105 @@ def build_container(
     disc: RBIDisc,
     output_file: Path,
     rg_block: bytes | None = None,
+    prov_data: dict[str, str] | None = None,
     extra_flags: int = 0,
 ) -> None:
-    """Assemble and write an RBI v2.0 container from raw PCM and TOC data.
+    """Assemble and write an RBI v4.0 container from raw PCM and TOC data.
 
-    *extra_flags* is OR-ed into the computed flags word alongside FLAG_RG_PRESENT.
-    Use it to record caller-level provenance bits such as FLAG_MASTER_MODE.
+    Blocks are written in order: TOC → PROV → RGDB → PCM.  The block
+    directory is appended last, and ``dir_offset`` is patched into the fixed
+    header via a seek after all data is written.
+
+    *extra_flags* is OR-ed into the flags word. Use FLAG_MASTER_MODE for
+    master-mode containers.
     """
-    toc_checksum = sha256_bytes(toc_data)
-    pcm_checksum = sha256_file(pcm_path)
+    prov_block = build_prov_block(prov_data) if prov_data is not None else None
 
-    created_str = (
-        f"Created by cdda2img v{_TOOL_VERSION} "
-        f"(format {VERSION_MAJOR}.{VERSION_MINOR}) "
-        f"on {datetime.datetime.now().isoformat()}"
-    )
-    metadata_bytes = created_str.encode("utf-8")
-    metadata_len = len(metadata_bytes)
-    if metadata_len > MAX_METADATA_LEN:
-        msg = f"Metadata string too long: {metadata_len} bytes (max {MAX_METADATA_LEN})"
-        raise ValueError(msg)
-
-    toc_start = HEADER_FIXED_SIZE + metadata_len
-    toc_end = toc_start + len(toc_data)
-
+    dir_count = 2  # TOC + PCM always present
+    if prov_block is not None:
+        dir_count += 1
     if rg_block is not None:
-        flags = extra_flags | FLAG_RG_PRESENT
-        rg_start = toc_end
-        rg_end = toc_end + len(rg_block)
-        rg_checksum_val = sha256_bytes(rg_block)
-        pcm_start = rg_end
-    else:
-        flags = extra_flags
-        rg_start = OFFSET_PLACEHOLDER
-        rg_end = OFFSET_PLACEHOLDER
-        rg_checksum_val = CHECKSUM_PLACEHOLDER
-        pcm_start = toc_end
-
-    pcm_end = pcm_start + pcm_path.stat().st_size
+        dir_count += 1
 
     header = struct.pack(
         HEADER_STRUCT,
         MAGIC,
         VERSION_MAJOR,
         VERSION_MINOR,
-        flags,
+        extra_flags,
         disc.track_count,
         disc.disc_number,
         disc.disc_total,
         PCM_SAMPLE_RATE,
         PCM_CHANNELS,
         PCM_BIT_DEPTH,
-        toc_start,
-        toc_end,
-        pcm_start,
-        pcm_end,
-        toc_checksum,
-        pcm_checksum,
-        metadata_len,
-        rg_start,
-        rg_end,
-        rg_checksum_val,
+        0,  # dir_offset placeholder; patched after blocks are written
+        dir_count,
+        b"\x00" * 7,  # reserved
     )
     assert len(header) == HEADER_FIXED_SIZE  # noqa: S101  # LINT-006
 
+    # Collect (type_id, block_flags, offset, length, checksum) as we write
+    dir_entries: list[tuple[bytes, int, int, int, bytes]] = []
+
     with open(output_file, "wb") as out:
         out.write(header)
-        out.write(metadata_bytes)
+
+        # TOC block
+        toc_offset = out.tell()
         out.write(toc_data)
+        dir_entries.append((
+            BLOCK_TYPE_TOC,
+            0,
+            toc_offset,
+            len(toc_data),
+            sha256_bytes(toc_data),
+        ))
+
+        # PROV block
+        if prov_block is not None:
+            prov_offset = out.tell()
+            out.write(prov_block)
+            dir_entries.append((
+                BLOCK_TYPE_PROV,
+                BLOCK_FLAG_SKIP,
+                prov_offset,
+                len(prov_block),
+                sha256_bytes(prov_block),
+            ))
+
+        # RGDB block
         if rg_block is not None:
+            rg_offset = out.tell()
             out.write(rg_block)
+            dir_entries.append((
+                BLOCK_TYPE_RGDB,
+                BLOCK_FLAG_SKIP,
+                rg_offset,
+                len(rg_block),
+                sha256_bytes(rg_block),
+            ))
+
+        # PCM block (streaming to avoid loading the whole file into memory)
+        pcm_checksum = sha256_file(pcm_path)
+        pcm_size = pcm_path.stat().st_size
+        pcm_offset = out.tell()
         with open(pcm_path, "rb") as pcm:
             shutil.copyfileobj(pcm, out)
+        dir_entries.append((BLOCK_TYPE_PCM, 0, pcm_offset, pcm_size, pcm_checksum))
+
+        # Write block directory
+        dir_offset = out.tell()
+        for type_id, block_flags, offset, length, checksum in dir_entries:
+            out.write(
+                struct.pack(
+                    DIR_ENTRY_STRUCT, type_id, block_flags, offset, length, checksum
+                )
+            )
+
+        # Patch dir_offset in header
+        out.seek(OFFSET_DIR_OFFSET)
+        out.write(struct.pack("<Q", dir_offset))
 
     print(f"Container created: {output_file}")
 
@@ -197,7 +251,7 @@ def build_container(
 
 
 def read_header(file: Path) -> RBIHeader:
-    """Read and validate the fixed header of an RBI v2.0 file."""
+    """Read and validate the fixed header and block directory of an RBI v4.0 file."""
     with open(file, "rb") as f:
         fixed = f.read(HEADER_FIXED_SIZE)
         if len(fixed) < HEADER_FIXED_SIZE:
@@ -215,35 +269,40 @@ def read_header(file: Path) -> RBIHeader:
             pcm_sample_rate,
             pcm_channels,
             pcm_bit_depth,
-            toc_start,
-            toc_end,
-            pcm_start,
-            pcm_end,
-            toc_checksum,
-            pcm_checksum,
-            metadata_len,
-            rg_start,
-            rg_end,
-            rg_checksum,
+            dir_offset,
+            dir_count,
+            _reserved,
         ) = struct.unpack(HEADER_STRUCT, fixed)
 
         if magic != MAGIC:
             msg = f"Invalid magic bytes: {magic!r}"
             raise ValueError(msg)
         if version_major != VERSION_MAJOR:
-            msg = f"Unsupported format version: {version_major}.{version_minor} (this reader requires major version {VERSION_MAJOR})"
-            raise ValueError(msg)
-        if metadata_len > MAX_METADATA_LEN:
-            msg = f"Unrealistic metadata length: {metadata_len}"
+            msg = (
+                f"Unsupported format version: {version_major}.{version_minor} "
+                f"(this reader requires major version {VERSION_MAJOR})"
+            )
             raise ValueError(msg)
 
-        metadata_raw = f.read(metadata_len)
-
-    try:
-        metadata = metadata_raw.decode("utf-8")
-    except UnicodeDecodeError as exc:
-        msg = "Invalid UTF-8 in metadata field"
-        raise ValueError(msg) from exc
+        f.seek(dir_offset)
+        directory: list[RBIDirEntry] = []
+        for _ in range(dir_count):
+            entry_raw = f.read(DIR_ENTRY_SIZE)
+            if len(entry_raw) < DIR_ENTRY_SIZE:
+                msg = "Truncated block directory"
+                raise ValueError(msg)
+            e_type_id, e_flags, e_offset, e_length, e_checksum = struct.unpack(
+                DIR_ENTRY_STRUCT, entry_raw
+            )
+            directory.append(
+                RBIDirEntry(
+                    type_id=e_type_id,
+                    block_flags=e_flags,
+                    offset=e_offset,
+                    length=e_length,
+                    checksum=e_checksum,
+                )
+            )
 
     return RBIHeader(
         version_major=version_major,
@@ -255,16 +314,9 @@ def read_header(file: Path) -> RBIHeader:
         pcm_sample_rate=pcm_sample_rate,
         pcm_channels=pcm_channels,
         pcm_bit_depth=pcm_bit_depth,
-        toc_start=toc_start,
-        toc_end=toc_end,
-        pcm_start=pcm_start,
-        pcm_end=pcm_end,
-        toc_checksum=toc_checksum,
-        pcm_checksum=pcm_checksum,
-        metadata=metadata,
-        rg_start=rg_start,
-        rg_end=rg_end,
-        rg_checksum=rg_checksum,
+        dir_offset=dir_offset,
+        dir_count=dir_count,
+        directory=directory,
     )
 
 
@@ -334,7 +386,7 @@ def _write_rg_json(path: Path, rg_data: RBIReplayGain) -> None:
     print(f"RG data saved: {path}")
 
 
-def extract_data(
+def extract_data(  # noqa: C901
     container_file: Path,
     raw_dir: Path | None,
     tracks: bool,
@@ -353,21 +405,41 @@ def extract_data(
     header = read_header(container_file)
     stem = container_file.stem
 
-    with open(container_file, "rb") as f:
-        f.seek(header.toc_start)
-        toc_data = f.read(header.toc_length)
-        f.seek(header.pcm_start)
-        pcm_checksum = _stream_sha256(f, header.pcm_length)
+    toc_entry = header.find_block(BLOCK_TYPE_TOC)
+    pcm_entry = header.find_block(BLOCK_TYPE_PCM)
+    if toc_entry is None or pcm_entry is None:
+        msg = "Missing required TOC or PCM block in container"
+        raise ValueError(msg)
 
-    _warn_checksum("TOC", sha256_bytes(toc_data), header.toc_checksum)
-    _warn_checksum("PCM", pcm_checksum, header.pcm_checksum)
+    with open(container_file, "rb") as f:
+        f.seek(toc_entry.offset)
+        toc_data = f.read(toc_entry.length)
+        f.seek(pcm_entry.offset)
+        pcm_checksum = _stream_sha256(f, pcm_entry.length)
+
+    _warn_checksum("TOC", sha256_bytes(toc_data), toc_entry.checksum)
+    _warn_checksum("PCM", pcm_checksum, pcm_entry.checksum)
+
+    # Parse PROV block once; used for comment synthesis and provenance display
+    prov: dict[str, str] = {}
+    prov_entry = header.find_block(BLOCK_TYPE_PROV)
+    if prov_entry is not None:
+        with open(container_file, "rb") as f:
+            f.seek(prov_entry.offset)
+            prov_raw = f.read(prov_entry.length)
+        prov = _parse_provenance(prov_raw)
+
+    creator = prov.get("creator", "")
+    created = prov.get("created", "")
+    comment = f"{creator} on {created}" if creator and created else creator or created
 
     rg_data = None
-    if header.has_rg:
+    rg_entry = header.find_block(BLOCK_TYPE_RGDB)
+    if rg_entry is not None:
         with open(container_file, "rb") as f:
-            f.seek(header.rg_start)
-            rg_raw = f.read(header.rg_length)
-        if sha256_bytes(rg_raw) == header.rg_checksum:
+            f.seek(rg_entry.offset)
+            rg_raw = f.read(rg_entry.length)
+        if sha256_bytes(rg_raw) == rg_entry.checksum:
             rg_data = unpack_rg_block(rg_raw, header.track_count)
         else:
             print(
@@ -387,11 +459,12 @@ def extract_data(
 
         bin_path = raw_dir / f"{stem}.bin"
         with open(container_file, "rb") as f_in, open(bin_path, "wb") as f_out:
-            f_in.seek(header.pcm_start)
-            _copy_bytes_swapped(f_in, f_out, header.pcm_length)
+            f_in.seek(pcm_entry.offset)
+            _copy_bytes_swapped(f_in, f_out, pcm_entry.length)
         print(f"BIN saved: {bin_path}  (s16le → s16be, disc-native byte order)")
-        print(f"Metadata: {header.metadata}")
-        _print_provenance(_parse_provenance(toc_data.decode("utf-8", errors="replace")))
+        if comment:
+            print(f"Created:   {comment}")
+        _print_provenance(prov)
 
         if rg_data is not None:
             _write_rg_json(raw_dir / f"{stem}.rg.json", rg_data)
@@ -401,13 +474,13 @@ def extract_data(
         extract_tracks(
             disc=disc,
             container_file=container_file,
-            pcm_start=header.pcm_start,
+            pcm_start=pcm_entry.offset,
             disc_number=header.disc_number,
             disc_total=header.disc_total,
             sample_rate=header.pcm_sample_rate,
             channels=header.pcm_channels,
             bit_depth=header.pcm_bit_depth,
-            comment=header.metadata,
+            comment=comment,
             base=base_dir,
             rg_data=rg_data if embed_rg else None,
         )
@@ -475,11 +548,25 @@ def _fmt_duration(seconds: float) -> str:
     return f"{m}:{s:02}"
 
 
-_PROVENANCE_RE = re.compile(r"^// PROVENANCE_(\w+): (.+)$", re.MULTILINE)
+def _parse_provenance(prov_bytes: bytes) -> dict[str, str]:
+    """Parse a PROV block into a key→value dict.
 
-
-def _parse_provenance(toc_text: str) -> dict[str, str]:
-    return {m.group(1): m.group(2) for m in _PROVENANCE_RE.finditer(toc_text)}
+    Splits on the first ``=`` only (values may contain ``=``). Skips blank
+    lines and lines starting with ``#``. Per spec §6.3, value whitespace is
+    significant and is not stripped.
+    """
+    try:
+        text = prov_bytes.decode("utf-8")
+    except UnicodeDecodeError:
+        return {}
+    result: dict[str, str] = {}
+    for line in text.splitlines():
+        if not line or line.startswith("#"):
+            continue
+        if "=" in line:
+            key, _, value = line.partition("=")
+            result[key] = value
+    return result
 
 
 _REMASTER_LABELS = {
@@ -489,87 +576,110 @@ _REMASTER_LABELS = {
     "UNKNOWN": "Unknown",
 }
 
+_BLOCK_NAMES = {
+    BLOCK_TYPE_TOC: "TOC",
+    BLOCK_TYPE_PCM: "PCM audio",
+    BLOCK_TYPE_PROV: "Provenance",
+    BLOCK_TYPE_RGDB: "ReplayGain",
+    BLOCK_TYPE_ARIP: "AccurateRip",
+    BLOCK_TYPE_RLOG: "Rip log",
+    BLOCK_TYPE_CTDB: "CTDB",
+}
+
 
 def _print_provenance(provenance: dict[str, str]) -> None:
     if not provenance:
         return
-    mode = provenance.get("MODE", "?")
-    mode_label = {"i": "i (import)", "c": "c (create)"}.get(mode, mode)
+    mode = provenance.get("mode", "?")
+    mode_label = {"r": "r (rip)", "i": "i (import)", "c": "c (create)"}.get(mode, mode)
     print(f"Mode:      {mode_label}")
-    if source := provenance.get("SOURCE"):
+    if source := provenance.get("source"):
         print(f"Source:    {source}")
-    if ptype := provenance.get("TYPE"):
-        print(f"Type:      {ptype}")
-    if drive_name := provenance.get("DRIVE_NAME"):
-        offset_str = provenance.get("DRIVE_READ_OFFSET", "?")
+    if ripper := provenance.get("ripper"):
+        print(f"Ripper:    {ripper}")
+    if drive_name := provenance.get("drive_name"):
+        offset_str = provenance.get("drive_read_offset", "?")
         print(f"Drive:     {drive_name}  (offset {offset_str})")
-    if rms := provenance.get("REMASTERED_SOURCE"):
+    if rms := provenance.get("remastered"):
         label = _REMASTER_LABELS.get(rms, rms)
         extra = ""
-        if rd := provenance.get("RELEASE_DATE"):
+        if rd := provenance.get("release_date"):
             extra += f"  (this release: {rd}"
-            if od := provenance.get("ORIGINAL_RELEASE_DATE"):
+            if od := provenance.get("original_release_date"):
                 extra += f", original: {od}"
             extra += ")"
         print(f"Remaster:  {label}{extra}")
 
 
 def list_container(rbi_file: Path) -> None:
-    """Print a human-readable listing of an RBI file's sections and tracks."""
+    """Print a human-readable listing of an RBI file's blocks and tracks."""
     from cdda2img.toc_parser import parse_toc
 
     header = read_header(rbi_file)
     file_size = rbi_file.stat().st_size
 
+    # Collect provenance from PROV block
+    prov: dict[str, str] = {}
+    prov_entry = header.find_block(BLOCK_TYPE_PROV)
+    if prov_entry is not None:
+        with open(rbi_file, "rb") as f:
+            f.seek(prov_entry.offset)
+            prov = _parse_provenance(f.read(prov_entry.length))
+
+    toc_entry = header.find_block(BLOCK_TYPE_TOC)
+    if toc_entry is None:
+        msg = "No TOC block in container"
+        raise ValueError(msg)
+
     mode_flags: list[str] = ["master" if header.is_master else "remaster"]
-    if header.has_rg:
+    if header.find_block(BLOCK_TYPE_RGDB) is not None:
         mode_flags.append("ReplayGain")
     flags_str = ", ".join(mode_flags)
 
-    with open(rbi_file, "rb") as f:
-        f.seek(header.toc_start)
-        toc_bytes_for_prov = f.read(header.toc_length)
-    provenance = _parse_provenance(toc_bytes_for_prov.decode("utf-8", errors="replace"))
+    creator = prov.get("creator", "")
+    created = prov.get("created", "")
+    created_str = (
+        f"{creator} on {created}"
+        if creator and created
+        else creator or created or "(unknown)"
+    )
 
     print(f"RBI Image: {rbi_file.name}  ({_fmt_size(file_size)})")
     print(
-        f"Format:    v{header.version_major}.{header.version_minor}  |  disc {header.disc_number}/{header.disc_total}  |  {header.track_count} tracks  |  {flags_str}"
+        f"Format:    v{header.version_major}.{header.version_minor}  |  "
+        f"disc {header.disc_number}/{header.disc_total}  |  "
+        f"{header.track_count} tracks  |  {flags_str}"
     )
-    print(f"Created:   {header.metadata}")
-    _print_provenance(provenance)
+    print(f"Created:   {created_str}")
+    _print_provenance(prov)
     print()
 
-    col_w = len("ReplayGain block") + 2
-    hdr_line = f"{'Section':<{col_w}}  {'Offset':>14}  {'Size':>14}"
+    col_w = len("Provenance block") + 2
+    hdr_line = f"{'Block':<{col_w}}  {'Offset':>14}  {'Size':>14}"
     print(hdr_line)
     print("-" * len(hdr_line))
 
-    meta_size = header.toc_start - HEADER_FIXED_SIZE
-    sections: list[tuple[str, int, int, str | None]] = [
-        ("Fixed header", 0, HEADER_FIXED_SIZE, None),
-        ("Metadata", HEADER_FIXED_SIZE, meta_size, None),
-        ("TOC", header.toc_start, header.toc_length, None),
-    ]
-    if header.has_rg:
-        sections.append(("ReplayGain block", header.rg_start, header.rg_length, None))
-
-    pcm_seconds = header.pcm_length / (
-        header.pcm_sample_rate * header.pcm_channels * (header.pcm_bit_depth // 8)
-    )
-    sections.append((
-        "PCM audio",
-        header.pcm_start,
-        header.pcm_length,
-        _fmt_duration(pcm_seconds),
-    ))
-
-    for name, offset, size, extra in sections:
-        extra_str = f"  ({extra})" if extra else ""
-        print(f"{name:<{col_w}}  {offset:>14,}  {_fmt_size(size):>14}{extra_str}")
+    for entry in header.directory:
+        name = _BLOCK_NAMES.get(
+            entry.type_id,
+            entry.type_id.decode("ascii", errors="replace"),
+        )
+        extra_str = ""
+        if entry.type_id == BLOCK_TYPE_PCM:
+            pcm_seconds = entry.length / (
+                PCM_SAMPLE_RATE * PCM_CHANNELS * (PCM_BIT_DEPTH // 8)
+            )
+            extra_str = f"  ({_fmt_duration(pcm_seconds)})"
+        print(
+            f"{name:<{col_w}}  {entry.offset:>14,}  {_fmt_size(entry.length):>14}{extra_str}"
+        )
 
     print()
 
-    disc = parse_toc(toc_bytes_for_prov)
+    with open(rbi_file, "rb") as f:
+        f.seek(toc_entry.offset)
+        toc_bytes = f.read(toc_entry.length)
+    disc = parse_toc(toc_bytes)
     print(f"Tracks:  {disc.performer} — {disc.title}")
     print()
     for track in disc.tracks:
@@ -582,14 +692,12 @@ def list_container(rbi_file: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def verify_container(rbi_file: Path) -> bool:
-    """Validate an RBI file against the format specification.
+def verify_container(rbi_file: Path) -> bool:  # noqa: C901
+    """Validate an RBI file against the v4.0 format specification (27 rules).
 
     Prints a pass/fail line for each check. Returns True if all pass.
     """
-    import struct as _struct
-
-    from cdda2img.toc_parser import parse_toc
+    import re as _re
 
     passed: list[str] = []
     failed: list[str] = []
@@ -628,140 +736,246 @@ def verify_container(rbi_file: Path) -> bool:
         pcm_sample_rate,
         pcm_channels,
         pcm_bit_depth,
-        toc_start,
-        toc_end,
-        pcm_start,
-        pcm_end,
-        toc_checksum_stored,
-        pcm_checksum_stored,
-        metadata_len,
-        rg_start,
-        rg_end,
-        rg_checksum_stored,
-    ) = _struct.unpack(HEADER_STRUCT, raw)
+        dir_offset,
+        dir_count,
+        reserved,
+    ) = struct.unpack(HEADER_STRUCT, raw)
 
-    check("Magic bytes", magic == MAGIC, f"got {magic!r}")
+    # Rules 1-8
+    check("1. Magic bytes", magic == MAGIC, f"got {magic!r}")
     check(
-        f"Format version v{version_major}.{version_minor}",
+        "2. Format version major == 4",
         version_major == VERSION_MAJOR,
         f"major version {version_major} unsupported (need {VERSION_MAJOR})",
     )
-    check(
-        "Reserved flag bits are zero",
-        (flags & FLAGS_RESERVED_MASK) == 0,
-        f"flags=0x{flags:08X}, reserved bits 0x{flags & FLAGS_RESERVED_MASK:08X} set",
-    )
-    check(
-        f"Track count {track_count} in range 1-{MAX_TRACKS}",
-        1 <= track_count <= MAX_TRACKS,
-    )
-    check(f"Disc {disc_number}/{disc_total} consistent", 1 <= disc_number <= disc_total)
-    check(
-        f"PCM sample rate {pcm_sample_rate} Hz",
-        pcm_sample_rate == PCM_SAMPLE_RATE,
-        f"expected {PCM_SAMPLE_RATE}",
-    )
-    check(
-        f"PCM channels {pcm_channels}",
-        pcm_channels == PCM_CHANNELS,
-        f"expected {PCM_CHANNELS}",
-    )
-    check(
-        f"PCM bit depth {pcm_bit_depth}-bit",
-        pcm_bit_depth == PCM_BIT_DEPTH,
-        f"expected {PCM_BIT_DEPTH}",
-    )
-    check(
-        f"Metadata length {metadata_len} B in range",
-        metadata_len <= MAX_METADATA_LEN,
-        f"max {MAX_METADATA_LEN}",
-    )
-
-    expected_toc_start = HEADER_FIXED_SIZE + metadata_len
-    check(
-        "TOC starts immediately after header+metadata",
-        toc_start == expected_toc_start,
-        f"toc_start={toc_start}, expected {expected_toc_start}",
-    )
-    check(
-        "TOC end > TOC start",
-        toc_end > toc_start,
-        f"toc_start={toc_start}, toc_end={toc_end}",
-    )
-
-    has_rg = bool(flags & FLAG_RG_PRESENT)
-    if has_rg:
-        check(
-            "RG block starts at TOC end",
-            rg_start == toc_end,
-            f"rg_start={rg_start}, toc_end={toc_end}",
-        )
-        check(
-            "RG block end > RG start",
-            rg_end > rg_start,
-            f"rg_start={rg_start}, rg_end={rg_end}",
-        )
-        check(
-            "PCM starts at RG block end",
-            pcm_start == rg_end,
-            f"pcm_start={pcm_start}, rg_end={rg_end}",
+    if version_minor > VERSION_MINOR:
+        print(
+            f"  [WARN] 3. Minor version {version_minor} > {VERSION_MINOR} — proceeding (minor increments are backwards-compatible)"
         )
     else:
-        check(
-            "PCM starts at TOC end",
-            pcm_start == toc_end,
-            f"pcm_start={pcm_start}, toc_end={toc_end}",
+        check("3. Format version minor == 0", version_minor == VERSION_MINOR)
+
+    unknown_odd_bits = flags & ~FLAG_MASTER_MODE & 0xAAAAAAAA  # odd bit positions
+    check(
+        "4. No unknown odd-position flag bits",
+        unknown_odd_bits == 0,
+        f"flags=0x{flags:08X}, unknown odd bits 0x{unknown_odd_bits:08X}",
+    )
+    check(
+        "5. Reserved bytes are zero",
+        reserved == b"\x00" * 7,
+        f"got {reserved!r}",
+    )
+    check(
+        f"6. Track count {track_count} in range 1-{MAX_TRACKS}",
+        1 <= track_count <= MAX_TRACKS,
+    )
+    check(
+        f"7. Disc {disc_number}/{disc_total} consistent", 1 <= disc_number <= disc_total
+    )
+    check(
+        "8. PCM parameters (44100 Hz, 2ch, 16-bit)",
+        pcm_sample_rate == PCM_SAMPLE_RATE
+        and pcm_channels == PCM_CHANNELS
+        and pcm_bit_depth == PCM_BIT_DEPTH,
+        f"got {pcm_sample_rate} Hz, {pcm_channels}ch, {pcm_bit_depth}-bit",
+    )
+
+    # Rules 9-12 (directory structural checks)
+    check("9. dir_count >= 2", dir_count >= 2, f"dir_count={dir_count}")
+    check("10. dir_count <= 256", dir_count <= 256, f"dir_count={dir_count}")
+    check(
+        "11. dir_offset >= 40",
+        dir_offset >= HEADER_FIXED_SIZE,
+        f"dir_offset={dir_offset}",
+    )
+    check(
+        "12. dir_offset + dir_countx54 == file_size",
+        dir_offset + dir_count * DIR_ENTRY_SIZE == file_size,
+        f"dir_offset={dir_offset}, dir_count={dir_count}, expected file_size={dir_offset + dir_count * DIR_ENTRY_SIZE}, actual={file_size}",
+    )
+
+    # Read directory entries
+    with open(rbi_file, "rb") as f:
+        f.seek(dir_offset)
+        dir_raw = f.read(dir_count * DIR_ENTRY_SIZE)
+
+    if len(dir_raw) < dir_count * DIR_ENTRY_SIZE:
+        check("Directory readable", False, "truncated")
+        print(f"\n  {len(failed)} check(s) FAILED — cannot continue.")
+        return False
+
+    directory: list[RBIDirEntry] = []
+    for i in range(dir_count):
+        chunk = dir_raw[i * DIR_ENTRY_SIZE : (i + 1) * DIR_ENTRY_SIZE]
+        e_type_id, e_flags, e_offset, e_length, e_checksum = struct.unpack(
+            DIR_ENTRY_STRUCT, chunk
         )
+        directory.append(
+            RBIDirEntry(
+                type_id=e_type_id,
+                block_flags=e_flags,
+                offset=e_offset,
+                length=e_length,
+                checksum=e_checksum,
+            )
+        )
+
+    toc_entries = [e for e in directory if e.type_id == BLOCK_TYPE_TOC]
+    pcm_entries = [e for e in directory if e.type_id == BLOCK_TYPE_PCM]
+
+    # Rules 13-15
     check(
-        "PCM end > PCM start",
-        pcm_end > pcm_start,
-        f"pcm_start={pcm_start}, pcm_end={pcm_end}",
+        "13. Exactly one TOC entry", len(toc_entries) == 1, f"found {len(toc_entries)}"
     )
     check(
-        "File size matches pcm_end",
-        pcm_end == file_size,
-        f"pcm_end={pcm_end}, actual={file_size}",
+        "14. Exactly one PCM entry", len(pcm_entries) == 1, f"found {len(pcm_entries)}"
     )
 
-    with open(rbi_file, "rb") as f:
-        f.seek(HEADER_FIXED_SIZE)
-        metadata_raw = f.read(metadata_len)
-    try:
-        metadata_raw.decode("utf-8")
-        check("Metadata is valid UTF-8", True)
-    except UnicodeDecodeError as exc:
-        check("Metadata is valid UTF-8", False, str(exc))
+    required_ids = {BLOCK_TYPE_TOC, BLOCK_TYPE_PCM}
+    required_dups = [
+        e.type_id
+        for e in directory
+        if e.type_id in required_ids
+        if sum(1 for x in directory if x.type_id == e.type_id) > 1
+    ]
+    check(
+        "15. No duplicate required block type_ids",
+        len(required_dups) == 0,
+        f"duplicated: {[t.decode() for t in set(required_dups)]}",
+    )
 
-    with open(rbi_file, "rb") as f:
-        f.seek(toc_start)
-        toc_bytes = f.read(toc_end - toc_start)
-    check("TOC checksum (SHA-256)", sha256_bytes(toc_bytes) == toc_checksum_stored)
+    # Rules 16-17 (per-entry range checks)
+    r16_ok = all(e.offset + e.length <= dir_offset for e in directory)
+    check(
+        "16. All blocks end before directory",
+        r16_ok,
+        "one or more blocks overlap the directory",
+    )
+    r17_ok = all(e.offset >= HEADER_FIXED_SIZE for e in directory)
+    check(
+        "17. All blocks start after fixed header",
+        r17_ok,
+        "one or more blocks overlap the fixed header",
+    )
 
-    if has_rg:
+    # Rule 18: no overlapping block byte ranges
+    sorted_entries = sorted(directory, key=lambda e: e.offset)
+    overlaps = any(
+        sorted_entries[i].offset + sorted_entries[i].length
+        > sorted_entries[i + 1].offset
+        for i in range(len(sorted_entries) - 1)
+    )
+    check("18. No overlapping block byte ranges", not overlaps)
+
+    # Rules 19-27 require reading block data
+    if toc_entries:
+        toc_entry = toc_entries[0]
         with open(rbi_file, "rb") as f:
-            f.seek(rg_start)
-            rg_bytes = f.read(rg_end - rg_start)
+            f.seek(toc_entry.offset)
+            toc_bytes = f.read(toc_entry.length)
+
+        # Rule 19: TRACK AUDIO count matches track_count
+        n_tracks_in_toc = len(re.findall(rb"^TRACK AUDIO", toc_bytes, re.MULTILINE))
         check(
-            "ReplayGain block checksum (SHA-256)",
-            sha256_bytes(rg_bytes) == rg_checksum_stored,
+            f"19. TOC TRACK AUDIO count matches header track_count ({track_count})",
+            n_tracks_in_toc == track_count,
+            f"TOC has {n_tracks_in_toc} TRACK AUDIO entries",
         )
 
-    print("  Verifying PCM checksum (may take a moment)...")
-    with open(rbi_file, "rb") as f:
-        f.seek(pcm_start)
-        computed_pcm = _stream_sha256(f, pcm_end - pcm_start)
-    check("PCM checksum (SHA-256)", computed_pcm == pcm_checksum_stored)
+        # Rule 21: TOC is valid UTF-8
+        try:
+            toc_bytes.decode("utf-8")
+            check("21. TOC block is valid UTF-8", True)
+        except UnicodeDecodeError as exc:
+            check("21. TOC block is valid UTF-8", False, str(exc))
+    else:
+        print("  [SKIP] 19. TOC TRACK AUDIO count (no TOC entry)")
+        print("  [SKIP] 21. TOC block is valid UTF-8 (no TOC entry)")
 
-    try:
-        disc = parse_toc(toc_bytes)
-        check("TOC parses without error", True)
-        check(
-            f"Parsed track count matches header ({track_count})",
-            len(disc.tracks) == track_count,
-            f"parsed {len(disc.tracks)} tracks",
+    # Rule 20: checksums for all blocks
+    print("  Verifying block checksums (may take a moment for PCM)...")
+    for entry in directory:
+        type_name = _BLOCK_NAMES.get(
+            entry.type_id, entry.type_id.decode("ascii", errors="replace")
         )
-    except Exception as exc:
-        check("TOC parses without error", False, str(exc))
+        with open(rbi_file, "rb") as f:
+            f.seek(entry.offset)
+            computed = _stream_sha256(f, entry.length)
+        check(f"20. {type_name} block checksum (SHA-256)", computed == entry.checksum)
+
+    # Rule 22: PROV block UTF-8
+    prov_entry = next((e for e in directory if e.type_id == BLOCK_TYPE_PROV), None)
+    if prov_entry is not None:
+        with open(rbi_file, "rb") as f:
+            f.seek(prov_entry.offset)
+            prov_bytes = f.read(prov_entry.length)
+        try:
+            prov_bytes.decode("utf-8")
+            check("22. PROV block is valid UTF-8", True)
+        except UnicodeDecodeError as exc:
+            check("22. PROV block is valid UTF-8", False, str(exc))
+
+    # Rule 23: RLOG block UTF-8
+    rlog_entry = next((e for e in directory if e.type_id == BLOCK_TYPE_RLOG), None)
+    if rlog_entry is not None:
+        with open(rbi_file, "rb") as f:
+            f.seek(rlog_entry.offset)
+            rlog_bytes = f.read(rlog_entry.length)
+        try:
+            rlog_bytes.decode("utf-8")
+            check("23. RLOG block is valid UTF-8", True)
+        except UnicodeDecodeError as exc:
+            check("23. RLOG block is valid UTF-8", False, str(exc))
+
+        # Rule 27: RLOG SHA-256 self-seal
+        lines = rlog_bytes.split(b"\n")
+        if lines and _re.match(rb"SHA-256: [0-9a-f]{64}", lines[-1]):
+            body = b"\n".join(lines[:-1]) + b"\n"
+            expected_seal = lines[-1][len(b"SHA-256: ") :].decode()
+            actual_seal = hashlib.sha256(body).hexdigest()
+            check("27. RLOG SHA-256 self-seal", actual_seal == expected_seal)
+        elif lines and not lines[-1]:
+            # trailing newline: try second-to-last
+            if len(lines) >= 2 and _re.match(rb"SHA-256: [0-9a-f]{64}", lines[-2]):
+                body = b"\n".join(lines[:-2]) + b"\n"
+                expected_seal = lines[-2][len(b"SHA-256: ") :].decode()
+                actual_seal = hashlib.sha256(body).hexdigest()
+                check("27. RLOG SHA-256 self-seal", actual_seal == expected_seal)
+            else:
+                print("  [SKIP] 27. RLOG SHA-256 self-seal (no seal line found)")
+        else:
+            print("  [SKIP] 27. RLOG SHA-256 self-seal (no seal line found)")
+
+    # Rule 24: RGDB block length
+    rgdb_entry = next((e for e in directory if e.type_id == BLOCK_TYPE_RGDB), None)
+    if rgdb_entry is not None:
+        expected_rg_len = 17 + 12 * track_count
+        check(
+            f"24. RGDB block length == 17 + 12x{track_count} = {expected_rg_len}",
+            rgdb_entry.length == expected_rg_len,
+            f"got {rgdb_entry.length}",
+        )
+
+    # Rules 25-26: ARIP block
+    arip_entry = next((e for e in directory if e.type_id == BLOCK_TYPE_ARIP), None)
+    if arip_entry is not None:
+        expected_arip_len = 13 + 15 * track_count
+        check(
+            f"25. ARIP block length == 13 + 15x{track_count} = {expected_arip_len}",
+            arip_entry.length == expected_arip_len,
+            f"got {arip_entry.length}",
+        )
+        if arip_entry.length == expected_arip_len:
+            with open(rbi_file, "rb") as f:
+                f.seek(arip_entry.offset + 13)  # skip 13-byte header
+                arip_tracks_raw = f.read(15 * track_count)
+            statuses = [arip_tracks_raw[i * 15 + 14] for i in range(track_count)]
+            check(
+                "26. ARIP status values in range 0-2",
+                all(0 <= s <= 2 for s in statuses),
+                f"invalid: {[s for s in statuses if not 0 <= s <= 2]}",
+            )
 
     total = len(passed) + len(failed)
     print()

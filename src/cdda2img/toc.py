@@ -67,7 +67,6 @@ def generate_toc(
     disc: RBIDisc,
     source_rg: list[dict[str, str]] | None = None,
     raw_titles: list[str] | None = None,
-    provenance: dict[str, str] | None = None,
 ) -> bytes:
     """Generate cdrdao-compatible TOC text for the given disc.
 
@@ -79,19 +78,12 @@ def generate_toc(
     differs from the sanitized TOC title get a '// TRACK_TITLE_UNICODE: <json>'
     comment. This preserves the original Unicode title (e.g. curly quotes) for
     use as the FLAC TITLE tag on extraction, without breaking the TOC grammar.
-
-    If *provenance* is provided, keys are written as '// PROVENANCE_KEY: value'
-    lines immediately after CD_DA.  Conventional keys: MODE, SOURCE, TYPE.
     """
     album = sanitize_title(disc.album)
     artist = sanitize_title(disc.artist)
     pcm_filename = f"{album}.s16le"
 
     lines: list[str] = ["CD_DA\n"]
-    if provenance:
-        for key, value in provenance.items():
-            lines.append(f"// PROVENANCE_{key}: {value}")
-        lines.append("")
 
     if disc.catalog:
         lines.append(f'CATALOG "{disc.catalog}"\n')

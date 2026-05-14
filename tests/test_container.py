@@ -1,5 +1,5 @@
 """
-test_container.py — RBI v2.0 container roundtrip tests.
+test_container.py — RBI v4.0 container roundtrip tests.
 
 Covers: header fields, checksum integrity, TOC parse round-trip, RG block
 serialisation round-trip, FLAC extraction with embedded RG tags, and the
@@ -20,8 +20,10 @@ from cdda2img.container import (
     wav_to_raw_pcm,
 )
 from cdda2img.rbi_format import (
+    BLOCK_TYPE_PROV,
+    BLOCK_TYPE_RGDB,
+    BLOCK_TYPE_TOC,
     FLAG_MASTER_MODE,
-    FLAG_RG_PRESENT,
     PCM_BIT_DEPTH,
     PCM_CHANNELS,
     PCM_SAMPLE_RATE,
@@ -85,11 +87,13 @@ def built_containers(tmp_path_factory, wav_tracks):
     rg_result = analyse(wav_tracks)
     rg_block = pack_rg_block(rg_result)
 
+    prov = {"mode": "c", "source": "/test", "ripper": "file"}
+
     rbi_rg = tmp / "test_rg.rbi"
     rbi_no_rg = tmp / "test_no_rg.rbi"
 
-    build_container(pcm, toc_data, disc, rbi_rg, rg_block=rg_block)
-    build_container(pcm, toc_data, disc, rbi_no_rg, rg_block=None)
+    build_container(pcm, toc_data, disc, rbi_rg, rg_block=rg_block, prov_data=prov)
+    build_container(pcm, toc_data, disc, rbi_no_rg, rg_block=None, prov_data=prov)
 
     return {
         "rg": (rbi_rg, disc, rg_result),
@@ -103,9 +107,7 @@ def built_containers(tmp_path_factory, wav_tracks):
 
 
 def test_header_fields_with_rg(built_containers):
-    rbi, _disc, _ = built_containers[
-        "rg"
-    ]  # LINT-010: disc and rg_result not needed; header re-read independently
+    rbi, _disc, _ = built_containers["rg"]
     h = read_header(rbi)
 
     assert h.version_major == VERSION_MAJOR
@@ -116,20 +118,18 @@ def test_header_fields_with_rg(built_containers):
     assert h.pcm_sample_rate == PCM_SAMPLE_RATE
     assert h.pcm_channels == PCM_CHANNELS
     assert h.pcm_bit_depth == PCM_BIT_DEPTH
-    assert h.has_rg
-    assert bool(h.flags & FLAG_RG_PRESENT)
-    assert h.rg_start > 0
-    assert h.rg_end > h.rg_start
+
+    rg_entry = h.find_block(BLOCK_TYPE_RGDB)
+    assert rg_entry is not None
+    assert rg_entry.offset > 0
+    assert rg_entry.length > 0
 
 
 def test_header_fields_without_rg(built_containers):
-    rbi, _, _ = built_containers["no_rg"]  # LINT-010
+    rbi, _, _ = built_containers["no_rg"]
     h = read_header(rbi)
 
-    assert not h.has_rg
-    assert not bool(h.flags & FLAG_RG_PRESENT)
-    assert h.rg_start == 0
-    assert h.rg_end == 0
+    assert h.find_block(BLOCK_TYPE_RGDB) is None
 
 
 # ---------------------------------------------------------------------------
@@ -138,23 +138,17 @@ def test_header_fields_without_rg(built_containers):
 
 
 def test_checksums_pass(built_containers):
-    """All three SHA-256 checksums in the header match the actual block bytes."""
-    rbi, _, _ = built_containers["rg"]  # LINT-010
+    """All SHA-256 checksums in directory entries match the actual block bytes."""
+    rbi, _, _ = built_containers["rg"]
     h = read_header(rbi)
 
-    with open(rbi, "rb") as f:
-        f.seek(h.toc_start)
-        toc_bytes = f.read(h.toc_length)
-
-        f.seek(h.pcm_start)
-        pcm_bytes = f.read(h.pcm_length)
-
-        f.seek(h.rg_start)
-        rg_bytes = f.read(h.rg_length)
-
-    assert hashlib.sha256(toc_bytes).digest() == h.toc_checksum, "TOC checksum mismatch"
-    assert hashlib.sha256(pcm_bytes).digest() == h.pcm_checksum, "PCM checksum mismatch"
-    assert hashlib.sha256(rg_bytes).digest() == h.rg_checksum, "RG checksum mismatch"
+    for entry in h.directory:
+        with open(rbi, "rb") as f:
+            f.seek(entry.offset)
+            block_bytes = f.read(entry.length)
+        assert hashlib.sha256(block_bytes).digest() == entry.checksum, (
+            f"Checksum mismatch for block {entry.type_id!r}"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -167,9 +161,12 @@ def test_toc_roundtrip(built_containers):
     rbi, disc, _ = built_containers["rg"]
     h = read_header(rbi)
 
+    toc_entry = h.find_block(BLOCK_TYPE_TOC)
+    assert toc_entry is not None
+
     with open(rbi, "rb") as f:
-        f.seek(h.toc_start)
-        toc_bytes = f.read(h.toc_length)
+        f.seek(toc_entry.offset)
+        toc_bytes = f.read(toc_entry.length)
 
     parsed = parse_toc(toc_bytes)
 
@@ -188,16 +185,15 @@ def test_toc_roundtrip(built_containers):
 
 def test_rg_block_roundtrip(built_containers):
     """RG values survive pack→embed→read→unpack; all fields match within float tolerance."""
-    rbi, _, rg_result = built_containers[
-        "rg"
-    ]  # LINT-010: disc not needed; rg_result used for assertions
+    rbi, _, rg_result = built_containers["rg"]
     h = read_header(rbi)
 
-    assert h.has_rg
+    rg_entry = h.find_block(BLOCK_TYPE_RGDB)
+    assert rg_entry is not None
 
     with open(rbi, "rb") as f:
-        f.seek(h.rg_start)
-        rg_raw = f.read(h.rg_length)
+        f.seek(rg_entry.offset)
+        rg_raw = f.read(rg_entry.length)
 
     unpacked = unpack_rg_block(rg_raw, h.track_count)
 
@@ -220,14 +216,14 @@ def test_rg_block_roundtrip(built_containers):
 
 def test_flac_extraction_rg_tags(tmp_path, built_containers):
     """Extracted FLACs carry uppercase RG Vorbis comment tags matching stored values."""
-    rbi, _disc, rg_result = built_containers[
-        "rg"
-    ]  # LINT-010: disc re-derived from TOC bytes below (round-trip test)
+    rbi, _disc, rg_result = built_containers["rg"]
     h = read_header(rbi)
 
+    toc_entry = h.find_block(BLOCK_TYPE_TOC)
+    assert toc_entry is not None
     with open(rbi, "rb") as f:
-        f.seek(h.toc_start)
-        toc_bytes = f.read(h.toc_length)
+        f.seek(toc_entry.offset)
+        toc_bytes = f.read(toc_entry.length)
     parsed_disc = parse_toc(toc_bytes)
 
     extract_data(rbi, raw_dir=None, tracks=True, base_dir=tmp_path, embed_rg=True)
@@ -287,3 +283,79 @@ def test_master_mode_flag(tmp_path_factory, wav_tracks):
     assert bool(h_master.flags & FLAG_MASTER_MODE)
     assert not h_remaster.is_master
     assert not bool(h_remaster.flags & FLAG_MASTER_MODE)
+
+
+# ---------------------------------------------------------------------------
+# PROV block
+# ---------------------------------------------------------------------------
+
+
+def test_prov_block_present(built_containers):
+    """PROV block is written and contains the expected keys."""
+    rbi, _, _ = built_containers["rg"]
+    h = read_header(rbi)
+
+    prov_entry = h.find_block(BLOCK_TYPE_PROV)
+    assert prov_entry is not None
+    assert prov_entry.is_skippable
+
+    with open(rbi, "rb") as f:
+        f.seek(prov_entry.offset)
+        prov_bytes = f.read(prov_entry.length)
+
+    text = prov_bytes.decode("utf-8")
+    pairs = dict(line.split("=", 1) for line in text.splitlines() if "=" in line)
+    assert "creator" in pairs
+    assert "created" in pairs
+    assert pairs.get("mode") == "c"
+    assert pairs.get("ripper") == "file"
+
+
+def test_prov_block_absent_when_not_passed(tmp_path_factory, wav_tracks):
+    """PROV block is absent when prov_data=None."""
+    tmp = tmp_path_factory.mktemp("no_prov")
+    pcm = tmp / "all.pcm"
+    concat_wav(wav_tracks, tmp / "all.wav")
+    wav_to_raw_pcm(tmp / "all.wav", pcm)
+
+    disc = RBIDisc(album="Test Album", artist="Test Artist")
+    durations = get_track_durations(wav_tracks)
+    disc.tracks = build_toc_entries(_EXAMPLE_TRACKS, durations, disc)
+    toc_data = generate_toc(disc)
+
+    rbi = tmp / "no_prov.rbi"
+    build_container(pcm, toc_data, disc, rbi, prov_data=None)
+
+    h = read_header(rbi)
+    assert h.find_block(BLOCK_TYPE_PROV) is None
+
+
+# ---------------------------------------------------------------------------
+# Directory structure
+# ---------------------------------------------------------------------------
+
+
+def test_directory_structure(built_containers):
+    """Block directory is internally consistent: offsets, lengths, ordering."""
+    from cdda2img.rbi_format import DIR_ENTRY_SIZE, HEADER_FIXED_SIZE
+
+    rbi, _, _ = built_containers["rg"]
+    h = read_header(rbi)
+    file_size = rbi.stat().st_size
+
+    # Rule 12: dir_offset + dir_count * 54 == file_size
+    assert h.dir_offset + h.dir_count * DIR_ENTRY_SIZE == file_size
+
+    for entry in h.directory:
+        # Rule 16: blocks end before directory
+        assert entry.offset + entry.length <= h.dir_offset
+        # Rule 17: blocks start after fixed header
+        assert entry.offset >= HEADER_FIXED_SIZE
+
+    # Rule 18: no overlapping ranges
+    sorted_entries = sorted(h.directory, key=lambda e: e.offset)
+    for i in range(len(sorted_entries) - 1):
+        assert (
+            sorted_entries[i].offset + sorted_entries[i].length
+            <= sorted_entries[i + 1].offset
+        )
