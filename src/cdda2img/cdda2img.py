@@ -402,6 +402,9 @@ def create_image(
             prov_data=provenance,
             extra_flags=container_flags,
         )
+        from cdda2img.catalogue import register_rbi
+
+        register_rbi(output_file)
         temp.cleanup()
 
 
@@ -545,6 +548,9 @@ def _finalize_import(
         prov_data=provenance,
         extra_flags=FLAG_MASTER_MODE,
     )
+    from cdda2img.catalogue import register_rbi
+
+    register_rbi(output)
 
 
 def _resolve_drive_offsets(

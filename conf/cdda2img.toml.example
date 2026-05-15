@@ -14,6 +14,10 @@
 # Default: 1d
 # database_backup_frequency = "1d"
 
+# Disc catalogue database path.
+# Default: $XDG_DATA_HOME/cdda2img/cdda2img.db
+# catalogue_path = "/path/to/cdda2img.db"
+
 # Per-drive read and write offsets.
 # read_offset is stored automatically after AccurateRip confirmation.
 # write_offset is stored automatically by tools/measure_write_offset.py.
