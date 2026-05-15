@@ -369,7 +369,7 @@ def format_arip_text(arip: RBIArip) -> str:
 
     lines = [
         f"AccurateRip [ID: {arip.disc_id1:08x}-{arip.disc_id2:08x}-{arip.cddb_id:08x}]",
-        "Track   [  CRC V1  |  CRC V2  ]   Status",
+        "Track   [ CRC V1 | CRC V2 ]   Status",
     ]
     for i, t in enumerate(arip.tracks):
         v1_str = f"{t.v1_crc:08x}"

@@ -469,6 +469,7 @@ def extract_data(  # noqa: C901
 
     if base_dir is None:
         base_dir = Path.cwd() / "extracted"
+    base_dir.mkdir(parents=True, exist_ok=True)
 
     header = read_header(container_file)
     stem = container_file.stem
@@ -854,7 +855,8 @@ def _list_info(rbi_file: Path) -> str:  # noqa: C901
     lines.append("")
     for track in disc.tracks:
         dur = _fmt_duration(track.duration_frames / CD_FRAMES_PER_SECOND)
-        lines.append(f"  {track.track_number:2d}  {track.title:<52}  {dur:>5}")
+        title = track.title if len(track.title) <= 52 else track.title[:49] + "..."
+        lines.append(f"  {track.track_number:2d}  {title:<52}  {dur:>5}")
 
     return "\n".join(lines)
 
