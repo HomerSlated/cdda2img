@@ -134,8 +134,9 @@ def _print_meta_summary(meta: DiscMeta) -> None:
     print(f"  Album:         {meta.album or '(none)'}")
     if meta.set_title:
         print(f"  Set:           {meta.set_title}")
-    if meta.disc_number is not None and meta.disc_total is not None:
-        print(f"  Disc:          {meta.disc_number} of {meta.disc_total}")
+    if meta.disc_total is not None:
+        disc_pos = f"{meta.disc_number}" if meta.disc_number is not None else "?"
+        print(f"  Disc:          {disc_pos} of {meta.disc_total}")
     print(f"  Artist:        {meta.artist or '(none)'}")
     if meta.release_date:
         print(f"  Released:      {meta.release_date}")

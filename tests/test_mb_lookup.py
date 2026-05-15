@@ -440,20 +440,20 @@ def test_parse_release_multi_disc_matching():
 
 
 def test_parse_release_multi_disc_no_match_falls_back():
-    """No disc-list match falls back to all mediums with no disc position set."""
+    """No disc-list match falls back to all mediums; disc_total still set from medium-count."""
     meta = _parse_release(_MOCK_BOXSET_RELEASE, _disc_id="NONEXISTENT_ID")
     assert meta.disc_number is None
-    assert meta.disc_total is None
+    assert meta.disc_total == 10  # medium-count always populated
     assert meta.set_title is None
     assert meta.album == "The Complete Studio Albums"
     assert len(meta.tracks) == 2  # both mediums flattened
 
 
 def test_parse_release_no_disc_id_flattens_all_mediums():
-    """Without _disc_id, all mediums are returned (text-search path)."""
+    """Without _disc_id, all mediums are returned; disc_total still set from medium-count."""
     meta = _parse_release(_MOCK_BOXSET_RELEASE)
     assert meta.disc_number is None
-    assert meta.disc_total is None
+    assert meta.disc_total == 10  # medium-count always populated
     assert len(meta.tracks) == 2
 
 

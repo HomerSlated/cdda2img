@@ -43,6 +43,9 @@ docs/source
 *.orig
 *.bak
 
+# Tarball backup archives (scripts/backup.py)
+backups/
+
 # Personal local config files (not project-relevant)
 *.fish
 *.vimrc

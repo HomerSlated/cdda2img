@@ -164,6 +164,12 @@ def parse_args() -> argparse.Namespace:
         default=False,
         help="Preserve pre-gaps in remaster mode (default: disabled; no-op for audio-file sources)",
     )
+    c.add_argument(
+        "--output",
+        type=Path,
+        default=None,
+        help="Output .rbi file path (default: derived from album title); multi-disc: used as base name",
+    )
 
     x = sub.add_parser("x", help="Extract blocks from an RBI image")
     x.add_argument("rbi_file", type=Path, help="RBI file to extract")
@@ -328,6 +334,7 @@ def create_image(
     loudness: str = "rg",
     strategy: str = DEFAULT_STRATEGY,
     trim_silence: bool = True,
+    output: Path | None = None,
 ) -> None:
     files = sorted(
         p for p in input_dir.iterdir() if p.is_file() and not p.name.startswith(".")
@@ -405,8 +412,17 @@ def create_image(
             )
             rg_block = pack_rg_block(rg_result)
 
-        stem = album if disc_total == 1 else f"{album}_disc{disc_num}"
-        output_file = _unique_path(stem, "rbi")
+        if output is not None:
+            if disc_total == 1:
+                output_file = output
+            else:
+                output_file = (
+                    output.parent
+                    / f"{output.stem}_disc{disc_num}{output.suffix or '.rbi'}"
+                )
+        else:
+            stem = album if disc_total == 1 else f"{album}_disc{disc_num}"
+            output_file = _unique_path(stem, "rbi")
         container_flags = FLAG_MASTER_MODE if mode == "master" else 0
         build_container(
             temp.pcm_file,
@@ -967,6 +983,7 @@ def _dispatch(args: argparse.Namespace) -> None:
             loudness=args.loudness,
             strategy=args.strategy,
             trim_silence=args.trim_silence,
+            output=args.output,
         )
     elif args.cmd == "r":
         rip_image(

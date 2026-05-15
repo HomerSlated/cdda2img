@@ -165,10 +165,13 @@ def _parse_track_number(track: dict) -> int | None:
 def _parse_release(release: dict, _disc_id: str | None = None) -> DiscMeta:
     """Parse a MusicBrainz release dict into a DiscMeta.
 
+    *disc_total* (medium-count) is always populated when the release has
+    multiple mediums — it is a property of the release, not the disc match.
+
     When *_disc_id* is provided (disc-ID lookup path), the matching medium is
-    located by walking medium-list/disc-list; disc_number, disc_total, and
-    set_title are populated only on that path.  Text-search callers omit
-    *_disc_id* and receive the existing flatten-all-mediums behaviour.
+    additionally located by walking medium-list/disc-list; *disc_number* and
+    *set_title* are populated only on that path.  Text-search callers omit
+    *_disc_id* and receive the flatten-all-mediums behaviour with disc_number=None.
     """
     artist = _artist_credit_name(release.get("artist-credit", []))
     date = release.get("date") or ""
@@ -186,7 +189,8 @@ def _parse_release(release: dict, _disc_id: str | None = None) -> DiscMeta:
 
     medium_list = release.get("medium-list") or []
     disc_number: int | None = None
-    disc_total: int | None = None
+    total = int(release.get("medium-count") or 0)
+    disc_total: int | None = total or None
     set_title: str | None = None
     album_title: str | None = release.get("title") or None
     matched_mediums: list[dict] = medium_list
@@ -198,8 +202,6 @@ def _parse_release(release: dict, _disc_id: str | None = None) -> DiscMeta:
             # position is a string in MB responses ("8", not 8)
             pos = int(matched_medium.get("position") or 0)
             disc_number = pos or None  # 0 is unreachable; guard is defensive
-            total = int(release.get("medium-count") or 0)
-            disc_total = total or None
             medium_title = matched_medium.get("title") or ""
             if medium_title:
                 # Box set: disc has its own title ("Eliminator"); release title is the set.
