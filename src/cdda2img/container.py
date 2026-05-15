@@ -710,6 +710,8 @@ def _print_provenance(provenance: dict[str, str]) -> None:
     if drive_name := provenance.get("drive_name"):
         offset_str = provenance.get("drive_read_offset", "?")
         print(f"Drive:     {drive_name}  (offset {offset_str})")
+    if set_title := provenance.get("set_title"):
+        print(f"Set:       {set_title}")
     if rms := provenance.get("remastered"):
         label = _REMASTER_LABELS.get(rms, rms)
         extra = ""

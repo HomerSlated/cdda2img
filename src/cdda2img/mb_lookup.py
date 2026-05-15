@@ -138,7 +138,38 @@ def _artist_credit_name(artist_credits: list) -> str:
     return "".join(parts).strip()
 
 
-def _parse_release(release: dict) -> DiscMeta:
+def _find_disc_medium(medium_list: list[dict], disc_id: str) -> dict | None:
+    """Return the first medium whose disc-list contains *disc_id*, or None."""
+    for medium in medium_list:
+        for d in medium.get("disc-list") or []:
+            if d.get("id") == disc_id:
+                return medium
+    return None
+
+
+def _parse_track_number(track: dict) -> int | None:
+    """Return the 1-based track number from a MB track dict.
+
+    Falls back to sequential position for vinyl-style labels (A1, B2, …).
+    """
+    try:
+        return int(track.get("number") or 0) or None
+    except (ValueError, TypeError):
+        pass
+    try:
+        return int(track.get("position") or 0) or None
+    except (ValueError, TypeError):
+        return None
+
+
+def _parse_release(release: dict, _disc_id: str | None = None) -> DiscMeta:
+    """Parse a MusicBrainz release dict into a DiscMeta.
+
+    When *_disc_id* is provided (disc-ID lookup path), the matching medium is
+    located by walking medium-list/disc-list; disc_number, disc_total, and
+    set_title are populated only on that path.  Text-search callers omit
+    *_disc_id* and receive the existing flatten-all-mediums behaviour.
+    """
     artist = _artist_credit_name(release.get("artist-credit", []))
     date = release.get("date") or ""
     rg = release.get("release-group") or {}
@@ -153,25 +184,38 @@ def _parse_release(release: dict) -> DiscMeta:
             label = first["label"].get("name", "")
         catalog_number = first.get("catalog-number") or ""
 
+    medium_list = release.get("medium-list") or []
+    disc_number: int | None = None
+    disc_total: int | None = None
+    set_title: str | None = None
+    album_title: str | None = release.get("title") or None
+    matched_mediums: list[dict] = medium_list
+
+    if _disc_id:
+        matched_medium = _find_disc_medium(medium_list, _disc_id)
+        if matched_medium is not None:
+            matched_mediums = [matched_medium]
+            # position is a string in MB responses ("8", not 8)
+            pos = int(matched_medium.get("position") or 0)
+            disc_number = pos or None  # 0 is unreachable; guard is defensive
+            total = int(release.get("medium-count") or 0)
+            disc_total = total or None
+            medium_title = matched_medium.get("title") or ""
+            if medium_title:
+                # Box set: disc has its own title ("Eliminator"); release title is the set.
+                if medium_title != album_title:
+                    set_title = album_title
+                album_title = medium_title
+
     tracks: list[TrackMeta] = []
-    for medium in release.get("medium-list") or []:
+    for medium in matched_mediums:
         for track in medium.get("track-list") or []:
             recording = track.get("recording") or {}
-            num_str = track.get("number") or ""
-            try:
-                number = int(num_str) or None
-            except (ValueError, TypeError):
-                # vinyl-style positions (A1, B2): fall back to sequential position
-                pos_str = track.get("position") or ""
-                try:
-                    number = int(pos_str) or None
-                except (ValueError, TypeError):
-                    number = None
             isrc_list = recording.get("isrc-list") or []
             length = recording.get("length")
             tracks.append(
                 TrackMeta(
-                    number=number,
+                    number=_parse_track_number(track),
                     title=recording.get("title") or track.get("title"),
                     performer=artist or None,
                     isrc=isrc_list[0] if isrc_list else None,
@@ -180,7 +224,7 @@ def _parse_release(release: dict) -> DiscMeta:
             )
 
     return DiscMeta(
-        album=release.get("title") or None,
+        album=album_title,
         artist=artist or None,
         catalog=release.get("barcode") or None,
         mb_release_id=release.get("id") or None,
@@ -190,6 +234,9 @@ def _parse_release(release: dict) -> DiscMeta:
         country=release.get("country") or None,
         label=label or None,
         catalog_number=catalog_number or None,
+        disc_number=disc_number,
+        disc_total=disc_total,
+        set_title=set_title,
         remastered_source=_classify_remaster(
             release.get("title") or "",
             _parse_year(original_date),
@@ -210,13 +257,13 @@ def lookup_disc_id(disc: RBIDisc) -> list[DiscMeta]:
 
     Returns a list of matching DiscMeta (empty on no match or network error).
     """
-    disc_id = disc_id_from_rbi(disc)
-    if not disc_id:
+    disc_id_str = disc_id_from_rbi(disc)
+    if not disc_id_str:
         return []
-    log.debug("MusicBrainz disc ID lookup: %s", disc_id)
+    log.debug("MusicBrainz disc ID lookup: %s", disc_id_str)
     try:
         result = musicbrainzngs.get_releases_by_discid(
-            disc_id,
+            disc_id_str,
             includes=["artists", "recordings", "release-groups", "labels", "isrcs"],
         )
     except musicbrainzngs.ResponseError as exc:
@@ -226,7 +273,7 @@ def lookup_disc_id(disc: RBIDisc) -> list[DiscMeta]:
         log.debug("MusicBrainz network error: %s", exc)
         return []
     releases = (result.get("disc") or {}).get("release-list") or []
-    return [_parse_release(r) for r in releases]
+    return [_parse_release(r, _disc_id=disc_id_str) for r in releases]
 
 
 def lookup_release(release_id: str) -> DiscMeta | None:
@@ -398,8 +445,12 @@ def _merge_into_disc(meta: DiscMeta, disc: RBIDisc) -> RBIDisc:
     return RBIDisc(
         album=album,
         artist=artist,
-        disc_number=disc.disc_number,
-        disc_total=disc.disc_total,
+        disc_number=(
+            meta.disc_number if meta.disc_number is not None else disc.disc_number
+        ),
+        disc_total=(
+            meta.disc_total if meta.disc_total is not None else disc.disc_total
+        ),
         catalog=catalog,
         disc_id=disc.disc_id,
         tracks=new_tracks,
@@ -413,6 +464,7 @@ def _merge_into_disc(meta: DiscMeta, disc: RBIDisc) -> RBIDisc:
             else disc.remastered_source
         ),
         mb_release_id=disc.mb_release_id or meta.mb_release_id or None,
+        set_title=disc.set_title or meta.set_title,
     )
 
 
@@ -444,8 +496,12 @@ def _overwrite_disc(meta: DiscMeta, disc: RBIDisc) -> RBIDisc:
     return RBIDisc(
         album=meta.album or disc.album,
         artist=meta.artist or disc.artist,
-        disc_number=disc.disc_number,
-        disc_total=disc.disc_total,
+        disc_number=(
+            meta.disc_number if meta.disc_number is not None else disc.disc_number
+        ),
+        disc_total=(
+            meta.disc_total if meta.disc_total is not None else disc.disc_total
+        ),
         catalog=meta.catalog or disc.catalog,
         disc_id=disc.disc_id,
         tracks=new_tracks,
@@ -459,6 +515,7 @@ def _overwrite_disc(meta: DiscMeta, disc: RBIDisc) -> RBIDisc:
             else disc.remastered_source
         ),
         mb_release_id=meta.mb_release_id or disc.mb_release_id or None,
+        set_title=meta.set_title or disc.set_title,
     )
 
 

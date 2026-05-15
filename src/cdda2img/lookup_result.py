@@ -52,6 +52,13 @@ class DiscMeta:
     country: str | None = None
     label: str | None = None
     catalog_number: str | None = None  # label catalogue number (e.g. "XYZ-001")
+    disc_number: int | None = (
+        None  # 1-based position in a multi-disc set; None = unknown
+    )
+    disc_total: int | None = None  # total discs in set; None = unknown
+    set_title: str | None = (
+        None  # box set / release title when disc has its own album title
+    )
     remastered_source: str = REMASTERED_UNKNOWN
     source: str = (
         "unknown"  # "cdtext" | "embedded" | "musicbrainz" | "discogs" | "manual"
@@ -79,6 +86,9 @@ def merge_disc_meta(base: DiscMeta, update: DiscMeta) -> DiscMeta:
         "country",
         "label",
         "catalog_number",
+        "disc_number",
+        "disc_total",
+        "set_title",
     )
     kwargs: dict = {f: getattr(base, f) or getattr(update, f) for f in scalar_fields}
     kwargs["source"] = base.source

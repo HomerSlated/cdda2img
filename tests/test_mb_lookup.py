@@ -22,6 +22,8 @@ from cdda2img.lookup_result import (
 from cdda2img.mb_lookup import (
     _classify_remaster,
     _merge_into_disc,
+    _overwrite_disc,
+    _parse_release,
     _parse_year,
     compute_disc_id,
     disc_id_from_rbi,
@@ -378,6 +380,161 @@ def test_lookup_disc_id_empty_disc():
         results = lookup_disc_id(disc)
     mock_mb.assert_not_called()
     assert results == []
+
+
+# ---------------------------------------------------------------------------
+# Multi-disc: _parse_release with disc-list matching
+# ---------------------------------------------------------------------------
+
+_MOCK_BOXSET_RELEASE = {
+    "id": "mock-boxset-uuid",
+    "title": "The Complete Studio Albums",
+    "date": "2013-06-10",
+    "country": "US",
+    "barcode": "0081227975173",
+    "medium-count": 10,
+    "artist-credit": [{"artist": {"name": "ZZ Top"}, "joinphrase": ""}],
+    "release-group": {"id": "mock-rg-uuid", "first-release-date": "1983-03-14"},
+    "label-info-list": [],
+    "medium-list": [
+        {
+            "position": "7",
+            "title": "El Loco",
+            "disc-list": [{"id": "WRONG_DISC_ID"}],
+            "track-list": [
+                {
+                    "number": "1",
+                    "recording": {"title": "Tube Snake Boogie", "length": "210000"},
+                }
+            ],
+        },
+        {
+            "position": "8",
+            "title": "Eliminator",
+            "disc-list": [{"id": "TARGET_DISC_ID"}],
+            "track-list": [
+                {
+                    "number": "1",
+                    "recording": {
+                        "title": "Sharp Dressed Man",
+                        "length": "248000",
+                        "isrc-list": ["USEE18300025"],
+                    },
+                }
+            ],
+        },
+    ],
+}
+
+
+def test_parse_release_multi_disc_matching():
+    """disc-list match sets disc_number, disc_total, set_title, and filters tracks."""
+    meta = _parse_release(_MOCK_BOXSET_RELEASE, _disc_id="TARGET_DISC_ID")
+    assert meta.album == "Eliminator"
+    assert meta.set_title == "The Complete Studio Albums"
+    assert meta.disc_number == 8
+    assert meta.disc_total == 10
+    assert len(meta.tracks) == 1
+    assert meta.tracks[0].title == "Sharp Dressed Man"
+    assert meta.tracks[0].isrc == "USEE18300025"
+
+
+def test_parse_release_multi_disc_no_match_falls_back():
+    """No disc-list match falls back to all mediums with no disc position set."""
+    meta = _parse_release(_MOCK_BOXSET_RELEASE, _disc_id="NONEXISTENT_ID")
+    assert meta.disc_number is None
+    assert meta.disc_total is None
+    assert meta.set_title is None
+    assert meta.album == "The Complete Studio Albums"
+    assert len(meta.tracks) == 2  # both mediums flattened
+
+
+def test_parse_release_no_disc_id_flattens_all_mediums():
+    """Without _disc_id, all mediums are returned (text-search path)."""
+    meta = _parse_release(_MOCK_BOXSET_RELEASE)
+    assert meta.disc_number is None
+    assert meta.disc_total is None
+    assert len(meta.tracks) == 2
+
+
+def test_lookup_disc_id_populates_disc_position():
+    """lookup_disc_id passes the computed disc_id to _parse_release."""
+    disc = _make_disc(tracks=[(1, 0, 18000)])
+    disc_id_str = disc_id_from_rbi(disc)
+    boxset_response = {
+        "disc": {
+            "id": disc_id_str,
+            "release-list": [
+                {
+                    **_MOCK_BOXSET_RELEASE,
+                    "medium-list": [
+                        {
+                            "position": "8",
+                            "title": "Eliminator",
+                            "disc-list": [{"id": disc_id_str}],
+                            "track-list": [
+                                {
+                                    "number": "1",
+                                    "recording": {
+                                        "title": "Sharp Dressed Man",
+                                        "length": "248000",
+                                    },
+                                }
+                            ],
+                        }
+                    ],
+                }
+            ],
+        }
+    }
+    with patch("musicbrainzngs.get_releases_by_discid", return_value=boxset_response):
+        results = lookup_disc_id(disc)
+    assert len(results) == 1
+    r = results[0]
+    assert r.album == "Eliminator"
+    assert r.set_title == "The Complete Studio Albums"
+    assert r.disc_number == 8
+    assert r.disc_total == 10
+
+
+# ---------------------------------------------------------------------------
+# _merge_into_disc / _overwrite_disc — disc position propagation
+# ---------------------------------------------------------------------------
+
+
+def test_merge_into_disc_propagates_disc_position():
+    """disc_number/disc_total from meta update disc when meta has values."""
+    disc = _make_disc(tracks=[])
+    meta = DiscMeta(disc_number=3, disc_total=5, set_title="Box Set Title")
+    result = _merge_into_disc(meta, disc)
+    assert result.disc_number == 3
+    assert result.disc_total == 5
+    assert result.set_title == "Box Set Title"
+
+
+def test_merge_into_disc_preserves_existing_disc_position():
+    """Existing disc position is not overwritten when meta has no position."""
+    disc = _make_disc(tracks=[])
+    disc.disc_number = 2
+    disc.disc_total = 4
+    meta = DiscMeta(disc_number=None, disc_total=None)
+    result = _merge_into_disc(meta, disc)
+    assert result.disc_number == 2
+    assert result.disc_total == 4
+
+
+def test_overwrite_disc_propagates_disc_position():
+    """_overwrite_disc updates position from meta when meta has values."""
+    disc = _make_disc(tracks=[])
+    disc.disc_number = 1
+    disc.disc_total = 1
+    meta = DiscMeta(
+        disc_number=8, disc_total=10, set_title="The Complete Studio Albums"
+    )
+    result = _overwrite_disc(meta, disc)
+    assert result.disc_number == 8
+    assert result.disc_total == 10
+    assert result.set_title == "The Complete Studio Albums"
 
 
 # ---------------------------------------------------------------------------

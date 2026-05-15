@@ -95,9 +95,13 @@ def _prompt_search_fields(artist: str, title: str) -> tuple[str, str]:
 
 def _print_disc_summary(disc: RBIDisc) -> None:
     print(f"  Album:   {disc.album or '(none)'}")
+    if disc.set_title:
+        print(f"  Set:     {disc.set_title}")
     print(f"  Artist:  {disc.artist or '(none)'}")
     if disc.catalog:
         print(f"  Catalog: {disc.catalog}")
+    if disc.disc_total > 1 or disc.disc_number != 1:
+        print(f"  Disc:    {disc.disc_number} of {disc.disc_total}")
     print(f"  Tracks:  {len(disc.tracks)}")
     if disc.remastered_source != REMASTERED_UNKNOWN:
         orig = (
@@ -116,8 +120,22 @@ def _print_disc_summary(disc: RBIDisc) -> None:
             print(f"  … and {len(disc.tracks) - 20} more")
 
 
+def _print_meta_tracks(meta: DiscMeta) -> None:
+    if not meta.tracks:
+        return
+    titled = [t for t in meta.tracks if t.title]
+    if titled and len(meta.tracks) == 1:
+        print(f"  Track title:   {titled[0].title}")
+    else:
+        print(f"  Tracks:        {len(meta.tracks)}")
+
+
 def _print_meta_summary(meta: DiscMeta) -> None:
     print(f"  Album:         {meta.album or '(none)'}")
+    if meta.set_title:
+        print(f"  Set:           {meta.set_title}")
+    if meta.disc_number is not None and meta.disc_total is not None:
+        print(f"  Disc:          {meta.disc_number} of {meta.disc_total}")
     print(f"  Artist:        {meta.artist or '(none)'}")
     if meta.release_date:
         print(f"  Released:      {meta.release_date}")
@@ -134,12 +152,7 @@ def _print_meta_summary(meta: DiscMeta) -> None:
         print(f"  Barcode:       {meta.catalog}")
     if meta.remastered_source != REMASTERED_UNKNOWN:
         print(f"  Remaster:      {meta.remastered_source}")
-    if meta.tracks:
-        titled = [t for t in meta.tracks if t.title]
-        if titled and len(meta.tracks) == 1:
-            print(f"  Track title:   {titled[0].title}")
-        else:
-            print(f"  Tracks:        {len(meta.tracks)}")
+    _print_meta_tracks(meta)
 
 
 # ---------------------------------------------------------------------------
@@ -652,6 +665,25 @@ def _fetch_menu(
 # ---------------------------------------------------------------------------
 
 
+def _edit_disc_position(disc: RBIDisc) -> RBIDisc:
+    """Prompt for disc number and total; validate and update disc in place."""
+    _header("Edit Disc Position")
+    print(f"  Current: disc {disc.disc_number} of {disc.disc_total}")
+    print()
+    while True:
+        raw_num = _prompt(f"  Disc number [{disc.disc_number}]: ").strip()
+        num = int(raw_num) if raw_num.isdigit() else disc.disc_number
+        raw_total = _prompt(f"  Total discs [{disc.disc_total}]: ").strip()
+        total = int(raw_total) if raw_total.isdigit() else disc.disc_total
+        if num < 1 or total < 1 or num > total:
+            print(f"  Invalid: disc {num} of {total} — number must be 1..total.")
+            continue
+        disc.disc_number = num
+        disc.disc_total = total
+        print(f"  Set: disc {num} of {total}.")
+        return disc
+
+
 def _edit_menu(disc: RBIDisc) -> RBIDisc:
     while True:
         _header("Edit Metadata")
@@ -659,6 +691,7 @@ def _edit_menu(disc: RBIDisc) -> RBIDisc:
         print()
         print("  [a]   Edit album title")
         print("  [r]   Edit artist")
+        print("  [d]   Edit disc number / total")
         print("  [t N] Edit track N  (e.g.  t 3)")
         print("  [b]   Back")
         choice = _prompt("  > ").strip().lower()
@@ -669,6 +702,8 @@ def _edit_menu(disc: RBIDisc) -> RBIDisc:
             disc.album = _prompt_edit("Album title", disc.album or "")
         elif choice == "r":
             disc.artist = _prompt_edit("Artist", disc.artist or "")
+        elif choice == "d":
+            disc = _edit_disc_position(disc)
         elif choice.startswith("t "):
             try:
                 num = int(choice[2:].strip())
@@ -887,6 +922,7 @@ def _clear_disc(disc: RBIDisc) -> RBIDisc:
         artist="",
         disc_number=disc.disc_number,
         disc_total=disc.disc_total,
+        set_title=disc.set_title,
         tracks=cleared_tracks,
     )
 

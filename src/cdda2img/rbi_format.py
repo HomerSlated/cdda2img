@@ -286,6 +286,9 @@ class RBIDisc:
     original_release_date: str | None = None  # release-group first-release-date
     remastered_source: str = "UNKNOWN"  # UNKNOWN | NO | POSSIBLE | YES
     mb_release_id: str | None = None  # MusicBrainz release UUID for provenance
+    set_title: str | None = (
+        None  # box set / release title when medium has its own album title
+    )
 
     @property
     def total_frames(self) -> int:
