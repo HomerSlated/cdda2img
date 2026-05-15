@@ -101,8 +101,10 @@ from the original source — the write offset must be compensated before burning
 ### The AccurateRip driveoffsets.htm page covers read offsets only
 
 The AccurateRip catalog contains **read offsets only**. It has no write offset column.
-Write offsets have historically been collected inside EAC (Exact Audio Copy) through a
-separate calibration step, but there is no open public database.
+Write offsets were historically collected inside EAC (Exact Audio Copy) through a
+separate calibration step. An archived copy of the EAC write offset database exists on
+archive.org; it is old and covers primarily legacy drives, but is a useful starting
+reference for common hardware. No actively maintained open write offset database exists.
 
 ### How to measure it
 
