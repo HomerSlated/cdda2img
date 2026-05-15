@@ -94,6 +94,7 @@ class Config:
     database_backup_frequency: str = "1d"
     drives: list[DriveConfig] = field(default_factory=list)
     catalogue_path: Path | None = None
+    enable_catalogue: bool = True
 
 
 def _parse_drives(raw_drives: object) -> list[DriveConfig]:
@@ -158,12 +159,15 @@ def load_config() -> Config:
         Path(str(raw_catalogue_path)) if raw_catalogue_path is not None else None
     )
 
+    enable_catalogue = bool(data.get("enable_catalogue", True))
+
     return Config(
         cddb_server=cddb_server,
         database_backups=database_backups,
         database_backup_frequency=database_backup_frequency,
         drives=drives,
         catalogue_path=catalogue_path,
+        enable_catalogue=enable_catalogue,
     )
 
 

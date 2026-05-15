@@ -248,6 +248,14 @@ def parse_args() -> argparse.Namespace:
         help="Output .rbi file path (default: derived from album title)",
     )
 
+    d_cmd = sub.add_parser("d", help="Browse disc catalogue")
+    d_cmd.add_argument(
+        "--db",
+        metavar="PATH",
+        default=None,
+        help="catalogue database path (default: from config or XDG data dir)",
+    )
+
     w_cmd = sub.add_parser(
         "w", help="Burn an RBI image to a blank CD-DA disc via cdrdao"
     )
@@ -982,6 +990,10 @@ def _dispatch(args: argparse.Namespace) -> None:
 
         if not verify_container(args.rbi_file):
             raise SystemExit(1)
+    elif args.cmd == "d":
+        from cdda2img.catalogue_menu import run_catalogue_menu
+
+        run_catalogue_menu(Path(args.db) if args.db else None)
     elif args.cmd == "w":
         burn_image(
             args.rbi_file,

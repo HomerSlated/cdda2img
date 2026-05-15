@@ -256,16 +256,26 @@ def _prompt_duplicate_action(conn: sqlite3.Connection, dup_ids: list[int]) -> st
         print("  Please enter s, r, or a.")
 
 
+def _get_catalogue_config() -> tuple[bool, Path | None]:
+    """Return (enable_catalogue, catalogue_path) from user config."""
+    with contextlib.suppress(Exception):
+        from cdda2img.config import load_config
+
+        cfg = load_config()
+        return cfg.enable_catalogue, cfg.catalogue_path
+    return True, None
+
+
 def register_rbi(rbi_path: Path, catalogue_path: Path | None = None) -> None:
     """Register *rbi_path* in the disc catalogue.
 
     Reads all metadata directly from the RBI container. Silently warns on failure.
+    When *catalogue_path* is None, reads enable_catalogue and catalogue_path from config.
     """
     if catalogue_path is None:
-        with contextlib.suppress(Exception):
-            from cdda2img.config import load_config
-
-            catalogue_path = load_config().catalogue_path
+        enabled, catalogue_path = _get_catalogue_config()
+        if not enabled:
+            return
     try:
         _register_impl(rbi_path, catalogue_path)
     except Exception as exc:
