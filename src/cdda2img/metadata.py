@@ -6,16 +6,6 @@ from pathlib import Path
 
 from mutagen import File  # type: ignore[import-untyped]  # LINT-004
 
-_RG_TAGS: frozenset[str] = frozenset({
-    "REPLAYGAIN_TRACK_GAIN",
-    "REPLAYGAIN_TRACK_PEAK",
-    "REPLAYGAIN_TRACK_RANGE",
-    "REPLAYGAIN_ALBUM_GAIN",
-    "REPLAYGAIN_ALBUM_PEAK",
-    "REPLAYGAIN_ALBUM_RANGE",
-    "REPLAYGAIN_REFERENCE_LOUDNESS",
-})
-
 _ARTIST_TAGS: list[str] = [
     "ALBUM ARTIST",
     "ALBUM_ARTIST",
@@ -83,34 +73,6 @@ def derive_album_info(tracks: list[Path], autoaccept: bool = False) -> dict[str,
         final_artist = _confirm("album artist", final_artist)
 
     return {"album": final_album, "artist": final_artist}
-
-
-def read_source_rg_tags(path: Path) -> dict[str, str]:
-    """Read any REPLAYGAIN_* tags from *path*. Returns an empty dict if none present.
-
-    Normalises across tag format differences:
-      ID3 (MP3)       → TXXX:REPLAYGAIN_TRACK_GAIN   (take last colon segment)
-      Vorbis (FLAC)   → replaygain_track_gain         (uppercase)
-      iTunes (M4A)    → ----:com.apple.iTunes:replaygain_track_gain  (take last segment)
-    """
-    audio = File(str(path))
-    if not audio or not audio.tags:
-        return {}
-    result: dict[str, str] = {}
-    for raw_key in audio.tags.keys():  # noqa: SIM118  # VCommentDict(list subclass) iterates as (key, val) tuples; .keys() is required
-        canonical = raw_key.upper().split(":")[-1]
-        if canonical not in _RG_TAGS:
-            continue
-        tag = audio.tags[raw_key]
-        if hasattr(tag, "text"):  # ID3 TXXX frame
-            val = str(tag.text[0]) if tag.text else ""
-        elif isinstance(tag, list):  # Vorbis comment
-            val = str(tag[0]) if tag else ""
-        else:
-            val = str(tag)
-        if val:
-            result[canonical] = val
-    return result
 
 
 def _confirm(prompt: str, default: str) -> str:

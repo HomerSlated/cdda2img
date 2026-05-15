@@ -1227,13 +1227,6 @@ Proposed CLI: `cdda2img c <dir> --check-quality {warn,error,none}` (default: `wa
 
 ---
 
-## Housekeeping
-
-- [ ] **Remove `read_source_rg_tags` from `metadata.py`** — dead code since SOURCE_RG
-  comments were removed from `generate_toc()`. The function read REPLAYGAIN_* tags from
-  source files to embed them as TOC comments; that feature was dropped (RG data belongs
-  in the RGDB block, not the TOC text). No callers remain. Low risk removal.
-
 ---
 
 ## Input Batching — "tags" strategy (deferred — low priority)
