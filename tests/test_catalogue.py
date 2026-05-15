@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
 
@@ -166,7 +166,7 @@ def _insert_disc(
     durations: tuple[int, ...] = (11025, 22050),
     ar_crcs: tuple[str | None, ...] = (None, None),
 ) -> int:
-    now = datetime.now(UTC).isoformat()
+    now = datetime.now(timezone.utc).isoformat()
     cur = conn.execute(
         """INSERT INTO catalogue
            (album, artist, year, disc_number, disc_total, track_count, mcn,

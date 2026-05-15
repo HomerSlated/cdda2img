@@ -13,7 +13,7 @@ import os
 import re
 import sqlite3
 import sys
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 log = logging.getLogger(__name__)
@@ -106,7 +106,7 @@ def _init_meta(conn: sqlite3.Connection) -> None:
             ).strip()
         except (EOFError, KeyboardInterrupt):
             print()
-    now = datetime.now(UTC).isoformat()
+    now = datetime.now(timezone.utc).isoformat()
     conn.executemany(
         "INSERT OR IGNORE INTO db_meta (key, value) VALUES (?, ?)",
         [
@@ -376,7 +376,7 @@ def _register_impl(rbi_path: Path, catalogue_path: Path | None) -> None:  # noqa
             if action == "s":
                 return
 
-        now = datetime.now(UTC).isoformat()
+        now = datetime.now(timezone.utc).isoformat()
 
         with conn:
             if action == "r":
