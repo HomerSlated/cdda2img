@@ -28,7 +28,7 @@ def sanitize_title(text: str) -> str:
     """
     for bad, good in _TITLE_REPLACEMENTS.items():
         text = text.replace(bad, good)
-    text = re.sub(r"^\d{2} ", "", text)
+    text = re.sub(r"^\d{1,2}[-. ]+", "", text)
     text = re.sub(r"[^\x00-\x7F]+", "", text)
     return text.replace('"', "'")
 
@@ -65,14 +65,9 @@ def build_toc_entries(
 
 def generate_toc(
     disc: RBIDisc,
-    source_rg: list[dict[str, str]] | None = None,
     raw_titles: list[str] | None = None,
 ) -> bytes:
     """Generate cdrdao-compatible TOC text for the given disc.
-
-    If *source_rg* is provided (one dict per track), any REPLAYGAIN_* entries
-    are written as '// SOURCE_RG: KEY="VALUE"' comment lines preceding each
-    track block.
 
     If *raw_titles* is provided (one string per track), tracks whose raw title
     differs from the sanitized TOC title get a '// TRACK_TITLE_UNICODE: <json>'
@@ -81,7 +76,7 @@ def generate_toc(
     """
     album = sanitize_title(disc.album)
     artist = sanitize_title(disc.artist)
-    pcm_filename = f"{album}.s16le"
+    pcm_filename = f"{album}.bin"
 
     lines: list[str] = ["CD_DA\n"]
 
@@ -109,9 +104,6 @@ def generate_toc(
     ]
 
     for idx, track in enumerate(disc.tracks):
-        rg = source_rg[idx] if source_rg and idx < len(source_rg) else {}
-        rg_lines = [f'// SOURCE_RG: {k}="{v}"' for k, v in sorted(rg.items())]
-
         raw_title = raw_titles[idx] if raw_titles and idx < len(raw_titles) else None
         unicode_lines = (
             [f"// TRACK_TITLE_UNICODE: {json.dumps(raw_title)}"]
@@ -127,7 +119,6 @@ def generate_toc(
         lines += [
             f"// Track {track.track_number}",
             *unicode_lines,
-            *rg_lines,
             "TRACK AUDIO",
             "NO COPY",
             "NO PRE_EMPHASIS",

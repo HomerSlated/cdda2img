@@ -20,7 +20,7 @@ from cdda2img.container import (
     wav_to_raw_pcm,
 )
 from cdda2img.input_selector import select_batches
-from cdda2img.metadata import derive_album_info, read_source_rg_tags
+from cdda2img.metadata import derive_album_info
 from cdda2img.rbi_format import (
     CD_FRAMES_PER_SECOND,
     FLAG_MASTER_MODE,
@@ -101,6 +101,10 @@ def parse_args() -> argparse.Namespace:
               --write-offset N      Write offset override in samples (default: from config)
               --yes                 Skip confirmation prompt (non-interactive burn)
 
+            mount options:
+              --slot N              cdemu slot to load into (default: first free)
+              --mnt-dir PATH        Directory for extracted TOC+BIN (default: ./mnt)
+
             examples:
               cdda2img r
               cdda2img r /dev/sr0 --loudness none --output mydisc.rbi
@@ -123,6 +127,8 @@ def parse_args() -> argparse.Namespace:
               cdda2img l album.rbi
               cdda2img l album.rbi --ar
               cdda2img t album.rbi
+              cdda2img m album.rbi
+              cdda2img m album.rbi --slot 1 --mnt-dir /tmp/mnt
         """),
     )
     parser.add_argument(
@@ -298,6 +304,24 @@ def parse_args() -> argparse.Namespace:
         help="Skip confirmation prompt",
     )
 
+    m_cmd = sub.add_parser("m", help="Mount an RBI image as a virtual disc via cdemu")
+    m_cmd.add_argument("rbi_file", type=Path, help="RBI file to mount")
+    m_cmd.add_argument(
+        "--slot",
+        type=int,
+        default=None,
+        metavar="N",
+        help="cdemu slot to load into (default: first free)",
+    )
+    m_cmd.add_argument(
+        "--mnt-dir",
+        type=Path,
+        default=None,
+        dest="mnt_dir",
+        metavar="PATH",
+        help="Directory for extracted TOC+BIN (default: ./mnt)",
+    )
+
     return parser.parse_args()
 
 
@@ -387,15 +411,14 @@ def create_image(
 
         disc = run_metadata_menu(disc, source_wavs=source_wavs)
 
-        source_rg = [read_source_rg_tags(p) for p in batch]
-        raw_titles = [re.sub(r"^\d{2} ", "", p.stem) for p in batch]
+        raw_titles = [re.sub(r"^\d{1,2}[-. ]+", "", p.stem) for p in batch]
         provenance = {
             "mode": "c",
             "source": str(input_dir.resolve()),
             "ripper": "file",
         }
         _add_release_provenance(provenance, disc)
-        toc_data = generate_toc(disc, source_rg=source_rg, raw_titles=raw_titles)
+        toc_data = generate_toc(disc, raw_titles=raw_titles)
 
         rg_block: bytes | None = None
         if loudness == "rg":
@@ -975,6 +998,19 @@ def burn_image(
     burn_disc(rbi_file, device=device, write_offset=write_offset, speed=speed, yes=yes)
 
 
+def mount_image(
+    rbi_file: Path,
+    slot: int | None = None,
+    mnt_dir: Path | None = None,
+) -> None:
+    from cdda2img.cdemu import mount_rbi
+
+    slot_used, toc_path = mount_rbi(rbi_file, slot=slot, mnt_dir=mnt_dir)
+    print(f"Mounted in cdemu slot {slot_used}: {toc_path}")
+    print(f"Re-rip:  cdrdao read-cd --device /dev/vhba_cd{slot_used} disc.toc")
+    print(f"Unload:  cdemu unload {slot_used}")
+
+
 def _dispatch(args: argparse.Namespace) -> None:
     if args.cmd == "c":
         create_image(
@@ -1004,7 +1040,12 @@ def _dispatch(args: argparse.Namespace) -> None:
             all_blocks=args.all_blocks,
             normalize=args.normalize,
         )
-    elif args.cmd == "l":
+    else:
+        _dispatch_utility(args)
+
+
+def _dispatch_utility(args: argparse.Namespace) -> None:
+    if args.cmd == "l":
         from cdda2img.container import list_container
 
         show_info = args.info or not (args.rg or args.ar or args.log)
@@ -1028,6 +1069,8 @@ def _dispatch(args: argparse.Namespace) -> None:
             speed=args.speed,
             yes=args.yes,
         )
+    elif args.cmd == "m":
+        mount_image(args.rbi_file, slot=args.slot, mnt_dir=args.mnt_dir)
 
 
 def main() -> None:

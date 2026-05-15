@@ -520,7 +520,9 @@ def extract_data(  # noqa: C901
         raw_dir = base_dir / "raw"
         raw_dir.mkdir(parents=True, exist_ok=True)
 
-        toc_text = toc_data.decode("utf-8").replace(f'"{stem}.s16le"', f'"{stem}.bin"')
+        toc_text = re.sub(
+            r'FILE "[^"]*"', f'FILE "{stem}.bin"', toc_data.decode("utf-8")
+        )
         (raw_dir / f"{stem}.toc").write_text(toc_text, encoding="utf-8")
         print(f"TOC saved: {raw_dir / f'{stem}.toc'}")
 

@@ -1197,6 +1197,45 @@ archival quality (avoiding loudness-war mastering applied to many remasters).
 
 ---
 
+## Source Audio Quality Check (deferred — discuss before implementing)
+
+Detect fake-lossless source files in the `c` (create) pipeline: FLAC or WAV files that
+were transcoded from lossy sources (MP3, AAC) and will degrade archival quality.
+
+Research saved at `private/research/incomming/true-audio-checker.md`. Key findings:
+
+- **Algorithm**: FFT spectral analysis detects the characteristic "shelf" left by lossy
+  codecs above their encoding cutoff (e.g. MP3 128 kbps ≈ 16 kHz, 320 kbps ≈ 20.5 kHz).
+  Tau Software's Aucdtect adds a neural network (trained via genetic algorithm) to
+  distinguish lossy artifacts from intentional high-frequency rolloff in mastering.
+  Accuracy: 92.4% on genuine CDDA; ~100% on obvious transcodes.
+- **Key limitations**: high-bitrate MP3 (320 kbps) approaches the detection limit;
+  rolled-off vintage mastering and heavily dithered audio produce false positives;
+  algorithm is 44.1 kHz specific (Red Book only).
+- **Integration point**: pre-transcode quality gate in `create_image()`; warn (not abort)
+  by default; result stored as provenance in TOC.
+- **Dependency question to resolve**: a lightweight pure-Python FFT approach needs
+  `scipy` (not currently a direct dep); alternatively, optional subprocess to the
+  `aucdtect` binary if installed; or a pre-trained ONNX model embedded in the package.
+
+Proposed CLI: `cdda2img c <dir> --check-quality {warn,error,none}` (default: `warn`).
+
+- [ ] Decide on dependency strategy (scipy / aucdtect subprocess / embedded model)
+- [ ] Implement `quality_check.py` with `QualityReport` dataclass
+- [ ] Wire into `create_image()` before transcode phase
+- [ ] Store result in TOC provenance block; surface in `l` output
+
+---
+
+## Housekeeping
+
+- [ ] **Remove `read_source_rg_tags` from `metadata.py`** — dead code since SOURCE_RG
+  comments were removed from `generate_toc()`. The function read REPLAYGAIN_* tags from
+  source files to embed them as TOC comments; that feature was dropped (RG data belongs
+  in the RGDB block, not the TOC text). No callers remain. Low risk removal.
+
+---
+
 ## Input Batching — "tags" strategy (deferred — low priority)
 
 A fifth batching strategy for `input_selector.py`: `tags`. Uses embedded disc/track
