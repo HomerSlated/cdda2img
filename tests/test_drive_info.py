@@ -476,7 +476,7 @@ def test_import_eac_idempotent_on_second_run(tmp_path: Path) -> None:
     xml = _xml_file(tmp_path, _EAC_XML_MINIMAL)
 
     import_eac_drives_xml(conn, xml)
-    result2, conflicts = import_eac_drives_xml(conn, xml)
+    result2, _conflicts = import_eac_drives_xml(conn, xml)
 
     assert result2.inserted == 0
     assert result2.skipped == 2
@@ -512,7 +512,7 @@ def test_import_eac_upgrade_fills_nulls(tmp_path: Path) -> None:
 
     # XML has c2_error_retrieval=? → still no-data, no upgrade expected
     xml = _xml_file(tmp_path, _EAC_XML_UPGRADE)
-    result, conflicts = import_eac_drives_xml(conn, xml)
+    result, _conflicts = import_eac_drives_xml(conn, xml)
 
     assert result.skipped == 1
     assert result.upgraded == 0
@@ -531,7 +531,7 @@ def test_import_eac_upgrade_when_null_in_db(tmp_path: Path) -> None:
     conn.commit()
 
     xml = _xml_file(tmp_path, _EAC_XML_UPGRADE)
-    result, conflicts = import_eac_drives_xml(conn, xml)
+    result, _conflicts = import_eac_drives_xml(conn, xml)
 
     assert result.upgraded == 1
     assert result.conflicts == 0
