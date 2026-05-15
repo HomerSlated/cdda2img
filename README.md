@@ -73,6 +73,10 @@ This is an active prototype. A Rust reimplementation is planned once the design 
 - **List and verify** — `l` prints container structure, track index, and optional block
   content (`--info`, `--rg`, `--ar`, `--log` flags); `t` runs 27 structural and checksum
   checks, exits non-zero on failure
+- **Disc catalogue** — SQLite database at `$XDG_DATA_HOME/cdda2img/cdda2img.db`; populated
+  automatically after every rip, import, or create; browsable via `cdda2img d` with a summary
+  page, full-text search across artist and album, and a per-disc track listing with AccurateRip
+  status and confidence per track
 - **SHA-256 checksums** for all blocks — stored in the block directory, verified on every
   extract and test
 - **Open, documented format** — `docs/reference/rbi_spec.md` fully specifies every field
@@ -81,8 +85,6 @@ This is an active prototype. A Rust reimplementation is planned once the design 
 
 - Foreign format import — read CUE/BIN, MDS/MDF, CCD/IMG/SUB, NRG as input;
   read-only plugins only, always converted to RBI first
-- **Music collection catalogue** — SQLite database of all created RBIs, queryable
-  by album, artist, remaster status, and more
 - TUI — Textual-based terminal UI with real-time VU metering and delivery-mode audition
   (compare unprocessed / normalised / ReplayGain before committing to an extract)
 - Rust reimplementation, once the design has stabilised
@@ -151,6 +153,10 @@ cdda2img i disc.toc --loudness none --output mydisc.rbi
 cdda2img l album.rbi
 cdda2img l album.rbi --ar
 cdda2img t album.rbi
+
+# Browse the disc catalogue
+cdda2img d
+cdda2img d --db /path/to/custom.db
 ```
 
 **Batching strategies** (`--strategy`):

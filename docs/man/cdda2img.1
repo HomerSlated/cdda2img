@@ -1,6 +1,6 @@
 .\" cdda2img.1 — manual page for cdda2img
 .\" Install: doas install -m 644 docs/man/cdda2img.1 /usr/local/share/man/man1/
-.TH CDDA2IMG 1 "2026\-05\-10" "cdda2img 0.1.6" "User Commands"
+.TH CDDA2IMG 1 "2026\-05\-15" "cdda2img 0.1.7" "User Commands"
 .\"
 .SH NAME
 cdda2img \- create and extract RBI audio CD archive images
@@ -33,6 +33,9 @@ cdda2img \- create and extract RBI audio CD archive images
 .br
 .B "cdda2img t"
 .I FILE.rbi
+.br
+.B "cdda2img d"
+.RI [ options ]
 .br
 .B "cdda2img \-\-version"
 .\"
@@ -309,6 +312,22 @@ Exits with status 1 if any check fails.
 .B "cdda2img t"
 .I FILE.rbi
 .\"
+.SS d \(em Browse catalogue
+Displays an interactive disc catalogue browser.
+Shows a summary of catalogued discs and enters a search loop that matches
+terms against artist and album names.
+Paged results can be drilled into for a full per\-track listing including
+AccurateRip status and confidence.
+Requires an interactive terminal.
+.PP
+.BI "cdda2img d " "[options]"
+.TP
+.BI \-\-db " PATH"
+Use the catalogue database at
+.I PATH
+instead of the default
+.IR $XDG_DATA_HOME/cdda2img/cdda2img.db .
+.\"
 .SH ENVIRONMENT
 .TP
 .B ACOUSTID_API_KEY
@@ -568,6 +587,14 @@ SQLite database caching the AccurateRip drive offset catalog.
 Created automatically on first rip.
 Default location:
 .IR ~/.local/share/cdda2img/drive_offsets.db .
+.TP
+.I $XDG_DATA_HOME/cdda2img/cdda2img.db
+Disc catalogue database.
+Populated automatically after every rip, import, or create.
+Browsable via
+.BR "cdda2img d" .
+Default location:
+.IR ~/.local/share/cdda2img/cdda2img.db .
 .\"
 .SH EXAMPLES
 Rip the disc in the default drive:

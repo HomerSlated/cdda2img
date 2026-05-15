@@ -105,19 +105,21 @@ def _show_summary(conn: object) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _search_loop(conn: object) -> None:
-    """Drive search/results loop until the user quits."""
+def _search_loop(conn: object) -> str:
+    """Drive search/results loop. Returns 'summary' (blank Enter) or 'quit' (q/EOF)."""
     while True:
         _header("Disc Catalogue — Search")
         print("  Enter search terms (artist, album, or partial match).")
         print("  Leave blank and press Enter to return to the summary.")
         query = _prompt("  > ").strip()
-        if not query or query == "q":
-            return
+        if not query:
+            return "summary"
+        if query == "q":
+            return "quit"
 
         result = _run_search(conn, query)
         if result != "search":
-            return
+            return "quit"
 
 
 def _run_search(conn: object, query: str) -> str | None:
@@ -162,7 +164,7 @@ def _results_loop(conn: object, rows: list, query: str) -> str | None:  # noqa: 
             print(
                 f"  {i:>3}  {_trunc(artist, 24):<24}  "
                 f"{_trunc((album or '') + disc_str, 28):<28}  "
-                f"  {(str(year) if year else ''):>4}  {n_tracks:>3}"
+                f"{(str(year) if year else ''):>4}  {n_tracks:>3}"
             )
 
         print()
@@ -352,7 +354,9 @@ def run_catalogue_menu(catalogue_path: Path | None = None) -> None:
 
     conn = open_catalogue_db(db_path)
     try:
-        _show_summary(conn)
-        _search_loop(conn)
+        while True:
+            _show_summary(conn)
+            if _search_loop(conn) != "summary":
+                break
     finally:
         conn.close()

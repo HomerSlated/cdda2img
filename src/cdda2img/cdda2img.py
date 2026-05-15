@@ -30,7 +30,12 @@ from cdda2img.rbi_format import (
     RBIDisc,
 )
 from cdda2img.silence import trim_silence_cd_da
-from cdda2img.toc import build_toc_entries, generate_toc, get_track_durations
+from cdda2img.toc import (
+    build_toc_entries,
+    generate_toc,
+    get_track_durations,
+    sanitize_title,
+)
 from cdda2img.transcode import transcode_audio
 
 log = logging.getLogger(__name__)
@@ -440,8 +445,6 @@ def _per_track_wavs(disc: RBIDisc, pcm_path: Path, out_dir: Path) -> list[Path]:
 def import_image(
     source: Path, loudness: str = "rg", output: Path | None = None
 ) -> None:
-    from cdda2img.toc import sanitize_title
-
     if not source.exists():
         msg = f"{source}: no such file or directory"
         raise FileNotFoundError(msg)
@@ -517,6 +520,11 @@ def _finalize_import(
 
     disc = prepopulate_from_mb(disc, verbose=sys.stdin.isatty())
     disc = run_metadata_menu(disc, source_pcm=pcm_file)
+
+    if output is None:
+        new_stem = sanitize_title(disc.album)
+        if new_stem:
+            output_stem = new_stem
 
     rlog_block: bytes | None = None
     if rlog_builder is not None:
@@ -691,7 +699,6 @@ def rip_image(
     from cdda2img.accuraterip import pack_arip_block, print_ar_report, verify_rip
     from cdda2img.cddb import compute_cddb_disc_id, prepopulate_from_cddb
     from cdda2img.config import load_config
-    from cdda2img.toc import sanitize_title
 
     cfg = load_config()
     read_offset, _write_offset, drive_name = _resolve_drive_offsets(device, cfg)

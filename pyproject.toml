@@ -1,6 +1,6 @@
 [project]
 name = "cdda2img"
-version = "0.1.6"
+version = "0.1.7"
 description = "Creates archive images of Red Book standard CD-DA Audio CDs"
 authors = [{ name = "Homer", email = "github@hazensparkle.co.uk" }]
 readme = "README.md"

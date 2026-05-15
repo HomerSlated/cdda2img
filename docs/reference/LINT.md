@@ -333,3 +333,47 @@ Format per entry:
 - **Decision:** `_` / `_disc` prefix is correct Python idiom. No code change needed.
   Note: `test_toc_roundtrip` (line 158) uses `disc` without underscore because it IS
   used — `disc.album` and `disc.artist` are asserted against the parsed values.
+
+---
+
+## LINT-015 — S101 assert isinstance guard for sqlite3 connections (`catalogue_menu.py`)
+
+- **Rule:** `ruff: S101` (assert-used)
+- **Locations:**
+  - `catalogue_menu.py:71` — `_show_summary`
+  - `catalogue_menu.py:129` — `_run_search`
+  - `catalogue_menu.py:209` — `_show_record`
+- **Rationale:** All three functions accept `conn: object` to defer `import sqlite3` to
+  call time — the same deferred-import pattern as `metadata_menu.py` (see LINT-005, LINT-006).
+  The `assert isinstance(conn, sqlite3.Connection)` guard serves two purposes: it narrows
+  the type for subsequent attribute accesses and enforces the caller contract at development
+  time. The only caller is `run_catalogue_menu()`, which constructs the connection via
+  `open_catalogue_db()` — the assert can never fire in production.
+- **Alternatives:**
+  - *Accept `sqlite3.Connection` directly* — would move `import sqlite3` to module level,
+    defeating the deferred-import pattern. Inconsistent with LINT-005/006.
+  - *Restructure to avoid the guard* — `conn: object` typing is intentional to keep the
+    module importable without sqlite3 being resolved at parse time.
+- **Decision:** `# noqa: S101` is correct. Same rationale as LINT-005/006.
+
+---
+
+## LINT-016 — C901 complexity in interactive TUI dispatch loops (`catalogue_menu.py`)
+
+- **Rule:** `ruff: C901` (complex-structure)
+- **Locations:**
+  - `catalogue_menu.py:148` — `_results_loop`
+  - `catalogue_menu.py:206` — `_show_record`
+- **Rationale:** Both functions implement interactive command dispatch loops. `_results_loop`
+  handles `n`/`p`/`s`/`q` navigation plus numeric entry selection (with `ValueError` handling
+  for non-integer input). `_show_record` handles `n`/`p`/`b` navigation with multi-page track
+  display. McCabe complexity is inflated by the exhaustive branch set. Extracting sub-functions
+  would require threading `page`, `rows`, `conn`, and return sentinels through the call stack —
+  adding indirection without reducing cognitive load. The loop body is linear and easy to follow.
+- **Alternatives:**
+  - *Extract branch handlers* — e.g. `_handle_nav(choice, page, total_pages)` — adds function
+    boundaries that obscure a single conceptual action (respond to one keypress) and still
+    requires passing shared state by reference.
+  - *Restructure as a state machine class* — disproportionate for a read-only browser.
+- **Decision:** `# noqa: C901` is correct. Interactive TUI dispatch loops are a well-established
+  pattern where high branch counts are inherent to the design.

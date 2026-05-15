@@ -99,6 +99,13 @@ def _print_disc_summary(disc: RBIDisc) -> None:
     if disc.catalog:
         print(f"  Catalog: {disc.catalog}")
     print(f"  Tracks:  {len(disc.tracks)}")
+    if disc.remastered_source != REMASTERED_UNKNOWN:
+        orig = (
+            f"  (orig. {disc.original_release_date[:4]})"
+            if disc.original_release_date
+            else ""
+        )
+        print(f"  Remaster: {disc.remastered_source}{orig}")
     if disc.tracks:
         print()
         print(f"  {'#':>2}  {'Title':<40}  {'ISRC'}")
@@ -177,7 +184,7 @@ def _select_from_results(
         nav.append("[b] back without selecting")
         print("  " + "  ".join(nav))
 
-        choice = _prompt(f"  Select 1-{total} or command: ").strip().lower()
+        choice = _prompt(f"  Select 1-{total}: ").strip().lower()
         if choice == "n" and page < total_pages - 1:
             page += 1
         elif choice == "p" and page > 0:
@@ -750,44 +757,110 @@ def _fetch_releases_for_group(
     return search_releases(query, limit=50), mb_rg_id
 
 
+def _set_remaster_manually(disc: RBIDisc) -> RBIDisc:
+    """Prompt the user to set remaster status and optional original year."""
+    _header("Set Remaster Status Manually")
+    print("  Is this a remaster?")
+    print()
+    print("  1  YES")
+    print("  2  NO")
+    print("  3  POSSIBLE")
+    print("  4  UNKNOWN")
+    print()
+    _status_map = {
+        "1": REMASTERED_YES,
+        "2": REMASTERED_NO,
+        "3": REMASTERED_POSSIBLE,
+        "4": REMASTERED_UNKNOWN,
+    }
+    while True:
+        choice = _prompt("  > ").strip()
+        if choice in _status_map:
+            status = _status_map[choice]
+            break
+        if choice in ("b", "q", ""):
+            return disc
+        print("  Enter 1, 2, 3, or 4.")
+
+    orig_year: str | None = None
+    if status == REMASTERED_YES:
+        error_flag = False
+        while True:
+            suffix = "  <- Must be a valid year!" if error_flag else ""
+            raw = _prompt(f"  Year of original release?{suffix} > ").strip()
+            if raw in ("b", "q", ""):
+                return disc
+            if len(raw) == 4 and raw.isdigit():
+                orig_year = raw
+                break
+            error_flag = True
+
+    disc.remastered_source = status
+    if orig_year is not None:
+        disc.original_release_date = orig_year
+    print(
+        f"  Set. REMASTERED_SOURCE: {status}"
+        + (f"  orig. {orig_year}" if orig_year else "")
+    )
+    return disc
+
+
 def _original_release_menu(
     disc: RBIDisc, mb_rg_id: str | None
 ) -> tuple[RBIDisc, str | None]:
-    _header("Find Original Release")
-    releases, mb_rg_id = _fetch_releases_for_group(disc, mb_rg_id)
-
-    if not releases:
-        print("  No results found.")
-        _prompt("  [Enter to return] ")
-        return disc, mb_rg_id
-
-    releases_sorted = sorted(releases, key=lambda m: m.release_date or "9999")
-    print(f"\n  {len(releases_sorted)} release(s) found, sorted earliest first.")
-
     while True:
-        selected = _select_from_results(
-            releases_sorted, "Original Release - Earliest First"
-        )
-        if selected is None:
-            return disc, mb_rg_id
-
-        _header("Selected Release")
-        _print_meta_summary(selected)
-        print()
-        assessment = _assess_remaster(selected)
-        print()
-        print("  [a]  Apply and set REMASTERED_SOURCE")
-        print("  [b]  Back to list")
+        _header("Find Original Release")
+        print("  [s]  Search MusicBrainz")
+        print("  [m]  Set manually")
+        print("  [b]  Back")
         choice = _prompt("  > ").strip().lower()
 
-        if choice == "a":
-            disc.original_release_date = (
-                selected.release_date or disc.original_release_date
-            )
-            disc.remastered_source = assessment
-            mb_rg_id = selected.mb_release_group_id or mb_rg_id
-            print(f"  Applied. REMASTERED_SOURCE: {assessment}")
+        if choice in ("b", "q", ""):
             return disc, mb_rg_id
+        elif choice == "m":
+            disc = _set_remaster_manually(disc)
+            return disc, mb_rg_id
+        elif choice != "s":
+            print("  Enter s, m, or b.")
+            continue
+
+        releases, mb_rg_id = _fetch_releases_for_group(disc, mb_rg_id)
+
+        if not releases:
+            print("  No results found.")
+            _prompt("  [Enter to return] ")
+            continue
+
+        releases_sorted = sorted(releases, key=lambda m: m.release_date or "9999")
+        print(f"\n  {len(releases_sorted)} release(s) found, sorted earliest first.")
+
+        while True:
+            selected = _select_from_results(
+                releases_sorted, "Original Release - Earliest First"
+            )
+            if selected is None:
+                break
+
+            _header("Selected Release")
+            _print_meta_summary(selected)
+            print()
+            assessment = _assess_remaster(selected)
+            print()
+            print("  [a]  Apply and set REMASTERED_SOURCE")
+            print("  [b]  Back to list")
+            sel_choice = _prompt("  > ").strip().lower()
+
+            if sel_choice == "a":
+                raw_date = selected.release_date or ""
+                disc.original_release_date = (
+                    raw_date[:4]
+                    if len(raw_date) >= 4 and raw_date[:4].isdigit()
+                    else (raw_date or disc.original_release_date)
+                )
+                disc.remastered_source = assessment
+                mb_rg_id = selected.mb_release_group_id or mb_rg_id
+                print(f"  Applied. REMASTERED_SOURCE: {assessment}")
+                return disc, mb_rg_id
 
 
 # ---------------------------------------------------------------------------

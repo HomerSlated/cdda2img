@@ -1,5 +1,27 @@
 # TODO
 
+## ✅ DONE — Metadata menu improvements + catalogue UI fixes (2026-05-15)
+
+303 tests; ruff + ty clean.
+
+- [x] **Remaster status in metadata summary** — `_print_disc_summary` shows
+  `Remaster: YES/POSSIBLE/NO (orig. YYYY)` when `remastered_source != UNKNOWN`.
+- [x] **Manual remaster entry** — `_set_remaster_manually()` added; 1–4 maps to
+  YES/NO/POSSIBLE/UNKNOWN; YES triggers year prompt with inline error for non-4-digit input.
+- [x] **Year-only date storage** — `original_release_date` pruned to `YYYY`.
+- [x] **`[r]` menu restructured** — `_original_release_menu` now shows `[s]`/`[m]`/`[b]`
+  before any MB fetch.
+- [x] **Results prompt simplified** — `"Select 1-N or command:"` → `"Select 1-N:"`.
+- [x] **Catalogue menu navigation fix** — blank Enter returns to summary; `_search_loop`
+  returns `"summary"` vs `"quit"` sentinel.
+- [x] **Year column alignment fix** — spurious spaces removed from year column.
+- [x] **Output filename fix** — `_finalize_import()` recomputes `output_stem` from
+  `disc.album` after `run_metadata_menu()`; `sanitize_title` moved to top-level import.
+- [x] **Docs: README, LINT (LINT-015/016), TODO, man page updated for v0.1.7**;
+  `d` subcommand documented in man page.
+
+---
+
 ## ✅ DONE — RBI v4.0, ARIP/RLOG blocks, x/l refactor, embed_rg_tags fix (2026-05-14)
 
 275 tests; ruff + ty clean.
@@ -1132,21 +1154,22 @@ documented defaults if absent.
 
 ---
 
-## Catalogue (deferred — low priority)
+## ✅ DONE — Disc Catalogue
 
 A local SQLite database tracking all RBI images created by this user, stored at
 `${XDG_DATA_HOME:-$HOME/.local/share}/cdda2img/cdda2img.db`.
-Populated automatically when an RBI is created; queryable via a `cdda2img db`
-subcommand.
+Populated automatically when an RBI is created; queryable via `cdda2img d`.
 
-Initial schema: `albums` (album, artist, disc_number, disc_total, track_count,
-duration_s, rbi_path, sha256, created_at), `tracks` (album_id, track_number,
-title, isrc, duration_frames), `release_meta` (album_id, this_year, original_year,
-this_mcn, original_mcn, remaster_status, mb_release_id).
+Schema: `catalogue` (album, artist, year, disc_number, disc_total, track_count,
+mcn, remaster, mode, source, ripper, drive, rg fields, file_basename, file_path,
+file_size, registered_at), `catalogue_tracks` (catalogue_id, track_number, title,
+duration_frames, rg per-track fields, ar_v1_crc, ar_v2_crc, ar_status,
+ar_confidence), `release_meta` (album_id, this_year, original_year, this_mcn,
+original_mcn, remaster_status, mb_release_id).
 
-- [ ] Design `catalogue.py` — SQLite schema, insert/query API
-- [ ] Populate catalogue automatically on `c` subcommand completion
-- [ ] Implement `cdda2img db` subcommand: list, search, show
+- [x] Design `catalogue.py` — SQLite schema, insert/query API
+- [x] Populate catalogue automatically on `c`, `r`, and `i` subcommand completion
+- [x] Implement `cdda2img d` subcommand: summary, full-text search, per-disc track listing
 
 ### Release intelligence (remaster detection)
 
