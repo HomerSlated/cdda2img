@@ -159,7 +159,7 @@ A conforming v4.0 writer **MUST NOT** write more than one entry of a given `type
 
 ### 6.1 TOC Block (`b"TOC "`)
 
-The TOC block is a UTF-8 encoded plain-text file in cdrdao TOC format. It is self-contained and human-readable. Comments (`//`) **MAY** appear for human readability but **MUST NOT** carry cdda2img-specific metadata; all proprietary cdda2img data belongs in the PROV block.
+The TOC block is a UTF-8 encoded plain-text file in cdrdao TOC format. It is self-contained and human-readable. Comments (`//`) **MAY** appear for human readability. Undefined `//` comments **MUST** be ignored by readers; all proprietary cdda2img metadata belongs in the PROV block. The one exception is the defined extension comment `// TRACK_TITLE_UNICODE:` (see §6.1.8), which readers **MUST** preserve and parse.
 
 #### 6.1.1 Structure
 
@@ -175,10 +175,12 @@ CD_TEXT {
   LANGUAGE 0 {
     TITLE "<album title>"
     PERFORMER "<album artist>"
+    DISC_ID "<label catalogue ref>"
   }
 }
 
 // Track 1
+// TRACK_TITLE_UNICODE: "<original Unicode title as JSON string>"
 TRACK AUDIO
 NO COPY
 NO PRE_EMPHASIS
@@ -186,16 +188,24 @@ TWO_CHANNEL_AUDIO
 ISRC "GBAYE9300135"
 CD_TEXT {
   LANGUAGE 0 {
+    TITLE "<sanitised ASCII title>"
+    PERFORMER "<track artist>"
+  }
+}
+FILE "<album>.bin" MM:SS:FF MM:SS:FF
+
+// Track 2 (with pre-gap)
+TRACK AUDIO
+NO COPY
+NO PRE_EMPHASIS
+TWO_CHANNEL_AUDIO
+CD_TEXT {
+  LANGUAGE 0 {
     TITLE "<track title>"
     PERFORMER "<track artist>"
   }
 }
-FILE "<album>.pcm" MM:SS:FF MM:SS:FF
-
-// Track 2 (with pre-gap)
-TRACK AUDIO
-...
-FILE "<album>.pcm" MM:SS:FF MM:SS:FF
+FILE "<album>.bin" MM:SS:FF MM:SS:FF
 START MM:SS:FF
 
 // Track 3
@@ -221,7 +231,7 @@ Conversion: `total_frames = MM × 75 × 60 + SS × 75 + FF`
 
 #### 6.1.3 FILE reference
 
-The filename in each `FILE` line uses the extension `.pcm` to reflect that the payload is raw PCM. The stem is the sanitised album title. On extraction, a WAV file is reconstructed from the raw PCM using the audio parameters in the fixed header.
+The filename in each `FILE` line uses the extension `.bin` and the sanitised album title as the stem (e.g. `"Led Zeppelin - IV.bin"`). The extension is an internal identifier only — the PCM block contains raw s16le audio, not a binary blob. On extraction, a WAV or FLAC file is reconstructed from the raw PCM using the audio parameters in the fixed header.
 
 #### 6.1.4 ISRC
 
@@ -250,6 +260,43 @@ Track and album titles are sanitised before embedding:
 - Ellipsis (`…`) → three periods (`...`)
 - Leading two-digit track number prefix (`01 `) stripped
 - Remaining non-ASCII characters removed
+
+Sanitisation is applied to both `TITLE` and `PERFORMER` values in disc-level and track-level `CD_TEXT` blocks.
+
+#### 6.1.7 DISC_ID field
+
+The `DISC_ID` field in the disc-level `LANGUAGE 0` block corresponds to CD-Text PTI `0x86` — a label catalogue reference string. It is optional; omitted when no `disc_id` is available. Double-quote characters within the value are replaced with single quotes before embedding.
+
+Field ordering within `LANGUAGE 0`: `TITLE`, `PERFORMER`, `DISC_ID` (if present).
+
+#### 6.1.8 TRACK_TITLE_UNICODE extension comment
+
+The cdrdao TOC grammar constrains `TITLE` strings to ASCII (non-ASCII characters in titles are removed by sanitisation). When the original title contains non-ASCII characters, the original Unicode title is preserved via a defined extension comment immediately before the `TRACK AUDIO` line:
+
+```
+// TRACK_TITLE_UNICODE: <json-string>
+```
+
+where `<json-string>` is the original title encoded as a JSON string literal (double-quoted, with standard JSON escaping). This comment is present only when the original title differs from the sanitised ASCII title; it is absent for pure-ASCII titles.
+
+Readers implementing cdda2img `x` (extract) **MUST** parse this comment and use the recovered Unicode title as the FLAC `TITLE` vorbis comment and output filename. Readers that do not implement extraction **MAY** ignore it.
+
+Grammar (ABNF):
+```
+unicode-comment = "//" SP "TRACK_TITLE_UNICODE:" SP json-string
+json-string     = DQUOTE *( json-char ) DQUOTE
+```
+
+#### 6.1.9 Canonical formatting rules
+
+The `generate_toc()` function produces a canonical, deterministic TOC encoding. The same `RBIDisc` always produces identical bytes. Canonical rules:
+
+1. **Encoding**: UTF-8, Unix line endings (`\n`), file ends with `\n`.
+2. **Blank lines**: one blank line after the `CD_DA` line; one after `CATALOG` (if present); one after the disc-level `CD_TEXT` block; one blank line at the end of each track block.
+3. **Indentation**: `LANGUAGE_MAP`, `LANGUAGE N`, and their closing `}` lines are indented 2 spaces inside `CD_TEXT {`; inner fields (`TITLE`, `PERFORMER`, `DISC_ID`) are indented 4 spaces.
+4. **Disc-level field order**: `CD_DA` → `CATALOG` (if present) → `CD_TEXT { LANGUAGE_MAP ... LANGUAGE 0 { TITLE PERFORMER DISC_ID } }`.
+5. **Track field order**: `// Track N` → `// TRACK_TITLE_UNICODE:` (if needed) → `TRACK AUDIO` → `NO COPY` → `NO PRE_EMPHASIS` → `TWO_CHANNEL_AUDIO` → `ISRC` (if present) → `CD_TEXT { LANGUAGE 0 { TITLE PERFORMER } }` → `FILE` → `START` (if present).
+6. **FILE start position**: always formatted as `MM:SS:FF` (e.g. `00:00:00` for track 1); never the bare integer `0`.
 
 ---
 

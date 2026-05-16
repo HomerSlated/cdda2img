@@ -1,0 +1,204 @@
+"""
+test_toc.py — Round-trip and canonical-format tests for generate_toc / parse_toc.
+"""
+
+from cdda2img.cdrdao_reader import parsed_to_rbi_disc
+from cdda2img.rbi_format import RBIDisc, RBITocEntry
+from cdda2img.toc import generate_toc, sanitize_title
+from cdda2img.toc_parser import parse_toc
+
+# ---------------------------------------------------------------------------
+# Shared fixture — covers the full optional-field surface:
+#   catalog set, disc_id set,
+#   track 1: ISRC + no pregap
+#   track 2: pregap only
+#   track 3: ISRC + pregap
+#   track 4: bare (neither)
+# ---------------------------------------------------------------------------
+
+_FRAMES_PER_MIN = 75 * 60
+
+
+def _make_disc() -> RBIDisc:
+    disc = RBIDisc(
+        album="Test Album",
+        artist="Test Artist",
+        catalog="0724383697724",
+        disc_id="CAT-001",
+    )
+    disc.tracks = [
+        RBITocEntry(
+            track_number=1,
+            title="Track One",
+            performer="Test Artist",
+            start_frame=0,
+            duration_frames=_FRAMES_PER_MIN * 3,
+            pregap_frames=0,
+            isrc="GBAYE9300001",
+        ),
+        RBITocEntry(
+            track_number=2,
+            title="Track Two",
+            performer="Test Artist",
+            start_frame=_FRAMES_PER_MIN * 3,
+            duration_frames=_FRAMES_PER_MIN * 4,
+            pregap_frames=150,  # 2-second pregap
+            isrc=None,
+        ),
+        RBITocEntry(
+            track_number=3,
+            title="Track Three",
+            performer="Test Artist",
+            start_frame=_FRAMES_PER_MIN * 7 + 150,
+            duration_frames=_FRAMES_PER_MIN * 3,
+            pregap_frames=75,  # 1-second pregap
+            isrc="GBAYE9300003",
+        ),
+        RBITocEntry(
+            track_number=4,
+            title="Track Four",
+            performer="Test Artist",
+            start_frame=_FRAMES_PER_MIN * 10 + 225,
+            duration_frames=_FRAMES_PER_MIN * 5,
+            pregap_frames=0,
+            isrc=None,
+        ),
+    ]
+    return disc
+
+
+# ---------------------------------------------------------------------------
+# Determinism
+# ---------------------------------------------------------------------------
+
+
+def test_toc_generate_is_deterministic() -> None:
+    disc = _make_disc()
+    assert generate_toc(disc) == generate_toc(disc)
+
+
+# ---------------------------------------------------------------------------
+# Field round-trip: parse(generate(disc)) preserves every field
+# ---------------------------------------------------------------------------
+
+
+def test_toc_fields_round_trip() -> None:
+    disc = _make_disc()
+    toc_bytes = generate_toc(disc)
+    parsed = parse_toc(toc_bytes)
+
+    assert parsed.title == sanitize_title(disc.album)
+    assert parsed.performer == sanitize_title(disc.artist)
+    assert parsed.catalog == disc.catalog
+    assert parsed.disc_id == disc.disc_id
+    assert len(parsed.tracks) == len(disc.tracks)
+
+    for pt, rt in zip(parsed.tracks, disc.tracks):
+        assert pt.track_number == rt.track_number
+        assert pt.title == rt.title
+        assert pt.performer == sanitize_title(rt.performer)
+        assert pt.isrc == rt.isrc
+        assert pt.duration_frames == rt.duration_frames
+        assert pt.pregap_frames == rt.pregap_frames
+        assert pt.start_frame == rt.start_frame
+
+
+# ---------------------------------------------------------------------------
+# Byte-identical round-trip: parse → parsed_to_rbi_disc → generate
+# Only valid for pure-ASCII titles (sanitisation is idempotent on ASCII).
+# ---------------------------------------------------------------------------
+
+
+def test_toc_bytes_round_trip() -> None:
+    disc1 = _make_disc()
+    toc1 = generate_toc(disc1)
+    parsed = parse_toc(toc1)
+    disc2 = parsed_to_rbi_disc(parsed)
+    toc2 = generate_toc(disc2)
+    assert toc1 == toc2
+
+
+# ---------------------------------------------------------------------------
+# TRACK_TITLE_UNICODE comment: written when needed, absent otherwise
+# ---------------------------------------------------------------------------
+
+
+def test_toc_unicode_comment_present() -> None:
+    disc = _make_disc()
+    raw_titles = ["Träck Öne", "Track Two", "Track Three", "Track Four"]
+    toc_bytes = generate_toc(disc, raw_titles=raw_titles)
+    toc_text = toc_bytes.decode("utf-8")
+
+    # Comment must be present for track 1 (title differs after sanitisation)
+    assert "// TRACK_TITLE_UNICODE:" in toc_text
+    parsed = parse_toc(toc_bytes)
+    assert parsed.tracks[0].title == "Träck Öne"
+
+
+def test_toc_unicode_comment_absent_for_ascii() -> None:
+    disc = _make_disc()
+    # raw_titles identical to sanitised titles — no comment needed
+    raw_titles = [t.title for t in disc.tracks]
+    toc_bytes = generate_toc(disc, raw_titles=raw_titles)
+    toc_text = toc_bytes.decode("utf-8")
+
+    assert "// TRACK_TITLE_UNICODE:" not in toc_text
+
+
+def test_toc_unicode_comment_recovery() -> None:
+    disc = _make_disc()
+    # Track 2 gets a curly-quote title; sanitiser converts it to ASCII
+    disc.tracks[1].title = sanitize_title("It’s Alive")  # noqa: RUF001
+    raw_titles = [t.title for t in disc.tracks]
+    raw_titles[1] = "It’s Alive"  # noqa: RUF001  # Unicode original
+    toc_bytes = generate_toc(disc, raw_titles=raw_titles)
+    parsed = parse_toc(toc_bytes)
+    assert parsed.tracks[1].title == "It’s Alive"  # noqa: RUF001
+    assert parsed.tracks[0].title == disc.tracks[0].title  # unchanged
+
+
+# ---------------------------------------------------------------------------
+# Canonical formatting spot-checks
+# ---------------------------------------------------------------------------
+
+
+def test_toc_file_extension_is_bin() -> None:
+    disc = _make_disc()
+    toc_text = generate_toc(disc).decode("utf-8")
+    assert '.bin"' in toc_text
+    assert '.pcm"' not in toc_text
+
+
+def test_toc_file_start_uses_timestamp_not_zero() -> None:
+    """Track 1 start should be 00:00:00, not bare 0 (canonical rule §6.1.9.6)."""
+    disc = _make_disc()
+    toc_text = generate_toc(disc).decode("utf-8")
+    # The FILE line for track 1 starts at 00:00:00
+    assert 'FILE "' in toc_text
+    assert '" 00:00:00 ' in toc_text
+
+
+def test_toc_unix_line_endings() -> None:
+    disc = _make_disc()
+    toc_bytes = generate_toc(disc)
+    assert b"\r\n" not in toc_bytes
+    assert toc_bytes.endswith(b"\n")
+
+
+def test_toc_optional_fields_absent_when_none() -> None:
+    disc = RBIDisc(album="Bare Album", artist="Bare Artist")
+    disc.tracks = [
+        RBITocEntry(
+            track_number=1,
+            title="Only Track",
+            performer="Bare Artist",
+            start_frame=0,
+            duration_frames=_FRAMES_PER_MIN * 3,
+        )
+    ]
+    toc_text = generate_toc(disc).decode("utf-8")
+    assert "CATALOG" not in toc_text
+    assert "DISC_ID" not in toc_text
+    assert "ISRC" not in toc_text
+    assert "START" not in toc_text
+    assert "TRACK_TITLE_UNICODE" not in toc_text
