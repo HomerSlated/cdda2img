@@ -1019,9 +1019,11 @@ def mount_image(
 ) -> None:
     from cdda2img.cdemu import mount_rbi
 
-    slot_used, toc_path = mount_rbi(rbi_file, slot=slot, mnt_dir=mnt_dir)
+    slot_used, toc_path, device = mount_rbi(rbi_file, slot=slot, mnt_dir=mnt_dir)
+    dev_str = device or f"/dev/sr?  (slot {slot_used} — run: cdemu device-mapping)"
     print(f"Mounted in cdemu slot {slot_used}: {toc_path}")
-    print(f"Re-rip:  cdrdao read-cd --device /dev/vhba_cd{slot_used} disc.toc")
+    print(f"Device:  {dev_str}")
+    print(f"Re-rip:  cdrdao read-cd --device {dev_str} disc.toc")
     print(f"Unload:  cdemu unload {slot_used}")
 
 

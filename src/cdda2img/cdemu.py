@@ -26,6 +26,23 @@ def _run_cdemu(*args: str) -> subprocess.CompletedProcess:  # type: ignore[type-
         raise RuntimeError(msg) from e
 
 
+def cdemu_device_mapping() -> dict[int, str]:
+    """Return {slot: /dev/sr* path} from ``cdemu device-mapping``.
+
+    Returns an empty dict if the command fails or produces no output
+    (older cdemu versions without the subcommand).
+    """
+    result = _run_cdemu("device-mapping")
+    if result.returncode != 0:
+        return {}
+    mapping: dict[int, str] = {}
+    for line in result.stdout.splitlines():
+        parts = line.split()
+        if len(parts) >= 2 and parts[0].isdigit():
+            mapping[int(parts[0])] = parts[1]
+    return mapping
+
+
 def cdemu_status() -> list[CdemuDevice]:
     result = _run_cdemu("status")
     if result.returncode != 0:
@@ -63,10 +80,11 @@ def mount_rbi(
     rbi_file: Path,
     slot: int | None = None,
     mnt_dir: Path | None = None,
-) -> tuple[int, Path]:
+) -> tuple[int, Path, str | None]:
     """Extract raw TOC+BIN from *rbi_file* and load into a cdemu virtual slot.
 
-    Returns (slot, toc_path) on success.  toc_path is absolute.
+    Returns (slot, toc_path, device) on success.  toc_path is absolute.
+    device is the /dev/sr* node for the slot, or None if unavailable.
     """
     from cdda2img.container import ExtractOptions, extract_data
 
@@ -99,4 +117,6 @@ def mount_rbi(
         raise RuntimeError(msg)
 
     _load_slot(slot, toc_path)
-    return slot, toc_path
+    mapping = cdemu_device_mapping()
+    device = mapping.get(slot)
+    return slot, toc_path, device
