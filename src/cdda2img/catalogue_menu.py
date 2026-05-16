@@ -105,11 +105,23 @@ def _show_summary(conn: object) -> None:
 # ---------------------------------------------------------------------------
 
 
+def _summary_prompt() -> str:
+    """Show action prompt on the summary page. Returns 'search' or 'quit'."""
+    print()
+    print("  [s] search  [q] quit")
+    while True:
+        choice = _prompt("  > ").strip().lower()
+        if choice in ("s", ""):
+            return "search"
+        if choice == "q":
+            return "quit"
+
+
 def _search_loop(conn: object) -> str:
     """Drive search/results loop. Returns 'summary' (blank Enter) or 'quit' (q/EOF)."""
     while True:
         _header("Disc Catalogue — Search")
-        print("  Enter search terms (artist, album, or partial match).")
+        print("  Enter search terms (artist, album, year, or track title).")
         print("  Leave blank and press Enter to return to the summary.")
         query = _prompt("  > ").strip()
         if not query:
@@ -130,11 +142,12 @@ def _run_search(conn: object, query: str) -> str | None:
 
     like = f"%{query}%"
     rows = conn.execute(
-        "SELECT id, artist, album, year, disc_number, disc_total, track_count "
-        "FROM catalogue "
-        "WHERE artist LIKE ? OR album LIKE ? "
-        "ORDER BY artist, album, disc_number",
-        (like, like),
+        "SELECT DISTINCT c.id, c.artist, c.album, c.year, c.disc_number, c.disc_total, c.track_count "
+        "FROM catalogue c "
+        "LEFT JOIN catalogue_tracks ct ON ct.catalogue_id = c.id "
+        "WHERE c.artist LIKE ? OR c.album LIKE ? OR CAST(c.year AS TEXT) LIKE ? OR ct.title LIKE ? "
+        "ORDER BY c.artist, c.album, c.disc_number",
+        (like, like, like, like),
     ).fetchall()
 
     if not rows:
@@ -174,6 +187,7 @@ def _results_loop(conn: object, rows: list, query: str) -> str | None:  # noqa: 
         if page < total_pages - 1:
             nav.append("[n] next")
         nav.append("[s] new search")
+        nav.append("[d] delete")
         nav.append("[q] quit")
         print("  " + "  ".join(nav))
 
@@ -186,6 +200,32 @@ def _results_loop(conn: object, rows: list, query: str) -> str | None:  # noqa: 
             return "search"
         elif choice == "q":
             return None
+        elif choice == "d":
+            del_str = _prompt(f"  Delete which entry (1-{total})? ").strip()
+            try:
+                del_idx = int(del_str) - 1
+                if 0 <= del_idx < total:
+                    import sqlite3
+
+                    assert isinstance(conn, sqlite3.Connection)  # noqa: S101
+                    rec = rows[del_idx]
+                    label = f"{rec[1] or ''} — {rec[2] or ''}"
+                    confirm = _prompt(f"  Delete {label!r}? [y/N] ").strip().lower()
+                    if confirm == "y":
+                        with conn:
+                            conn.execute("DELETE FROM catalogue WHERE id=?", (rec[0],))
+                        rows = [r for r in rows if r[0] != rec[0]]
+                        total = len(rows)
+                        total_pages = max(1, (total + _PAGE - 1) // _PAGE)
+                        page = min(page, max(0, total_pages - 1))
+                        print("  Deleted.")
+                        if total == 0:
+                            _prompt("  No results remain. [Enter to search again] ")
+                            return "search"
+                else:
+                    print("  Invalid selection.")
+            except ValueError:
+                print("  Invalid selection.")
         else:
             try:
                 idx = int(choice) - 1
@@ -356,7 +396,9 @@ def run_catalogue_menu(catalogue_path: Path | None = None) -> None:
     try:
         while True:
             _show_summary(conn)
-            if _search_loop(conn) != "summary":
+            if _summary_prompt() == "quit":
+                break
+            if _search_loop(conn) == "quit":
                 break
     finally:
         conn.close()

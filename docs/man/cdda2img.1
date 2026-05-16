@@ -69,8 +69,14 @@ which captures the full subchannel data in one pass: MCN (Q\-channel Mode 2),
 per\-track ISRC (Q\-channel Mode 3), and CD\-Text (R\-W subchannels).
 If cdrdao fails, the fallback path uses the
 .B cd\-paranoia
-binary with jitter correction and overlapping reads; subchannel data is not available
+binary with full jitter correction and overlapping reads; subchannel data is not available
 on the fallback path.
+If AccurateRip verification subsequently reports mismatches on one or more tracks
+(indicating disc read errors rather than an offset problem), the disc is re-ripped with
+.B cd\-paranoia
+running at full paranoia.
+Disc metadata captured during the original cdrdao pass (MCN, ISRC, CD\-Text) is
+preserved even when the audio is re-ripped.
 .PP
 Before each rip,
 .B cdda2img r
@@ -327,10 +333,21 @@ Exits with status 1 if any check fails.
 .\"
 .SS d \(em Browse catalogue
 Displays an interactive disc catalogue browser.
-Shows a summary of catalogued discs and enters a search loop that matches
-terms against artist and album names.
-Paged results can be drilled into for a full per\-track listing including
-AccurateRip status and confidence.
+The summary screen shows disc, track, and artist counts and lists the top artists;
+press
+.B s
+to open the search screen or
+.B q
+to quit.
+The search screen matches terms against artist name, album title, year, or track title.
+From the paged results list, select a number to drill into the full per\-track detail
+(including AccurateRip status and confidence), press
+.B d
+to delete an entry with confirmation, press
+.B s
+for a new search, or press
+.B q
+to quit.
 Requires an interactive terminal.
 .PP
 .BI "cdda2img d " "[options]"
@@ -417,33 +434,12 @@ mkdir \-p ~/.config/cdda2img
 cat > ~/.config/cdda2img/cdda2img.toml << 'EOF'
 # cdda2img configuration
 
-# CD drive read offset in samples (4 bytes per sample, stereo).
-# Find your drive at https://www.accuraterip.com/driveoffsets.htm
-# Default: 0 (no offset correction)
-drive_offset = 30
-
 # CDDB server for disc metadata lookup (host:port).
 # cddb_server = "cddb.retrobridge.org:888"
 EOF
 .fi
 .RE
 .SS Configuration keys
-.TP
-.BI "drive_offset = " 0
-Global fallback sample read offset (integer, samples), used when the drive is
-not found in the AccurateRip catalog and has no per-drive
-.B [[drives]]
-entry.
-Sign convention: positive means the drive reads ahead of the disc write position
-(e.g. Plextor PX\-716A = +30).
-In practice this setting is rarely needed: on first rip
-.B cdda2img r
-queries the AccurateRip drive offset catalog and, on a confident match, saves
-the result to
-.B [[drives]]
-automatically.
-Default:
-.BR 0 .
 .TP
 .BI "cddb_server = " \(dqcddb.retrobridge.org:888\(dq
 CDDB server used for automatic disc identification during
@@ -498,9 +494,7 @@ The
 field must match the normalised sysfs drive name printed by
 .B cdda2img r
 at rip time.
-A per-drive entry always takes precedence over the global
-.B drive_offset
-setting.
+A per-drive entry is always authoritative and bypasses the AccurateRip catalog lookup.
 .\"
 .SH HARDWARE SETUP
 The
@@ -605,7 +599,8 @@ in a single pass.
 Not required for creating, extracting, or verifying RBI images.
 .TP
 .B cd\-paranoia
-Used as the fallback rip path when cdrdao fails.
+Used as the fallback rip path when cdrdao fails, and for full-paranoia re-rips
+triggered by AccurateRip track mismatches.
 Provides jitter correction and overlapping reads.
 The
 .B cd\-paranoia
