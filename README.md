@@ -29,7 +29,7 @@ This is an active prototype. A Rust reimplementation is planned once the design 
   trimming (−55 dBFS) and 2-second Red Book inter-track gaps
 - **Physical disc ripping** — `r` subcommand rips directly from `/dev/sr0` (or any
   optical drive); primary path uses cdrdao (captures MCN, ISRC, and CD-Text in one pass);
-  fallback uses libcdio-paranoia (full paranoia correction) when cdrdao fails
+  fallback uses the `cd-paranoia` binary (full paranoia correction) when cdrdao fails
 - **AccurateRip v1/v2 verification** — per-track checksum computed against the AccurateRip
   database after every rip; matches against all drive-offset groups; reports confidence
   and mismatch status per track; results are stored in an ARIP block inside the RBI
@@ -70,6 +70,9 @@ This is an active prototype. A Rust reimplementation is planned once the design 
   - `--ar` — AccurateRip report as `.accurip`
   - `--log` — rip log as `.log`
   - `--normalize` — EBU R128 normalisation at −18 LUFS on extracted FLACs
+- **Virtual disc mount** — `m` extracts a TOC+BIN scratch copy and loads it into a cdemu
+  virtual slot; the mounted disc is then visible to cdrdao, whipper, or any other ripper
+  for re-ripping, verification, or playback
 - **List and verify** — `l` prints container structure, track index, and optional block
   content (`--info`, `--rg`, `--ar`, `--log` flags); `t` runs 27 structural and checksum
   checks, exits non-zero on failure
@@ -157,6 +160,10 @@ cdda2img t album.rbi
 # Browse the disc catalogue
 cdda2img d
 cdda2img d --db /path/to/custom.db
+
+# Mount as a virtual disc via cdemu (first free slot)
+cdda2img m album.rbi
+cdda2img m album.rbi --slot 1 --mnt-dir /tmp/mnt
 ```
 
 **Batching strategies** (`--strategy`):

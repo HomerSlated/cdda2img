@@ -37,6 +37,10 @@ cdda2img \- create and extract RBI audio CD archive images
 .B "cdda2img d"
 .RI [ options ]
 .br
+.B "cdda2img m"
+.RI [ options ]
+.I FILE.rbi
+.br
 .B "cdda2img \-\-version"
 .\"
 .SH DESCRIPTION
@@ -63,9 +67,9 @@ The primary rip path uses
 .BR cdrdao ,
 which captures the full subchannel data in one pass: MCN (Q\-channel Mode 2),
 per\-track ISRC (Q\-channel Mode 3), and CD\-Text (R\-W subchannels).
-If cdrdao fails, the fallback path uses
-.B libcdio\-paranoia
-with jitter correction and overlapping reads; subchannel data is not available
+If cdrdao fails, the fallback path uses the
+.B cd\-paranoia
+binary with jitter correction and overlapping reads; subchannel data is not available
 on the fallback path.
 .PP
 Before each rip,
@@ -328,6 +332,33 @@ Use the catalogue database at
 instead of the default
 .IR $XDG_DATA_HOME/cdda2img/cdda2img.db .
 .\"
+.SS m \(em Mount
+Mounts an RBI image as a virtual CD\-DA disc via cdemu.
+The image is first extracted to a scratch directory (TOC + BIN),
+then loaded into a free cdemu slot with
+.BR "cdemu load" .
+After mounting, the virtual disc is accessible to any application
+that reads optical drives, including cdrdao for re-ripping.
+.PP
+.BI "cdda2img m " "[options] FILE.rbi"
+.TP
+.BI \-\-slot " N"
+cdemu device slot to load the image into (default: first free slot).
+Fails if the specified slot is already loaded.
+.TP
+.BI \-\-mnt\-dir " PATH"
+Directory for the extracted TOC and BIN scratch files
+(default:
+.IR ./mnt ).
+.PP
+After a successful mount,
+.B cdda2img m
+prints the cdemu slot number, the TOC path, and reminder commands for
+re-ripping and unloading.
+The cdemu daemon must be running and the
+.B vhba
+kernel module must be loaded.
+.\"
 .SH ENVIRONMENT
 .TP
 .B ACOUSTID_API_KEY
@@ -523,7 +554,22 @@ does not require root.
 uses cdrdao with the default
 .B generic\-mmc
 driver (no vendor\-specific commands) and does not require root.
-The libcdio\-paranoia fallback path likewise issues only standard MMC commands.
+The cd\-paranoia fallback path likewise issues only standard MMC commands.
+.PP
+The
+.B m
+subcommand does not access a physical disc drive.
+It requires the cdemu daemon to be running and the
+.B vhba
+kernel module to be loaded.
+Start cdemu with:
+.PP
+.RS
+.nf
+modprobe vhba
+cdemu daemon
+.fi
+.RE
 .\"
 .SH SYSTEM DEPENDENCIES
 .SS Required
@@ -549,18 +595,28 @@ The rip path uses cdrdao to capture subchannel data (MCN, ISRC, CD\-Text)
 in a single pass.
 Not required for creating, extracting, or verifying RBI images.
 .TP
-.B libcdio\-paranoia
+.B cd\-paranoia
 Used as the fallback rip path when cdrdao fails.
-Provides jitter correction and overlapping reads via
-.BR libcdio_cdda.so.2
-and
-.BR libcdio_paranoia.so.2 .
+Provides jitter correction and overlapping reads.
+The
+.B cd\-paranoia
+binary is part of libcdio\-paranoia; only the runtime package is needed.
 Package name:
 .B libcdio\-paranoia
 (Void Linux),
-.B libcdio\-paranoia\-dev
+.B libcdio\-paranoia2
 (Debian/Ubuntu).
 Not required for creating, importing, extracting, or verifying RBI images.
+.TP
+.B cdemu\-daemon
+Required for
+.BR "cdda2img m" .
+The cdemu daemon creates virtual CD drives; the
+.B vhba
+kernel module provides the virtual SCSI host.
+Package name:
+.B cdemu\-daemon
+(most distributions).
 .SS Python packages
 All Python dependencies are installed automatically by
 .BR uv :
@@ -691,6 +747,22 @@ Verify container integrity:
 .RS
 .nf
 cdda2img t album.rbi
+.fi
+.RE
+.PP
+Mount an RBI image as a virtual disc via cdemu (into the first free slot):
+.PP
+.RS
+.nf
+cdda2img m album.rbi
+.fi
+.RE
+.PP
+Mount into a specific slot and write scratch files to a named directory:
+.PP
+.RS
+.nf
+cdda2img m album.rbi \-\-slot 1 \-\-mnt\-dir /tmp/mnt
 .fi
 .RE
 .\"
