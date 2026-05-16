@@ -17,10 +17,23 @@ def concat_wav(input_files: list[Path], output_path: Path) -> None:
         raise ValueError(msg)
 
     with wave.open(str(output_path), "wb") as out:
-        params_set = False
+        ref_params: wave._wave_params | None = None  # type: ignore[name-defined]
         for path in input_files:
             with wave.open(str(path), "rb") as inp:
-                if not params_set:
-                    out.setparams(inp.getparams())
-                    params_set = True
+                params = inp.getparams()
+                if ref_params is None:
+                    ref_params = params
+                    out.setparams(params)
+                elif (params.nchannels, params.sampwidth, params.framerate) != (
+                    ref_params.nchannels,
+                    ref_params.sampwidth,
+                    ref_params.framerate,
+                ):
+                    msg = (
+                        f"{path.name}: WAV parameters do not match first file "
+                        f"(channels={params.nchannels} width={params.sampwidth} "
+                        f"rate={params.framerate} vs "
+                        f"{ref_params.nchannels}/{ref_params.sampwidth}/{ref_params.framerate})"
+                    )
+                    raise ValueError(msg)
                 out.writeframes(inp.readframes(inp.getnframes()))

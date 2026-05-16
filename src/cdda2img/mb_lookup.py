@@ -33,11 +33,16 @@ log = logging.getLogger(__name__)
 
 _LEAD_IN_SECTORS = 150  # standard 2-second Red Book lead-in
 
-musicbrainzngs.set_useragent(
-    "cdda2img",
-    importlib.metadata.version("cdda2img"),
-    "keith.g.rt@gmail.com",
-)
+
+def _setup_useragent() -> None:
+    from cdda2img.config import load_config
+
+    cfg = load_config()
+    musicbrainzngs.set_useragent(
+        "cdda2img",
+        importlib.metadata.version("cdda2img"),
+        cfg.contact_email or None,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -528,6 +533,7 @@ def prepopulate_from_mb(disc: RBIDisc, *, verbose: bool = True) -> RBIDisc:
     MusicBrainz result and a summary line is printed (when *verbose* is True).
     On zero or multiple matches (or network error) *disc* is returned unchanged.
     """
+    _setup_useragent()
     matches = lookup_disc_id(disc)
     if not matches:
         return disc

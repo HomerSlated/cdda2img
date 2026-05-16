@@ -380,88 +380,92 @@ def create_image(
     for disc_num, batch in enumerate(batches, start=1):
         print(f"\nDisc {disc_num}/{disc_total}: {len(batch)} tracks")
         temp = TempFiles(temp_base)
-        source_wavs: list[Path] = []
+        try:
+            source_wavs: list[Path] = []
 
-        for i, track in enumerate(batch, start=1):
-            print(f"  Transcoding   {i:2}: {track.stem}")
-            trans = temp.temp_track(i, "_trans.wav")
-            transcode_audio(track, trans)
+            for i, track in enumerate(batch, start=1):
+                print(f"  Transcoding   {i:2}: {track.stem}")
+                trans = temp.temp_track(i, "_trans.wav")
+                transcode_audio(track, trans)
 
-            if mode == "remaster" and trim_silence:
-                print(f"  Trimming      {i:2}: {track.stem}")
-                trim = temp.temp_track(i, "_trim.wav")
-                trim_silence_cd_da(str(trans), str(trim), SILENCE_PAD_DUR)
-                source_wavs.append(trim)
-            else:
-                if mode == "remaster":
-                    print(f"  Skipping silence trim (--no-trim-silence): {track.stem}")
+                if mode == "remaster" and trim_silence:
+                    print(f"  Trimming      {i:2}: {track.stem}")
+                    trim = temp.temp_track(i, "_trim.wav")
+                    trim_silence_cd_da(str(trans), str(trim), SILENCE_PAD_DUR)
+                    source_wavs.append(trim)
                 else:
-                    print(f"  Skipping silence trim (master mode): {track.stem}")
-                source_wavs.append(trans)
+                    if mode == "remaster":
+                        print(
+                            f"  Skipping silence trim (--no-trim-silence): {track.stem}"
+                        )
+                    else:
+                        print(f"  Skipping silence trim (master mode): {track.stem}")
+                    source_wavs.append(trans)
 
-        print("  Concatenating tracks")
-        concat_wav(source_wavs, temp.pcm_pre)
-        wav_to_raw_pcm(temp.pcm_pre, temp.pcm_file)
+            print("  Concatenating tracks")
+            concat_wav(source_wavs, temp.pcm_pre)
+            wav_to_raw_pcm(temp.pcm_pre, temp.pcm_file)
 
-        durations = get_track_durations(source_wavs)
-        disc = RBIDisc(
-            album=album, artist=artist, disc_number=disc_num, disc_total=disc_total
-        )
-        disc.tracks = build_toc_entries(batch, durations, disc)
-
-        from cdda2img.metadata_menu import run_metadata_menu
-
-        disc = run_metadata_menu(disc, source_wavs=source_wavs)
-
-        raw_titles = [re.sub(r"^\d{1,2}[-. ]+", "", p.stem) for p in batch]
-        provenance = {
-            "mode": "c",
-            "source": str(input_dir.resolve()),
-            "ripper": "file",
-        }
-        _add_release_provenance(provenance, disc)
-        toc_data = generate_toc(disc, raw_titles=raw_titles)
-
-        rg_block: bytes | None = None
-        if loudness == "rg":
-            from cdda2img.replaygain import analyse, pack_rg_block
-
-            print("  Measuring loudness (EBU R128)...")
-            rg_result = analyse(source_wavs)
-            for warning in rg_result.warnings:
-                print(f"  Warning: {warning}")
-            print(
-                f"  Album gain: {rg_result.album_gain:+.2f} dB  "
-                f"peak: {rg_result.album_peak:.4f}  "
-                f"LRA: {rg_result.album_lra:.1f} LU"
+            durations = get_track_durations(source_wavs)
+            disc = RBIDisc(
+                album=album, artist=artist, disc_number=disc_num, disc_total=disc_total
             )
-            rg_block = pack_rg_block(rg_result)
+            disc.tracks = build_toc_entries(batch, durations, disc)
 
-        if output is not None:
-            if disc_total == 1:
-                output_file = output
-            else:
-                output_file = (
-                    output.parent
-                    / f"{output.stem}_disc{disc_num}{output.suffix or '.rbi'}"
+            from cdda2img.metadata_menu import run_metadata_menu
+
+            disc = run_metadata_menu(disc, source_wavs=source_wavs)
+
+            raw_titles = [re.sub(r"^\d{1,2}[-. ]+", "", p.stem) for p in batch]
+            provenance = {
+                "mode": "c",
+                "source": str(input_dir.resolve()),
+                "ripper": "file",
+            }
+            _add_release_provenance(provenance, disc)
+            toc_data = generate_toc(disc, raw_titles=raw_titles)
+
+            rg_block: bytes | None = None
+            if loudness == "rg":
+                from cdda2img.replaygain import analyse, pack_rg_block
+
+                print("  Measuring loudness (EBU R128)...")
+                rg_result = analyse(source_wavs)
+                for warning in rg_result.warnings:
+                    print(f"  Warning: {warning}")
+                print(
+                    f"  Album gain: {rg_result.album_gain:+.2f} dB  "
+                    f"peak: {rg_result.album_peak:.4f}  "
+                    f"LRA: {rg_result.album_lra:.1f} LU"
                 )
-        else:
-            stem = album if disc_total == 1 else f"{album}_disc{disc_num}"
-            output_file = _unique_path(stem, "rbi")
-        container_flags = FLAG_MASTER_MODE if mode == "master" else 0
-        build_container(
-            temp.pcm_file,
-            toc_data,
-            disc,
-            output_file,
-            rg_block=rg_block,
-            prov_data=provenance,
-            extra_flags=container_flags,
-        )
-        from cdda2img.catalogue import register_rbi
+                rg_block = pack_rg_block(rg_result)
 
-        register_rbi(output_file)
-        temp.cleanup()
+            if output is not None:
+                if disc_total == 1:
+                    output_file = output
+                else:
+                    output_file = (
+                        output.parent
+                        / f"{output.stem}_disc{disc_num}{output.suffix or '.rbi'}"
+                    )
+            else:
+                stem = album if disc_total == 1 else f"{album}_disc{disc_num}"
+                output_file = _unique_path(stem, "rbi")
+            container_flags = FLAG_MASTER_MODE if mode == "master" else 0
+            build_container(
+                temp.pcm_file,
+                toc_data,
+                disc,
+                output_file,
+                rg_block=rg_block,
+                prov_data=provenance,
+                extra_flags=container_flags,
+            )
+            from cdda2img.catalogue import register_rbi
+
+            register_rbi(output_file)
+        finally:
+            temp.cleanup()
 
 
 def _per_track_wavs(disc: RBIDisc, pcm_path: Path, out_dir: Path) -> list[Path]:

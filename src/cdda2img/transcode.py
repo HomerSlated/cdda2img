@@ -6,6 +6,9 @@ from av.audio.frame import AudioFrame
 
 def transcode_audio(input_path: Path, output_path: Path) -> None:
     with av.open(str(input_path)) as container:
+        if not container.streams.audio:
+            msg = f"No audio stream found in {input_path.name}"
+            raise ValueError(msg)
         input_stream = container.streams.audio[0]
 
         resampler = av.AudioResampler(format="s16", layout="stereo", rate=44100)
@@ -21,7 +24,7 @@ def transcode_audio(input_path: Path, output_path: Path) -> None:
                 for frame in packet.decode():
                     if not isinstance(frame, AudioFrame):
                         continue
-                    frame.pts = 0
+                    frame.pts = None
                     for resampled in resampler.resample(frame):
                         output.mux(output_stream.encode(resampled))
 

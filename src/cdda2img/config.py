@@ -90,6 +90,7 @@ class Config:
     """Validated cdda2img configuration with typed fields and defaults."""
 
     cddb_server: str = "cddb.retrobridge.org:888"
+    contact_email: str = ""
     database_backups: int = 3
     database_backup_frequency: str = "1d"
     drives: list[DriveConfig] = field(default_factory=list)
@@ -141,6 +142,7 @@ def load_config() -> Config:
     data = _load_raw()
 
     cddb_server = str(data.get("cddb_server", "cddb.retrobridge.org:888"))
+    contact_email = str(data.get("contact_email", ""))
 
     raw_backups = data.get("database_backups", 3)
     try:
@@ -163,6 +165,7 @@ def load_config() -> Config:
 
     return Config(
         cddb_server=cddb_server,
+        contact_email=contact_email,
         database_backups=database_backups,
         database_backup_frequency=database_backup_frequency,
         drives=drives,
