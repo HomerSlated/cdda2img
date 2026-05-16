@@ -247,10 +247,12 @@ def parse_args() -> argparse.Namespace:
     )
     i_cmd = sub.add_parser(
         "i",
-        help="Import a cdrdao TOC+BIN or DDP 2.0 image as an RBI container (master mode)",
+        help="Import a foreign disc image as an RBI container (master mode): cdrdao .toc, DDP 2.0, or Nero .nrg",
     )
     i_cmd.add_argument(
-        "source", type=Path, help="cdrdao .toc file or DDP 2.0 image directory"
+        "source",
+        type=Path,
+        help="cdrdao .toc file, DDP 2.0 image directory, or Nero .nrg file",
     )
     i_cmd.add_argument(
         "--loudness",
@@ -532,9 +534,21 @@ def import_image(
                 "source": str(source.resolve()),
                 "ripper": "toc",
             }
+        elif source.suffix.lower() == ".nrg":
+            from cdda2img.nrg_reader import import_nrg
+
+            print(f"Importing {source.name} (master mode) ...")
+            disc, _ = import_nrg(source, temp.pcm_file)
+            output_stem = sanitize_title(disc.album) or source.stem
+            provenance = {
+                "mode": "i",
+                "source": str(source.resolve()),
+                "ripper": "nrg",
+            }
         else:
             msg = (
-                f"{source.name}: expected a cdrdao .toc file or DDP 2.0 image directory"
+                f"{source.name}: expected a cdrdao .toc file, DDP 2.0 image directory,"
+                " or Nero .nrg file"
             )
             raise ValueError(msg)
 

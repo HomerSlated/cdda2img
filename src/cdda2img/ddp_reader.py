@@ -92,10 +92,10 @@ def _parse_pqdescr(path: Path) -> list[_PQEntry]:
 # ---------------------------------------------------------------------------
 
 
-def _parse_cdtext(
-    path: Path,
+def parse_cdtext_packs(
+    data: bytes,
 ) -> tuple[str, str, str | None, dict[int, tuple[str, str]]]:
-    """Parse block-0 CD-TEXT packs.
+    """Parse block-0 CD-TEXT packs from raw pack bytes.
 
     Returns ``(disc_title, disc_performer, disc_id, track_map)`` where
     *track_map* maps 1-based track numbers to ``(title, performer)`` pairs.
@@ -105,7 +105,6 @@ def _parse_cdtext(
     to form a stream of NUL-terminated ISO-8859-1 strings: disc first (index 0),
     then tracks 1, 2, … in order.
     """
-    data = path.read_bytes()
     streams: dict[int, bytearray] = {}
     for off in range(0, len(data) - 17, 18):
         pti = data[off]
@@ -283,7 +282,9 @@ def import_ddp(ddp_dir: Path, pcm_out: Path) -> tuple[RBIDisc, int]:
     disc_id: str | None = None
     track_map: dict[int, tuple[str, str]] = {}
     if cdtext_path.exists():
-        disc_title, disc_performer, disc_id, track_map = _parse_cdtext(cdtext_path)
+        disc_title, disc_performer, disc_id, track_map = parse_cdtext_packs(
+            cdtext_path.read_bytes()
+        )
 
     disc = _build_disc(
         pq_entries,

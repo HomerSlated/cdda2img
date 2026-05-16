@@ -1058,10 +1058,10 @@ Without canonical formatting, the TOC SHA-256 checksum is an implementation
 detail rather than a content fingerprint — two logically identical containers
 could have different TOC checksums if `generate_toc()` is ever changed.
 
-- [ ] Define and document canonical TOC formatting rules in `rbi_spec.md`:
+- [x] Define and document canonical TOC formatting rules in `rbi_spec.md`:
   consistent indentation (2 spaces), Unix line endings, fixed field ordering
   (CATALOG before TRACK, ISRC on a fixed line within the track block, etc.)
-- [ ] Update `generate_toc()` to comply; add a round-trip test that verifies
+- [x] Update `generate_toc()` to comply; add a round-trip test that verifies
   byte-identical TOC output across an RBI → parse → regenerate cycle
 
 ### Lossless round-trip invariant

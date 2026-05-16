@@ -45,6 +45,9 @@ This is an active prototype. A Rust reimplementation is planned once the design 
     Linux; parses DDPID (MCN), PQDESCR (timing + ISRC), and CDTEXT.BIN; enables
     professional glass-mastering archives without a Windows dependency
   - *cdrdao TOC+BIN* — byte-swaps s16be→s16le from disc-native format
+  - *Nero NRG* — DAO CD-DA images in NER5 (new, 64-bit offsets) and NERO (old, 32-bit
+    offsets) format variants; single-session only; parses DAOX/DAOI track blocks, CDTX
+    (CD-Text), and MTYP media type; audio stored as s16le (Windows-native, no byteswap)
 - **Automatic metadata lookup** — disc is identified before the metadata menu fires:
   - *CDDB* — TCP query against configurable server (default: retrobridge.org:888);
     auto-populates album, artist, year, and track titles from the disc TOC
@@ -151,6 +154,10 @@ cdda2img i /path/to/ddp_dir --output mydisc.rbi
 # Import a cdrdao TOC+BIN disc image (master mode, s16be→s16le)
 cdda2img i disc.toc
 cdda2img i disc.toc --loudness none --output mydisc.rbi
+
+# Import a Nero NRG image (master mode, DAO CD-DA only)
+cdda2img i album.nrg
+cdda2img i album.nrg --loudness none
 
 # Inspect a container; show AccurateRip report; verify all checksums
 cdda2img l album.rbi

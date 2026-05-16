@@ -238,14 +238,23 @@ with only byte\-order conversion and container encapsulation applied.
 .BI "cdda2img i " "[options] SOURCE"
 .PP
 .I SOURCE
-is either a cdrdao
+is one of:
+.RS
+.IP \(bu 4
+A cdrdao
 .B .toc
 file (the corresponding
 .B .bin
-must exist in the same directory) or a DDP\~2.0 image directory
-containing a
+must exist in the same directory).
+.IP \(bu 4
+A DDP\~2.0 image directory containing a
 .B DDPID
 file.
+.IP \(bu 4
+A Nero
+.B .nrg
+file (DAO CD-DA only; NER5 and NERO format variants; single-session).
+.RE
 .TP
 .BI \-\-loudness " {rg|none}"
 Same semantics as for the
@@ -731,6 +740,15 @@ Import a DDP\~2.0 image directory:
 .RS
 .nf
 cdda2img i /media/DDP_Technotronic
+.fi
+.RE
+.PP
+Import a Nero NRG image:
+.PP
+.RS
+.nf
+cdda2img i album.nrg
+cdda2img i album.nrg \-\-loudness none
 .fi
 .RE
 .PP
