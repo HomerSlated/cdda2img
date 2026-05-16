@@ -1227,8 +1227,6 @@ Proposed CLI: `cdda2img c <dir> --check-quality {warn,error,none}` (default: `wa
 
 ---
 
----
-
 ## Input Batching — "tags" strategy (deferred — low priority)
 
 A fifth batching strategy for `input_selector.py`: `tags`. Uses embedded disc/track
