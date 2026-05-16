@@ -2,9 +2,13 @@
 cdemu.py — cdemu virtual drive management for RBI mount.
 """
 
+import re
 import subprocess
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
+
+_DEV_SR_RE = re.compile(r"^/dev/sr[0-9]+$")
 
 
 @dataclass
@@ -38,7 +42,7 @@ def cdemu_device_mapping() -> dict[int, str]:
     mapping: dict[int, str] = {}
     for line in result.stdout.splitlines():
         parts = line.split()
-        if len(parts) >= 2 and parts[0].isdigit():
+        if len(parts) >= 2 and parts[0].isdigit() and _DEV_SR_RE.match(parts[1]):
             mapping[int(parts[0])] = parts[1]
     return mapping
 
@@ -105,7 +109,7 @@ def mount_rbi(
             raise RuntimeError(msg)
 
     if mnt_dir is None:
-        mnt_dir = Path.cwd() / "mnt"
+        mnt_dir = Path(tempfile.mkdtemp(prefix="cdda2img_mnt_"))
 
     opts = ExtractOptions(raw=True, tracks=False, warn_missing=False)
     extract_data(rbi_file, opts, base_dir=mnt_dir)
