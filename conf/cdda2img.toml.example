@@ -10,13 +10,22 @@
 # Without this, MusicBrainz lookups may be rate-limited or blocked.
 # contact_email = "you@example.com"
 
-# Number of rotating database backups to keep (0 = disabled).
+# Number of rotating drive-offset database backups to keep (0 = disabled).
 # Default: 3
 # database_backups = 3
 
-# Minimum interval between database backups: Nd (days), Nh (hours), Nm (minutes).
+# Minimum interval between drive-offset database backups: Nd (days), Nw (weeks), Nmo (months).
+# Default: 4w
+# database_backup_frequency = "4w"
+
+# Number of rotating disc catalogue backups to keep (0 = disabled).
+# Backups are triggered by write access (registration after rip/import/create).
+# Default: 3
+# catalogue_backups = 3
+
+# Minimum interval between disc catalogue backups: Nd (days), Nw (weeks), Nmo (months).
 # Default: 1d
-# database_backup_frequency = "1d"
+# catalogue_backup_frequency = "1d"
 
 # Disc catalogue database path.
 # Default: $XDG_DATA_HOME/cdda2img/cdda2img.db

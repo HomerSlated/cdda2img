@@ -70,6 +70,11 @@ def _show_summary(conn: object) -> None:
 
     assert isinstance(conn, sqlite3.Connection)  # noqa: S101
 
+    owner_row = conn.execute(
+        "SELECT value FROM db_meta WHERE key='owner_name'"
+    ).fetchone()
+    owner = (owner_row[0] or "").strip() if owner_row else ""
+
     row = conn.execute(
         "SELECT COUNT(*), COUNT(DISTINCT artist), MIN(registered_at), MAX(registered_at) "
         "FROM catalogue"
@@ -78,7 +83,10 @@ def _show_summary(conn: object) -> None:
 
     track_count = conn.execute("SELECT COUNT(*) FROM catalogue_tracks").fetchone()[0]
 
-    _header("Disc Catalogue — Summary")
+    title = (
+        f"{owner}'s Disc Catalogue — Summary" if owner else "Disc Catalogue — Summary"
+    )
+    _header(title)
     print(f"  Discs:    {disc_count}")
     print(f"  Tracks:   {track_count}")
     print(f"  Artists:  {artist_count}")

@@ -112,21 +112,21 @@ def drive_offsets_db_path() -> Path:
 def parse_frequency(s: str) -> timedelta:
     """Parse a backup-frequency string into a timedelta.
 
-    Accepted formats: ``Nd`` (days), ``Nh`` (hours), ``Nm`` (minutes).
+    Accepted formats: ``Nd`` (days), ``Nw`` (weeks), ``Nmo`` (months, ~30 days).
     Raises ValueError on any other input.
     """
-    m = re.fullmatch(r"(\d+)([mhd])", s.strip())
+    m = re.fullmatch(r"(\d+)(mo|w|d)", s.strip())
     if not m:
         msg = (
             f"invalid database_backup_frequency {s!r};"
-            " expected Nd, Nh, or Nm (e.g. '1d', '12h', '30m')"
+            " expected Nd, Nw, or Nmo (e.g. '1d', '4w', '3mo')"
         )
         raise ValueError(msg)
     n, unit = int(m.group(1)), m.group(2)
-    if unit == "m":
-        return timedelta(minutes=n)
-    if unit == "h":
-        return timedelta(hours=n)
+    if unit == "w":
+        return timedelta(weeks=n)
+    if unit == "mo":
+        return timedelta(days=n * 30)
     return timedelta(days=n)
 
 

@@ -32,18 +32,20 @@ from cdda2img.db import (
     [
         ("1d", timedelta(days=1)),
         ("30d", timedelta(days=30)),
-        ("12h", timedelta(hours=12)),
-        ("1h", timedelta(hours=1)),
-        ("30m", timedelta(minutes=30)),
-        ("1m", timedelta(minutes=1)),
         ("  7d  ", timedelta(days=7)),
+        ("1w", timedelta(weeks=1)),
+        ("4w", timedelta(weeks=4)),
+        ("1mo", timedelta(days=30)),
+        ("3mo", timedelta(days=90)),
     ],
 )
 def test_parse_frequency_valid(s: str, expected: timedelta) -> None:
     assert parse_frequency(s) == expected
 
 
-@pytest.mark.parametrize("bad", ["", "1x", "abc", "1 d", "-1d", "1.5d", "d", "1"])
+@pytest.mark.parametrize(
+    "bad", ["", "1x", "abc", "1 d", "-1d", "1.5d", "d", "1", "1h", "30m", "1m"]
+)
 def test_parse_frequency_invalid(bad: str) -> None:
     with pytest.raises(ValueError, match="invalid database_backup_frequency"):
         parse_frequency(bad)

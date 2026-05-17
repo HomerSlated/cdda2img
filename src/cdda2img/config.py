@@ -92,7 +92,9 @@ class Config:
     cddb_server: str = "cddb.retrobridge.org:888"
     contact_email: str = ""
     database_backups: int = 3
-    database_backup_frequency: str = "1d"
+    database_backup_frequency: str = "4w"
+    catalogue_backups: int = 3
+    catalogue_backup_frequency: str = "1d"
     drives: list[DriveConfig] = field(default_factory=list)
     catalogue_path: Path | None = None
     enable_catalogue: bool = True
@@ -153,7 +155,18 @@ def load_config() -> Config:
         )
         database_backups = 3
 
-    database_backup_frequency = str(data.get("database_backup_frequency", "1d"))
+    database_backup_frequency = str(data.get("database_backup_frequency", "4w"))
+
+    raw_cat_backups = data.get("catalogue_backups", 3)
+    try:
+        catalogue_backups = max(0, int(raw_cat_backups))
+    except (ValueError, TypeError):
+        log.warning(
+            "Invalid catalogue_backups %r in config; defaulting to 3", raw_cat_backups
+        )
+        catalogue_backups = 3
+
+    catalogue_backup_frequency = str(data.get("catalogue_backup_frequency", "1d"))
     drives = _parse_drives(data.get("drives", []))
 
     raw_catalogue_path = data.get("catalogue_path")
@@ -168,6 +181,8 @@ def load_config() -> Config:
         contact_email=contact_email,
         database_backups=database_backups,
         database_backup_frequency=database_backup_frequency,
+        catalogue_backups=catalogue_backups,
+        catalogue_backup_frequency=catalogue_backup_frequency,
         drives=drives,
         catalogue_path=catalogue_path,
         enable_catalogue=enable_catalogue,

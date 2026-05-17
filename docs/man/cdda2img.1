@@ -457,18 +457,34 @@ to disable backups.
 Default:
 .BR 3 .
 .TP
-.BI "database_backup_frequency = " \(dq1d\(dq
-Minimum interval between automatic database backups.
+.BI "database_backup_frequency = " \(dq4w\(dq
+Minimum interval between automatic drive-offset database backups.
 Format:
 .IR N \c
 .BR d
 (days),
 .IR N \c
-.BR h
-(hours), or
+.BR w
+(weeks), or
 .IR N \c
-.BR m
-(minutes).
+.BR mo
+(months, approximated as 30 days).
+Default:
+.BR 4w .
+.TP
+.BI "catalogue_backups = " 3
+Number of rotating backups to keep for the disc catalogue database.
+Backups are triggered by write access (after each successful rip, import, or create).
+Set to
+.B 0
+to disable backups.
+Default:
+.BR 3 .
+.TP
+.BI "catalogue_backup_frequency = " \(dq1d\(dq
+Minimum interval between automatic disc catalogue backups.
+Accepts the same format as
+.BR database_backup_frequency .
 Default:
 .BR 1d .
 .SS Per-drive offset entries

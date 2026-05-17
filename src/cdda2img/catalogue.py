@@ -355,6 +355,14 @@ def _register_impl(rbi_path: Path, catalogue_path: Path | None) -> None:  # noqa
             if at.status != ARIP_STATUS_NOT_IN_DB:
                 ar_v1_crcs[i] = f"{at.v1_crc:08x}"
 
+    db_path = catalogue_path or catalogue_db_path()
+    with contextlib.suppress(Exception):
+        from cdda2img.config import load_config
+        from cdda2img.db import ensure_backup
+
+        _cfg = load_config()
+        ensure_backup(db_path, _cfg.catalogue_backups, _cfg.catalogue_backup_frequency)
+
     conn = open_catalogue_db(catalogue_path)
     try:
         dups = _find_duplicates(
