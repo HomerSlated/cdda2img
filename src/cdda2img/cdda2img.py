@@ -549,10 +549,21 @@ def import_image(
                 "source": str(source.resolve()),
                 "ripper": "nrg",
             }
+        elif source.suffix.lower() == ".ccd":
+            from cdda2img.ccd_reader import import_ccd
+
+            print(f"Importing {source.name} (master mode) ...")
+            disc, _ = import_ccd(source, temp.pcm_file)
+            output_stem = sanitize_title(disc.album) or source.stem
+            provenance = {
+                "mode": "i",
+                "source": str(source.resolve()),
+                "ripper": "ccd",
+            }
         else:
             msg = (
                 f"{source.name}: expected a cdrdao .toc file, DDP 2.0 image directory,"
-                " or Nero .nrg file"
+                " Nero .nrg file, or CloneCD .ccd file"
             )
             raise ValueError(msg)
 
