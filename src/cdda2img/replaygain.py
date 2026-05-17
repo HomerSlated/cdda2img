@@ -15,7 +15,6 @@ Public API
 
 from __future__ import annotations
 
-import mmap
 import struct
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -164,12 +163,12 @@ def analyse(paths: list[Path]) -> RGResult:
 
 
 def analyse_raw(disc: RBIDisc, pcm_path: Path) -> RGResult:
-    """Measure EBU R128 from a raw s16le PCM file, slicing per-track via mmap.
+    """Measure EBU R128 from a raw s16le PCM file, slicing per-track via np.memmap.
 
-    Bypasses WAV encoding and PyAV decode entirely: mmap + np.frombuffer gives
-    a zero-copy view into the PCM file; the only allocation per track is the
-    float32 conversion (int16 → float32 / 32768). Both per-track and album
-    R128States are fed in a single linear scan of the file.
+    Bypasses WAV encoding and PyAV decode entirely: np.memmap gives a zero-copy
+    view into the PCM file; the only allocation per track is the float32
+    conversion (int16 → float32 / 32768). Both per-track and album R128States
+    are fed in a single linear scan of the file.
     """
     if not disc.tracks:
         msg = "analyse_raw: disc has no tracks"
@@ -177,27 +176,22 @@ def analyse_raw(disc: RBIDisc, pcm_path: Path) -> RGResult:
 
     album_state = pyebur128.R128State(PCM_CHANNELS, PCM_SAMPLE_RATE, _EBUR128_MODE)
     track_results: list[TrackRG] = []
-    with (
-        open(pcm_path, "rb") as f,
-        mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ) as mm,
-    ):
-        s16_view = np.frombuffer(mm, dtype="<i2")
-        for track in disc.tracks:
-            idx_start = (track.start_frame + track.pregap_frames) * _INT16_PER_FRAME
-            idx_count = track.duration_frames * _INT16_PER_FRAME
-            samples = (
-                s16_view[idx_start : idx_start + idx_count].astype(np.float32) / 32768.0
-            )
-            n_frames = len(samples) // PCM_CHANNELS
-            track_state = pyebur128.R128State(
-                PCM_CHANNELS, PCM_SAMPLE_RATE, _EBUR128_MODE
-            )
-            track_state.add_frames(samples, n_frames)
-            integrated, peak, lra = _state_results(track_state, PCM_CHANNELS)
-            track_results.append(
-                TrackRG(gain=RG_REFERENCE - integrated, peak=peak, lra=lra)
-            )
-            album_state.add_frames(samples, n_frames)
+    s16_view = np.memmap(pcm_path, dtype="<i2", mode="r")
+    for track in disc.tracks:
+        idx_start = (track.start_frame + track.pregap_frames) * _INT16_PER_FRAME
+        idx_count = track.duration_frames * _INT16_PER_FRAME
+        samples = (
+            s16_view[idx_start : idx_start + idx_count].astype(np.float32) / 32768.0
+        )
+        n_frames = len(samples) // PCM_CHANNELS
+        track_state = pyebur128.R128State(PCM_CHANNELS, PCM_SAMPLE_RATE, _EBUR128_MODE)
+        track_state.add_frames(samples, n_frames)
+        integrated, peak, lra = _state_results(track_state, PCM_CHANNELS)
+        track_results.append(
+            TrackRG(gain=RG_REFERENCE - integrated, peak=peak, lra=lra)
+        )
+        album_state.add_frames(samples, n_frames)
+    del s16_view
     al_int, al_peak, al_lra = _state_results(album_state, PCM_CHANNELS)
     return RGResult(
         reference=RG_REFERENCE,
