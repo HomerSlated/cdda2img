@@ -15,6 +15,7 @@ Keys:
 
 from __future__ import annotations
 
+import io
 import select
 import shutil
 import signal
@@ -23,11 +24,11 @@ import sys
 import tempfile
 import termios
 import tty
+import wave as _wave
 from pathlib import Path
 
 import av
 import numpy as np
-from ffmpeg_normalize import FFmpegNormalize
 
 from cdda2img.replaygain import analyse as _rg_analyse
 from cdda2img.replaygain import embed_rg_tags as _rg_embed_tags
@@ -117,19 +118,42 @@ def extract_clip(src: Path, start: float, dest: Path) -> None:
                 out_c.mux(out_packet)
 
 
-def normalize_clip(src: Path, dest: Path) -> None:
-    """Normalise *src* to RG_REFERENCE LUFS (EBU R128) and write FLAC with no metadata."""
-    norm = FFmpegNormalize(
-        normalization_type="ebu",
-        target_level=RG_REFERENCE,
-        auto_lower_loudness_target=True,
-        keep_loudness_range_target=True,
-        audio_codec="flac",
-        extra_output_options=["-map_metadata", "-1"],
-        progress=False,
-    )
-    norm.add_media_file(str(src), str(dest))
-    norm.run_normalization()
+def normalize_clip(src: Path, dest: Path, gain_db: float) -> None:
+    """Decode *src*, apply *gain_db* gain, and write as FLAC to *dest* (no metadata)."""
+    gain = 10.0 ** (gain_db / 20.0)
+    resampler = av.AudioResampler(format="s16", layout="stereo", rate=PCM_RATE)
+    pcm_chunks: list[bytes] = []
+    with av.open(str(src)) as in_c:
+        in_stream = in_c.streams.audio[0]
+        for packet in in_c.demux(in_stream):
+            for frame in packet.decode():
+                for rf in resampler.resample(frame):  # type: ignore[arg-type]  # LINT-002
+                    pcm_chunks.append(bytes(rf.planes[0]))
+        for rf in resampler.resample(None):
+            pcm_chunks.append(bytes(rf.planes[0]))
+
+    samples = np.frombuffer(b"".join(pcm_chunks), dtype="<i2").astype(np.float32)
+    samples *= gain
+    np.clip(samples, -32768.0, 32767.0, out=samples)
+
+    buf = io.BytesIO()
+    with _wave.open(buf, "wb") as w:
+        w.setnchannels(2)
+        w.setsampwidth(2)
+        w.setframerate(PCM_RATE)
+        w.writeframes(samples.astype("<i2").tobytes())
+
+    wav_buf = io.BytesIO(buf.getvalue())
+    with av.open(wav_buf, format="wav", mode="r") as in_c:
+        in_stream = in_c.streams.audio[0]
+        with av.open(str(dest), "w", format="flac") as out_c:
+            out_stream = out_c.add_stream("flac", rate=PCM_RATE)
+            for packet in in_c.demux(in_stream):
+                for frame in packet.decode():
+                    for out_packet in out_stream.encode(frame):  # type: ignore[arg-type]  # LINT-002
+                        out_c.mux(out_packet)
+            for out_packet in out_stream.encode(None):
+                out_c.mux(out_packet)
 
 
 # ---------------------------------------------------------------------------
@@ -272,10 +296,6 @@ def main() -> None:
     extract_clip(src, start, f_raw)
     print(" done")
 
-    print("  Normalising (EBU R128 -18 LUFS)...", end="", flush=True)
-    normalize_clip(f_raw, f_norm)
-    print(" done")
-
     print("  Computing ReplayGain 2.0       ...", end="", flush=True)
     rg_result = _rg_analyse([f_raw])
     track_rg = rg_result.tracks[0]
@@ -284,6 +304,10 @@ def main() -> None:
     print(
         f" gain {track_rg.gain:+.2f} dB  peak {track_rg.peak:.4f}  LRA {track_rg.lra:.1f} LU"
     )
+
+    print("  Normalising (EBU R128 -18 LUFS)...", end="", flush=True)
+    normalize_clip(f_raw, f_norm, gain_db=track_rg.gain)
+    print(" done")
 
     # Each entry: (path, gain_db_for_playback, display_description)
     options: dict[str, tuple[Path, float, str]] = {

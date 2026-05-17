@@ -174,26 +174,24 @@ def parse_args() -> argparse.Namespace:
     x = sub.add_parser("x", help="Extract blocks from an RBI image")
     x.add_argument("rbi_file", type=Path, help="RBI file to extract")
     x.add_argument(
-        "--raw", action="store_true", help="Extract TOC + BIN (s16be) to extracted/raw/"
+        "--raw", action="store_true", help="Extract TOC + BIN (s16be) to output dir"
     )
     x.add_argument(
         "--tracks",
         action="store_true",
-        help="Extract per-track FLAC + CUE to extracted/<artist>/<album>/",
+        help="Extract per-track FLAC + CUE to <artist>/<album>/ within output dir",
     )
     x.add_argument(
         "--rg",
         action="store_true",
-        help="Extract ReplayGain block to extracted/<stem>.rg.json",
+        help="Extract ReplayGain block to <stem>.rg.json",
     )
     x.add_argument(
         "--ar",
         action="store_true",
-        help="Extract AccurateRip report to extracted/<stem>.accurip",
+        help="Extract AccurateRip report to <stem>.accurip",
     )
-    x.add_argument(
-        "--log", action="store_true", help="Extract rip log to extracted/<stem>.log"
-    )
+    x.add_argument("--log", action="store_true", help="Extract rip log to <stem>.log")
     x.add_argument(
         "--all",
         action="store_true",
@@ -204,6 +202,12 @@ def parse_args() -> argparse.Namespace:
         "--normalize",
         action="store_true",
         help="Apply EBU R128 normalisation to extracted FLACs (modifier for --tracks/--all; skips RG tag embedding)",
+    )
+    x.add_argument(
+        "--output",
+        type=Path,
+        metavar="PATH",
+        help="Output directory (default: ./extracted)",
     )
 
     l_cmd = sub.add_parser("l", help="List the contents of an RBI image")
@@ -873,8 +877,17 @@ def extract_image(
     log: bool,
     all_blocks: bool,
     normalize: bool = False,
+    output: Path | None = None,
 ) -> None:
     from cdda2img.container import ExtractOptions
+
+    if output is not None:
+        base_dir = output.expanduser().resolve()
+        if base_dir.is_file():
+            msg = f"--output: {base_dir} is a file, not a directory"
+            raise ValueError(msg)
+    else:
+        base_dir = Path.cwd() / "extracted"
 
     use_all = all_blocks or not (raw or tracks or rg or ar or log)
     if use_all:
@@ -898,7 +911,7 @@ def extract_image(
             warn_missing=True,
         )
 
-    extract_data(rbi_file, opts, base_dir=Path.cwd() / "extracted")
+    extract_data(rbi_file, opts, base_dir=base_dir)
 
 
 def burn_image(
@@ -991,6 +1004,7 @@ def _dispatch(args: argparse.Namespace) -> None:
             log=args.log,
             all_blocks=args.all_blocks,
             normalize=args.normalize,
+            output=args.output,
         )
     else:
         _dispatch_utility(args)

@@ -408,7 +408,7 @@ class ExtractOptions:
     warn_missing: bool = True
 
 
-def _write_bin_format_hint(raw_dir: Path) -> None:
+def _write_bin_format_hint(out_dir: Path, stem: str) -> None:
     hint = (
         "BIN file format\n"
         "===============\n"
@@ -421,7 +421,7 @@ def _write_bin_format_hint(raw_dir: Path) -> None:
         "\n"
         "The .toc file references the .bin by name; both must be in the same directory.\n"
     )
-    (raw_dir / "bin_format.txt").write_text(hint, encoding="utf-8")
+    (out_dir / f"{stem}.bin_format.txt").write_text(hint, encoding="utf-8")
 
 
 def _rg_json_str(rg_data: RBIReplayGain) -> str:
@@ -494,6 +494,7 @@ def extract_data(  # noqa: C901
     from cdda2img.toc_parser import parse_toc
     from cdda2img.track_extract import (
         collect_track_flac_paths,
+        collect_tracks_output_paths,
         extract_tracks,
         write_cue,
     )
@@ -547,9 +548,40 @@ def extract_data(  # noqa: C901
 
     disc = parse_toc(toc_data)
 
+    _would_write: list[Path] = []
     if opts.raw:
-        raw_dir = base_dir / "raw"
-        raw_dir.mkdir(parents=True, exist_ok=True)
+        _would_write += [
+            base_dir / f"{stem}.toc",
+            base_dir / f"{stem}.bin",
+            base_dir / f"{stem}.bin_format.txt",
+        ]
+    if opts.tracks:
+        _would_write += collect_tracks_output_paths(
+            disc, header.disc_number, header.disc_total, base_dir
+        )
+    if opts.rg and rg_data is not None:
+        _would_write.append(base_dir / f"{stem}.rg.json")
+    if opts.ar and header.find_block(BLOCK_TYPE_ARIP) is not None:
+        _would_write.append(base_dir / f"{stem}.accurip")
+    if opts.log and header.find_block(BLOCK_TYPE_RLOG) is not None:
+        _would_write.append(base_dir / f"{stem}.log")
+    existing = [p for p in _would_write if p.exists()]
+    if existing:
+        if not sys.stdin.isatty():
+            msg = f"{existing[0]} already exists; aborting in non-interactive mode"
+            raise FileExistsError(msg)
+        print(
+            f"\n{len(existing)} output file(s) already exist and would be overwritten:"
+        )
+        for p in existing[:5]:
+            print(f"  {p}")
+        if len(existing) > 5:
+            print(f"  ... and {len(existing) - 5} more")
+        if input("Overwrite? [y/N] ").strip().lower() not in ("y", "yes"):
+            return
+
+    if opts.raw:
+        raw_dir = base_dir
 
         toc_text = re.sub(
             r'FILE "[^"]*"', f'FILE "{stem}.bin"', toc_data.decode("utf-8")
@@ -562,7 +594,7 @@ def extract_data(  # noqa: C901
             f_in.seek(pcm_entry.offset)
             _copy_bytes_swapped(f_in, f_out, pcm_entry.length)
         print(f"BIN saved: {bin_path}  (s16le → s16be, disc-native byte order)")
-        _write_bin_format_hint(raw_dir)
+        _write_bin_format_hint(raw_dir, stem)
         if comment:
             print(f"Created:   {comment}")
         _print_provenance(prov)
