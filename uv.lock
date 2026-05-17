@@ -188,7 +188,6 @@ source = { editable = "." }
 dependencies = [
     { name = "av" },
     { name = "discogs-client" },
-    { name = "ffmpeg-normalize" },
     { name = "musicbrainzngs" },
     { name = "mutagen" },
     { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
@@ -216,7 +215,6 @@ dev = [
 requires-dist = [
     { name = "av", specifier = ">=16.0.1" },
     { name = "discogs-client", specifier = ">=2.3.0" },
-    { name = "ffmpeg-normalize", specifier = ">=1.37.6" },
     { name = "musicbrainzngs", specifier = ">=0.7.1" },
     { name = "mutagen", specifier = ">=1.46.0" },
     { name = "numpy", specifier = ">=1.24" },
@@ -377,18 +375,6 @@ wheels = [
 ]
 
 [[package]]
-name = "colorlog"
-version = "6.7.0"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "colorama", marker = "sys_platform == 'win32'" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/78/6b/4e5481ddcdb9c255b2715f54c863629f1543e97bc8c309d1c5c131ad14f2/colorlog-6.7.0.tar.gz", hash = "sha256:bd94bd21c1e13fac7bd3153f4bc3a7dc0eb0974b8bc2fdf1a989e474f6e582e5", size = 29920, upload-time = "2022-08-29T14:51:27.945Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/58/43/a363c213224448f9e194d626221123ce00e3fb3d87c0c22aed52b620bdd1/colorlog-6.7.0-py2.py3-none-any.whl", hash = "sha256:0d33ca236784a1ba3ff9c532d4964126d8a2c44f1f0cb1d2b0728196f512f662", size = 11286, upload-time = "2022-08-29T14:51:26.426Z" },
-]
-
-[[package]]
 name = "discogs-client"
 version = "2.3.0"
 source = { registry = "https://pypi.org/simple" }
@@ -421,34 +407,6 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/50/79/66800aadf48771f6b62f7eb014e352e5d06856655206165d775e675a02c9/exceptiongroup-1.3.1.tar.gz", hash = "sha256:8b412432c6055b0b7d14c310000ae93352ed6754f70fa8f7c34141f91c4e3219", size = 30371, upload-time = "2025-11-21T23:01:54.787Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/8a/0e/97c33bf5009bdbac74fd2beace167cab3f978feb69cc36f1ef79360d6c4e/exceptiongroup-1.3.1-py3-none-any.whl", hash = "sha256:a7a39a3bd276781e98394987d3a5701d0c4edffb633bb7a5144577f82c773598", size = 16740, upload-time = "2025-11-21T23:01:53.443Z" },
-]
-
-[[package]]
-name = "ffmpeg-normalize"
-version = "1.37.6"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "colorama", marker = "sys_platform == 'win32'" },
-    { name = "colorlog" },
-    { name = "ffmpeg-progress-yield" },
-    { name = "mutagen" },
-    { name = "tqdm" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/c8/1a/0d27abae69de51b27dae48892f2d325dda3f80cc7def8ac216058b27c20c/ffmpeg_normalize-1.37.6.tar.gz", hash = "sha256:cec7d6a9d1b2108f0e4f8fcbd304f192676a708e8d11faf948073bf8eec562ee", size = 34800, upload-time = "2026-04-13T11:59:59.226Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/8e/a6/63f2d450cc11275a5e9e67e4734e9cd8f85ab3bf5b4af50f4c304424735a/ffmpeg_normalize-1.37.6-py3-none-any.whl", hash = "sha256:3e346c6f5bc2fc5411d22b52d5e33b994cd690ece657cd68d58911dfcbd5bd6b", size = 41075, upload-time = "2026-04-13T11:59:57.881Z" },
-]
-
-[[package]]
-name = "ffmpeg-progress-yield"
-version = "1.1.3"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "tqdm" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/36/eb/f4836c4c30cef5f26cb0d77fa16938303665f87c1e0f64c2812d00706ecf/ffmpeg_progress_yield-1.1.3.tar.gz", hash = "sha256:79bf782a6d6bf9be64bea1d3b7a0f777f11057705935128a225970db74dedf85", size = 10012, upload-time = "2026-03-30T15:38:45.453Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/fd/c7/c42ce9353ae6b70bd920856a97736ac81e068901fb537126365e6735f1c8/ffmpeg_progress_yield-1.1.3-py3-none-any.whl", hash = "sha256:4eb4948a72414608c7b05c8061aff85ff47e31e33f629abc22d08d0b03196c62", size = 12709, upload-time = "2026-03-30T15:38:44.575Z" },
 ]
 
 [[package]]
@@ -1669,18 +1627,6 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/4f/90/06752775b8cfadba8856190f5beae9f552547e0f287e0246677972107375/tox_uv-1.29.0.tar.gz", hash = "sha256:30fa9e6ad507df49d3c6a2f88894256bcf90f18e240a00764da6ecab1db24895", size = 23427, upload-time = "2025-10-09T20:40:27.384Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/5c/17/221d62937c4130b044bb437caac4181e7e13d5536bbede65264db1f0ac9f/tox_uv-1.29.0-py3-none-any.whl", hash = "sha256:b1d251286edeeb4bc4af1e24c8acfdd9404700143c2199ccdbb4ea195f7de6cc", size = 17254, upload-time = "2025-10-09T20:40:25.885Z" },
-]
-
-[[package]]
-name = "tqdm"
-version = "4.67.3"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "colorama", marker = "sys_platform == 'win32'" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/09/a9/6ba95a270c6f1fbcd8dac228323f2777d886cb206987444e4bce66338dd4/tqdm-4.67.3.tar.gz", hash = "sha256:7d825f03f89244ef73f1d4ce193cb1774a8179fd96f31d7e1dcde62092b960bb", size = 169598, upload-time = "2026-02-03T17:35:53.048Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/16/e1/3079a9ff9b8e11b846c6ac5c8b5bfb7ff225eee721825310c91b3b50304f/tqdm-4.67.3-py3-none-any.whl", hash = "sha256:ee1e4c0e59148062281c49d80b25b67771a127c85fc9676d3be5f243206826bf", size = 78374, upload-time = "2026-02-03T17:35:50.982Z" },
 ]
 
 [[package]]

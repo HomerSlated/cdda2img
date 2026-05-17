@@ -449,6 +449,37 @@ def _write_rg_json(path: Path, rg_data: RBIReplayGain) -> None:
     print(f"RG data saved: {path}")
 
 
+def _gain_from_rg(rg_data: RBIReplayGain) -> float:
+    """Compute linear gain factor from stored RG data, clamped to avoid true-peak clipping."""
+    gf = 10.0 ** (rg_data.album_gain / 20.0)
+    if rg_data.album_peak > 0:
+        gf = min(gf, 1.0 / rg_data.album_peak)
+    return gf
+
+
+def _measure_gain_from_container(container_file: Path, pcm_offset: int, disc) -> float:
+    """Measure album EBU R128 from raw PCM inside the container; return clamped gain factor."""
+    import numpy as np
+    import pyebur128
+
+    _RG_REF = -18.0
+    _MODE = 63  # _MODE_I | _MODE_LRA | _MODE_TRUE_PK; matches replaygain._EBUR128_MODE
+    bytes_per_frame = (
+        (PCM_SAMPLE_RATE // CD_FRAMES_PER_SECOND) * PCM_CHANNELS * (PCM_BIT_DEPTH // 8)
+    )
+    album_state = pyebur128.R128State(PCM_CHANNELS, PCM_SAMPLE_RATE, _MODE)
+    with open(container_file, "rb") as f:
+        for track in disc.tracks:
+            f.seek(pcm_offset + track.audio_start_frame * bytes_per_frame)
+            raw = f.read(track.duration_frames * bytes_per_frame)
+            samples = np.frombuffer(raw, dtype="<i2").astype(np.float32) / 32768.0
+            album_state.add_frames(samples, len(samples) // PCM_CHANNELS)
+    lufs = pyebur128.get_loudness_global(album_state)
+    peak = max(pyebur128.get_true_peak(album_state, ch) for ch in range(PCM_CHANNELS))
+    gf = 10.0 ** ((_RG_REF - lufs) / 20.0)
+    return min(gf, 1.0 / peak) if peak > 0 else gf
+
+
 def extract_data(  # noqa: C901
     container_file: Path,
     opts: ExtractOptions,
@@ -537,6 +568,15 @@ def extract_data(  # noqa: C901
         _print_provenance(prov)
 
     if opts.tracks:
+        gain_factor: float | None = None
+        if opts.normalize:
+            if rg_data is not None:
+                gain_factor = _gain_from_rg(rg_data)
+            else:
+                print("  Measuring loudness (EBU R128)...")
+                gain_factor = _measure_gain_from_container(
+                    container_file, pcm_entry.offset, disc
+                )
         print(f"\nExtracting {header.track_count} tracks...")
         extract_tracks(
             disc=disc,
@@ -550,6 +590,7 @@ def extract_data(  # noqa: C901
             comment=comment,
             base=base_dir,
             rg_data=rg_data if not opts.normalize else None,
+            gain_factor=gain_factor,
         )
         write_cue(disc, header.disc_number, header.disc_total, base_dir)
         if not opts.normalize:

@@ -8,6 +8,7 @@ import wave
 from pathlib import Path
 
 import av
+import numpy as np
 from av.audio.frame import AudioFrame
 
 from cdda2img.rbi_format import CD_FRAMES_PER_SECOND, RBIReplayGain
@@ -67,6 +68,14 @@ def collect_tracks_output_paths(
     paths: list[Path] = [d / _track_filename(t) for t in disc.tracks]
     paths.append(d / _cue_filename(disc))
     return paths
+
+
+def _apply_gain(pcm: bytes, gain_factor: float) -> bytes:
+    """Scale s16le PCM samples by gain_factor and clip to int16 range."""
+    samples = np.frombuffer(pcm, dtype="<i2").astype(np.float32)
+    samples *= gain_factor
+    np.clip(samples, -32768.0, 32767.0, out=samples)
+    return samples.astype("<i2").tobytes()
 
 
 def _read_pcm_slice(
@@ -134,6 +143,7 @@ def extract_tracks(
     comment: str,
     base: Path,
     rg_data: RBIReplayGain | None = None,
+    gain_factor: float | None = None,
 ) -> None:
     d = _disc_dir(disc, disc_number, disc_total, base)
     d.mkdir(parents=True, exist_ok=True)
@@ -150,6 +160,8 @@ def extract_tracks(
             channels,
             bit_depth,
         )
+        if gain_factor is not None:
+            pcm = _apply_gain(pcm, gain_factor)
         wav = _pcm_to_wav_bytes(pcm, sample_rate, channels, bit_depth)
 
         metadata: dict[str, str] = {

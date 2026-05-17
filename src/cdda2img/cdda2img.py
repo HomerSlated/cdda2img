@@ -864,32 +864,6 @@ def _confirm_overwrite(output_paths: list[Path]) -> bool:
     return input("Overwrite? [y/N] ").strip().lower() in ("y", "yes")
 
 
-def _normalize_flac(path: Path) -> None:
-    """Normalize a FLAC file in-place to -18 LUFS (EBU R128 / ReplayGain 2.0 reference)."""
-    import logging
-
-    from ffmpeg_normalize import FFmpegNormalize
-
-    logging.getLogger("ffmpeg_normalize").setLevel(logging.ERROR)
-    tmp = path.with_suffix(".normalizing.flac")
-    try:
-        norm = FFmpegNormalize(
-            normalization_type="ebu",
-            target_level=-18.0,
-            auto_lower_loudness_target=True,
-            keep_loudness_range_target=True,
-            audio_codec="flac",
-            sample_rate=44100,
-            audio_channels=2,
-            progress=False,
-        )
-        norm.add_media_file(str(path), str(tmp))
-        norm.run_normalization()
-        tmp.replace(path)
-    finally:
-        tmp.unlink(missing_ok=True)
-
-
 def extract_image(
     rbi_file: Path,
     raw: bool,
@@ -901,8 +875,6 @@ def extract_image(
     normalize: bool = False,
 ) -> None:
     from cdda2img.container import ExtractOptions
-    from cdda2img.toc_parser import parse_toc
-    from cdda2img.track_extract import collect_track_flac_paths
 
     use_all = all_blocks or not (raw or tracks or rg or ar or log)
     if use_all:
@@ -926,29 +898,7 @@ def extract_image(
             warn_missing=True,
         )
 
-    base_dir = Path.cwd() / "extracted"
-    extract_data(rbi_file, opts, base_dir=base_dir)
-
-    if normalize and opts.tracks:
-        from cdda2img.container import read_header
-
-        header = read_header(rbi_file)
-        with open(rbi_file, "rb") as f:
-            from cdda2img.rbi_format import BLOCK_TYPE_TOC
-
-            toc_entry = header.find_block(BLOCK_TYPE_TOC)
-            assert toc_entry is not None  # noqa: S101
-            f.seek(toc_entry.offset)
-            toc_data = f.read(toc_entry.length)
-        disc = parse_toc(toc_data)
-        flac_paths = collect_track_flac_paths(
-            disc, header.disc_number, header.disc_total, base_dir
-        )
-        print(f"\nNormalising {len(flac_paths)} tracks to -18 LUFS...")
-        for p in flac_paths:
-            print(f"  {p.name}", end="", flush=True)
-            _normalize_flac(p)
-            print(" done")
+    extract_data(rbi_file, opts, base_dir=Path.cwd() / "extracted")
 
 
 def burn_image(
