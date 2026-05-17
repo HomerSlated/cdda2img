@@ -3,13 +3,11 @@ replaygain.py — EBU R128 / ReplayGain 2.0 loudness analysis.
 
 Measures audio files via libebur128 (through the pyebur128 binding) and PyAV
 for decoding. Returns per-track and album gain, true peak, and loudness range.
-Inputs are expected to be post-transcode 44.1 kHz stereo WAVs; passing files
-with mismatched sample rates or channel layouts to the album measurement will
-produce incorrect results.
 
 Public API
 ----------
-    result = analyse(paths)               # measure N tracks → RGResult
+    result = analyse(paths)               # measure N audio files → RGResult
+    result = analyse_raw(disc, pcm_path)  # measure raw s16le PCM via mmap → RGResult
     embed_rg_tags(result, flac_paths)     # write RG tags into existing FLACs
     data   = pack_rg_block(result)        # serialise to RBI container RG block bytes
     result = unpack_rg_block(data, N)     # deserialise from RBI container RG block bytes
@@ -17,6 +15,7 @@ Public API
 
 from __future__ import annotations
 
+import mmap
 import struct
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -26,8 +25,11 @@ import numpy as np
 import pyebur128
 
 from cdda2img.rbi_format import (
+    PCM_CHANNELS,
+    PCM_SAMPLE_RATE,
     RG_BLOCK_FIXED_SIZE,
     RG_BLOCK_FIXED_STRUCT,
+    RBIDisc,
     RBIReplayGain,
 )
 
@@ -50,6 +52,7 @@ RG_REFERENCE: float = -18.0  # LUFS — ReplayGain 2.0 / ITU-R BS.1770-3
 RG_VERSION: int = 1  # RG block format version stored in the container
 
 _LRA_WARN_LU: float = 5.0  # album LRA below this indicates heavily compressed source
+_INT16_PER_FRAME = 1176  # 2352 bytes per CD frame / 2 bytes per int16
 
 
 # ---------------------------------------------------------------------------
@@ -88,34 +91,8 @@ class RGResult:
 
 
 # ---------------------------------------------------------------------------
-# libebur128 measurement via pyebur128 + PyAV
+# Internal helper
 # ---------------------------------------------------------------------------
-
-
-def _decode_interleaved(path: Path) -> tuple[np.ndarray, int, int]:
-    """Decode an audio file to float32 interleaved samples in [-1, 1].
-
-    Returns (samples, sample_rate, channels). AudioResampler with format='fltp'
-    ensures consistent float32 planar output regardless of the source codec's
-    native sample format (s16, s32, fltp, etc.), while preserving the original
-    sample rate and channel layout.
-    """
-    with av.open(str(path)) as c:
-        stream = c.streams.audio[0]
-        rate, channels = stream.sample_rate, stream.channels
-        resampler = av.AudioResampler(
-            format="fltp", layout=stream.layout.name, rate=rate
-        )
-        chunks: list[np.ndarray] = []
-        for packet in c.demux(stream):
-            for frame in packet.decode():
-                for rf in resampler.resample(frame):  # type: ignore[arg-type]  # LINT-002: audio stream yields AudioFrame; stubs over-broad
-                    chunks.append(
-                        rf.to_ndarray().T.flatten()
-                    )  # (ch, samples) → interleaved
-        for rf in resampler.resample(None):  # flush resampler
-            chunks.append(rf.to_ndarray().T.flatten())
-    return np.concatenate(chunks), rate, channels
 
 
 def _state_results(
@@ -128,37 +105,6 @@ def _state_results(
     return lufs, peak, lra
 
 
-def _measure_single(path: Path) -> tuple[float, float, float]:
-    """Measure EBU R128 on one file. Returns (integrated_lufs, peak_linear, lra_lu)."""
-    samples, rate, channels = _decode_interleaved(path)
-    state = pyebur128.R128State(channels, rate, _EBUR128_MODE)
-    state.add_frames(samples, len(samples) // channels)
-    return _state_results(state, channels)
-
-
-def _measure_concat(paths: list[Path]) -> tuple[float, float, float]:
-    """Measure EBU R128 over the virtual concatenation of all files.
-
-    Returns (integrated_lufs, peak_linear, lra_lu) for the combined programme.
-    libebur128 accumulates loudness history across sequential add_frames() calls
-    on a single R128State — equivalent to the ffmpeg filter_complex concat approach
-    but without subprocess overhead.
-    """
-    if not paths:
-        msg = "_measure_concat() requires at least one path"
-        raise ValueError(msg)
-    if len(paths) == 1:
-        return _measure_single(paths[0])
-
-    samples, rate, channels = _decode_interleaved(paths[0])
-    state = pyebur128.R128State(channels, rate, _EBUR128_MODE)
-    state.add_frames(samples, len(samples) // channels)
-    for path in paths[1:]:
-        samples, _, _ = _decode_interleaved(path)
-        state.add_frames(samples, len(samples) // channels)
-    return _state_results(state, channels)
-
-
 # ---------------------------------------------------------------------------
 # Public API — analysis
 # ---------------------------------------------------------------------------
@@ -167,32 +113,98 @@ def _measure_concat(paths: list[Path]) -> tuple[float, float, float]:
 def analyse(paths: list[Path]) -> RGResult:
     """Measure per-track and album EBU R128 loudness for a list of audio files.
 
-    Each track is measured independently for per-track gain/peak/LRA. Album
-    values are measured over the virtual concatenation of all tracks.
+    Single decode pass: each file is decoded once, feeding both a per-track
+    R128State and a shared album R128State simultaneously. This halves the
+    I/O and decode cost compared to the naïve two-pass approach.
     """
     if not paths:
         msg = "analyse: no input files provided"
         raise ValueError(msg)
 
     tracks: list[TrackRG] = []
+    album_state: pyebur128.R128State | None = None
+
     for path in paths:
-        integrated, peak, lra = _measure_single(path)
-        tracks.append(
-            TrackRG(
-                gain=RG_REFERENCE - integrated,
-                peak=peak,
-                lra=lra,
+        with av.open(str(path)) as c:
+            stream = c.streams.audio[0]
+            rate, channels = stream.sample_rate, stream.channels
+            if album_state is None:
+                album_state = pyebur128.R128State(channels, rate, _EBUR128_MODE)
+            track_state = pyebur128.R128State(channels, rate, _EBUR128_MODE)
+            resampler = av.AudioResampler(
+                format="fltp", layout=stream.layout.name, rate=rate
             )
-        )
+            for packet in c.demux(stream):
+                for frame in packet.decode():
+                    for rf in resampler.resample(frame):  # type: ignore[arg-type]  # LINT-002: audio stream yields AudioFrame; stubs over-broad
+                        chunk = rf.to_ndarray().T.flatten()
+                        n = len(chunk) // channels
+                        track_state.add_frames(chunk, n)
+                        album_state.add_frames(chunk, n)
+            for rf in resampler.resample(None):
+                chunk = rf.to_ndarray().T.flatten()
+                n = len(chunk) // channels
+                track_state.add_frames(chunk, n)
+                album_state.add_frames(chunk, n)
 
-    album_integrated, album_peak, album_lra = _measure_concat(paths)
+        integrated, peak, lra = _state_results(track_state, channels)
+        tracks.append(TrackRG(gain=RG_REFERENCE - integrated, peak=peak, lra=lra))
 
+    if album_state is None:
+        msg = "analyse: no tracks were processed"
+        raise RuntimeError(msg)
+    al_int, al_peak, al_lra = _state_results(album_state, channels)  # type: ignore[possibly-undefined]
     return RGResult(
         reference=RG_REFERENCE,
-        album_gain=RG_REFERENCE - album_integrated,
-        album_peak=album_peak,
-        album_lra=album_lra,
+        album_gain=RG_REFERENCE - al_int,
+        album_peak=al_peak,
+        album_lra=al_lra,
         tracks=tracks,
+    )
+
+
+def analyse_raw(disc: RBIDisc, pcm_path: Path) -> RGResult:
+    """Measure EBU R128 from a raw s16le PCM file, slicing per-track via mmap.
+
+    Bypasses WAV encoding and PyAV decode entirely: mmap + np.frombuffer gives
+    a zero-copy view into the PCM file; the only allocation per track is the
+    float32 conversion (int16 → float32 / 32768). Both per-track and album
+    R128States are fed in a single linear scan of the file.
+    """
+    if not disc.tracks:
+        msg = "analyse_raw: disc has no tracks"
+        raise ValueError(msg)
+
+    album_state = pyebur128.R128State(PCM_CHANNELS, PCM_SAMPLE_RATE, _EBUR128_MODE)
+    track_results: list[TrackRG] = []
+    with (
+        open(pcm_path, "rb") as f,
+        mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ) as mm,
+    ):
+        s16_view = np.frombuffer(mm, dtype="<i2")
+        for track in disc.tracks:
+            idx_start = (track.start_frame + track.pregap_frames) * _INT16_PER_FRAME
+            idx_count = track.duration_frames * _INT16_PER_FRAME
+            samples = (
+                s16_view[idx_start : idx_start + idx_count].astype(np.float32) / 32768.0
+            )
+            n_frames = len(samples) // PCM_CHANNELS
+            track_state = pyebur128.R128State(
+                PCM_CHANNELS, PCM_SAMPLE_RATE, _EBUR128_MODE
+            )
+            track_state.add_frames(samples, n_frames)
+            integrated, peak, lra = _state_results(track_state, PCM_CHANNELS)
+            track_results.append(
+                TrackRG(gain=RG_REFERENCE - integrated, peak=peak, lra=lra)
+            )
+            album_state.add_frames(samples, n_frames)
+    al_int, al_peak, al_lra = _state_results(album_state, PCM_CHANNELS)
+    return RGResult(
+        reference=RG_REFERENCE,
+        album_gain=RG_REFERENCE - al_int,
+        album_peak=al_peak,
+        album_lra=al_lra,
+        tracks=track_results,
     )
 
 

@@ -2,9 +2,7 @@ import argparse
 import importlib.metadata
 import logging
 import re
-import tempfile
 import textwrap
-import wave
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -22,11 +20,7 @@ from cdda2img.container import (
 from cdda2img.input_selector import select_batches
 from cdda2img.metadata import derive_album_info
 from cdda2img.rbi_format import (
-    CD_FRAMES_PER_SECOND,
     FLAG_MASTER_MODE,
-    PCM_BIT_DEPTH,
-    PCM_CHANNELS,
-    PCM_SAMPLE_RATE,
     RBIDisc,
 )
 from cdda2img.silence import trim_silence_cd_da
@@ -468,27 +462,6 @@ def create_image(
             temp.cleanup()
 
 
-def _per_track_wavs(disc: RBIDisc, pcm_path: Path, out_dir: Path) -> list[Path]:
-    """Slice raw s16le PCM into per-track WAV files for loudness analysis."""
-    bytes_per_frame = (
-        (PCM_SAMPLE_RATE // CD_FRAMES_PER_SECOND) * PCM_CHANNELS * (PCM_BIT_DEPTH // 8)
-    )
-    paths: list[Path] = []
-    with open(pcm_path, "rb") as f:
-        for track in disc.tracks:
-            audio_start = track.start_frame + track.pregap_frames
-            f.seek(audio_start * bytes_per_frame)
-            pcm_data = f.read(track.duration_frames * bytes_per_frame)
-            tw = out_dir / f"track{track.track_number:02d}.wav"
-            with wave.open(str(tw), "wb") as w:
-                w.setnchannels(PCM_CHANNELS)
-                w.setsampwidth(PCM_BIT_DEPTH // 8)
-                w.setframerate(PCM_SAMPLE_RATE)
-                w.writeframes(pcm_data)
-            paths.append(tw)
-    return paths
-
-
 def import_image(
     source: Path, loudness: str = "rg", output: Path | None = None
 ) -> None:
@@ -605,12 +578,10 @@ def _finalize_import(
 
     rg_block: bytes | None = None
     if loudness == "rg":
-        from cdda2img.replaygain import analyse, pack_rg_block
+        from cdda2img.replaygain import analyse_raw, pack_rg_block
 
         print("  Measuring loudness (EBU R128)...")
-        with tempfile.TemporaryDirectory() as td:
-            track_wavs = _per_track_wavs(disc, pcm_file, Path(td))
-            rg_result = analyse(track_wavs)
+        rg_result = analyse_raw(disc, pcm_file)
         for warning in rg_result.warnings:
             print(f"  Warning: {warning}")
         print(
