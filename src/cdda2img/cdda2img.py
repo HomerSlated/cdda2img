@@ -87,6 +87,7 @@ def parse_args() -> argparse.Namespace:
             import options:
               --loudness {rg|none}  rg: embed EBU R128 ReplayGain block (default); none: skip
               --output <path>       Output .rbi path (default: derived from album title)
+              --info                Dry-run: parse and display image metadata; do not import
               Note: import always uses master mode (1:1 conversion; s16be→s16le only)
               Accepts: cdrdao .toc file, or a DDP 2.0 image directory (must contain DDPID)
 
@@ -263,6 +264,11 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=None,
         help="Output .rbi file path (default: derived from album title)",
+    )
+    i_cmd.add_argument(
+        "--info",
+        action="store_true",
+        help="Dry-run: parse and display image metadata without importing",
     )
 
     d_cmd = sub.add_parser("d", help="Browse disc catalogue")
@@ -466,6 +472,114 @@ def create_image(
             temp.cleanup()
 
 
+def _fmt_size(n: int) -> str:
+    if n >= 1 << 30:
+        return f"{n / (1 << 30):.2f} GiB"
+    if n >= 1 << 20:
+        return f"{n / (1 << 20):.1f} MiB"
+    if n >= 1 << 10:
+        return f"{n / (1 << 10):.1f} KiB"
+    return f"{n} B"
+
+
+def _print_source_info(
+    label: str,
+    name: str,
+    total_bytes: int,
+    disc: RBIDisc,
+    has_cdtext: bool,
+) -> None:
+    """Display parsed metadata for an import source image (--info mode)."""
+    total_frames = sum(t.duration_frames for t in disc.tracks)
+    total_s = total_frames // 75
+    dm, ds = divmod(total_s, 60)
+    dur_str = f"{dm}:{ds:02}"
+
+    print(f"\n{label}: {name}  ({_fmt_size(total_bytes)})")
+    print(f"CD-Text:  {'YES' if has_cdtext else 'NO'}")
+    if disc.catalog:
+        print(f"Catalog:  {disc.catalog}")
+    if disc.album:
+        print(f"Album:    {disc.album}")
+    if disc.artist:
+        print(f"Artist:   {disc.artist}")
+    print(f"Tracks:   {len(disc.tracks)}  ({dur_str})")
+
+    if not disc.tracks:
+        return
+
+    has_isrc = any(t.isrc for t in disc.tracks)
+    title_w = max((len(t.title or "") for t in disc.tracks), default=5)
+    title_w = max(min(title_w, 52), 5)
+
+    print()
+    hdr = f"  {'#':>2}  {'Title':<{title_w}}  {'Duration':>8}"
+    sep = f"  {'─' * 2}  {'─' * title_w}  {'─' * 8}"
+    if has_isrc:
+        hdr += "  ISRC"
+        sep += "  ────────────"
+    print(hdr)
+    print(sep)
+
+    for t in disc.tracks:
+        dur_s = t.duration_frames // 75
+        tm, ts = divmod(dur_s, 60)
+        row_dur = f"{tm}:{ts:02}"
+        title = t.title or ""
+        if len(title) > title_w:
+            title = title[: title_w - 1] + "…"
+        row = f"  {t.track_number:>2}  {title:<{title_w}}  {row_dur:>8}"
+        if has_isrc:
+            row += f"  {t.isrc or ''}"
+        print(row)
+
+
+def info_image(source: Path) -> None:
+    """Parse and display metadata for a foreign disc image without importing it."""
+    if not source.exists():
+        msg = f"{source}: no such file or directory"
+        raise FileNotFoundError(msg)
+
+    if source.is_dir():
+        from cdda2img.ddp_reader import info_ddp
+
+        disc, has_cdtext, total_bytes = info_ddp(source)
+        _print_source_info("DDP 2.0 Image", source.name, total_bytes, disc, has_cdtext)
+
+    elif source.suffix.lower() == ".toc":
+        from cdda2img.cdrdao_reader import _find_bin_filename, parsed_to_rbi_disc
+        from cdda2img.toc_parser import parse_toc
+
+        toc_text = source.read_text(encoding="utf-8")
+        bin_name = _find_bin_filename(toc_text)
+        bin_path = source.parent / bin_name
+        if not bin_path.exists():
+            msg = f"BIN file not found: {bin_path}"
+            raise FileNotFoundError(msg)
+        disc = parsed_to_rbi_disc(parse_toc(toc_text.encode("utf-8")))
+        total_bytes = bin_path.stat().st_size
+        _print_source_info("cdrdao TOC Image", source.name, total_bytes, disc, False)
+
+    elif source.suffix.lower() == ".nrg":
+        from cdda2img.nrg_reader import info_nrg
+
+        disc, has_cdtext, total_bytes = info_nrg(source)
+        _print_source_info("Nero NRG Image", source.name, total_bytes, disc, has_cdtext)
+
+    elif source.suffix.lower() == ".ccd":
+        from cdda2img.ccd_reader import info_ccd
+
+        disc, has_cdtext, total_bytes = info_ccd(source)
+        _print_source_info("CloneCD Image", source.name, total_bytes, disc, has_cdtext)
+
+    else:
+        msg = (
+            f"{source.name}: expected a cdrdao .toc file, DDP 2.0 image directory,"
+            " Nero .nrg file, or CloneCD .ccd file"
+        )
+        raise ValueError(msg)
+
+
 def import_image(
     source: Path, loudness: str = "rg", output: Path | None = None
 ) -> None:
@@ -565,6 +679,7 @@ def _finalize_import(
     from cdda2img.mb_lookup import prepopulate_from_mb
     from cdda2img.metadata_menu import run_metadata_menu
 
+    print("  Querying MusicBrainz...")
     disc = prepopulate_from_mb(disc, verbose=sys.stdin.isatty())
     disc = run_metadata_menu(disc, source_pcm=pcm_file)
 
@@ -993,7 +1108,10 @@ def _dispatch(args: argparse.Namespace) -> None:
             output=args.output,
         )
     elif args.cmd == "i":
-        import_image(args.source, loudness=args.loudness, output=args.output)
+        if args.info:
+            info_image(args.source)
+        else:
+            import_image(args.source, loudness=args.loudness, output=args.output)
     elif args.cmd == "x":
         extract_image(
             args.rbi_file,

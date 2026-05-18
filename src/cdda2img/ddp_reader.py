@@ -252,10 +252,14 @@ def _build_disc(
 # ---------------------------------------------------------------------------
 
 
-def import_ddp(ddp_dir: Path, pcm_out: Path) -> tuple[RBIDisc, int]:
-    """Parse a DDP 2.0 directory and write s16le PCM to *pcm_out*.
+def _parse_ddp(ddp_dir: Path) -> tuple[RBIDisc, bool, int, int]:
+    """Parse a DDP 2.0 directory without writing PCM.
 
-    Returns ``(disc, FLAG_MASTER_MODE)``.
+    Returns ``(disc, has_cdtext, track_count, skip_frames)``.
+
+    Raises:
+        FileNotFoundError: DDPID or PQDESCR missing.
+        ValueError: no audio tracks found.
     """
     for name in ("DDPID", "PQDESCR"):
         if not (ddp_dir / name).exists():
@@ -271,7 +275,6 @@ def import_ddp(ddp_dir: Path, pcm_out: Path) -> tuple[RBIDisc, int]:
         msg = f"No audio tracks found in PQDESCR: {ddp_dir}"
         raise ValueError(msg)
 
-    # Skip the lead-in: frames from disc start to Track 1's music (index 1)
     skip_frames = next(
         (e.abs_frame for e in pq_entries if e.track == 1 and e.index == 1),
         _STANDARD_PREGAP_FRAMES,
@@ -281,7 +284,8 @@ def import_ddp(ddp_dir: Path, pcm_out: Path) -> tuple[RBIDisc, int]:
     disc_title = disc_performer = ""
     disc_id: str | None = None
     track_map: dict[int, tuple[str, str]] = {}
-    if cdtext_path.exists():
+    has_cdtext = cdtext_path.exists()
+    if has_cdtext:
         disc_title, disc_performer, disc_id, track_map = parse_cdtext_packs(
             cdtext_path.read_bytes()
         )
@@ -296,5 +300,23 @@ def import_ddp(ddp_dir: Path, pcm_out: Path) -> tuple[RBIDisc, int]:
         disc_id,
         track_map,
     )
+    return disc, has_cdtext, track_count, skip_frames
+
+
+def info_ddp(ddp_dir: Path) -> tuple[RBIDisc, bool, int]:
+    """Return ``(disc, has_cdtext, audio_bytes)`` for a DDP image without importing it."""
+    disc, has_cdtext, track_count, _ = _parse_ddp(ddp_dir)
+    dat_files = [ddp_dir / f"TRACK{n:02d}.DAT" for n in range(1, track_count + 1)]
+    total_bytes = sum(p.stat().st_size for p in dat_files if p.exists())
+    return disc, has_cdtext, total_bytes
+
+
+def import_ddp(ddp_dir: Path, pcm_out: Path) -> tuple[RBIDisc, int]:
+    """Parse a DDP 2.0 directory and write s16le PCM to *pcm_out*.
+
+    Returns ``(disc, FLAG_MASTER_MODE)``.
+    """
+    disc, has_cdtext, track_count, skip_frames = _parse_ddp(ddp_dir)
+    print(f"  CD-Text: {'YES' if has_cdtext else 'NO'}")
     _assemble_pcm(ddp_dir, track_count, skip_frames, pcm_out)
     return disc, FLAG_MASTER_MODE

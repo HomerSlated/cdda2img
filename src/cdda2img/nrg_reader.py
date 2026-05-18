@@ -245,10 +245,11 @@ def _write_pcm(f: IO[bytes], dao_tracks: list[dict], pcm_out: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def import_nrg(nrg_path: Path, pcm_out: Path) -> tuple[RBIDisc, int]:
-    """Import a Nero NRG disc image as master-mode RBI.
+def _parse_nrg(nrg_path: Path) -> tuple[RBIDisc, bool, list[dict]]:
+    """Parse a Nero NRG image without writing PCM.
 
-    Returns ``(disc, FLAG_MASTER_MODE)``.
+    Returns ``(disc, has_cdtext, dao_tracks)``.  *dao_tracks* carry byte
+    offsets into the original file so ``_write_pcm`` can re-open it later.
 
     Raises ValueError for: multi-session images, TAO format (ETN2/ETNF),
     non-CD-DA tracks, unsupported sector sizes, and sector-alignment failures.
@@ -257,45 +258,65 @@ def import_nrg(nrg_path: Path, pcm_out: Path) -> tuple[RBIDisc, int]:
         new_format, trailer_offset = _detect_format(f)
         blocks = _parse_trailer(f, trailer_offset)
 
-        dao_key = _BLK_DAOX if new_format else _BLK_DAOI
-        dao_blocks = blocks.get(dao_key, [])
+    dao_key = _BLK_DAOX if new_format else _BLK_DAOI
+    dao_blocks = blocks.get(dao_key, [])
 
-        if not dao_blocks:
-            if blocks.get(b"ETN2") or blocks.get(b"ETNF"):
-                msg = f"{nrg_path.name}: TAO format (ETN2/ETNF) is not supported; only DAO CD-DA images"
-            else:
-                msg = f"{nrg_path.name}: no DAO track data found (DAOX/DAOI block missing)"
-            raise ValueError(msg)
+    if not dao_blocks:
+        if blocks.get(b"ETN2") or blocks.get(b"ETNF"):
+            msg = f"{nrg_path.name}: TAO format (ETN2/ETNF) is not supported; only DAO CD-DA images"
+        else:
+            msg = f"{nrg_path.name}: no DAO track data found (DAOX/DAOI block missing)"
+        raise ValueError(msg)
 
-        if len(dao_blocks) > 1:
-            msg = (
-                f"{nrg_path.name}: multi-session NRG images are not supported"
-                f" ({len(dao_blocks)} sessions found)"
-            )
-            raise ValueError(msg)
-
-        mtyp_list = blocks.get(_BLK_MTYP, [])
-        if mtyp_list:
-            mtyp = struct.unpack(">I", mtyp_list[0][:4])[0]
-            if not (mtyp & (_MTYP_CD | _MTYP_CDROM)):
-                msg = f"{nrg_path.name}: unsupported media type 0x{mtyp:02x}"
-                raise ValueError(msg)
-
-        catalog, dao_tracks = _parse_dao_tracks(dao_blocks[0], new_format)
-        _validate_tracks(dao_tracks, nrg_path.name)
-
-        disc_title = disc_performer = ""
-        disc_id: str | None = None
-        track_map: dict[int, tuple[str, str]] = {}
-        cdtx_list = blocks.get(_BLK_CDTX, [])
-        if cdtx_list:
-            disc_title, disc_performer, disc_id, track_map = parse_cdtext_packs(
-                cdtx_list[0]
-            )
-
-        disc = _build_disc(
-            dao_tracks, catalog, disc_title, disc_performer, disc_id, track_map
+    if len(dao_blocks) > 1:
+        msg = (
+            f"{nrg_path.name}: multi-session NRG images are not supported"
+            f" ({len(dao_blocks)} sessions found)"
         )
-        _write_pcm(f, dao_tracks, pcm_out)
+        raise ValueError(msg)
 
+    mtyp_list = blocks.get(_BLK_MTYP, [])
+    if mtyp_list:
+        mtyp = struct.unpack(">I", mtyp_list[0][:4])[0]
+        if not (mtyp & (_MTYP_CD | _MTYP_CDROM)):
+            msg = f"{nrg_path.name}: unsupported media type 0x{mtyp:02x}"
+            raise ValueError(msg)
+
+    catalog, dao_tracks = _parse_dao_tracks(dao_blocks[0], new_format)
+    _validate_tracks(dao_tracks, nrg_path.name)
+
+    disc_title = disc_performer = ""
+    disc_id: str | None = None
+    track_map: dict[int, tuple[str, str]] = {}
+    cdtx_list = blocks.get(_BLK_CDTX, [])
+    has_cdtext = bool(cdtx_list)
+    if has_cdtext:
+        disc_title, disc_performer, disc_id, track_map = parse_cdtext_packs(
+            cdtx_list[0]
+        )
+
+    disc = _build_disc(
+        dao_tracks, catalog, disc_title, disc_performer, disc_id, track_map
+    )
+    return disc, has_cdtext, dao_tracks
+
+
+def info_nrg(nrg_path: Path) -> tuple[RBIDisc, bool, int]:
+    """Return ``(disc, has_cdtext, file_bytes)`` for an NRG image without importing it."""
+    disc, has_cdtext, _ = _parse_nrg(nrg_path)
+    return disc, has_cdtext, nrg_path.stat().st_size
+
+
+def import_nrg(nrg_path: Path, pcm_out: Path) -> tuple[RBIDisc, int]:
+    """Import a Nero NRG disc image as master-mode RBI.
+
+    Returns ``(disc, FLAG_MASTER_MODE)``.
+
+    Raises ValueError for: multi-session images, TAO format (ETN2/ETNF),
+    non-CD-DA tracks, unsupported sector sizes, and sector-alignment failures.
+    """
+    disc, has_cdtext, dao_tracks = _parse_nrg(nrg_path)
+    print(f"  CD-Text: {'YES' if has_cdtext else 'NO'}")
+    with open(nrg_path, "rb") as f:
+        _write_pcm(f, dao_tracks, pcm_out)
     return disc, FLAG_MASTER_MODE

@@ -225,83 +225,97 @@ def _parse_cdtext_section(
 # ---------------------------------------------------------------------------
 
 
-def _build_disc_and_write_pcm(
-    img: IO[bytes],
+def _compute_track_layout(
     track_entries: list[dict],
     track_details: list[dict],
     lead_out_plba: int,
+) -> list[dict]:
+    """Return per-track layout dicts: {img_start, img_end, pregap_frames, duration_frames, isrc}.
+
+    Track 1's 150-sector lead-in pre-gap is excluded (IMG sectors 0-149 skipped).
+    Inter-track pre-gaps (INDEX 0 present and < PLBA) are included so the RBI
+    TOC can reference them with START directives.
+    """
+    n_tracks = len(track_entries)
+    layout: list[dict] = []
+
+    for n, (entry, detail) in enumerate(zip(track_entries, track_details), start=1):
+        plba = entry["plba"]
+        index0 = detail["index0"]
+
+        if n == 1:
+            img_start = _STANDARD_PREGAP_SECTORS if plba == 0 else plba
+            audio_plba = img_start
+            pregap_frames = 0
+        else:
+            audio_plba = plba
+            if index0 is not None and 0 < index0 < plba:
+                img_start = index0
+                pregap_frames = plba - index0
+            else:
+                img_start = plba
+                pregap_frames = 0
+
+        if n < n_tracks:
+            nxt_entry = track_entries[n]
+            nxt_detail = track_details[n]
+            nxt_index0 = nxt_detail["index0"]
+            nxt_plba = nxt_entry["plba"]
+            img_end = (
+                nxt_index0
+                if nxt_index0 is not None and 0 < nxt_index0 < nxt_plba
+                else nxt_plba
+            )
+        else:
+            img_end = lead_out_plba
+
+        layout.append({
+            "img_start": img_start,
+            "img_end": img_end,
+            "pregap_frames": pregap_frames,
+            "duration_frames": img_end - audio_plba,
+            "isrc": detail["isrc"],
+        })
+
+    return layout
+
+
+def _build_disc(
+    layout: list[dict],
     catalog: str | None,
     disc_title: str,
     disc_performer: str,
     disc_id: str | None,
     track_map: dict[int, tuple[str, str]],
-    pcm_out: Path,
 ) -> RBIDisc:
-    """Build RBIDisc and write PCM in one pass.
-
-    Track 1's 150-sector lead-in pre-gap (IMG sectors 0-149) is skipped.
-    Inter-track pre-gaps (INDEX 0 present and < PLBA) are included in the
-    PCM block so the RBI TOC can reference them with START directives.
-    """
+    """Build RBIDisc from pre-computed track layout. No I/O."""
     disc = RBIDisc(
         album=disc_title, artist=disc_performer, catalog=catalog, disc_id=disc_id
     )
     pcm_frame = 0
-    n_tracks = len(track_entries)
-
-    with open(pcm_out, "wb") as out:
-        for n, (entry, detail) in enumerate(zip(track_entries, track_details), start=1):
-            plba = entry["plba"]
-            index0 = detail["index0"]
-
-            # --- sector range to read from IMG for this track ---
-            if n == 1:
-                # Always skip the standard 150-sector lead-in pre-gap.
-                img_start = _STANDARD_PREGAP_SECTORS if plba == 0 else plba
-                audio_plba = img_start  # no pre-gap in PCM for track 1
-                pregap_frames = 0
-            else:
-                audio_plba = plba
-                if index0 is not None and 0 < index0 < plba:
-                    img_start = index0  # include pre-gap in PCM
-                    pregap_frames = plba - index0
-                else:
-                    img_start = plba
-                    pregap_frames = 0
-
-            # Upper bound: start of next track's content (or lead-out).
-            if n < n_tracks:
-                nxt_entry = track_entries[n]  # 0-indexed: n == current 1-indexed
-                nxt_detail = track_details[n]
-                nxt_index0 = nxt_detail["index0"]
-                nxt_plba = nxt_entry["plba"]
-                img_end = (
-                    nxt_index0
-                    if nxt_index0 is not None and 0 < nxt_index0 < nxt_plba
-                    else nxt_plba
-                )
-            else:
-                img_end = lead_out_plba
-
-            duration_frames = img_end - audio_plba
-
-            title, performer = track_map.get(n, (disc_title, disc_performer))
-            disc.tracks.append(
-                RBITocEntry(
-                    track_number=n,
-                    title=title,
-                    performer=performer,
-                    start_frame=pcm_frame,
-                    duration_frames=duration_frames,
-                    pregap_frames=pregap_frames,
-                    isrc=detail["isrc"],
-                )
+    for n, row in enumerate(layout, start=1):
+        title, performer = track_map.get(n, (disc_title, disc_performer))
+        disc.tracks.append(
+            RBITocEntry(
+                track_number=n,
+                title=title,
+                performer=performer,
+                start_frame=pcm_frame,
+                duration_frames=row["duration_frames"],
+                pregap_frames=row["pregap_frames"],
+                isrc=row["isrc"],
             )
-            pcm_frame += pregap_frames + duration_frames
+        )
+        pcm_frame += row["pregap_frames"] + row["duration_frames"]
+    return disc
 
-            # Write IMG sectors [img_start, img_end) to PCM output.
-            img.seek(img_start * _CDDA_SECTOR_BYTES)
-            remaining = (img_end - img_start) * _CDDA_SECTOR_BYTES
+
+def _write_pcm(img: IO[bytes], layout: list[dict], pcm_out: Path) -> None:
+    """Write IMG sectors for each track to pcm_out (s16le, no byte-swap needed)."""
+    with open(pcm_out, "wb") as out:
+        for row in layout:
+            img.seek(row["img_start"] * _CDDA_SECTOR_BYTES)
+            remaining = (row["img_end"] - row["img_start"]) * _CDDA_SECTOR_BYTES
             while remaining > 0:
                 chunk = img.read(min(_CHUNK_BYTES, remaining))
                 if not chunk:
@@ -309,26 +323,25 @@ def _build_disc_and_write_pcm(
                 out.write(chunk)
                 remaining -= len(chunk)
 
-    return disc
-
 
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
 
-def import_ccd(ccd_path: Path, pcm_out: Path) -> tuple[RBIDisc, int]:
-    """Import a CloneCD CCD/IMG disc image as master-mode RBI.
+def _parse_ccd_image(
+    ccd_path: Path,
+) -> tuple[RBIDisc, bool, list[dict], Path]:
+    """Parse a CCD/IMG image without writing PCM.
 
-    Reads ``ccd_path`` (*.ccd text TOC) and the paired *.img file.
-    Returns ``(disc, FLAG_MASTER_MODE)``.
+    Returns ``(disc, has_cdtext, layout, img_path)``.  *layout* is suitable
+    for passing to ``_write_pcm`` to do the actual PCM extraction.
 
     Raises:
         FileNotFoundError: IMG file not found alongside the CCD.
         ValueError: multi-session image, data track, IMG size mismatch,
                     missing lead-out entry, or no audio tracks.
     """
-    # Locate the paired IMG file (case-insensitive fallback).
     img_path = ccd_path.with_suffix(".img")
     if not img_path.exists():
         candidates = [
@@ -371,23 +384,37 @@ def import_ccd(ccd_path: Path, pcm_out: Path) -> tuple[RBIDisc, int]:
     track_map: dict[int, tuple[str, str]] = {}
 
     cdtext_bytes = _parse_cdtext_section(sections, cdtext_length)
+    has_cdtext = cdtext_bytes is not None
     if cdtext_bytes:
         disc_title, disc_performer, disc_id, track_map = parse_cdtext_packs(
             cdtext_bytes
         )
 
-    with open(img_path, "rb") as img:
-        disc = _build_disc_and_write_pcm(
-            img,
-            track_entries,
-            track_details,
-            lead_out_plba,
-            catalog,
-            disc_title,
-            disc_performer,
-            disc_id,
-            track_map,
-            pcm_out,
-        )
+    layout = _compute_track_layout(track_entries, track_details, lead_out_plba)
+    disc = _build_disc(layout, catalog, disc_title, disc_performer, disc_id, track_map)
 
+    return disc, has_cdtext, layout, img_path
+
+
+def info_ccd(ccd_path: Path) -> tuple[RBIDisc, bool, int]:
+    """Return ``(disc, has_cdtext, img_bytes)`` for a CCD image without importing it."""
+    disc, has_cdtext, _, img_path = _parse_ccd_image(ccd_path)
+    return disc, has_cdtext, img_path.stat().st_size
+
+
+def import_ccd(ccd_path: Path, pcm_out: Path) -> tuple[RBIDisc, int]:
+    """Import a CloneCD CCD/IMG disc image as master-mode RBI.
+
+    Reads ``ccd_path`` (*.ccd text TOC) and the paired *.img file.
+    Returns ``(disc, FLAG_MASTER_MODE)``.
+
+    Raises:
+        FileNotFoundError: IMG file not found alongside the CCD.
+        ValueError: multi-session image, data track, IMG size mismatch,
+                    missing lead-out entry, or no audio tracks.
+    """
+    disc, has_cdtext, layout, img_path = _parse_ccd_image(ccd_path)
+    print(f"  CD-Text: {'YES' if has_cdtext else 'NO'}")
+    with open(img_path, "rb") as img:
+        _write_pcm(img, layout, pcm_out)
     return disc, FLAG_MASTER_MODE
