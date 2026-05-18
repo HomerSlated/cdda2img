@@ -15,9 +15,9 @@ Byte order: s16le (Windows-native) — no byteswap needed.
 Track 1's standard 150-sector lead-in pre-gap (IMG sectors 0-149) is skipped
 during PCM assembly; inter-track pre-gaps (INDEX 0 < PLBA) are included.
 
-NOTE: CD-Text parsing (CDTextLength > 0) uses the same 18-byte pack format as
-DDP/NRG, but the CDText hex-line encoding in CCD has not been validated against
-a real sample image.  The code path is exercised only when CDTextLength > 0.
+CDText: CDTextLength > 0 in [Disc] triggers [CDText] parsing.  Each Entry N line
+holds 16 hex bytes (18-byte pack minus the 2 CRC bytes stripped by CloneCD);
+CRC bytes are padded back to 0x00 before passing to parse_cdtext_packs().
 """
 
 from __future__ import annotations
@@ -188,8 +188,11 @@ def _parse_cdtext_section(
 ) -> bytes | None:
     """Extract raw CD-Text pack bytes from [CDText] section.
 
-    CCD stores each 18-byte pack as a hex line:
-      ``Entries N=MM NN PP ...``   (N = 0-based pack index)
+    CCD stores each 18-byte pack minus its 2 CRC bytes as a hex line:
+      ``Entry N=MM NN PP ...``   (N = 0-based pack index, 16 hex bytes)
+
+    The 2 CRC bytes are stripped by CloneCD; we pad with 0x00 0x00 so the
+    resulting buffer has 18-byte alignment as expected by parse_cdtext_packs().
 
     Returns ``cdtext_length`` bytes, or None if the section is absent/malformed.
     """
@@ -202,13 +205,17 @@ def _parse_cdtext_section(
     n_packs = cdtext_length // 18
     buf = bytearray()
     for i in range(n_packs):
-        line = sec.get(f"entries {i}", "")
+        line = sec.get(f"entry {i}", "")
         if not line:
             return None
         try:
-            buf.extend(int(b, 16) for b in line.split())
+            pack_bytes = bytes(int(b, 16) for b in line.split())
         except ValueError:
             return None
+        if len(pack_bytes) != 16:
+            return None
+        buf.extend(pack_bytes)
+        buf.extend(b"\x00\x00")  # restore CRC bytes stripped by CloneCD
 
     return bytes(buf) if len(buf) == cdtext_length else None
 

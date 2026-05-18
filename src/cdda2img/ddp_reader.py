@@ -108,7 +108,7 @@ def parse_cdtext_packs(
     streams: dict[int, bytearray] = {}
     for off in range(0, len(data) - 17, 18):
         pti = data[off]
-        block = (data[off + 2] >> 5) & 0x07
+        block = (data[off + 3] >> 5) & 0x07
         if block != 0 or pti not in (0x80, 0x81, 0x86):
             continue
         streams.setdefault(pti, bytearray()).extend(data[off + 4 : off + 16])
