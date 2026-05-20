@@ -30,7 +30,7 @@ uv run python -m cdda2img r --loudness none
 
 # Create an RBI image from a directory of audio files
 uv run python -m cdda2img c <input_dir>
-uv run python -m cdda2img c <input_dir> --loudness rg --strategy ball
+uv run python -m cdda2img c <input_dir> --loudness rg --strategy best
 uv run python -m cdda2img c <input_dir> --mode master --loudness none
 
 # Import a foreign disc image
@@ -138,7 +138,7 @@ Two source types, each producing s16le PCM, then both call `_finalize_import()`:
 - **`rbi_format.py`** — RBI v3.0 constants, `HEADER_STRUCT`, `RBIHeader` / `RBIDisc` / `RBITocEntry` / `RBIReplayGain` dataclasses, `frames_from_timestamp()`, `timestamp_from_frames()`
 - **`cdda2img.py`** — CLI entry point; `create_image()`, `import_image()`, `rip_image()`, `extract_image()` top-level functions
 - **`container.py`** — `build_container()`, `read_header()`, `extract_data()`, `wav_to_raw_pcm()`
-- **`input_selector.py`** — four batching strategies: `fcfs`, `aatc`, `bech`, `ball` (last two use OR-Tools CP-SAT)
+- **`input_selector.py`** — four batching strategies: `fcfs`, `aatc`, `best` (OR-Tools CP-SAT global bin-packing), `meta` (groups by embedded disc-number tag)
 - **`cdrdao_ripper.py`** — cdrdao read-cd rip (primary); parses TOC via toc_parser + cdrdao_reader; returns `RipInfo`
 - **`disc_reader.py`** — cd-paranoia rip (fallback); subprocess-based; returns `RipInfo(disc, track_lsns, disc_last_lsn)`
 - **`cddb.py`** — CDDB disc ID computation, TCP query, `prepopulate_from_cddb()`
@@ -182,9 +182,9 @@ Full specification: `docs/reference/rbi_spec.md`.
 
 - Red Book limits: ≤99 tracks, ≤80 minutes per disc (`MAX_RUNTIME_MINUTES`, `MAX_TRACKS` in `input_selector.py`)
 - Duration arithmetic uses integer scaling (`SCALE = 100`) to avoid floating-point bin-packing errors
-- OR-Tools CP-SAT (`bech`/`ball` strategies) has no type stubs — all method calls carry `# type: ignore[attr-defined]`
+- OR-Tools CP-SAT (`best` strategy) has no type stubs — all method calls carry `# type: ignore[attr-defined]`
 - `ty` (not mypy) is the type checker; configured via `[tool.ty.environment]` in `pyproject.toml`
-- Ruff line length is 120; `E501` is ignored. `S101` (assert) is allowed in tests
+- Ruff line length is 88 (the `ruff format` target); `E501` is ignored. `S101` (assert) is allowed in tests
 - Long exception messages use the `msg = ...; raise Err(msg)` pattern (TRY003)
 - Tests use `example/` directory audio files (committed to repo) as fixtures
 - **Byte-order invariants**: GEAR Pro DDP TRACK*.DAT is s16le — no byte-swap on import; cdrdao BIN output is s16be — always byte-swap via `convert_cdrdao_bin()` (import) or `convert_cdrdao_bin_to_wav()` (RG analysis); cd-paranoia outputs WAV (s16le) — no byte-swap for ripped data

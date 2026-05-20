@@ -34,7 +34,13 @@ log = logging.getLogger(__name__)
 _LEAD_IN_SECTORS = 150  # standard 2-second Red Book lead-in
 
 
+_useragent_set = False
+
+
 def _setup_useragent() -> None:
+    global _useragent_set
+    if _useragent_set:
+        return
     from cdda2img.config import load_config
 
     cfg = load_config()
@@ -43,6 +49,7 @@ def _setup_useragent() -> None:
         importlib.metadata.version("cdda2img"),
         cfg.contact_email or None,
     )
+    _useragent_set = True
 
 
 # ---------------------------------------------------------------------------
@@ -152,6 +159,47 @@ def _find_disc_medium(medium_list: list[dict], disc_id: str) -> dict | None:
     return None
 
 
+def _select_medium_by_position(
+    medium_list: list[dict], disc_number: int
+) -> dict | None:
+    """Return the medium at *disc_number* (1-based position), or None."""
+    for medium in medium_list:
+        if int(medium.get("position") or 0) == disc_number:
+            return medium
+    return None
+
+
+def _resolve_matched_mediums(
+    medium_list: list[dict],
+    album_title: str | None,
+    disc_id: str | None,
+    disc_number_hint: int | None,
+) -> tuple[list[dict], int | None, str | None, str | None]:
+    """Return (mediums, disc_number, album_title, set_title) for the best-matching medium.
+
+    Selects by disc-id when available, then by position hint, then falls back to
+    returning all mediums flat (single-disc releases or stub results).
+    """
+    if disc_id:
+        matched = _find_disc_medium(medium_list, disc_id)
+    elif disc_number_hint is not None:
+        matched = _select_medium_by_position(medium_list, disc_number_hint)
+    else:
+        return medium_list, None, album_title, None
+
+    if matched is None:
+        return medium_list, None, album_title, None
+
+    pos = int(matched.get("position") or 0)
+    disc_number = pos or None
+    medium_title = matched.get("title") or ""
+    set_title: str | None = None
+    if medium_title and medium_title != album_title:
+        set_title = album_title
+        album_title = medium_title
+    return [matched], disc_number, album_title, set_title
+
+
 def _parse_track_number(track: dict) -> int | None:
     """Return the 1-based track number from a MB track dict.
 
@@ -167,16 +215,21 @@ def _parse_track_number(track: dict) -> int | None:
         return None
 
 
-def _parse_release(release: dict, _disc_id: str | None = None) -> DiscMeta:
+def _parse_release(
+    release: dict,
+    _disc_id: str | None = None,
+    _disc_number: int | None = None,
+) -> DiscMeta:
     """Parse a MusicBrainz release dict into a DiscMeta.
 
     *disc_total* (medium-count) is always populated when the release has
     multiple mediums — it is a property of the release, not the disc match.
 
     When *_disc_id* is provided (disc-ID lookup path), the matching medium is
-    additionally located by walking medium-list/disc-list; *disc_number* and
-    *set_title* are populated only on that path.  Text-search callers omit
-    *_disc_id* and receive the flatten-all-mediums behaviour with disc_number=None.
+    located by walking medium-list/disc-list.  When *_disc_number* is provided
+    (text-search path on a known multi-disc release), the medium at that
+    1-based position is selected instead.  Without either, all mediums are
+    flattened — suitable for single-disc releases or stub results.
     """
     artist = _artist_credit_name(release.get("artist-credit", []))
     date = release.get("date") or ""
@@ -193,26 +246,12 @@ def _parse_release(release: dict, _disc_id: str | None = None) -> DiscMeta:
         catalog_number = first.get("catalog-number") or ""
 
     medium_list = release.get("medium-list") or []
-    disc_number: int | None = None
     total = int(release.get("medium-count") or 0)
     disc_total: int | None = total or None
-    set_title: str | None = None
     album_title: str | None = release.get("title") or None
-    matched_mediums: list[dict] = medium_list
-
-    if _disc_id:
-        matched_medium = _find_disc_medium(medium_list, _disc_id)
-        if matched_medium is not None:
-            matched_mediums = [matched_medium]
-            # position is a string in MB responses ("8", not 8)
-            pos = int(matched_medium.get("position") or 0)
-            disc_number = pos or None  # 0 is unreachable; guard is defensive
-            medium_title = matched_medium.get("title") or ""
-            if medium_title:
-                # Box set: disc has its own title ("Eliminator"); release title is the set.
-                if medium_title != album_title:
-                    set_title = album_title
-                album_title = medium_title
+    matched_mediums, disc_number, album_title, set_title = _resolve_matched_mediums(
+        medium_list, album_title, _disc_id, _disc_number
+    )
 
     tracks: list[TrackMeta] = []
     for medium in matched_mediums:
@@ -223,7 +262,7 @@ def _parse_release(release: dict, _disc_id: str | None = None) -> DiscMeta:
             tracks.append(
                 TrackMeta(
                     number=_parse_track_number(track),
-                    title=recording.get("title") or track.get("title"),
+                    title=track.get("title") or recording.get("title"),
                     performer=artist or None,
                     isrc=isrc_list[0] if isrc_list else None,
                     duration_ms=int(length) if length else None,
@@ -264,6 +303,7 @@ def lookup_disc_id(disc: RBIDisc) -> list[DiscMeta]:
 
     Returns a list of matching DiscMeta (empty on no match or network error).
     """
+    _setup_useragent()
     disc_id_str = disc_id_from_rbi(disc)
     if not disc_id_str:
         return []
@@ -283,12 +323,16 @@ def lookup_disc_id(disc: RBIDisc) -> list[DiscMeta]:
     return [_parse_release(r, _disc_id=disc_id_str) for r in releases]
 
 
-def lookup_release(release_id: str) -> DiscMeta | None:
+def lookup_release(release_id: str, disc_number: int | None = None) -> DiscMeta | None:
     """Fetch a single MusicBrainz release by ID with full track listing.
 
-    Returns None on network/response error. Use this to enrich stub releases
-    returned by text search or release-group browse (which omit medium-list).
+    *disc_number* selects the matching medium for multi-disc releases so that
+    only that disc's tracks are returned.  Pass ``disc.disc_number`` when
+    applying to a known disc in a set.
+
+    Returns None on network/response error.
     """
+    _setup_useragent()
     log.debug("MusicBrainz release lookup: %s", release_id)
     try:
         result = musicbrainzngs.get_release_by_id(
@@ -301,7 +345,7 @@ def lookup_release(release_id: str) -> DiscMeta | None:
     release = result.get("release") or {}
     if not release:
         return None
-    return _parse_release(release)
+    return _parse_release(release, _disc_number=disc_number)
 
 
 def _mb_lucene_escape(value: str) -> str:
@@ -328,6 +372,7 @@ def build_mb_search_query(artist: str | None, album: str | None) -> str:
 
 def search_releases(query: str, limit: int = 25) -> list[DiscMeta]:
     """Text search for releases on MusicBrainz. Returns empty list on error."""
+    _setup_useragent()
     log.debug("MusicBrainz text search: %r", query)
     try:
         result = musicbrainzngs.search_releases(query, limit=limit)
@@ -342,6 +387,7 @@ def lookup_release_group(rg_id: str) -> list[DiscMeta]:
 
     Used by the 'Find Original Release' menu to browse all pressings in a release group.
     """
+    _setup_useragent()
     log.debug("MusicBrainz release group lookup: %s", rg_id)
     try:
         result = musicbrainzngs.get_release_group_by_id(
@@ -369,6 +415,7 @@ def lookup_isrc(isrc: str) -> list[DiscMeta]:
     Returns a list of DiscMeta for releases that contain a recording with this ISRC.
     Results are basic (no per-track tracklist) due to the two-step lookup.
     """
+    _setup_useragent()
     log.debug("MusicBrainz ISRC lookup: %s", isrc)
     try:
         result = musicbrainzngs.get_recordings_by_isrc(

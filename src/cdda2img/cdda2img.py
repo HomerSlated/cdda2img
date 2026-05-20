@@ -3,11 +3,13 @@ import importlib.metadata
 import logging
 import re
 import textwrap
+from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from cdda2img.rip_log import RipLogBuilder
+    from cdda2img.terminal_ui import TerminalUI
 
 from cdda2img.concat import concat_wav
 from cdda2img.container import (
@@ -17,9 +19,15 @@ from cdda2img.container import (
     resolve_temp_dir,
     wav_to_raw_pcm,
 )
-from cdda2img.input_selector import select_batches
+from cdda2img.input_selector import (
+    MAX_RUNTIME_MINUTES,
+    MAX_TRACKS,
+    get_audio_duration_minutes,
+    select_batches,
+)
 from cdda2img.metadata import derive_album_info
 from cdda2img.rbi_format import (
+    CD_FRAMES_PER_SECOND,
     FLAG_MASTER_MODE,
     RBIDisc,
 )
@@ -52,12 +60,12 @@ def parse_args() -> argparse.Namespace:
                                     remaster: trim silence and add inter-track gap (default)
               --loudness {rg|none}  rg: measure EBU R128 and embed RG block (default)
                                     none: skip loudness analysis
-              --strategy {fcfs,aatc,bech,ball}
+              --strategy {fcfs,aatc,best,meta}
                                     Disc batching strategy (default: aatc)
                 fcfs  first-come-first-served: fill one disc in input order, stop
                 aatc  all-as-they-come: fill discs in input order, as many as needed
-                bech  best-each: pack each disc as full as possible in turn (order not preserved)
-                ball  best-all: global bin-packing to minimise total disc count (order not preserved)
+                best  global bin-packing to minimise total disc count (order not preserved)
+                meta  group tracks by embedded disc-number tag; untagged tracks form a final group
               --no-trim-silence     Skip silence trimming in remaster mode
               --preserve-pregaps    Preserve pre-gaps in remaster mode (no-op for audio-file sources)
 
@@ -105,7 +113,7 @@ def parse_args() -> argparse.Namespace:
               cdda2img r /dev/sr0 --loudness none --output mydisc.rbi
               cdda2img c /music/album
               cdda2img c /music/album --mode master --loudness none
-              cdda2img c /music/album --strategy ball
+              cdda2img c /music/album --strategy best
               cdda2img c /music/album --no-trim-silence
               cdda2img x album.rbi
               cdda2img x album.rbi --tracks
@@ -150,7 +158,7 @@ def parse_args() -> argparse.Namespace:
     c.add_argument(
         "--strategy",
         default=DEFAULT_STRATEGY,
-        choices=["fcfs", "aatc", "bech", "ball"],
+        choices=["fcfs", "aatc", "best", "meta"],
         help="Disc batching strategy (default: aatc)",
     )
     c.add_argument(
@@ -358,6 +366,20 @@ def _unique_path(stem: str, ext: str) -> Path:
     raise RuntimeError(msg)
 
 
+def _check_batch_limits(batches: list[list[Path]]) -> None:
+    """Raise ValueError if any batch exceeds Red Book track or duration limits."""
+    for disc_idx, batch in enumerate(batches, start=1):
+        n = len(batch)
+        total_min = sum(get_audio_duration_minutes(f) for f in batch)
+        if n > MAX_TRACKS or total_min > MAX_RUNTIME_MINUTES:
+            msg = (
+                f"Disc {disc_idx} would have {n} tracks and {total_min:.1f} min"
+                f" (Red Book limit: {MAX_TRACKS} tracks / {MAX_RUNTIME_MINUTES} min)."
+                f" Re-tag files with correct disc numbers or choose a different strategy."
+            )
+            raise ValueError(msg)
+
+
 def create_image(
     input_dir: Path,
     mode: str = "remaster",
@@ -373,6 +395,8 @@ def create_image(
     if not batches:
         print("No audio files found.")
         return
+
+    _check_batch_limits(batches)
 
     meta = derive_album_info(files)
     album = meta["album"]
@@ -583,6 +607,8 @@ def info_image(source: Path) -> None:
 def import_image(
     source: Path, loudness: str = "rg", output: Path | None = None
 ) -> None:
+    import sys
+
     if not source.exists():
         msg = f"{source}: no such file or directory"
         raise FileNotFoundError(msg)
@@ -590,11 +616,17 @@ def import_image(
     temp_base = resolve_temp_dir()
     temp = TempFiles(temp_base)
 
+    ui: TerminalUI | None = None
+    if sys.stdin.isatty():
+        from cdda2img.terminal_ui import TerminalUI as _TUI
+
+        ui = _TUI().start()
+
     try:
         if source.is_dir():
             from cdda2img.ddp_reader import import_ddp
 
-            print(f"Importing DDP image {source.name} (master mode) ...")
+            _ui_status(ui, f"Importing DDP image {source.name}…")
             disc, _ = import_ddp(source, temp.pcm_file)
             output_stem = sanitize_title(disc.album) or source.name
             provenance = {
@@ -610,7 +642,7 @@ def import_image(
             )
             from cdda2img.toc_parser import parse_toc
 
-            print(f"Importing {source.name} (master mode) ...")
+            _ui_status(ui, f"Importing {source.name}…")
             toc_text = source.read_text(encoding="utf-8")
             bin_name = _find_bin_filename(toc_text)
             bin_path = source.parent / bin_name
@@ -620,7 +652,7 @@ def import_image(
 
             disc = parsed_to_rbi_disc(parse_toc(toc_text.encode("utf-8")))
 
-            print(f"  Converting {bin_name} (s16be → s16le) ...")
+            _ui_status(ui, f"Converting {bin_name} (s16be → s16le)…")
             convert_cdrdao_bin_to_wav(bin_path, temp.pcm_pre)
             wav_to_raw_pcm(temp.pcm_pre, temp.pcm_file)
             output_stem = sanitize_title(disc.album) or source.stem
@@ -632,7 +664,7 @@ def import_image(
         elif source.suffix.lower() == ".nrg":
             from cdda2img.nrg_reader import import_nrg
 
-            print(f"Importing {source.name} (master mode) ...")
+            _ui_status(ui, f"Importing {source.name}…")
             disc, _ = import_nrg(source, temp.pcm_file)
             output_stem = sanitize_title(disc.album) or source.stem
             provenance = {
@@ -643,7 +675,7 @@ def import_image(
         elif source.suffix.lower() == ".ccd":
             from cdda2img.ccd_reader import import_ccd
 
-            print(f"Importing {source.name} (master mode) ...")
+            _ui_status(ui, f"Importing {source.name}…")
             disc, _ = import_ccd(source, temp.pcm_file)
             output_stem = sanitize_title(disc.album) or source.stem
             provenance = {
@@ -658,8 +690,12 @@ def import_image(
             )
             raise ValueError(msg)
 
-        _finalize_import(disc, temp.pcm_file, provenance, output_stem, loudness, output)
+        _finalize_import(
+            disc, temp.pcm_file, provenance, output_stem, loudness, output, ui=ui
+        )
     finally:
+        if ui is not None:
+            ui.stop()
         temp.cleanup()
 
 
@@ -672,6 +708,7 @@ def _finalize_import(
     output: Path | None,
     arip_block: bytes | None = None,
     rlog_builder: "RipLogBuilder | None" = None,
+    ui: "TerminalUI | None" = None,
 ) -> None:
     """Shared post-rip/import pipeline: MB lookup → metadata menu → TOC → RG → container."""
     import sys
@@ -679,9 +716,16 @@ def _finalize_import(
     from cdda2img.mb_lookup import prepopulate_from_mb
     from cdda2img.metadata_menu import run_metadata_menu
 
-    print("  Querying MusicBrainz...")
-    disc = prepopulate_from_mb(disc, verbose=sys.stdin.isatty())
+    _ui_status(ui, "Querying MusicBrainz…")
+    # Suppress verbose MB output when TUI is active — status line serves that role.
+    disc = prepopulate_from_mb(disc, verbose=(ui is None) and sys.stdin.isatty())
+
+    # Hand the terminal over to the interactive metadata menu.
+    if ui is not None:
+        ui.pause()
     disc = run_metadata_menu(disc, source_pcm=pcm_file)
+    if ui is not None:
+        ui.resume()
 
     if output is None:
         new_stem = sanitize_title(disc.album)
@@ -699,17 +743,19 @@ def _finalize_import(
     if loudness == "rg":
         from cdda2img.replaygain import analyse_raw, pack_rg_block
 
-        print("  Measuring loudness (EBU R128)...")
-        rg_result = analyse_raw(disc, pcm_file)
+        _ui_status(ui, "Measuring loudness (EBU R128)…")
+        rg_result = analyse_raw(disc, pcm_file, progress_cb=_rg_progress_cb(ui))
         for warning in rg_result.warnings:
-            print(f"  Warning: {warning}")
-        print(
-            f"  Album gain: {rg_result.album_gain:+.2f} dB  "
+            _ui_print(ui, f"  Warning: {warning}")
+        rg_summary = (
+            f"Album gain: {rg_result.album_gain:+.2f} dB  "
             f"peak: {rg_result.album_peak:.4f}  "
             f"LRA: {rg_result.album_lra:.1f} LU"
         )
+        _ui_status(ui, rg_summary)
         rg_block = pack_rg_block(rg_result)
 
+    _ui_status(ui, "Building container…")
     if output is None:
         output = _unique_path(output_stem, "rbi")
 
@@ -723,7 +769,13 @@ def _finalize_import(
         rlog_block=rlog_block,
         prov_data=provenance,
         extra_flags=FLAG_MASTER_MODE,
+        quiet=ui is not None,
     )
+    # register_rbi() has interactive input() prompts — pause TUI before handing
+    # the terminal over so they're visible. No resume needed; this is the last step.
+    if ui is not None:
+        ui.add_output(f"  Container: {output}")
+        ui.pause()
     from cdda2img.catalogue import register_rbi
 
     register_rbi(output)
@@ -815,22 +867,87 @@ def _resolve_drive_offsets(
     return 0, None, drive_name
 
 
-def _rip_with_fallback(device: str, output_pcm: Path, read_offset: int = 0):
+def _ui_status(ui: TerminalUI | None, text: str, prog: float = -1.0) -> None:
+    """Set TUI status on a phase transition: clears the output region, then updates the line."""
+    if ui is not None:
+        ui.clear_output()
+        ui.set_status(text, prog)
+    else:
+        print(f"  {text}")
+
+
+def _ui_print(ui: TerminalUI | None, text: str) -> None:
+    """Append *text* to the TUI output region, or print it directly when no TUI."""
+    if ui is not None:
+        ui.add_output(text)
+    else:
+        print(text)
+
+
+def _rg_progress_cb(ui: TerminalUI | None) -> Callable[[int, int], None] | None:
+    """Build an analyse_raw() progress callback that drives the TUI loudness bar.
+
+    Returns None when there is no TUI, so the analysis runs without reporting.
+    *done*/*total* are CD frames; the detail shows audio time as M:SS.
+    """
+    if ui is None:
+        return None
+
+    def _cb(done: int, total: int) -> None:
+        mins, secs = divmod(done // CD_FRAMES_PER_SECOND, 60)
+        tmins, tsecs = divmod(total // CD_FRAMES_PER_SECOND, 60)
+        ui.set_status(
+            "Measuring loudness (EBU R128)…",
+            done / total if total else 0.0,
+            detail=f"({mins:02d}:{secs:02d}/{tmins:02d}:{tsecs:02d})",
+        )
+
+    return _cb
+
+
+def _rip_with_fallback(
+    device: str,
+    output_pcm: Path,
+    read_offset: int = 0,
+    ui: TerminalUI | None = None,
+):
     """Try cdrdao read-cd first; fall back to cd-paranoia (full) on failure.
 
     *read_offset* is passed through to cd-paranoia via ``-O`` so that the
     fallback path stores offset-corrected PCM.  The cdrdao path returns raw
     PCM; the caller applies ``apply_drive_offset`` after this function returns.
+
+    When *ui* is provided, cdrdao stdout is captured and fed to the TUI
+    progress bar. Without *ui*, behaviour is unchanged.
     """
+    from cdda2img.cdrdao_progress import ProgressUpdate
     from cdda2img.cdrdao_ripper import rip_cdrdao
     from cdda2img.disc_reader import rip_disc
 
-    print(f"Ripping {device} via cdrdao ...")
+    _ui_status(ui, f"Ripping {device} via cdrdao…")
+
+    def _cb(update: ProgressUpdate) -> None:
+        if ui is not None:
+            ui.set_status(
+                update.status,
+                update.fraction,
+                detail=f"({update.elapsed_frames}/{update.total_frames})",
+            )
+
+    progress_cb = _cb if ui is not None else None
+
     try:
-        return rip_cdrdao(device, output_pcm), "cdrdao"
+        return rip_cdrdao(device, output_pcm, progress_cb=progress_cb), "cdrdao"
     except RuntimeError as exc:
-        print(f"  cdrdao failed: {exc}")
-        print("  Falling back to cd-paranoia (paranoia=full) ...")
+        if ui is not None:
+            ui.pause()
+            print(f"  cdrdao failed: {exc}")
+            print("  Falling back to cd-paranoia (paranoia=full) …")
+            ui.resume()
+        else:
+            print(f"  cdrdao failed: {exc}")
+            print("  Falling back to cd-paranoia (paranoia=full) ...")
+        _ui_status(ui, "cd-paranoia (full paranoia)…")
         return rip_disc(
             device, output_pcm, paranoia="full", read_offset=read_offset
         ), "cd-paranoia"
@@ -856,23 +973,33 @@ def rip_image(
     loudness: str = "rg",
     output: Path | None = None,
 ) -> None:
+    import sys
+
     from cdda2img.accuraterip import pack_arip_block, print_ar_report, verify_rip
     from cdda2img.cddb import compute_cddb_disc_id, prepopulate_from_cddb
     from cdda2img.config import load_config
 
     cfg = load_config()
+    # Drive offset resolution may prompt the user (input()) — must happen before TUI.
     read_offset, _write_offset, drive_name = _resolve_drive_offsets(device, cfg)
 
     temp_base = resolve_temp_dir()
     temp = TempFiles(temp_base)
+
+    ui: TerminalUI | None = None
+    if sys.stdin.isatty():
+        from cdda2img.terminal_ui import TerminalUI as _TUI
+
+        ui = _TUI().start()
+
     try:
-        info, rip_type = _rip_with_fallback(device, temp.pcm_file, read_offset)
+        info, rip_type = _rip_with_fallback(device, temp.pcm_file, read_offset, ui=ui)
 
         track_count = len(info.disc.tracks)
         total_s = info.disc.total_seconds
-        print(
-            f"  {track_count} track(s), "
-            f"{int(total_s) // 60}:{int(total_s) % 60:02d} total"
+        _ui_status(
+            ui,
+            f"{track_count} track(s), {int(total_s) // 60}:{int(total_s) % 60:02d} total",
         )
 
         # cdrdao has no native offset flag; correct the PCM after ripping.
@@ -880,10 +1007,16 @@ def rip_image(
         if rip_type == "cdrdao" and read_offset != 0:
             from cdda2img.offset_correct import apply_offset
 
+            _ui_status(ui, "Applying drive offset correction…")
             apply_offset(temp.pcm_file, read_offset)
 
+        _ui_status(ui, "Querying CDDB…")
         disc = prepopulate_from_cddb(
-            info.disc, info.track_lsns, info.disc_last_lsn, server=cfg.cddb_server
+            info.disc,
+            info.track_lsns,
+            info.disc_last_lsn,
+            server=cfg.cddb_server,
+            verbose=ui is None,
         )
 
         cddb_id = int(compute_cddb_disc_id(info.track_lsns, info.disc_last_lsn), 16)
@@ -892,6 +1025,7 @@ def rip_image(
         final_disc_last_lsn = info.disc_last_lsn
 
         # PCM is now offset-corrected for both paths; verify_rip reads from correct positions.
+        _ui_status(ui, "Verifying AccurateRip…")
         ar_results = verify_rip(
             temp.pcm_file,
             final_track_lsns,
@@ -899,7 +1033,11 @@ def rip_image(
             read_offset=0,
             cddb_id=cddb_id,
         )
+        if ui is not None:
+            ui.pause()
         print_ar_report(ar_results, read_offset=read_offset)
+        if ui is not None:
+            ui.resume()
 
         # AR-triggered fallback: partial mismatch → read error on specific tracks.
         # Re-rip with cd-paranoia full paranoia; keep disc metadata from cdrdao scan
@@ -914,9 +1052,9 @@ def rip_image(
                 and r.confidence_v1 is None
                 and r.confidence_v2 is None
             )
-            print(
-                f"  {n_bad} track(s) failed AccurateRip — "
-                "re-ripping with cd-paranoia (full paranoia) ..."
+            _ui_status(
+                ui,
+                f"{n_bad} track(s) failed AccurateRip — re-ripping with cd-paranoia…",
             )
             paranoia_info = rip_disc(
                 device, temp.pcm_file, paranoia="full", read_offset=read_offset
@@ -924,6 +1062,7 @@ def rip_image(
             rip_type = "cd-paranoia"
             final_track_lsns = paranoia_info.track_lsns
             final_disc_last_lsn = paranoia_info.disc_last_lsn
+            _ui_status(ui, "Verifying AccurateRip (re-rip)…")
             ar_results = verify_rip(
                 temp.pcm_file,
                 final_track_lsns,
@@ -931,7 +1070,11 @@ def rip_image(
                 read_offset=0,
                 cddb_id=cddb_id,
             )
+            if ui is not None:
+                ui.pause()
             print_ar_report(ar_results, read_offset=read_offset)
+            if ui is not None:
+                ui.resume()
 
         arip_block = pack_arip_block(
             ar_results, final_track_lsns, final_disc_last_lsn, cddb_id
@@ -965,8 +1108,11 @@ def rip_image(
             output,
             arip_block=arip_block,
             rlog_builder=rlog_builder,
+            ui=ui,
         )
     finally:
+        if ui is not None:
+            ui.stop()
         temp.cleanup()
 
 

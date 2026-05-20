@@ -1,5 +1,33 @@
 # TODO
 
+## ✅ DONE — TUI progress bars: cdrdao rip + EBU R128 loudness (2026-05-20)
+
+384 tests; ruff + ty clean.
+
+- [x] **cdrdao rip progress overshoot fixed** — `cdrdao_progress.py`: cdrdao prints the
+  *absolute* disc MSF position (`CdrDriver.cc:4062`/`4090`), not a track-relative offset.
+  The parser was adding a per-track base on top, overshooting the leadout (observed
+  220655/204143, hitting 100% at track 10 of 11). The MSF value is now used directly as
+  elapsed and clamped to total; the `_done_frames`/`_track_frames` machinery is removed.
+  `cdrdao_ripper.py` now reads cdrdao **stderr** (where progress text goes), not stdout.
+  Confirmed working on a real rip.
+- [x] **Loudness progress bar** — `replaygain.py:analyse_raw()` scans each track in
+  `_RG_CHUNK_FRAMES` (750 ≈ 10 s) chunks and calls an optional `progress_cb(done, total)`;
+  libebur128's incremental `add_frames()` makes chunked feeding bit-identical to one call.
+  `cdda2img.py:_rg_progress_cb()` drives the TUI bar — previously an indeterminate
+  "bobber". Chunking also bounds the float32 conversion buffer. Confirmed on a real rip.
+- [x] **Tests** — `tests/test_cdrdao_progress.py` (5: absolute-MSF parsing, monotonic
+  progress, no overshoot); `tests/test_replaygain.py` (3: progress-callback contract,
+  chunk-size invariance, empty-disc guard).
+- [x] **`container.py:build_container` C901 fix** — four `dir_count` counters collapsed
+  into one `sum(...)` expression (the `quiet=` parameter had pushed complexity to 11).
+- [x] **Docs / config** — `CLAUDE.md` corrected (ruff line length is 88, not 120);
+  `album/` added to `.gitignore`; `scratch/` excluded from ruff and ty in `pyproject.toml`
+  (it holds throwaway prototypes — the source of `sync.py` `ruff check .` failures and of
+  stray `ty` warnings; `ruff check`/`ty`/pre-commit had three different file scopes).
+
+---
+
 ## ✅ DONE — Metadata menu improvements + catalogue UI fixes (2026-05-15)
 
 303 tests; ruff + ty clean.

@@ -4,6 +4,7 @@ catalogue_menu.py — interactive disc catalogue browser (``d`` subcommand).
 
 from __future__ import annotations
 
+import re
 import sys
 from pathlib import Path
 
@@ -30,6 +31,26 @@ def _trunc(text: str | None, width: int) -> str:
     if not text:
         return ""
     return text if len(text) <= width else text[: width - 1] + "…"
+
+
+def _parse_selection_range(s: str, total: int) -> list[int]:
+    """Parse a 1-based selection string into a list of 0-based indices.
+
+    Accepts a single integer ("3") or a range ("1-3", "1 - 3", "1- 3", "1 -3").
+    Returns an empty list for invalid input or values outside 1..total.
+    """
+    s = s.strip()
+    m = re.match(r"^(\d+)\s*-\s*(\d+)$", s)
+    if m:
+        lo, hi = int(m.group(1)), int(m.group(2))
+        if lo > hi:
+            lo, hi = hi, lo
+        return [i - 1 for i in range(lo, hi + 1) if 1 <= i <= total]
+    try:
+        idx = int(s) - 1
+    except ValueError:
+        return []
+    return [idx] if 0 <= idx < total else []
 
 
 def _prompt(prompt: str) -> str:
@@ -210,30 +231,33 @@ def _results_loop(conn: object, rows: list, query: str) -> str | None:  # noqa: 
             return None
         elif choice == "d":
             del_str = _prompt(f"  Delete which entry (1-{total})? ").strip()
-            try:
-                del_idx = int(del_str) - 1
-                if 0 <= del_idx < total:
-                    import sqlite3
-
-                    assert isinstance(conn, sqlite3.Connection)  # noqa: S101
-                    rec = rows[del_idx]
-                    label = f"{rec[1] or ''} — {rec[2] or ''}"
-                    confirm = _prompt(f"  Delete {label!r}? [y/N] ").strip().lower()
-                    if confirm == "y":
-                        with conn:
-                            conn.execute("DELETE FROM catalogue WHERE id=?", (rec[0],))
-                        rows = [r for r in rows if r[0] != rec[0]]
-                        total = len(rows)
-                        total_pages = max(1, (total + _PAGE - 1) // _PAGE)
-                        page = min(page, max(0, total_pages - 1))
-                        print("  Deleted.")
-                        if total == 0:
-                            _prompt("  No results remain. [Enter to search again] ")
-                            return "search"
-                else:
-                    print("  Invalid selection.")
-            except ValueError:
+            del_indices = _parse_selection_range(del_str, total)
+            if not del_indices:
                 print("  Invalid selection.")
+            else:
+                import sqlite3
+
+                assert isinstance(conn, sqlite3.Connection)  # noqa: S101
+                to_delete = [rows[i] for i in del_indices]
+                if len(to_delete) == 1:
+                    label = f"{to_delete[0][1] or ''} — {to_delete[0][2] or ''}"
+                else:
+                    label = f"{len(to_delete)} entries"
+                confirm = _prompt(f"  Delete {label!r}? [y/N] ").strip().lower()
+                if confirm == "y":
+                    ids_to_delete = {r[0] for r in to_delete}
+                    with conn:
+                        for rec_id in ids_to_delete:
+                            conn.execute("DELETE FROM catalogue WHERE id=?", (rec_id,))
+                    rows = [r for r in rows if r[0] not in ids_to_delete]
+                    total = len(rows)
+                    total_pages = max(1, (total + _PAGE - 1) // _PAGE)
+                    page = min(page, max(0, total_pages - 1))
+                    n = len(ids_to_delete)
+                    print(f"  Deleted {n} {'entry' if n == 1 else 'entries'}.")
+                    if total == 0:
+                        _prompt("  No results remain. [Enter to search again] ")
+                        return "search"
         else:
             try:
                 idx = int(choice) - 1

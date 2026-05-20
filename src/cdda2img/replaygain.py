@@ -16,6 +16,7 @@ Public API
 from __future__ import annotations
 
 import struct
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -52,6 +53,8 @@ RG_VERSION: int = 1  # RG block format version stored in the container
 
 _LRA_WARN_LU: float = 5.0  # album LRA below this indicates heavily compressed source
 _INT16_PER_FRAME = 1176  # 2352 bytes per CD frame / 2 bytes per int16
+# CD frames per analysis chunk (~10 s); also bounds the float32 conversion buffer.
+_RG_CHUNK_FRAMES = 750
 
 
 # ---------------------------------------------------------------------------
@@ -162,13 +165,23 @@ def analyse(paths: list[Path]) -> RGResult:
     )
 
 
-def analyse_raw(disc: RBIDisc, pcm_path: Path) -> RGResult:
+def analyse_raw(
+    disc: RBIDisc,
+    pcm_path: Path,
+    progress_cb: Callable[[int, int], None] | None = None,
+) -> RGResult:
     """Measure EBU R128 from a raw s16le PCM file, slicing per-track via np.memmap.
 
     Bypasses WAV encoding and PyAV decode entirely: np.memmap gives a zero-copy
-    view into the PCM file; the only allocation per track is the float32
-    conversion (int16 → float32 / 32768). Both per-track and album R128States
-    are fed in a single linear scan of the file.
+    view into the PCM file. Each track is scanned in chunks of _RG_CHUNK_FRAMES
+    CD frames; after every chunk *progress_cb* (when given) is called with
+    (cd_frames_done, cd_frames_total). Chunking also bounds the float32 conversion
+    buffer regardless of track length. Both per-track and album R128States are fed
+    in a single linear scan of the file.
+
+    libebur128's add_frames() is incremental, so feeding a track as a sequence of
+    whole-CD-frame chunks yields state identical to one add_frames() call — the
+    progress reporting does not perturb the measurement.
     """
     if not disc.tracks:
         msg = "analyse_raw: disc has no tracks"
@@ -177,20 +190,33 @@ def analyse_raw(disc: RBIDisc, pcm_path: Path) -> RGResult:
     album_state = pyebur128.R128State(PCM_CHANNELS, PCM_SAMPLE_RATE, _EBUR128_MODE)
     track_results: list[TrackRG] = []
     s16_view = np.memmap(pcm_path, dtype="<i2", mode="r")
+
+    total_frames = sum(t.duration_frames for t in disc.tracks)
+    done_frames = 0
+
     for track in disc.tracks:
-        idx_start = (track.start_frame + track.pregap_frames) * _INT16_PER_FRAME
-        idx_count = track.duration_frames * _INT16_PER_FRAME
-        samples = (
-            s16_view[idx_start : idx_start + idx_count].astype(np.float32) / 32768.0
-        )
-        n_frames = len(samples) // PCM_CHANNELS
         track_state = pyebur128.R128State(PCM_CHANNELS, PCM_SAMPLE_RATE, _EBUR128_MODE)
-        track_state.add_frames(samples, n_frames)
+        pos = track.start_frame + track.pregap_frames
+        remaining = track.duration_frames
+        while remaining > 0:
+            chunk = min(_RG_CHUNK_FRAMES, remaining)
+            idx_start = pos * _INT16_PER_FRAME
+            idx_count = chunk * _INT16_PER_FRAME
+            samples = (
+                s16_view[idx_start : idx_start + idx_count].astype(np.float32) / 32768.0
+            )
+            n_frames = len(samples) // PCM_CHANNELS
+            track_state.add_frames(samples, n_frames)
+            album_state.add_frames(samples, n_frames)
+            pos += chunk
+            remaining -= chunk
+            done_frames += chunk
+            if progress_cb is not None:
+                progress_cb(done_frames, total_frames)
         integrated, peak, lra = _state_results(track_state, PCM_CHANNELS)
         track_results.append(
             TrackRG(gain=RG_REFERENCE - integrated, peak=peak, lra=lra)
         )
-        album_state.add_frames(samples, n_frames)
     del s16_view
     al_int, al_peak, al_lra = _state_results(album_state, PCM_CHANNELS)
     return RGResult(

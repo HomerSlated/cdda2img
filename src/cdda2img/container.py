@@ -148,6 +148,7 @@ def build_container(
     rlog_block: bytes | None = None,
     prov_data: dict[str, str] | None = None,
     extra_flags: int = 0,
+    quiet: bool = False,
 ) -> None:
     """Assemble and write an RBI v4.0 container from raw PCM and TOC data.
 
@@ -160,15 +161,10 @@ def build_container(
     """
     prov_block = build_prov_block(prov_data) if prov_data is not None else None
 
-    dir_count = 2  # TOC + PCM always present
-    if prov_block is not None:
-        dir_count += 1
-    if rg_block is not None:
-        dir_count += 1
-    if arip_block is not None:
-        dir_count += 1
-    if rlog_block is not None:
-        dir_count += 1
+    # TOC + PCM always present; each optional block adds one directory entry.
+    dir_count = 2 + sum(
+        b is not None for b in (prov_block, rg_block, arip_block, rlog_block)
+    )
 
     header = struct.pack(
         HEADER_STRUCT,
@@ -274,7 +270,8 @@ def build_container(
         out.seek(OFFSET_DIR_OFFSET)
         out.write(struct.pack("<Q", dir_offset))
 
-    print(f"Container created: {output_file}")
+    if not quiet:
+        print(f"Container created: {output_file}")
 
 
 # ---------------------------------------------------------------------------

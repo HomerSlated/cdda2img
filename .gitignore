@@ -79,6 +79,7 @@ scripts/
 rips/
 mnt/
 extracted/
+album/
 *.extracted/
 
 # Machine-local Claude Code context (see CLAUDE.md for the committed portion)

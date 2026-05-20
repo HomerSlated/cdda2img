@@ -327,7 +327,9 @@ def _mb_search_menu(
             if mode:
                 if selected.mb_release_id and not selected.tracks:
                     print("  Fetching full track listing from MusicBrainz...")
-                    full = lookup_release(selected.mb_release_id)
+                    full = lookup_release(
+                        selected.mb_release_id, disc_number=disc.disc_number
+                    )
                     if full and (full.album or full.tracks):
                         selected = full
                 disc = (
@@ -495,7 +497,9 @@ def _acoustid_run_one(
         if mode:
             if selected.mb_release_id and len(selected.tracks) < len(disc.tracks):
                 print("  Fetching full track listing from MusicBrainz...")
-                full = lookup_release(selected.mb_release_id)
+                full = lookup_release(
+                    selected.mb_release_id, disc_number=disc.disc_number
+                )
                 if full and (full.album or full.tracks):
                     selected = full
             updated = (
