@@ -127,7 +127,7 @@ def build_prov_block(data: dict[str, str]) -> bytes:
     """
     merged: dict[str, str] = {
         "creator": f"cdda2img v{_TOOL_VERSION}",
-        "created": datetime.datetime.now(datetime.UTC).isoformat(),
+        "created": datetime.datetime.now(datetime.timezone.utc).isoformat(),
     }
     merged.update(data)
     return "\n".join(f"{k}={v}" for k, v in merged.items()).encode("utf-8")

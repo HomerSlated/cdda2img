@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import argparse
 import importlib.metadata
 import logging
@@ -707,8 +709,8 @@ def _finalize_import(
     loudness: str,
     output: Path | None,
     arip_block: bytes | None = None,
-    rlog_builder: "RipLogBuilder | None" = None,
-    ui: "TerminalUI | None" = None,
+    rlog_builder: RipLogBuilder | None = None,
+    ui: TerminalUI | None = None,
 ) -> None:
     """Shared post-rip/import pipeline: MB lookup → metadata menu → TOC → RG → container."""
     import sys

@@ -25,6 +25,14 @@
   `album/` added to `.gitignore`; `scratch/` excluded from ruff and ty in `pyproject.toml`
   (it holds throwaway prototypes — the source of `sync.py` `ruff check .` failures and of
   stray `ty` warnings; `ruff check`/`ty`/pre-commit had three different file scopes).
+- [x] **Follow-up — Python 3.10–3.13 CI fix** — f496e21 was verified only on 3.14 (the
+  dev runtime) and broke the older CI matrix. `cdda2img.py` used a `TYPE_CHECKING`-only
+  `TerminalUI` in unquoted annotations with no `from __future__ import annotations` —
+  lazy on 3.14 (PEP 649) but eager at definition time on 3.10–3.13 → `NameError`.
+  `container.py:build_prov_block` used `datetime.UTC` (added in Python 3.11) →
+  `AttributeError` on 3.10. Fixed with the future import (ruff then dropped the
+  now-redundant quoted annotations) and `datetime.timezone.utc`; suite verified on
+  Python 3.10 and 3.14 (`uv run --python 3.10 pytest`).
 
 ---
 
