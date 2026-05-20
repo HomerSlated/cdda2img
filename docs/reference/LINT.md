@@ -166,10 +166,12 @@ Format per entry:
 
 ---
 
-## LINT-008 — Trusted internal subprocess call for `ffplay` (`audition.py`)
+## LINT-008 — Trusted internal subprocess call for `ffplay` (`audition.py`, `track_preview.py`)
 
 - **Rule:** `ruff: S603` (subprocess without `shell=True` check)
-- **Location:** `audition.py:154` — `subprocess.Popen(cmd, stdin=subprocess.DEVNULL)`
+- **Locations:**
+  - `audition.py:186` — `subprocess.Popen(cmd, stdin=subprocess.DEVNULL)` in `Player.play()`
+  - `track_preview.py:89` — `subprocess.Popen(cmd, ...)` (looping `ffplay`) in `_grab_and_play()`
 - **Rationale:** S603 warns that subprocess calls may execute untrusted input. Here `cmd`
   is constructed entirely from hardcoded constants and resolved `Path` objects inside the
   module — no user-supplied string ever reaches subprocess arguments. The `ffplay`
@@ -230,12 +232,13 @@ Format per entry:
 
 ---
 
-## LINT-012 — Trusted internal subprocess calls for `cd-paranoia` (`disc_reader.py`)
+## LINT-012 — Trusted internal subprocess calls for `cd-paranoia` (`disc_reader.py`, `track_preview.py`)
 
 - **Rules:** `ruff: S603` (subprocess without `shell=True` check), `ruff: S607` (partial executable path)
 - **Locations:**
-  - `disc_reader.py:62–63` — `subprocess.run(["cd-paranoia", "-Q", ...])` in `_query_disc()`
-  - `disc_reader.py:152–153` — `subprocess.run(["cd-paranoia", "-d", ...])` in `rip_disc()`
+  - `disc_reader.py:63` — `subprocess.run(["cd-paranoia", "-Q", ...])` in `query_disc()`
+  - `disc_reader.py:168` — `subprocess.run(cmd)` (`cd-paranoia` rip) in `rip_disc()`
+  - `track_preview.py:112` — `subprocess.Popen(cmd)` (`cd-paranoia` track-1 grab) in `_grab_track1()`
 - **Rationale:**
   - *S603:* Both calls construct argument lists entirely from hardcoded string literals,
     the caller-supplied `device` string (a device path like `/dev/sr0`), and a resolved
@@ -377,3 +380,20 @@ Format per entry:
   - *Restructure as a state machine class* — disproportionate for a read-only browser.
 - **Decision:** `# noqa: C901` is correct. Interactive TUI dispatch loops are a well-established
   pattern where high branch counts are inherent to the design.
+
+---
+
+## LINT-017 — Trusted `sleep` subprocess in a test (`test_track_preview.py`)
+
+- **Rule:** `ruff: S607` (partial executable path)
+- **Location:** `test_track_preview.py:36` — `subprocess.Popen(["sleep", "30"])`
+- **Rationale:** `test_stop_terminates_playback_and_removes_wav` spawns a real, long-running
+  process so it can verify `TrackPreview.stop()` actually terminates playback. `sleep` is
+  a coreutils binary invoked by name with two hardcoded literal arguments — no external
+  input. S603 does not fire (ruff does not flag a hardcoded `Popen` list); only S607
+  (partial path) applies.
+- **Alternatives:**
+  - *Use a fake process object* — would need a `cast()` to satisfy the type checker and
+    would not exercise real OS process termination; the real subprocess is the honest test.
+  - *Absolute path to `sleep`* — fragile across distributions; `sleep` is universally on `PATH`.
+- **Decision:** `# noqa: S607` is correct — a hardcoded coreutils invocation in a test.

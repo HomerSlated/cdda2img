@@ -4,6 +4,7 @@ disc_reader.py — CD-DA ripping via cd-paranoia subprocess.
 Public interface:
     RipInfo(disc, track_lsns, disc_last_lsn)
     rip_disc(device, output_pcm, *, paranoia="overlap") -> RipInfo
+    query_disc(device) -> (disc_first, disc_last, [(num, first_lsn, length), ...])
 """
 
 from __future__ import annotations
@@ -52,7 +53,7 @@ class RipInfo(NamedTuple):
 # ---------------------------------------------------------------------------
 
 
-def _query_disc(device: str) -> tuple[int, int, list[tuple[int, int, int]]]:
+def query_disc(device: str) -> tuple[int, int, list[tuple[int, int, int]]]:
     """Run 'cd-paranoia -Q' and return (disc_first, disc_last, [(num, first_lsn, length), ...]).
 
     disc_first is the first sector of track 1 (index 01); disc_last is the last sector of
@@ -141,7 +142,7 @@ def rip_disc(
     """
     from cdda2img.container import wav_to_raw_pcm
 
-    disc_first, disc_last, tracks = _query_disc(device)
+    disc_first, disc_last, tracks = query_disc(device)
     log.debug(
         "disc: first=%d last=%d sectors=%d tracks=%d",
         disc_first,

@@ -161,6 +161,7 @@ Two source types, each producing s16le PCM, then both call `_finalize_import()`:
 - **`concat.py`** — WAV concatenation via the `wave` module
 - **`track_extract.py`** — per-track FLAC extraction + CUE sheet writer
 - **`audition.py`** — ffplay subprocess wrapper for interactive audition (pause/resume via SIGSTOP/SIGCONT)
+- **`track_preview.py`** — cosmetic track-1 audio preview for the `r` pipeline: grabs track 1 via cd-paranoia, loops it via ffplay in the background during the rip; best-effort (never fails a rip)
 
 ## RBI Format (v3.0)
 
@@ -189,7 +190,7 @@ Full specification: `docs/reference/rbi_spec.md`.
 - Tests use `example/` directory audio files (committed to repo) as fixtures
 - **Byte-order invariants**: GEAR Pro DDP TRACK*.DAT is s16le — no byte-swap on import; cdrdao BIN output is s16be — always byte-swap via `convert_cdrdao_bin()` (import) or `convert_cdrdao_bin_to_wav()` (RG analysis); cd-paranoia outputs WAV (s16le) — no byte-swap for ripped data
 - **Normalize vs ReplayGain**: `--normalize` is extract-time only (mutually exclusive with RG tag embedding); `--loudness rg` at create/rip/import time measures EBU R128 and stores the result in the RBI container without modifying the PCM
-- **Subprocess**: `disc_reader.py` and `cdrdao_ripper.py` spawn `cd-paranoia` and `cdrdao` via `subprocess.run`; `audition.py` spawns `ffplay` via `subprocess.Popen`; intentional subprocess calls carry `# noqa: S603, S607` (see LINT-012, LINT-013, LINT-008)
+- **Subprocess**: `disc_reader.py`, `cdrdao_ripper.py`, and `track_preview.py` spawn `cd-paranoia` and `cdrdao`; `audition.py` and `track_preview.py` spawn `ffplay`; intentional subprocess calls carry `# noqa: S603, S607` (see LINT-008, LINT-012, LINT-013, LINT-017)
 - **Version** lives in `pyproject.toml` only; `container.py` and `cdda2img.py` read it via `importlib.metadata`
 - **spec-before-code**: update `docs/reference/rbi_spec.md` before changing the container format
 

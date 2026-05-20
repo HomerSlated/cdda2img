@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from cdda2img.rip_log import RipLogBuilder
     from cdda2img.terminal_ui import TerminalUI
+    from cdda2img.track_preview import TrackPreview
 
 from cdda2img.concat import concat_wav
 from cdda2img.container import (
@@ -746,7 +747,11 @@ def _finalize_import(
         from cdda2img.replaygain import analyse_raw, pack_rg_block
 
         _ui_status(ui, "Measuring loudness (EBU R128)…")
-        rg_result = analyse_raw(disc, pcm_file, progress_cb=_rg_progress_cb(ui))
+        rg_result = analyse_raw(
+            disc,
+            pcm_file,
+            progress_cb=_phase_progress_cb(ui, "Measuring loudness (EBU R128)…"),
+        )
         for warning in rg_result.warnings:
             _ui_print(ui, f"  Warning: {warning}")
         rg_summary = (
@@ -886,11 +891,13 @@ def _ui_print(ui: TerminalUI | None, text: str) -> None:
         print(text)
 
 
-def _rg_progress_cb(ui: TerminalUI | None) -> Callable[[int, int], None] | None:
-    """Build an analyse_raw() progress callback that drives the TUI loudness bar.
+def _phase_progress_cb(
+    ui: TerminalUI | None, label: str
+) -> Callable[[int, int], None] | None:
+    """Build a CD-frame progress callback that drives the TUI bar for *label*.
 
-    Returns None when there is no TUI, so the analysis runs without reporting.
-    *done*/*total* are CD frames; the detail shows audio time as M:SS.
+    Returns None when there is no TUI, so the phase runs without reporting.
+    *done*/*total* are CD frames; the detail shows elapsed/total time as M:SS.
     """
     if ui is None:
         return None
@@ -899,12 +906,34 @@ def _rg_progress_cb(ui: TerminalUI | None) -> Callable[[int, int], None] | None:
         mins, secs = divmod(done // CD_FRAMES_PER_SECOND, 60)
         tmins, tsecs = divmod(total // CD_FRAMES_PER_SECOND, 60)
         ui.set_status(
-            "Measuring loudness (EBU R128)…",
+            label,
             done / total if total else 0.0,
             detail=f"({mins:02d}:{secs:02d}/{tmins:02d}:{tsecs:02d})",
         )
 
     return _cb
+
+
+def _start_track_preview(
+    device: str, work_dir: Path, ui: TerminalUI | None
+) -> TrackPreview | None:
+    """Grab track 1 and start looping background playback (TTY sessions only).
+
+    Cosmetic only — start_preview() swallows every failure and returns None,
+    so the rip is never affected.
+    """
+    if ui is None:
+        return None
+    from cdda2img.track_preview import start_preview
+
+    _ui_status(ui, "Grabbing track 1…")
+    return start_preview(device, work_dir, _phase_progress_cb(ui, "Grabbing track 1…"))
+
+
+def _stop_preview(preview: TrackPreview | None) -> None:
+    """Stop background track-1 playback, if a preview is running."""
+    if preview is not None:
+        preview.stop()
 
 
 def _rip_with_fallback(
@@ -994,7 +1023,12 @@ def rip_image(
 
         ui = _TUI().start()
 
+    preview: TrackPreview | None = None
     try:
+        # Grab track 1 first (drive is single-use), then play it on a loop in
+        # the background while the rest of the rip runs.
+        preview = _start_track_preview(device, temp_base, ui)
+
         info, rip_type = _rip_with_fallback(device, temp.pcm_file, read_offset, ui=ui)
 
         track_count = len(info.disc.tracks)
@@ -1113,6 +1147,7 @@ def rip_image(
             ui=ui,
         )
     finally:
+        _stop_preview(preview)
         if ui is not None:
             ui.stop()
         temp.cleanup()

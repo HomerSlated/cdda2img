@@ -1,5 +1,31 @@
 # TODO
 
+## ✅ DONE — Track-1 audio preview during rip (2026-05-20)
+
+387 tests; ruff + ty clean. Verified on hardware (PX-716A).
+
+- [x] **`track_preview.py`** (new module) — `start_preview(device, work_dir, progress_cb)`
+  grabs track 1 via `cd-paranoia -Z` (fast, no paranoia — it is a throwaway preview) to a
+  temp WAV, then loops it with `ffplay -loop 0` as a detached background process.
+  `TrackPreview.stop()` terminates playback and deletes the WAV. Best-effort: every
+  failure path (missing cd-paranoia/ffplay, grab error) is swallowed, so a rip is never
+  affected. Progress is derived by polling the growing WAV size against the known track
+  length — robust and tool-agnostic, unlike parsing cd-paranoia's progress display.
+- [x] **`r` pipeline integration** — `rip_image()` grabs track 1 first (single optical
+  drive, so the grab is sequential before the cdrdao rip), shows a real "Grabbing
+  track 1…" progress bar, then plays it on a loop through the cdrdao rip, metadata menu,
+  loudness analysis and container build. `ffplay` gets `stdin=DEVNULL` so it cannot steal
+  keystrokes from the metadata menu. Skipped when not a TTY; stopped in the `finally` via
+  `_stop_preview()`. Track 1 is read twice (cd-paranoia preview + cdrdao archive rip) —
+  an accepted cosmetic cost.
+- [x] **Refactors** — `disc_reader._query_disc` → public `query_disc` (reused for track
+  1's length); `cdda2img._rg_progress_cb` → general `_phase_progress_cb(ui, label)`,
+  shared by the loudness and "Grabbing track 1…" progress bars.
+- [x] **Tests** — `tests/test_track_preview.py` (3): tools-missing → None, internal
+  error → None (never raises), `stop()` terminates playback + cleans up.
+
+---
+
 ## ✅ DONE — TUI progress bars: cdrdao rip + EBU R128 loudness (2026-05-20)
 
 384 tests; ruff + ty clean.
