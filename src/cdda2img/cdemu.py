@@ -115,7 +115,7 @@ def mount_rbi(
     extract_data(rbi_file, opts, base_dir=mnt_dir)
 
     stem = rbi_file.stem
-    toc_path = (mnt_dir / "raw" / f"{stem}.toc").resolve()
+    toc_path = (mnt_dir / f"{stem}.toc").resolve()
     if not toc_path.exists():
         msg = f"Expected extracted TOC not found: {toc_path}"
         raise RuntimeError(msg)

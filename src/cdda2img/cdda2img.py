@@ -1270,6 +1270,7 @@ def mount_image(
     dev_str = device or f"/dev/sr?  (slot {slot_used} — run: cdemu device-mapping)"
     print(f"Mounted in cdemu slot {slot_used}: {toc_path}")
     print(f"Device:  {dev_str}")
+    print(f"Play:    mpv av://libcdio:{dev_str}")
     print(f"Re-rip:  cdrdao read-cd --device {dev_str} disc.toc")
     print(f"Unload:  cdemu unload {slot_used}")
 

@@ -3,7 +3,7 @@
 measure_write_offset.py — Measure CD burn drive write offset via burn-and-read-back.
 
 Usage (from project root):
-    uv run python scripts/measure_write_offset.py [--device DEV] \\
+    uv run python tools/measure_write_offset.py [--device DEV] \\
         [--read-offset N] [--speed N]
 
 Sign convention
