@@ -98,6 +98,7 @@ class Config:
     drives: list[DriveConfig] = field(default_factory=list)
     catalogue_path: Path | None = None
     enable_catalogue: bool = True
+    default_device: str = "/dev/sr0"
 
 
 def _parse_drives(raw_drives: object) -> list[DriveConfig]:
@@ -175,6 +176,7 @@ def load_config() -> Config:
     )
 
     enable_catalogue = bool(data.get("enable_catalogue", True))
+    default_device = str(data.get("default_device", "/dev/sr0"))
 
     return Config(
         cddb_server=cddb_server,
@@ -186,6 +188,7 @@ def load_config() -> Config:
         drives=drives,
         catalogue_path=catalogue_path,
         enable_catalogue=enable_catalogue,
+        default_device=default_device,
     )
 
 

@@ -391,3 +391,26 @@ def test_load_config_no_drives_field_returns_empty(
     monkeypatch.setattr("cdda2img.config.config_path", lambda: cfg)
     config = load_config()
     assert config.drives == []
+
+
+# ---------------------------------------------------------------------------
+# default_device
+# ---------------------------------------------------------------------------
+
+
+def test_default_device_fallback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cfg = tmp_path / "cfg.toml"
+    cfg.write_text("")
+    monkeypatch.setattr("cdda2img.config.config_path", lambda: cfg)
+    assert load_config().default_device == "/dev/sr0"
+
+
+def test_default_device_reads_from_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cfg = tmp_path / "cfg.toml"
+    cfg.write_text('default_device = "/dev/sr1"\n')
+    monkeypatch.setattr("cdda2img.config.config_path", lambda: cfg)
+    assert load_config().default_device == "/dev/sr1"

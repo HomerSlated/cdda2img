@@ -240,8 +240,8 @@ def parse_args() -> argparse.Namespace:
     r_cmd.add_argument(
         "device",
         nargs="?",
-        default="/dev/sr0",
-        help="Optical drive device (default: /dev/sr0)",
+        default=None,
+        help="Optical drive device (default: from config default_device, fallback /dev/sr0)",
     )
     r_cmd.add_argument(
         "--loudness",
@@ -297,8 +297,8 @@ def parse_args() -> argparse.Namespace:
     w_cmd.add_argument(
         "device",
         nargs="?",
-        default="/dev/sr0",
-        help="CD drive device (default: /dev/sr0)",
+        default=None,
+        help="CD drive device (default: from config default_device, fallback /dev/sr0)",
     )
     w_cmd.add_argument(
         "--speed",
@@ -1000,7 +1000,7 @@ def _ar_has_partial_mismatch(results: list) -> bool:
 
 
 def rip_image(
-    device: str,
+    device: str | None = None,
     loudness: str = "rg",
     output: Path | None = None,
 ) -> None:
@@ -1011,6 +1011,7 @@ def rip_image(
     from cdda2img.config import load_config
 
     cfg = load_config()
+    device = device or cfg.default_device
     # Drive offset resolution may prompt the user (input()) — must happen before TUI.
     read_offset, _write_offset, drive_name = _resolve_drive_offsets(device, cfg)
 
@@ -1214,7 +1215,7 @@ def extract_image(
 
 def burn_image(
     rbi_file: Path,
-    device: str = "/dev/sr0",
+    device: str | None = None,
     write_offset_override: int | None = None,
     speed: int = 4,
     yes: bool = False,
@@ -1224,6 +1225,7 @@ def burn_image(
     from cdda2img.drive_info import probe_drive_name
 
     cfg = load_config()
+    device = device or cfg.default_device
     if write_offset_override is not None:
         write_offset = write_offset_override
         log.debug("write_offset=%d (CLI override)", write_offset)

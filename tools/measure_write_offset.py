@@ -28,6 +28,7 @@ Results accumulate in rips/write_offset_results.toml; re-run to add cycles.
 from __future__ import annotations
 
 import argparse
+import re
 import subprocess
 import sys
 import wave
@@ -345,6 +346,13 @@ def _run_one_cycle(
     return input("Another disc? [Enter / q]: ").strip().lower() != "q"
 
 
+def _drive_slug(name: str | None, device: str) -> str:
+    """Return a filesystem-safe slug for use in result filenames."""
+    if name:
+        return re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-") or "unknown"
+    return re.sub(r"[^a-z0-9]+", "-", device.lower().lstrip("/")).strip("-") or "device"
+
+
 def _probe_drive(
     device: str, read_offset_override: int | None
 ) -> tuple[str | None, int]:
@@ -379,9 +387,9 @@ def main() -> int:
     )
     ap.add_argument(
         "--device",
-        default="/dev/sr0",
+        default=None,
         metavar="DEV",
-        help="CD drive device (default: /dev/sr0)",
+        help="CD drive device (default: from config default_device, fallback /dev/sr0)",
     )
     ap.add_argument(
         "--read-offset",
@@ -399,14 +407,20 @@ def main() -> int:
     )
     args = ap.parse_args()
 
+    if args.device is None:
+        from cdda2img.config import load_config
+
+        args.device = load_config().default_device
+
     drive_name, read_offset = _probe_drive(args.device, args.read_offset)
     if drive_name:
         print(f"Drive: {drive_name}  read_offset={read_offset:+d}")
     else:
         print(f"Drive: unknown  read_offset={read_offset:+d}")
 
+    slug = _drive_slug(drive_name, args.device)
     work = Path("rips/write_offset")
-    results_path = Path("rips/write_offset_results.toml")
+    results_path = Path(f"rips/write_offset_{slug}.toml")
     wav = work / "test.wav"
     toc = work / "test.toc"
     ripped_bin = work / "ripped.bin"

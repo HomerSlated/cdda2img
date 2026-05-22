@@ -35,6 +35,10 @@
 # Default: true
 # enable_catalogue = true
 
+# Default CD drive device used when no --device argument is supplied.
+# Default: /dev/sr0
+# default_device = "/dev/sr0"
+
 # Per-drive read and write offsets.
 # read_offset is stored automatically after AccurateRip confirmation.
 # write_offset is stored automatically by tools/measure_write_offset.py.
