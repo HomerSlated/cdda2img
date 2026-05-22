@@ -1220,6 +1220,8 @@ def burn_image(
     speed: int = 4,
     yes: bool = False,
 ) -> None:
+    import sys
+
     from cdda2img.config import load_config
     from cdda2img.disc_writer import burn_disc
     from cdda2img.drive_info import probe_drive_name
@@ -1258,7 +1260,25 @@ def burn_image(
                         drive_name,
                         eac_wo,
                     )
-    burn_disc(rbi_file, device=device, write_offset=write_offset, speed=speed, yes=yes)
+
+    ui: TerminalUI | None = None
+    if sys.stdin.isatty():
+        from cdda2img.terminal_ui import TerminalUI as _TUI
+
+        ui = _TUI().start()
+
+    try:
+        burn_disc(
+            rbi_file,
+            device=device,
+            write_offset=write_offset,
+            speed=speed,
+            yes=yes,
+            ui=ui,
+        )
+    finally:
+        if ui is not None:
+            ui.stop()
 
 
 def mount_image(
