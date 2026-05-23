@@ -4,17 +4,22 @@ from cdda2img.disc_writer import _sanitize_toc_for_burn
 
 
 def _toc(
-    catalog: str | None = None, tracks: list[tuple[str, str]] | None = None
+    catalog: str | None = None,
+    tracks: list[tuple[str, str]] | None = None,
+    disc_title: str = "Test Album",
+    disc_performer: str = "Test Artist",
 ) -> str:
     lines = ["CD_DA\n"]
     if catalog is not None:
         lines.append(f'CATALOG "{catalog}"\n')
+    # Always emit the disc-level block as-is (including empty-string fields) so
+    # _sanitize_toc_for_burn can be tested against old-RBI-style empty shells.
     lines += [
         "CD_TEXT {",
         "  LANGUAGE_MAP { 0: 9 }",
         "  LANGUAGE 0 {",
-        '    TITLE "Test Album"',
-        '    PERFORMER "Test Artist"',
+        f'    TITLE "{disc_title}"',
+        f'    PERFORMER "{disc_performer}"',
         "  }",
         "}\n",
     ]
@@ -114,3 +119,44 @@ def test_both_sanitizations_applied_together():
     assert 'PERFORMER "Artist"' in result
     assert "Track 1" in result
     assert "Track 2" in result
+
+
+# ── Empty CD_TEXT shell stripping ─────────────────────────────────────────────
+
+
+def test_track_cdtext_block_stripped_when_both_fields_empty():
+    """A track-level CD_TEXT block with both TITLE "" and PERFORMER "" stripped."""
+    toc = _toc(tracks=[("", "")])
+    result = _sanitize_toc_for_burn(toc)
+    # Disc-level block is preserved (has default "Test Album" / "Test Artist").
+    assert 'TITLE "Test Album"' in result
+    # Track-level block is entirely removed — only the disc-level CD_TEXT remains.
+    assert result.count("CD_TEXT {") == 1
+
+
+def test_track_cdtext_block_preserved_when_title_present():
+    """Block kept when TITLE has content even if PERFORMER is empty."""
+    toc = _toc(tracks=[("Sharp Dressed Man", "")])
+    result = _sanitize_toc_for_burn(toc)
+    assert 'TITLE "Sharp Dressed Man"' in result
+    assert result.count("CD_TEXT {") == 2  # disc-level + track-level both present
+
+
+def test_disc_level_empty_language_block_stripped():
+    """Disc-level CD_TEXT with empty TITLE and PERFORMER stripped entirely."""
+    toc = _toc(disc_title="", disc_performer="")
+    result = _sanitize_toc_for_burn(toc)
+    # The entire disc-level CD_TEXT block (including LANGUAGE_MAP shell) is gone.
+    assert "LANGUAGE_MAP" not in result
+    assert "CD_DA" in result
+
+
+def test_disc_level_nonempty_preserved_when_tracks_empty():
+    """Disc-level CD_TEXT with content is kept even when track blocks are stripped."""
+    toc = _toc(disc_title="The Eliminator", disc_performer="ZZ Top", tracks=[("", "")])
+    result = _sanitize_toc_for_burn(toc)
+    assert 'TITLE "The Eliminator"' in result
+    assert 'PERFORMER "ZZ Top"' in result
+    # Disc-level block preserved (has LANGUAGE_MAP); track-level block is gone.
+    assert "LANGUAGE_MAP" in result
+    assert result.count("CD_TEXT {") == 1

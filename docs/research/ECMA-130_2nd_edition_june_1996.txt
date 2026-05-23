@@ -1,0 +1,15 @@
+ECMA-130: Data interchange on read-only 120 mm optical data discs (CD-ROM)
+2nd edition, June 1996
+
+URL: https://www.ecma-international.org/wp-content/uploads/ECMA-130_2nd_edition_june_1996.pdf
+
+Freely available from ECMA International at the above URL (no purchase required).
+
+The document is primarily the CD-ROM data layer standard (Mode 1/Mode 2 sector format,
+error correction, synchronisation, header, EDC/ECC), but it also contains a textual
+representation of the Eight-to-Fourteen Modulation (EFM) lookup table (Annex A). This
+is the same LUT used for CD-DA. The carrotIndustries/redbook decoder obtained the LUT
+by OCR from IEC 60908; the textual form in ECMA-130 is an easier machine-readable
+alternative.
+
+A local copy is at: docs/research/ECMA-130_2nd_edition_june_1996.pdf

@@ -93,16 +93,17 @@ def generate_toc(
             f'    DISC_ID "{disc.disc_id.replace(chr(34), chr(39))}"'
         )
 
-    lines += [
-        "CD_TEXT {",
-        "  LANGUAGE_MAP {",
-        "    0: 9",
-        "  }",
-        "  LANGUAGE 0 {",
-        *disc_text_lines,
-        "  }",
-        "}\n",
-    ]
+    if disc_text_lines:
+        lines += [
+            "CD_TEXT {",
+            "  LANGUAGE_MAP {",
+            "    0: 9",
+            "  }",
+            "  LANGUAGE 0 {",
+            *disc_text_lines,
+            "  }",
+            "}\n",
+        ]
 
     for idx, track in enumerate(disc.tracks):
         raw_title = raw_titles[idx] if raw_titles and idx < len(raw_titles) else None

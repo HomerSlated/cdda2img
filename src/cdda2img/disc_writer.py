@@ -29,6 +29,19 @@ _EMPTY_CDTEXT_RE = re.compile(
     r'\s+""\s*\n',
     re.MULTILINE,
 )
+# LANGUAGE block whose body is empty (all fields were stripped above)
+_EMPTY_LANG_BLOCK_RE = re.compile(
+    r"  LANGUAGE \d+ \{\n  \}\n",
+    re.MULTILINE,
+)
+# CD_TEXT block left empty after stripping fields/LANGUAGE sections.
+# Optional inner group matches a disc-level LANGUAGE_MAP; without it the
+# block is a track-level shell.  [^}]* is safe because LANGUAGE_MAP content
+# never contains a bare '}' character.
+_EMPTY_CDTEXT_SHELL_RE = re.compile(
+    r"^CD_TEXT \{\n(?:  LANGUAGE_MAP \{[^}]*\}\n)?\}\n?",
+    re.MULTILINE,
+)
 
 
 def _patch_toc_filenames(toc_text: str) -> str:
@@ -40,8 +53,10 @@ def _sanitize_toc_for_burn(toc_text: str) -> str:
     """Strip TOC constructs that cdrdao write rejects but cdrdao read-cd tolerates.
 
     1. CATALOG with a non-13-digit value — write enforces the Red Book MCN format.
-    2. CD-Text fields with empty string values — write cannot encode them; omitting
-       them causes cdrdao to inherit from the disc-level block instead.
+    2. CD-Text fields with empty string values — cdrdao's encoder receives a NULL
+       pointer and fails; omit them so cdrdao inherits from the disc-level block.
+    3. Empty LANGUAGE blocks left behind after step 2.
+    4. Empty CD_TEXT shells left behind after step 3.
     """
 
     def _fix_catalog(m: re.Match[str]) -> str:
@@ -50,6 +65,8 @@ def _sanitize_toc_for_burn(toc_text: str) -> str:
 
     text = _CATALOG_BAD_RE.sub(_fix_catalog, toc_text)
     text = _EMPTY_CDTEXT_RE.sub("", text)
+    text = _EMPTY_LANG_BLOCK_RE.sub("", text)
+    text = _EMPTY_CDTEXT_SHELL_RE.sub("", text)
     return text
 
 
@@ -237,8 +254,9 @@ def burn_disc(
             raise RuntimeError(msg)
 
     _ui_status(ui, "Done.", 1.0)
-    if ui is None:
-        print("Done.")
+    if ui is not None:
+        ui.pause()
+        print("  Done.")
 
 
 def _copy_bytes(f_in, f_out, length: int) -> None:
