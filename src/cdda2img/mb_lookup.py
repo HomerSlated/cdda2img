@@ -382,6 +382,18 @@ def search_releases(query: str, limit: int = 25) -> list[DiscMeta]:
     return [_parse_release(r) for r in (result.get("release-list") or [])]
 
 
+def search_releases_by_barcode(barcode: str, limit: int = 25) -> list[DiscMeta]:
+    """Search MusicBrainz for releases by barcode. Returns empty list on error."""
+    _setup_useragent()
+    log.debug("MusicBrainz barcode search: %r", barcode)
+    try:
+        result = musicbrainzngs.search_releases(barcode=barcode, limit=limit)
+    except (musicbrainzngs.ResponseError, musicbrainzngs.NetworkError) as exc:
+        log.debug("MusicBrainz barcode search failed: %s", exc)
+        return []
+    return [_parse_release(r) for r in (result.get("release-list") or [])]
+
+
 def lookup_release_group(rg_id: str) -> list[DiscMeta]:
     """Fetch all releases in a MusicBrainz release group, sorted by date (oldest first).
 

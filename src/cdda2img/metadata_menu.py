@@ -98,8 +98,7 @@ def _print_disc_summary(disc: RBIDisc) -> None:
     if disc.set_title:
         print(f"  Set:     {disc.set_title}")
     print(f"  Artist:  {disc.artist or '(none)'}")
-    if disc.catalog:
-        print(f"  Catalog: {disc.catalog}")
+    print(f"  MCN:     {disc.catalog or '(none)'}")
     if disc.disc_total > 1 or disc.disc_number != 1:
         print(f"  Disc:    {disc.disc_number} of {disc.disc_total}")
     print(f"  Tracks:  {len(disc.tracks)}")
@@ -148,9 +147,10 @@ def _print_meta_summary(meta: DiscMeta) -> None:
         label_str = meta.label + (
             f"  [{meta.catalog_number}]" if meta.catalog_number else ""
         )
-        print(f"  Label:         {label_str}")
-    if meta.catalog:
-        print(f"  Barcode:       {meta.catalog}")
+    else:
+        label_str = "(none)"
+    print(f"  Label:         {label_str}")
+    print(f"  UPC:           {meta.catalog or '(none)'}")
     if meta.remastered_source != REMASTERED_UNKNOWN:
         print(f"  Remaster:      {meta.remastered_source}")
     _print_meta_tracks(meta)
@@ -283,6 +283,35 @@ def _confirm_apply(meta: DiscMeta, disc: RBIDisc) -> str | None:
 # ---------------------------------------------------------------------------
 
 
+def _mb_select_and_apply(
+    results: list,
+    disc: RBIDisc,
+    mb_rg_id: str | None,
+) -> tuple[RBIDisc, str | None]:
+    """Present MB results, confirm, and apply chosen meta to disc."""
+    from cdda2img.mb_lookup import _merge_into_disc, _overwrite_disc, lookup_release
+
+    selected = _select_from_results(results, "MusicBrainz Results")
+    if selected is None:
+        return disc, mb_rg_id
+    mode = _confirm_apply(selected, disc)
+    if not mode:
+        return disc, mb_rg_id
+    if selected.mb_release_id and not selected.tracks:
+        print("  Fetching full track listing from MusicBrainz...")
+        full = lookup_release(selected.mb_release_id, disc_number=disc.disc_number)
+        if full and (full.album or full.tracks):
+            selected = full
+    disc = (
+        _merge_into_disc(selected, disc)
+        if mode == "update"
+        else _overwrite_disc(selected, disc)
+    )
+    mb_rg_id = selected.mb_release_group_id or mb_rg_id
+    print("  Applied.")
+    return disc, mb_rg_id
+
+
 def _mb_search_menu(
     disc: RBIDisc,
     mb_rg_id: str | None,
@@ -290,11 +319,9 @@ def _mb_search_menu(
     seed_title: str = "",
 ) -> tuple[RBIDisc, str | None]:
     from cdda2img.mb_lookup import (
-        _merge_into_disc,
-        _overwrite_disc,
         build_mb_search_query,
-        lookup_release,
         search_releases,
+        search_releases_by_barcode,
     )
 
     artist_q = disc.artist or seed_artist
@@ -306,6 +333,7 @@ def _mb_search_menu(
         print()
         print("  [s]  Search with current fields")
         print("  [e]  Edit artist / title")
+        print("  [u]  Search by UPC/barcode")
         print("  [b]  Back")
         choice = _prompt("  > ").strip().lower()
 
@@ -313,6 +341,19 @@ def _mb_search_menu(
             return disc, mb_rg_id
         elif choice == "e":
             artist_q, title_q = _prompt_search_fields(artist_q, title_q)
+        elif choice == "u":
+            current = disc.catalog or ""
+            raw = _prompt(f"  UPC/barcode [{current}]: ").strip()
+            effective = raw or current
+            if not effective:
+                print("  No barcode to search.")
+                continue
+            print(f"\n  Searching MusicBrainz by barcode {effective!r} ...")
+            results = search_releases_by_barcode(effective)
+            if not results:
+                print("  No results found.")
+                continue
+            disc, mb_rg_id = _mb_select_and_apply(results, disc, mb_rg_id)
         elif choice == "s":
             query = build_mb_search_query(artist_q, title_q)
             print(f"\n  Searching MusicBrainz for {query!r} ...")
@@ -320,25 +361,7 @@ def _mb_search_menu(
             if not results:
                 print("  No results found.")
                 continue
-            selected = _select_from_results(results, "MusicBrainz Results")
-            if selected is None:
-                continue
-            mode = _confirm_apply(selected, disc)
-            if mode:
-                if selected.mb_release_id and not selected.tracks:
-                    print("  Fetching full track listing from MusicBrainz...")
-                    full = lookup_release(
-                        selected.mb_release_id, disc_number=disc.disc_number
-                    )
-                    if full and (full.album or full.tracks):
-                        selected = full
-                disc = (
-                    _merge_into_disc(selected, disc)
-                    if mode == "update"
-                    else _overwrite_disc(selected, disc)
-                )
-                mb_rg_id = selected.mb_release_group_id or mb_rg_id
-                print("  Applied.")
+            disc, mb_rg_id = _mb_select_and_apply(results, disc, mb_rg_id)
         else:
             print("  Unknown command.")
 
@@ -354,14 +377,17 @@ def _discogs_execute_search(
     *,
     artist: str = "",
     release_title: str = "",
+    barcode: str = "",
 ) -> RBIDisc:
     """Run one Discogs search (barcode or structured artist/title) and apply if confirmed."""
     from cdda2img import discogs_lookup
     from cdda2img.mb_lookup import _merge_into_disc, _overwrite_disc
 
-    if use_barcode and disc.catalog:
-        label = f"barcode {disc.catalog!r}"
-        results = discogs_lookup.search_by_barcode(disc.catalog)
+    if use_barcode:
+        effective = barcode or disc.catalog or ""
+        normalized = discogs_lookup.normalize_barcode(effective) or effective
+        label = f"barcode {normalized!r}"
+        results = discogs_lookup.search_by_barcode(normalized)
     else:
         label = f"artist={artist!r} title={release_title!r}"
         results = discogs_lookup.search_releases(
@@ -412,8 +438,7 @@ def _discogs_menu(
         print()
         print("  [s]  Search with current fields")
         print("  [e]  Edit artist / title")
-        if disc.catalog:
-            print("  [c]  Search by barcode/catalog number")
+        print("  [c]  Search by UPC/barcode")
         print("  [b]  Back")
         choice = _prompt("  > ").strip().lower()
 
@@ -425,8 +450,16 @@ def _discogs_menu(
             disc = _discogs_execute_search(
                 disc, use_barcode=False, artist=artist_q, release_title=title_q
             )
-        elif choice == "c" and disc.catalog:
-            disc = _discogs_execute_search(disc, use_barcode=True)
+        elif choice == "c":
+            current = disc.catalog or ""
+            raw = _prompt(f"  UPC/barcode [{current}]: ").strip()
+            effective = raw or current
+            if effective:
+                disc = _discogs_execute_search(
+                    disc, use_barcode=True, barcode=effective
+                )
+            else:
+                print("  No barcode to search.")
         else:
             print("  Unknown command.")
 

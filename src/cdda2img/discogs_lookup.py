@@ -11,6 +11,7 @@ from __future__ import annotations
 import importlib.metadata
 import logging
 import os
+import re
 
 from cdda2img.lookup_result import DiscMeta, TrackMeta
 from cdda2img.mb_lookup import _classify_remaster, _parse_year
@@ -23,6 +24,21 @@ _USER_AGENT = f"cdda2img/{importlib.metadata.version('cdda2img')} +https://githu
 def is_available() -> bool:
     """Return True if DISCOGS_TOKEN is set in the environment."""
     return bool(os.environ.get("DISCOGS_TOKEN"))
+
+
+def normalize_barcode(raw: str | None) -> str | None:
+    """Normalize a raw barcode to GTIN-13 (EAN-13), or return None.
+
+    Strips non-digit characters; pads a 12-digit UPC-A with a leading '0'
+    (GS1 §1.3.1 Table 1-9: GTIN-12 → GTIN-13). Rejects anything that isn't
+    exactly 13 digits after stripping and padding.
+    """
+    if not raw:
+        return None
+    digits = re.sub(r"\D", "", raw)
+    if len(digits) == 12:
+        digits = "0" + digits
+    return digits if len(digits) == 13 else None
 
 
 def _get_client():

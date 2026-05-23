@@ -121,7 +121,7 @@ def generate_toc(
         track_cdtext_lines = []
         if track.title:
             track_cdtext_lines.append(f'    TITLE "{track.title}"')
-        track_performer = sanitize_title(track.performer)
+        track_performer = sanitize_title(track.performer) or sanitize_title(disc.artist)
         if track_performer:
             track_cdtext_lines.append(f'    PERFORMER "{track_performer}"')
         track_cdtext_block = (

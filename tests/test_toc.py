@@ -3,6 +3,7 @@ test_toc.py — Round-trip and canonical-format tests for generate_toc / parse_t
 """
 
 from cdda2img.cdrdao_reader import parsed_to_rbi_disc
+from cdda2img.discogs_lookup import normalize_barcode
 from cdda2img.rbi_format import RBIDisc, RBITocEntry
 from cdda2img.toc import generate_toc, sanitize_title
 from cdda2img.toc_parser import parse_toc
@@ -202,3 +203,73 @@ def test_toc_optional_fields_absent_when_none() -> None:
     assert "ISRC" not in toc_text
     assert "START" not in toc_text
     assert "TRACK_TITLE_UNICODE" not in toc_text
+
+
+# ---------------------------------------------------------------------------
+# PERFORMER fallback
+# ---------------------------------------------------------------------------
+
+
+def test_performer_fallback_from_disc_artist() -> None:
+    """Empty track.performer falls back to disc.artist in the TOC."""
+    disc = RBIDisc(album="Test Album", artist="Album Artist")
+    disc.tracks = [
+        RBITocEntry(
+            track_number=1,
+            title="Track One",
+            performer="",
+            start_frame=0,
+            duration_frames=_FRAMES_PER_MIN * 3,
+        )
+    ]
+    toc_text = generate_toc(disc).decode("utf-8")
+    assert 'PERFORMER "Album Artist"' in toc_text
+
+
+def test_performer_no_fallback_when_both_empty() -> None:
+    """No PERFORMER line emitted when both track.performer and disc.artist are empty."""
+    disc = RBIDisc(album="Test Album", artist="")
+    disc.tracks = [
+        RBITocEntry(
+            track_number=1,
+            title="Track One",
+            performer="",
+            start_frame=0,
+            duration_frames=_FRAMES_PER_MIN * 3,
+        )
+    ]
+    toc_text = generate_toc(disc).decode("utf-8")
+    assert "PERFORMER" not in toc_text
+
+
+# ---------------------------------------------------------------------------
+# normalize_barcode
+# ---------------------------------------------------------------------------
+
+
+def test_normalize_barcode_gtin13_passthrough() -> None:
+    assert normalize_barcode("0724383697724") == "0724383697724"
+
+
+def test_normalize_barcode_upc_a_padded_to_gtin13() -> None:
+    assert normalize_barcode("075992377423") == "0075992377423"
+
+
+def test_normalize_barcode_strips_non_digits() -> None:
+    assert normalize_barcode("0 75992 37742 3") == "0075992377423"
+
+
+def test_normalize_barcode_rejects_short() -> None:
+    assert normalize_barcode("12345") is None
+
+
+def test_normalize_barcode_rejects_long() -> None:
+    assert normalize_barcode("12345678901234") is None
+
+
+def test_normalize_barcode_none_input() -> None:
+    assert normalize_barcode(None) is None
+
+
+def test_normalize_barcode_empty_string() -> None:
+    assert normalize_barcode("") is None
