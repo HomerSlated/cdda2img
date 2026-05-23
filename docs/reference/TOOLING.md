@@ -481,7 +481,7 @@ Feature gaps identified by comparison with the software landscape above:
 | ISRC per track in rip | ❌ TODO | Plextor cdrdao driver extracts it; needs to flow into RBI container |
 | MCN / CATALOG from rip | ❌ TODO | cdrdao logs "Found disk catalogue number"; parse into RBI TOC |
 | Subchannel P–W optional block | ❌ TODO (flag reserved) | CloneCD .sub; CD+G preservation |
-| DDP 2.0 import | ✅ Done | `ddp_reader.py`; GEAR Pro writes s16le to TRACK*.DAT (verified empirically); `cdda2img i <dir>` — first open-source DDP 2.0 reader for Linux |
+| DDP 2.0 import | ✅ Done | `ddp_reader.py`; GEAR Pro writes s16le to TRACK*.DAT (verified empirically); `cdda2img import <dir>` — first open-source DDP 2.0 reader for Linux |
 | DDP 2.0 export | ❌ Planned | ddpLib (GPL-3.0 Java) is the only open-source reference; no Python/Rust implementation; RBI PCM block is already s16le so no conversion needed |
 | AccurateRip v1/v2 | ❌ TODO | Standard verification step |
 | HTOA detection and capture | ❌ TODO | Requires reading negative-LBA pre-gap via Plextor driver |
@@ -677,11 +677,11 @@ cdda2img's `r` subcommand when an Enhanced CD is detected.
 
 ### Relevance to cdda2img
 
-- **`r` subcommand**: detect multi-session disc (cdrdao reports session count in TOC);
+- **`rip` subcommand**: detect multi-session disc (cdrdao reports session count in TOC);
   automatically restrict to `--session 1` for audio. Log that Session 2 data was ignored.
 - **Foreign TOC importer**: skip any non-AUDIO track type in the parsed TOC; do not error
   on MODE1/MODE2_FORM1 tracks.
-- **`c` subcommand (creating Enhanced CD)**: out of scope for now — requires two burn
+- **`create` subcommand (creating Enhanced CD)**: out of scope for now — requires two burn
   passes with `--multi`; not a standard archival use case for RBI.
 
 ### Confirmed Enhanced CD albums

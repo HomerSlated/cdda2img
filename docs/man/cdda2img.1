@@ -6,38 +6,36 @@
 cdda2img \- create and extract RBI audio CD archive images
 .\"
 .SH SYNOPSIS
-.B "cdda2img r"
+.B "cdda2img rip"
 .RI [ options ]
-.RI [ DEVICE ]
 .br
-.B "cdda2img c"
+.B "cdda2img create"
 .RI [ options ]
 .I INPUT_DIR
 .br
-.B "cdda2img x"
+.B "cdda2img extract"
 .RI [ options ]
 .I FILE.rbi
 .br
-.B "cdda2img i"
+.B "cdda2img import"
 .RI [ options ]
 .I SOURCE
 .br
-.B "cdda2img w"
-.RI [ options ]
-.I FILE.rbi
-.RI [ DEVICE ]
-.br
-.B "cdda2img l"
+.B "cdda2img burn"
 .RI [ options ]
 .I FILE.rbi
 .br
-.B "cdda2img t"
+.B "cdda2img list"
+.RI [ options ]
 .I FILE.rbi
 .br
-.B "cdda2img d"
+.B "cdda2img test"
+.I FILE.rbi
+.br
+.B "cdda2img catalogue"
 .RI [ options ]
 .br
-.B "cdda2img m"
+.B "cdda2img mount"
 .RI [ options ]
 .I FILE.rbi
 .br
@@ -58,7 +56,7 @@ provenance \(em is sourced interactively from MusicBrainz, AcoustID, and Discogs
 lookups and embedded in the TOC block.
 .\"
 .SH SUBCOMMANDS
-.SS r \(em Rip
+.SS rip \(em Rip
 Rips a physical CD\-DA disc to an RBI image.
 Rip always uses master mode: raw audio is captured 1:1 and encapsulated in
 the RBI container without any silence trimming or gap insertion.
@@ -79,7 +77,7 @@ Disc metadata captured during the original cdrdao pass (MCN, ISRC, CD\-Text) is
 preserved even when the audio is re-ripped.
 .PP
 Before each rip,
-.B cdda2img r
+.B cdda2img rip
 automatically resolves the correct drive sample offset.
 Resolution order: (1) per-drive entry in the
 .B [[drives]]
@@ -98,15 +96,15 @@ After a successful rip, the per\-track AccurateRip v1/v2 checksums are computed
 and verified against the AccurateRip database.
 Results are printed as an informational report; a mismatch does not fail the rip.
 .PP
-.BI "cdda2img r " "[options] [DEVICE]"
-.PP
-.I DEVICE
-is the optical drive device node (default:
+.BI "cdda2img rip " "[options]"
+.TP
+.BI \-\-device " DEVICE"
+Optical drive device node (default:
 .BR /dev/sr0 ).
 .TP
 .BI \-\-loudness " {rg|none}"
 Same semantics as for the
-.B c
+.B create
 subcommand.
 Default:
 .BR rg .
@@ -117,13 +115,13 @@ Output
 file path.
 Default: derived from the album title.
 .\"
-.SS c \(em Create
+.SS create \(em Create
 Creates one or more RBI images from a directory of audio files.
 Files are grouped into CD\-sized batches (up to 99 tracks, up to 80 minutes)
 according to the chosen batching strategy.
 Each track is transcoded to Red Book PCM (44100\~Hz, 16\-bit, stereo) via PyAV.
 .PP
-.BI "cdda2img c " "[options] INPUT_DIR"
+.BI "cdda2img create " "[options] INPUT_DIR"
 .TP
 .BI \-\-mode " {master|remaster}"
 .RS
@@ -183,7 +181,7 @@ Disables silence trimming in remaster mode.
 .B \-\-preserve\-pregaps
 Preserves pre\-gaps in remaster mode (no\-op for audio\-file input).
 .\"
-.SS x \(em Extract
+.SS extract \(em Extract
 Extracts one or more block types from an RBI image.
 Output is written to an
 .I extracted/
@@ -191,7 +189,7 @@ directory beneath the current working directory.
 All flags are additive; omitting all flags is equivalent to
 .BR \-\-all .
 .PP
-.BI "cdda2img x " "[options] FILE.rbi"
+.BI "cdda2img extract " "[options] FILE.rbi"
 .TP
 .B \-\-tracks
 Writes per\-track FLAC files with embedded metadata and a CUE sheet to
@@ -236,12 +234,12 @@ or
 is set.
 Mutually exclusive with ReplayGain tag embedding.
 .\"
-.SS i \(em Import
+.SS import \(em Import
 Imports a foreign disc image into an RBI container.
 Import always uses master mode: the source audio is preserved 1:1,
 with only byte\-order conversion and container encapsulation applied.
 .PP
-.BI "cdda2img i " "[options] SOURCE"
+.BI "cdda2img import " "[options] SOURCE"
 .PP
 .I SOURCE
 is one of:
@@ -270,7 +268,7 @@ must exist in the same directory; audio tracks only; single-session).
 .TP
 .BI \-\-loudness " {rg|none}"
 Same semantics as for the
-.B c
+.B create
 subcommand.
 Default:
 .BR rg .
@@ -281,17 +279,17 @@ Output
 file path.
 Default: derived from the album title.
 .\"
-.SS w \(em Write (burn)
+.SS burn \(em Burn
 Burns an RBI image to a blank CD\-DA disc via cdrdao.
 Applies write offset correction to the disc stream before burning when a
 .B write_offset
 is configured for the drive in
 .BR [[drives]] .
 .PP
-.BI "cdda2img w " "[options] FILE.rbi [DEVICE]"
-.PP
-.I DEVICE
-is the optical drive device node (default:
+.BI "cdda2img burn " "[options] FILE.rbi"
+.TP
+.BI \-\-device " DEVICE"
+CD drive device node (default:
 .BR /dev/sr0 ).
 .TP
 .BI \-\-speed " N"
@@ -306,12 +304,12 @@ from configuration.
 .B \-\-yes
 Skip the confirmation prompt before burning.
 .\"
-.SS l \(em List
+.SS list \(em List
 Prints container information for an RBI image.
 All flags are additive; omitting all flags is equivalent to
 .BR \-\-info .
 .PP
-.BI "cdda2img l " "[options] FILE.rbi"
+.BI "cdda2img list " "[options] FILE.rbi"
 .TP
 .B \-\-info
 Prints the block directory with byte offsets, sizes, and checksums,
@@ -327,17 +325,17 @@ Renders the AccurateRip verification report.
 .B \-\-log
 Renders the rip log.
 .\"
-.SS t \(em Test
+.SS test \(em Test
 Verifies the integrity and spec\-conformance of an RBI image.
 Runs 27 checks covering magic bytes, format version, flags, block directory
 structure, file size, UTF\-8 metadata, SHA\-256 checksums for all blocks,
 TOC parse, and track\-count consistency.
 Exits with status 1 if any check fails.
 .PP
-.B "cdda2img t"
+.B "cdda2img test"
 .I FILE.rbi
 .\"
-.SS d \(em Browse catalogue
+.SS catalogue \(em Browse catalogue
 Displays an interactive disc catalogue browser.
 The summary screen shows disc, track, and artist counts and lists the top artists;
 press
@@ -356,7 +354,7 @@ for a new search, or press
 to quit.
 Requires an interactive terminal.
 .PP
-.BI "cdda2img d " "[options]"
+.BI "cdda2img catalogue " "[options]"
 .TP
 .BI \-\-db " PATH"
 Use the catalogue database at
@@ -364,7 +362,7 @@ Use the catalogue database at
 instead of the default
 .IR $XDG_DATA_HOME/cdda2img/cdda2img.db .
 .\"
-.SS m \(em Mount
+.SS mount \(em Mount
 Mounts an RBI image as a virtual CD\-DA disc via cdemu.
 The image is first extracted to a scratch directory (TOC + BIN),
 then loaded into a free cdemu slot with
@@ -372,7 +370,7 @@ then loaded into a free cdemu slot with
 After mounting, the virtual disc is accessible to any application
 that reads optical drives, including cdrdao for re-ripping.
 .PP
-.BI "cdda2img m " "[options] FILE.rbi"
+.BI "cdda2img mount " "[options] FILE.rbi"
 .TP
 .BI \-\-slot " N"
 cdemu device slot to load the image into (default: first free slot).
@@ -384,7 +382,7 @@ Directory for the extracted TOC and BIN scratch files
 .IR ./mnt ).
 .PP
 After a successful mount,
-.B cdda2img m
+.B cdda2img mount
 prints the cdemu slot number, the TOC path, and reminder commands for
 re-ripping and unloading.
 The cdemu daemon must be running and the
@@ -423,7 +421,7 @@ When
 is unset, the default path is
 .IR ~/.config/cdda2img/cdda2img.toml .
 If the file does not exist and standard input is a terminal,
-.B cdda2img r
+.B cdda2img rip
 will offer to create it automatically from the bundled example file
 .RB ( conf/cdda2img.toml.example ).
 Answer
@@ -449,7 +447,7 @@ EOF
 .TP
 .BI "cddb_server = " \(dqcddb.retrobridge.org:888\(dq
 CDDB server used for automatic disc identification during
-.BR "cdda2img r" .
+.BR "cdda2img rip" .
 Format is
 .IR host : port .
 Default:
@@ -498,7 +496,7 @@ Per-drive sample offsets are stored as an array of TOML tables under
 .BR [[drives]] ,
 one table per drive.
 Entries are created and updated automatically by
-.B cdda2img r
+.B cdda2img rip
 when a drive offset is confirmed from the AccurateRip catalog.
 They can also be set manually:
 .PP
@@ -514,29 +512,29 @@ write_offset = -30
 The
 .B name
 field must match the normalised sysfs drive name printed by
-.B cdda2img r
+.B cdda2img rip
 at rip time.
 A per-drive entry is always authoritative and bypasses the AccurateRip catalog lookup.
 .\"
 .SH HARDWARE SETUP
 The
-.BR c ,
-.BR x ,
-.BR l ,
-.BR t ,
+.BR create ,
+.BR extract ,
+.BR list ,
+.BR test ,
 and
-.B i
+.B import
 subcommands operate entirely on files and require no special hardware access.
 .PP
 The
-.B r
+.B rip
 and
-.B w
+.B burn
 subcommands access a physical disc drive.
 The optical drive device
 .RI ( /dev/sr0
 or similar) must be readable (and writable for
-.BR w )
+.BR burn )
 by the user.
 On Linux this requires membership in the
 .B cdrom
@@ -575,14 +573,14 @@ such as C2 error pointer support.
 Standard cdrdao usage without
 .B \-\-driver plextor
 does not require root.
-.B cdda2img r
+.B cdda2img rip
 uses cdrdao with the default
 .B generic\-mmc
 driver (no vendor\-specific commands) and does not require root.
 The cd\-paranoia fallback path likewise issues only standard MMC commands.
 .PP
 The
-.B m
+.B mount
 subcommand does not access a physical disc drive.
 It requires the cdemu daemon to be running and the
 .B vhba
@@ -613,9 +611,9 @@ Package names:
 .TP
 .B cdrdao
 Required for ripping physical discs
-.RB ( "cdda2img r" ,
+.RB ( "cdda2img rip" ,
 primary path) and for importing cdrdao TOC/BIN images
-.RB ( "cdda2img i " *.toc ).
+.RB ( "cdda2img import " *.toc ).
 The rip path uses cdrdao to capture subchannel data (MCN, ISRC, CD\-Text)
 in a single pass.
 Not required for creating, extracting, or verifying RBI images.
@@ -636,7 +634,7 @@ Not required for creating, importing, extracting, or verifying RBI images.
 .TP
 .B cdemu\-daemon
 Required for
-.BR "cdda2img m" .
+.BR "cdda2img mount" .
 The cdemu daemon creates virtual CD drives; the
 .B vhba
 kernel module provides the virtual SCSI host.
@@ -674,7 +672,7 @@ Default location:
 Disc catalogue database.
 Populated automatically after every rip, import, or create.
 Browsable via
-.BR "cdda2img d" .
+.BR "cdda2img catalogue" .
 Default location:
 .IR ~/.local/share/cdda2img/cdda2img.db .
 .\"
@@ -683,7 +681,7 @@ Rip the disc in the default drive:
 .PP
 .RS
 .nf
-cdda2img r
+cdda2img rip
 .fi
 .RE
 .PP
@@ -691,7 +689,7 @@ Rip from a specific device, skip loudness analysis:
 .PP
 .RS
 .nf
-cdda2img r /dev/sr0 \-\-loudness none \-\-output mydisc.rbi
+cdda2img rip \-\-device /dev/sr0 \-\-loudness none \-\-output mydisc.rbi
 .fi
 .RE
 .PP
@@ -699,7 +697,7 @@ Create an RBI image from a directory of audio files:
 .PP
 .RS
 .nf
-cdda2img c /music/Technotronic\ \-\ Pump\ Up\ the\ Jam
+cdda2img create /music/Technotronic\ \-\ Pump\ Up\ the\ Jam
 .fi
 .RE
 .PP
@@ -707,7 +705,7 @@ Create in master mode without loudness analysis:
 .PP
 .RS
 .nf
-cdda2img c /music/album \-\-mode master \-\-loudness none
+cdda2img create /music/album \-\-mode master \-\-loudness none
 .fi
 .RE
 .PP
@@ -715,7 +713,7 @@ Use global bin\-packing to minimise disc count across a large collection:
 .PP
 .RS
 .nf
-cdda2img c /music/album \-\-strategy ball
+cdda2img create /music/album \-\-strategy ball
 .fi
 .RE
 .PP
@@ -723,7 +721,7 @@ Extract per\-track FLACs with ReplayGain tags (default):
 .PP
 .RS
 .nf
-cdda2img x album.rbi
+cdda2img extract album.rbi
 .fi
 .RE
 .PP
@@ -731,7 +729,7 @@ Extract FLACs and also write raw PCM + TOC:
 .PP
 .RS
 .nf
-cdda2img x album.rbi \-\-tracks \-\-raw
+cdda2img extract album.rbi \-\-tracks \-\-raw
 .fi
 .RE
 .PP
@@ -739,7 +737,7 @@ Extract FLACs normalised to \-18\~LUFS:
 .PP
 .RS
 .nf
-cdda2img x album.rbi \-\-normalize
+cdda2img extract album.rbi \-\-normalize
 .fi
 .RE
 .PP
@@ -747,8 +745,8 @@ Import a cdrdao rip:
 .PP
 .RS
 .nf
-cdda2img i disc.toc
-cdda2img i disc.toc \-\-loudness none \-\-output mydisc.rbi
+cdda2img import disc.toc
+cdda2img import disc.toc \-\-loudness none \-\-output mydisc.rbi
 .fi
 .RE
 .PP
@@ -756,7 +754,7 @@ Import a DDP\~2.0 image directory:
 .PP
 .RS
 .nf
-cdda2img i /media/DDP_Technotronic
+cdda2img import /media/DDP_Technotronic
 .fi
 .RE
 .PP
@@ -764,8 +762,8 @@ Import a Nero NRG image:
 .PP
 .RS
 .nf
-cdda2img i album.nrg
-cdda2img i album.nrg \-\-loudness none
+cdda2img import album.nrg
+cdda2img import album.nrg \-\-loudness none
 .fi
 .RE
 .PP
@@ -773,7 +771,7 @@ List sections and track listing:
 .PP
 .RS
 .nf
-cdda2img l album.rbi
+cdda2img list album.rbi
 .fi
 .RE
 .PP
@@ -781,7 +779,7 @@ Verify container integrity:
 .PP
 .RS
 .nf
-cdda2img t album.rbi
+cdda2img test album.rbi
 .fi
 .RE
 .PP
@@ -789,7 +787,7 @@ Mount an RBI image as a virtual disc via cdemu (into the first free slot):
 .PP
 .RS
 .nf
-cdda2img m album.rbi
+cdda2img mount album.rbi
 .fi
 .RE
 .PP
@@ -797,7 +795,7 @@ Mount into a specific slot and write scratch files to a named directory:
 .PP
 .RS
 .nf
-cdda2img m album.rbi \-\-slot 1 \-\-mnt\-dir /tmp/mnt
+cdda2img mount album.rbi \-\-slot 1 \-\-mnt\-dir /tmp/mnt
 .fi
 .RE
 .\"

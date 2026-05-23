@@ -773,7 +773,14 @@ def _print_provenance(provenance: dict[str, str]) -> None:
     if not provenance:
         return
     mode = provenance.get("mode", "?")
-    mode_label = {"r": "r (rip)", "i": "i (import)", "c": "c (create)"}.get(mode, mode)
+    mode_label = {
+        "r": "rip",
+        "rip": "rip",
+        "i": "import",
+        "import": "import",
+        "c": "create",
+        "create": "create",
+    }.get(mode, mode)
     print(f"Mode:      {mode_label}")
     if source := provenance.get("source"):
         print(f"Source:    {source}")
@@ -840,9 +847,14 @@ def _list_info(rbi_file: Path) -> str:  # noqa: C901
     # Provenance detail lines
     mode = prov.get("mode", "")
     if mode:
-        mode_label = {"r": "r (rip)", "i": "i (import)", "c": "c (create)"}.get(
-            mode, mode
-        )
+        mode_label = {
+            "r": "rip",
+            "rip": "rip",
+            "i": "import",
+            "import": "import",
+            "c": "create",
+            "create": "create",
+        }.get(mode, mode)
         lines.append(f"Mode:      {mode_label}")
     if source := prov.get("source"):
         lines.append(f"Source:    {source}")

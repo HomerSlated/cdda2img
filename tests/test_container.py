@@ -94,7 +94,7 @@ def built_containers(tmp_path_factory, wav_tracks):
     rg_result = analyse(wav_tracks)
     rg_block = pack_rg_block(rg_result)
 
-    prov = {"mode": "c", "source": "/test", "ripper": "file"}
+    prov = {"mode": "create", "source": "/test", "ripper": "file"}
 
     rbi_rg = tmp / "test_rg.rbi"
     rbi_no_rg = tmp / "test_no_rg.rbi"
@@ -314,7 +314,7 @@ def test_prov_block_present(built_containers):
     pairs = dict(line.split("=", 1) for line in text.splitlines() if "=" in line)
     assert "creator" in pairs
     assert "created" in pairs
-    assert pairs.get("mode") == "c"
+    assert pairs.get("mode") == "create"
     assert pairs.get("ripper") == "file"
 
 

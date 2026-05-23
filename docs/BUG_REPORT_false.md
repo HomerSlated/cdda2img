@@ -13,12 +13,12 @@
 
 ## Problem Description
 
-When running `cdda2img r` to rip a physical disc via cdrdao, AccurateRip verification fails on one or more tracks (commonly track 6 and beyond). The same disc rips correctly with other tools (cyanrip, whipper, AccurateRip verifiers), indicating a bug in the track coordinate calculation logic.
+When running `cdda2img rip` to rip a physical disc via cdrdao, AccurateRip verification fails on one or more tracks (commonly track 6 and beyond). The same disc rips correctly with other tools (cyanrip, whipper, AccurateRip verifiers), indicating a bug in the track coordinate calculation logic.
 
 **Symptoms**:
 - AccurateRip reports "MISMATCH" on some tracks despite correct PCM data
 - Mismatches do not occur when using the cd-paranoia fallback path
-- Mismatches do not occur when importing a cdrdao TOC+BIN image via the `i` subcommand
+- Mismatches do not occur when importing a cdrdao TOC+BIN image via the `import` subcommand
 - Other ripping tools (cyanrip, whipper) pass AccurateRip verification on the same disc
 
 ## Root Cause: Coordinate System Mismatch
@@ -166,7 +166,7 @@ After applying the fix:
 uv sync
 
 # Rip a disc with AccurateRip verification
-uv run python -m cdda2img r /dev/sr0
+uv run python -m cdda2img rip --device /dev/sr0
 
 # Expected output (all tracks should pass):
 #   AccurateRip:

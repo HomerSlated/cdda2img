@@ -103,6 +103,7 @@ def parse_args() -> argparse.Namespace:
               Accepts: cdrdao .toc file, or a DDP 2.0 image directory (must contain DDPID)
 
             burn options:
+              --device DEVICE       CD drive device (default: from config default_device, fallback /dev/sr0)
               --speed N             Burn speed in CD-DA drive units (default: 4)
               --write-offset N      Write offset override in samples (default: from config)
               --yes                 Skip confirmation prompt (non-interactive burn)
@@ -112,29 +113,29 @@ def parse_args() -> argparse.Namespace:
               --mnt-dir PATH        Directory for extracted TOC+BIN (default: ./mnt)
 
             examples:
-              cdda2img r
-              cdda2img r /dev/sr0 --loudness none --output mydisc.rbi
-              cdda2img c /music/album
-              cdda2img c /music/album --mode master --loudness none
-              cdda2img c /music/album --strategy best
-              cdda2img c /music/album --no-trim-silence
-              cdda2img x album.rbi
-              cdda2img x album.rbi --tracks
-              cdda2img x album.rbi --raw
-              cdda2img x album.rbi --tracks --raw --rg
-              cdda2img x album.rbi --normalize
-              cdda2img i disc.toc
-              cdda2img i disc.toc --loudness none --output mydisc.rbi
-              cdda2img i /path/to/ddp_dir
-              cdda2img i /path/to/ddp_dir --output mydisc.rbi
-              cdda2img w album.rbi
-              cdda2img w album.rbi /dev/sr0 --speed 8
-              cdda2img w album.rbi --write-offset -30 --yes
-              cdda2img l album.rbi
-              cdda2img l album.rbi --ar
-              cdda2img t album.rbi
-              cdda2img m album.rbi
-              cdda2img m album.rbi --slot 1 --mnt-dir /tmp/mnt
+              cdda2img rip
+              cdda2img rip --device /dev/sr0 --loudness none --output mydisc.rbi
+              cdda2img create /music/album
+              cdda2img create /music/album --mode master --loudness none
+              cdda2img create /music/album --strategy best
+              cdda2img create /music/album --no-trim-silence
+              cdda2img extract album.rbi
+              cdda2img extract album.rbi --tracks
+              cdda2img extract album.rbi --raw
+              cdda2img extract album.rbi --tracks --raw --rg
+              cdda2img extract album.rbi --normalize
+              cdda2img import disc.toc
+              cdda2img import disc.toc --loudness none --output mydisc.rbi
+              cdda2img import /path/to/ddp_dir
+              cdda2img import /path/to/ddp_dir --output mydisc.rbi
+              cdda2img burn album.rbi
+              cdda2img burn album.rbi --device /dev/sr0 --speed 8
+              cdda2img burn album.rbi --write-offset -30 --yes
+              cdda2img list album.rbi
+              cdda2img list album.rbi --ar
+              cdda2img test album.rbi
+              cdda2img mount album.rbi
+              cdda2img mount album.rbi --slot 1 --mnt-dir /tmp/mnt
         """),
     )
     parser.add_argument(
@@ -144,7 +145,9 @@ def parse_args() -> argparse.Namespace:
     )
     sub = parser.add_subparsers(dest="cmd", required=True)
 
-    c = sub.add_parser("c", help="Create an RBI image from a directory of audio files")
+    c = sub.add_parser(
+        "create", help="Create an RBI image from a directory of audio files"
+    )
     c.add_argument("input_dir", type=Path, help="Directory containing audio files")
     c.add_argument(
         "--mode",
@@ -183,7 +186,7 @@ def parse_args() -> argparse.Namespace:
         help="Output .rbi file path (default: derived from album title); multi-disc: used as base name",
     )
 
-    x = sub.add_parser("x", help="Extract blocks from an RBI image")
+    x = sub.add_parser("extract", help="Extract blocks from an RBI image")
     x.add_argument("rbi_file", type=Path, help="RBI file to extract")
     x.add_argument(
         "--raw", action="store_true", help="Extract TOC + BIN (s16be) to output dir"
@@ -222,7 +225,7 @@ def parse_args() -> argparse.Namespace:
         help="Output directory (default: ./extracted)",
     )
 
-    l_cmd = sub.add_parser("l", help="List the contents of an RBI image")
+    l_cmd = sub.add_parser("list", help="List the contents of an RBI image")
     l_cmd.add_argument("rbi_file", type=Path, help="RBI file to list")
     l_cmd.add_argument(
         "--info",
@@ -233,14 +236,14 @@ def parse_args() -> argparse.Namespace:
     l_cmd.add_argument("--ar", action="store_true", help="Show AccurateRip report")
     l_cmd.add_argument("--log", action="store_true", help="Show rip log")
 
-    t_cmd = sub.add_parser("t", help="Test/validate an RBI image against the spec")
+    t_cmd = sub.add_parser("test", help="Test/validate an RBI image against the spec")
     t_cmd.add_argument("rbi_file", type=Path, help="RBI file to validate")
 
-    r_cmd = sub.add_parser("r", help="Rip a physical CD-DA disc to an RBI container")
+    r_cmd = sub.add_parser("rip", help="Rip a physical CD-DA disc to an RBI container")
     r_cmd.add_argument(
-        "device",
-        nargs="?",
+        "--device",
         default=None,
+        metavar="DEVICE",
         help="Optical drive device (default: from config default_device, fallback /dev/sr0)",
     )
     r_cmd.add_argument(
@@ -256,7 +259,7 @@ def parse_args() -> argparse.Namespace:
         help="Output .rbi file path (default: derived from album title)",
     )
     i_cmd = sub.add_parser(
-        "i",
+        "import",
         help="Import a foreign disc image as an RBI container (master mode): cdrdao .toc, DDP 2.0, or Nero .nrg",
     )
     i_cmd.add_argument(
@@ -282,7 +285,7 @@ def parse_args() -> argparse.Namespace:
         help="Dry-run: parse and display image metadata without importing",
     )
 
-    d_cmd = sub.add_parser("d", help="Browse disc catalogue")
+    d_cmd = sub.add_parser("catalogue", help="Browse disc catalogue")
     d_cmd.add_argument(
         "--db",
         metavar="PATH",
@@ -291,13 +294,13 @@ def parse_args() -> argparse.Namespace:
     )
 
     w_cmd = sub.add_parser(
-        "w", help="Burn an RBI image to a blank CD-DA disc via cdrdao"
+        "burn", help="Burn an RBI image to a blank CD-DA disc via cdrdao"
     )
     w_cmd.add_argument("rbi_file", type=Path, help="RBI file to burn")
     w_cmd.add_argument(
-        "device",
-        nargs="?",
+        "--device",
         default=None,
+        metavar="DEVICE",
         help="CD drive device (default: from config default_device, fallback /dev/sr0)",
     )
     w_cmd.add_argument(
@@ -321,7 +324,9 @@ def parse_args() -> argparse.Namespace:
         help="Skip confirmation prompt",
     )
 
-    m_cmd = sub.add_parser("m", help="Mount an RBI image as a virtual disc via cdemu")
+    m_cmd = sub.add_parser(
+        "mount", help="Mount an RBI image as a virtual disc via cdemu"
+    )
     m_cmd.add_argument("rbi_file", type=Path, help="RBI file to mount")
     m_cmd.add_argument(
         "--slot",
@@ -449,7 +454,7 @@ def create_image(
 
             raw_titles = [re.sub(r"^\d{1,2}[-. ]+", "", p.stem) for p in batch]
             provenance = {
-                "mode": "c",
+                "mode": "create",
                 "source": str(input_dir.resolve()),
                 "ripper": "file",
             }
@@ -633,7 +638,7 @@ def import_image(
             disc, _ = import_ddp(source, temp.pcm_file)
             output_stem = sanitize_title(disc.album) or source.name
             provenance = {
-                "mode": "i",
+                "mode": "import",
                 "source": str(source.resolve()),
                 "ripper": "ddp",
             }
@@ -660,7 +665,7 @@ def import_image(
             wav_to_raw_pcm(temp.pcm_pre, temp.pcm_file)
             output_stem = sanitize_title(disc.album) or source.stem
             provenance = {
-                "mode": "i",
+                "mode": "import",
                 "source": str(source.resolve()),
                 "ripper": "toc",
             }
@@ -671,7 +676,7 @@ def import_image(
             disc, _ = import_nrg(source, temp.pcm_file)
             output_stem = sanitize_title(disc.album) or source.stem
             provenance = {
-                "mode": "i",
+                "mode": "import",
                 "source": str(source.resolve()),
                 "ripper": "nrg",
             }
@@ -682,7 +687,7 @@ def import_image(
             disc, _ = import_ccd(source, temp.pcm_file)
             output_stem = sanitize_title(disc.album) or source.stem
             provenance = {
-                "mode": "i",
+                "mode": "import",
                 "source": str(source.resolve()),
                 "ripper": "ccd",
             }
@@ -1129,7 +1134,7 @@ def rip_image(
 
         output_stem = sanitize_title(disc.album) or device.lstrip("/").replace("/", "_")
         provenance: dict[str, str] = {
-            "mode": "r",
+            "mode": "rip",
             "source": device,
             "ripper": rip_type,
         }
@@ -1298,7 +1303,7 @@ def mount_image(
 
 
 def _dispatch(args: argparse.Namespace) -> None:
-    if args.cmd == "c":
+    if args.cmd == "create":
         create_image(
             args.input_dir,
             mode=args.mode,
@@ -1307,18 +1312,18 @@ def _dispatch(args: argparse.Namespace) -> None:
             trim_silence=args.trim_silence,
             output=args.output,
         )
-    elif args.cmd == "r":
+    elif args.cmd == "rip":
         rip_image(
             args.device,
             loudness=args.loudness,
             output=args.output,
         )
-    elif args.cmd == "i":
+    elif args.cmd == "import":
         if args.info:
             info_image(args.source)
         else:
             import_image(args.source, loudness=args.loudness, output=args.output)
-    elif args.cmd == "x":
+    elif args.cmd == "extract":
         extract_image(
             args.rbi_file,
             raw=args.raw,
@@ -1335,23 +1340,23 @@ def _dispatch(args: argparse.Namespace) -> None:
 
 
 def _dispatch_utility(args: argparse.Namespace) -> None:
-    if args.cmd == "l":
+    if args.cmd == "list":
         from cdda2img.container import list_container
 
         show_info = args.info or not (args.rg or args.ar or args.log)
         list_container(
             args.rbi_file, info=show_info, rg=args.rg, ar=args.ar, log=args.log
         )
-    elif args.cmd == "t":
+    elif args.cmd == "test":
         from cdda2img.container import verify_container
 
         if not verify_container(args.rbi_file):
             raise SystemExit(1)
-    elif args.cmd == "d":
+    elif args.cmd == "catalogue":
         from cdda2img.catalogue_menu import run_catalogue_menu
 
         run_catalogue_menu(Path(args.db) if args.db else None)
-    elif args.cmd == "w":
+    elif args.cmd == "burn":
         burn_image(
             args.rbi_file,
             device=args.device,
@@ -1359,7 +1364,7 @@ def _dispatch_utility(args: argparse.Namespace) -> None:
             speed=args.speed,
             yes=args.yes,
         )
-    elif args.cmd == "m":
+    elif args.cmd == "mount":
         mount_image(args.rbi_file, slot=args.slot, mnt_dir=args.mnt_dir)
 
 

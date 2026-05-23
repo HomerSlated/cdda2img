@@ -1204,12 +1204,12 @@ documented defaults if absent.
 - [x] Create `config.py` — `Config` dataclass (`drive_offset`, `cddb_server`); `load_config()`;
   `_prompt_create_config()` for first-run; XDG path via `config_path()`
 - [ ] `silence = 55` — silence detection threshold in dBFS (absolute value); replaces
-  the hardcoded constant in `silence.py`. Add `--silence N` flag to `c` subcommand for
+  the hardcoded constant in `silence.py`. Add `--silence N` flag to `create` subcommand for
   one-off override. TUI will expose this as a live-adjustable control so the user can
   preview the effect in real time — useful for corner-case albums (classical, ambient)
   with unusually quiet passages.
 - [ ] `capacity = 80` — disc capacity in minutes (default 80, matching current
-  `MAX_RUNTIME_MINUTES`). Add `--capacity N` flag to `c` subcommand for one-off
+  `MAX_RUNTIME_MINUTES`). Add `--capacity N` flag to `create` subcommand for one-off
   override. Note: 80 min ≈ 703 MB (standard "700 MB" CD-R). Media up to 90 min exists;
   "overburn" beyond nominal capacity is possible on some drive/media combinations —
   document limits in the generated config comments.
@@ -1220,7 +1220,7 @@ documented defaults if absent.
 
 A local SQLite database tracking all RBI images created by this user, stored at
 `${XDG_DATA_HOME:-$HOME/.local/share}/cdda2img/cdda2img.db`.
-Populated automatically when an RBI is created; queryable via `cdda2img d`.
+Populated automatically when an RBI is created; queryable via `cdda2img catalogue`.
 
 Schema: `catalogue` (album, artist, year, disc_number, disc_total, track_count,
 mcn, remaster, mode, source, ripper, drive, rg fields, file_basename, file_path,
@@ -1280,12 +1280,12 @@ Research saved at `private/research/incomming/true-audio-checker.md`. Key findin
   `scipy` (not currently a direct dep); alternatively, optional subprocess to the
   `aucdtect` binary if installed; or a pre-trained ONNX model embedded in the package.
 
-Proposed CLI: `cdda2img c <dir> --check-quality {warn,error,none}` (default: `warn`).
+Proposed CLI: `cdda2img create <dir> --check-quality {warn,error,none}` (default: `warn`).
 
 - [ ] Decide on dependency strategy (scipy / aucdtect subprocess / embedded model)
 - [ ] Implement `quality_check.py` with `QualityReport` dataclass
 - [ ] Wire into `create_image()` before transcode phase
-- [ ] Store result in TOC provenance block; surface in `l` output
+- [ ] Store result in TOC provenance block; surface in `list` output
 
 ---
 

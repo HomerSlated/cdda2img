@@ -6,14 +6,14 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 `cdda2img` is a CLI tool for creating, importing, ripping, extracting, and verifying **RBI (Red Book Image)** archive containers of CD-DA audio discs. Subcommands:
 
-- **`r`** — rip a physical disc via cdrdao (primary) with cd-paranoia fallback
-- **`c`** — create one or more RBIs from a directory of audio files
-- **`i`** — import a foreign disc image (cdrdao TOC+BIN or DDP 2.0 / GEAR Pro)
-- **`x`** — extract to per-track FLAC + CUE, or raw PCM + TOC, or both
-- **`l`** — list container sections and track index with offsets and checksums
-- **`t`** — verify all checksums and structural invariants (23 checks, exits 1 on failure)
+- **`rip`** — rip a physical disc via cdrdao (primary) with cd-paranoia fallback
+- **`create`** — create one or more RBIs from a directory of audio files
+- **`import`** — import a foreign disc image (cdrdao TOC+BIN or DDP 2.0 / GEAR Pro)
+- **`extract`** — extract to per-track FLAC + CUE, or raw PCM + TOC, or both
+- **`list`** — list container sections and track index with offsets and checksums
+- **`test`** — verify all checksums and structural invariants (23 checks, exits 1 on failure)
 
-The `r`, `i`, and `c` pipelines all embed cdrdao-format TOC text, optional EBU R128 ReplayGain, and raw s16le PCM in a single RBI container. Metadata (album, artist, track titles, ISRC, CATALOG, remaster provenance) is sourced from CDDB, MusicBrainz, AcoustID, and Discogs lookups and an interactive confirmation menu.
+The `rip`, `import`, and `create` pipelines all embed cdrdao-format TOC text, optional EBU R128 ReplayGain, and raw s16le PCM in a single RBI container. Metadata (album, artist, track titles, ISRC, CATALOG, remaster provenance) is sourced from CDDB, MusicBrainz, AcoustID, and Discogs lookups and an interactive confirmation menu.
 
 This is a prototype; a Rust reimplementation is planned once the design has stabilised.
 
@@ -24,28 +24,28 @@ This is a prototype; a Rust reimplementation is planned once the design has stab
 uv sync
 
 # Rip a physical disc (cdrdao primary; cd-paranoia fallback)
-uv run python -m cdda2img r
-uv run python -m cdda2img r /dev/sr0
-uv run python -m cdda2img r --loudness none
+uv run python -m cdda2img rip
+uv run python -m cdda2img rip --device /dev/sr0
+uv run python -m cdda2img rip --loudness none
 
 # Create an RBI image from a directory of audio files
-uv run python -m cdda2img c <input_dir>
-uv run python -m cdda2img c <input_dir> --loudness rg --strategy best
-uv run python -m cdda2img c <input_dir> --mode master --loudness none
+uv run python -m cdda2img create <input_dir>
+uv run python -m cdda2img create <input_dir> --loudness rg --strategy best
+uv run python -m cdda2img create <input_dir> --mode master --loudness none
 
 # Import a foreign disc image
-uv run python -m cdda2img i disc.toc
-uv run python -m cdda2img i /path/to/ddp_dir
+uv run python -m cdda2img import disc.toc
+uv run python -m cdda2img import /path/to/ddp_dir
 
 # Extract an RBI image
-uv run python -m cdda2img x <file.rbi>                 # FLAC + CUE (default)
-uv run python -m cdda2img x <file.rbi> --raw           # raw PCM + TOC
-uv run python -m cdda2img x <file.rbi> --normalize     # FLAC normalised to −18 LUFS
-uv run python -m cdda2img x <file.rbi> --tracks --raw  # both
+uv run python -m cdda2img extract <file.rbi>                 # FLAC + CUE (default)
+uv run python -m cdda2img extract <file.rbi> --raw           # raw PCM + TOC
+uv run python -m cdda2img extract <file.rbi> --normalize     # FLAC normalised to −18 LUFS
+uv run python -m cdda2img extract <file.rbi> --tracks --raw  # both
 
 # Inspect and verify
-uv run python -m cdda2img l <file.rbi>
-uv run python -m cdda2img t <file.rbi>
+uv run python -m cdda2img list <file.rbi>
+uv run python -m cdda2img test <file.rbi>
 
 # Run tests
 uv run pytest tests/
@@ -92,7 +92,7 @@ remains valid (the stale-message guard only fires when `COMMIT_EDITMSG` matches
 
 All source lives under `src/cdda2img/`. The pipeline is fully wired end-to-end.
 
-### Create pipeline (`c` subcommand)
+### Create pipeline (`create` subcommand)
 1. `input_selector.py:select_batches()` — groups audio files into CD-sized batches (≤99 tracks, ≤80 min)
 2. `transcode.py:transcode_audio()` — converts each track to 16-bit stereo 44.1 kHz PCM WAV via PyAV
 3. `silence.py:trim_silence_cd_da()` — remaster mode only: trims leading/trailing silence (−55 dBFS) and appends 2-second inter-track gap
@@ -104,19 +104,19 @@ All source lives under `src/cdda2img/`. The pipeline is fully wired end-to-end.
 9. `replaygain.py:analyse()` — optional EBU R128 loudness analysis via pyebur128 (per-track source WAVs, no concat)
 10. `container.py:build_container()` — writes the RBI file
 
-### Rip pipeline (`r` subcommand)
+### Rip pipeline (`rip` subcommand)
 0. `cdda2img.py:_resolve_drive_offset(device, cfg) → (int, str | None)` — resolves `(drive_offset, drive_name)` before the rip:
    1. `cfg.drives` (`[[drives]]` TOML entries keyed by normalised sysfs name) — always authoritative.
    2. AccurateRip catalog: `drive_info.ensure_drive_offsets(conn)` + `find_drive_offset(conn, name)` — auto-applies at ≥ `_MIN_AR_CONFIDENCE=3` submissions; prompts if lower; no-op without a TTY.
    3. `cfg.drive_offset` (global fallback).
-   Confirmed offsets written via `config.save_drive()` (atomic rename). `OSError` swallowed with warning. `drive_name` feeds `PROVENANCE_DRIVE_NAME`/`PROVENANCE_DRIVE_OFFSET` in the container TOC so `l` shows the drive.
+   Confirmed offsets written via `config.save_drive()` (atomic rename). `OSError` swallowed with warning. `drive_name` feeds `PROVENANCE_DRIVE_NAME`/`PROVENANCE_DRIVE_OFFSET` in the container TOC so `list` shows the drive.
 1. `cdda2img.py:_rip_with_fallback()` — tries `cdrdao_ripper.rip_cdrdao()` (primary); falls back to `disc_reader.rip_disc(paranoia="full")` on RuntimeError
    - `cdrdao_ripper.py:rip_cdrdao()` — runs `cdrdao read-cd`; parses TOC via `toc_parser.py`, builds disc via `cdrdao_reader.parsed_to_rbi_disc()`, byte-swaps s16be BIN via `cdrdao_reader.convert_cdrdao_bin()`; returns `RipInfo(disc, track_lsns, disc_last_lsn)`
    - `disc_reader.py:rip_disc()` — cd-paranoia fallback; queries disc via `-Q`, rips via subprocess; returns same `RipInfo`
 2. `cddb.py:prepopulate_from_cddb()` — TCP CDDB query using disc TOC fingerprint; pre-populates album/artist/track titles before the metadata menu
 3. Shared finalization: `_finalize_import()` (see below)
 
-### Import pipeline (`i` subcommand)
+### Import pipeline (`import` subcommand)
 Two source types, each producing s16le PCM, then both call `_finalize_import()`:
 - **DDP 2.0** (`ddp_reader.py:import_ddp()`): parses DDPID (MCN), PQDESCR (timing + ISRC), CDTEXT.BIN; PCM (TRACK*.DAT) is already s16le — no byte-swap
 - **cdrdao TOC+BIN** (`cdrdao_reader.py`): parses `.toc` text via `toc_parser.py`; byte-swaps s16be BIN → s16le WAV via `convert_cdrdao_bin_to_wav()`
@@ -128,7 +128,7 @@ Two source types, each producing s16le PCM, then both call `_finalize_import()`:
 4. `replaygain.py:analyse()` — optional EBU R128 analysis on per-track WAV slices of the raw PCM
 5. `container.py:build_container()` — writes the RBI file
 
-### Extract pipeline (`x` subcommand)
+### Extract pipeline (`extract` subcommand)
 1. `container.py:read_header()` — parses the 169-byte fixed RBI header
 2. `toc_parser.py:parse_toc()` — parses the embedded cdrdao TOC into `ParsedDisc` / `ParsedTrack` dataclasses
 3. `container.py:extract_data()` — dispatches to raw and/or track output
@@ -161,7 +161,7 @@ Two source types, each producing s16le PCM, then both call `_finalize_import()`:
 - **`concat.py`** — WAV concatenation via the `wave` module
 - **`track_extract.py`** — per-track FLAC extraction + CUE sheet writer
 - **`audition.py`** — ffplay subprocess wrapper for interactive audition (pause/resume via SIGSTOP/SIGCONT)
-- **`track_preview.py`** — cosmetic track-1 audio preview for the `r` pipeline: grabs track 1 via cd-paranoia, loops it via ffplay in the background during the rip; best-effort (never fails a rip)
+- **`track_preview.py`** — cosmetic track-1 audio preview for the `rip` pipeline: grabs track 1 via cd-paranoia, loops it via ffplay in the background during the rip; best-effort (never fails a rip)
 
 ## RBI Format (v3.0)
 
@@ -216,7 +216,7 @@ Additional machine-local references (not committed) are documented in `CLAUDE.lo
 ## CD-DA Domain Knowledge
 
 This section documents CD-DA / subchannel / offset concepts relevant to current and planned work,
-particularly the `r` rip pipeline and `i` foreign image import pipeline.
+particularly the `rip` pipeline and `import` foreign image import pipeline.
 
 ### Q-channel Modes
 
@@ -282,7 +282,7 @@ cd-paranoia supports offset correction at read time (via `-O`); cdrdao `read-cd`
 equivalent. Offset correction for cdrdao-ripped audio must therefore be applied post-rip if
 needed (see AccurateRip validation below).
 
-### Rip Strategy (`r` subcommand — `_rip_with_fallback`)
+### Rip Strategy (`rip` subcommand — `_rip_with_fallback`)
 
 **Primary path — cdrdao** (`cdrdao_ripper.py:rip_cdrdao()`):
 - Captures full subchannel data: MCN (Q-ch Mode 2), per-track ISRC (Q-ch Mode 3), CD-Text
@@ -314,7 +314,7 @@ needed (see AccurateRip validation below).
 
 ### Sample Offset Correction — Post-Rip (Foreign Image Import)
 
-When importing foreign rips (CCD, NRG, MDF, C2D, B6I, etc.) via the `i` subcommand, the source
+When importing foreign rips (CCD, NRG, MDF, C2D, B6I, etc.) via the `import` subcommand, the source
 drive offset is unknown and may not have been applied during the original rip. Offset correction
 **must be applied across the full concatenated disc audio**, not per-track in isolation — the
 corrected samples at a track boundary come from the adjacent track.

@@ -423,7 +423,9 @@ def built_rbi(tmp_path_factory):
     wav_to_raw_pcm(concat, pcm)
 
     rbi = tmp / "test.rbi"
-    build_container(pcm, toc_data, disc, rbi, rg_block=None, prov_data={"mode": "c"})
+    build_container(
+        pcm, toc_data, disc, rbi, rg_block=None, prov_data={"mode": "create"}
+    )
     return rbi
 
 
