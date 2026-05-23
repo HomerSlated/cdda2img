@@ -48,18 +48,22 @@ def _run_with_write_progress(
     cwd: str,
     ui: TerminalUI | None,
     n_tracks: int,
-) -> int:
+) -> tuple[int, list[str]]:
     """Run cdrdao write, feeding stderr into the progress parser.
 
-    Returns the process exit code.
+    Returns ``(exit_code, stderr_lines)``. *stderr_lines* contains every
+    cdrdao stderr line (used to surface error detail on failure) and is
+    only populated when *ui* is active — in non-TUI mode cdrdao stderr
+    passes directly to the terminal.
     """
     from cdda2img.cdrdao_write_progress import CdrdaoWriteProgress
 
     if ui is None:
         result = subprocess.run(cmd, cwd=cwd)  # noqa: S603
-        return result.returncode
+        return result.returncode, []
 
     parser = CdrdaoWriteProgress(n_tracks)
+    stderr_lines: list[str] = []
     with subprocess.Popen(  # noqa: S603
         cmd,
         cwd=cwd,
@@ -68,6 +72,7 @@ def _run_with_write_progress(
     ) as proc:
         assert proc.stderr is not None  # noqa: S101
         for raw in proc.stderr:
+            stderr_lines.append(raw.rstrip("\r\n"))
             update = parser.feed(raw)
             if update is not None:
                 ui.set_status(update.status, update.fraction)
@@ -75,7 +80,17 @@ def _run_with_write_progress(
         final = parser.done()
         if final is not None:
             ui.set_status(final.status, final.fraction)
-        return proc.returncode
+        return proc.returncode, stderr_lines
+
+
+def _print_cdrdao_error(ui: TerminalUI | None, lines: list[str]) -> None:
+    """Pause the TUI (if active) and print captured cdrdao stderr to the terminal."""
+    if ui is None or not lines:
+        return
+    ui.pause()
+    for line in lines:
+        if line:
+            print(f"  {line}")
 
 
 def _confirm_insert(yes: bool, ui: TerminalUI | None) -> bool:
@@ -188,8 +203,9 @@ def burn_disc(
             "--eject",
             toc_path.name,
         ]
-        rc = _run_with_write_progress(cmd, str(tmp), ui, track_count)
+        rc, cdrdao_stderr = _run_with_write_progress(cmd, str(tmp), ui, track_count)
         if rc != 0:
+            _print_cdrdao_error(ui, cdrdao_stderr)
             msg = f"cdrdao write failed (exit {rc})"
             raise RuntimeError(msg)
 
