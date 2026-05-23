@@ -162,15 +162,19 @@ def _parse_full_release(r) -> DiscMeta:
         label = labels[0].get("name") or ""
         catalog_number = labels[0].get("catno") or ""
 
+    barcode_idents = [
+        ident
+        for ident in (data.get("identifiers") or [])
+        if isinstance(ident, dict) and (ident.get("type") or "").lower() == "barcode"
+    ]
     barcode = next(
         (
             ident.get("value") or ""
-            for ident in (data.get("identifiers") or [])
-            if isinstance(ident, dict)
-            and (ident.get("type") or "").lower() == "barcode"
+            for ident in barcode_idents
+            if "scanned" in (ident.get("description") or "").lower()
         ),
         "",
-    )
+    ) or next((ident.get("value") or "" for ident in barcode_idents), "")
 
     return DiscMeta(
         album=album or None,

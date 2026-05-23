@@ -226,6 +226,62 @@ def test_discogs_parse_result_remaster_classification():
     assert meta.remastered_source == REMASTERED_POSSIBLE
 
 
+def test_discogs_parse_full_release_prefers_scanned_barcode():
+    """_parse_full_release picks 'Scanned' barcode over 'Printed' when both present."""
+    from cdda2img.discogs_lookup import _parse_full_release
+
+    r = SimpleNamespace(
+        data={
+            "id": 13837211,
+            "title": "Eliminator",
+            "artists": [{"name": "ZZ Top", "join": ""}],
+            "year": 1983,
+            "country": "US",
+            "labels": [{"name": "Warner Bros. Records", "catno": "9 23774-2"}],
+            "identifiers": [
+                {
+                    "type": "Barcode",
+                    "value": "0 7599-23774-2",
+                    "description": "Printed",
+                },
+                {"type": "Barcode", "value": "075992377423", "description": "Scanned"},
+            ],
+            "tracklist": [],
+        }
+    )
+    meta = _parse_full_release(r)
+    assert meta.catalog == "075992377423"
+
+
+def test_discogs_parse_full_release_falls_back_to_first_barcode():
+    """_parse_full_release falls back to the first barcode when no 'Scanned' entry."""
+    from cdda2img.discogs_lookup import _parse_full_release
+
+    r = SimpleNamespace(
+        data={
+            "id": 1,
+            "title": "Album",
+            "artists": [{"name": "Artist", "join": ""}],
+            "year": 2000,
+            "country": "DE",
+            "labels": [],
+            "identifiers": [
+                {"type": "Barcode", "value": "4012345678901"},
+            ],
+            "tracklist": [],
+        }
+    )
+    meta = _parse_full_release(r)
+    assert meta.catalog == "4012345678901"
+
+
+def test_normalize_barcode_eleven_digits_returns_none():
+    """Printed barcode without check digit (11 digits) is rejected, not silently mangled."""
+    from cdda2img.discogs_lookup import normalize_barcode
+
+    assert normalize_barcode("0 7599-23774-2") is None
+
+
 # ---------------------------------------------------------------------------
 # acoustid_lookup — availability
 # ---------------------------------------------------------------------------

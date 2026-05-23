@@ -707,7 +707,7 @@ def import_image(
         temp.cleanup()
 
 
-def _prepopulate_from_discogs(disc: RBIDisc) -> RBIDisc:
+def _prepopulate_from_discogs(disc: RBIDisc, ui: TerminalUI | None = None) -> RBIDisc:
     """Auto-apply Discogs metadata via MCN barcode (single-match merge only)."""
     if not disc.catalog:
         return disc
@@ -715,8 +715,16 @@ def _prepopulate_from_discogs(disc: RBIDisc) -> RBIDisc:
     from cdda2img.mb_lookup import _merge_into_disc
 
     barcode = discogs_lookup.normalize_barcode(disc.catalog)
-    if not barcode or not discogs_lookup.is_available():
+    if not barcode:
+        _ui_print(
+            ui,
+            f"  Note: disc MCN {disc.catalog!r} is not a valid barcode "
+            f"(expected 12 or 13 digits after stripping) — skipping Discogs lookup",
+        )
         return disc
+    if not discogs_lookup.is_available():
+        return disc
+    _ui_status(ui, "Querying Discogs by barcode…")
     results = discogs_lookup.search_by_barcode(barcode)
     if len(results) == 1:
         return _merge_into_disc(results[0], disc)
@@ -744,8 +752,7 @@ def _finalize_import(
     # Suppress verbose MB output when TUI is active — status line serves that role.
     disc = prepopulate_from_mb(disc, verbose=(ui is None) and sys.stdin.isatty())
 
-    _ui_status(ui, "Querying Discogs by barcode…")
-    disc = _prepopulate_from_discogs(disc)
+    disc = _prepopulate_from_discogs(disc, ui)
 
     # Hand the terminal over to the interactive metadata menu.
     if ui is not None:
