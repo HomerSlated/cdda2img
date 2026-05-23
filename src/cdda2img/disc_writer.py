@@ -21,11 +21,36 @@ if TYPE_CHECKING:
     from cdda2img.terminal_ui import TerminalUI
 
 _FILE_NAME_RE = re.compile(r'(FILE\s+)"[^"]*"')
+# CATALOG line with anything other than exactly 13 decimal digits
+_CATALOG_BAD_RE = re.compile(r'^CATALOG\s+"([^"]*)"\s*\n?', re.MULTILINE)
+# Indented CD-Text field with an empty string value
+_EMPTY_CDTEXT_RE = re.compile(
+    r"[ \t]+(?:TITLE|PERFORMER|SONGWRITER|COMPOSER|ARRANGER|MESSAGE|DISC_ID|GENRE)"
+    r'\s+""\s*\n',
+    re.MULTILINE,
+)
 
 
 def _patch_toc_filenames(toc_text: str) -> str:
     """Replace all FILE "..." filename fields with "disc.wav"."""
     return _FILE_NAME_RE.sub(r'\1"disc.wav"', toc_text)
+
+
+def _sanitize_toc_for_burn(toc_text: str) -> str:
+    """Strip TOC constructs that cdrdao write rejects but cdrdao read-cd tolerates.
+
+    1. CATALOG with a non-13-digit value — write enforces the Red Book MCN format.
+    2. CD-Text fields with empty string values — write cannot encode them; omitting
+       them causes cdrdao to inherit from the disc-level block instead.
+    """
+
+    def _fix_catalog(m: re.Match[str]) -> str:
+        mcn = m.group(1)
+        return m.group(0) if (len(mcn) == 13 and mcn.isdigit()) else ""
+
+    text = _CATALOG_BAD_RE.sub(_fix_catalog, toc_text)
+    text = _EMPTY_CDTEXT_RE.sub("", text)
+    return text
 
 
 def _ui_status(ui: TerminalUI | None, text: str, prog: float = -1.0) -> None:
@@ -190,7 +215,9 @@ def burn_disc(
             wf.setframerate(header.pcm_sample_rate)
             wf.writeframes(pcm_path.read_bytes())
 
-        toc_path.write_text(_patch_toc_filenames(toc_text), encoding="utf-8")
+        toc_path.write_text(
+            _sanitize_toc_for_burn(_patch_toc_filenames(toc_text)), encoding="utf-8"
+        )
 
         _ui_status(ui, f"Burning track 1/{track_count}")
         cmd = [

@@ -83,10 +83,11 @@ def generate_toc(
     if disc.catalog:
         lines.append(f'CATALOG "{disc.catalog}"\n')
 
-    disc_text_lines = [
-        f'    TITLE "{album}"',
-        f'    PERFORMER "{artist}"',
-    ]
+    disc_text_lines = []
+    if album:
+        disc_text_lines.append(f'    TITLE "{album}"')
+    if artist:
+        disc_text_lines.append(f'    PERFORMER "{artist}"')
     if disc.disc_id:
         disc_text_lines.append(
             f'    DISC_ID "{disc.disc_id.replace(chr(34), chr(39))}"'
@@ -116,6 +117,18 @@ def generate_toc(
             [f"START {track.pregap_timestamp}"] if track.pregap_frames > 0 else []
         )
 
+        track_cdtext_lines = []
+        if track.title:
+            track_cdtext_lines.append(f'    TITLE "{track.title}"')
+        track_performer = sanitize_title(track.performer)
+        if track_performer:
+            track_cdtext_lines.append(f'    PERFORMER "{track_performer}"')
+        track_cdtext_block = (
+            ["CD_TEXT {", "  LANGUAGE 0 {", *track_cdtext_lines, "  }", "}"]
+            if track_cdtext_lines
+            else []
+        )
+
         lines += [
             f"// Track {track.track_number}",
             *unicode_lines,
@@ -124,12 +137,7 @@ def generate_toc(
             "NO PRE_EMPHASIS",
             "TWO_CHANNEL_AUDIO",
             *isrc_lines,
-            "CD_TEXT {",
-            "  LANGUAGE 0 {",
-            f'    TITLE "{track.title}"',
-            f'    PERFORMER "{sanitize_title(track.performer)}"',
-            "  }",
-            "}",
+            *track_cdtext_block,
             f'FILE "{pcm_filename}" {track.start_timestamp} {track.slot_timestamp}',
             *start_lines,
             "",
