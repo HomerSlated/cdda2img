@@ -46,16 +46,7 @@ def _get_client():
     if not token:
         return None
     try:
-        import warnings
-
-        # discogs_client 2.3.0 uses \w in a non-raw string (fetchers.py:102);
-        # Python 3.12+ flags this as SyntaxWarning on first module compilation.
-        # Remove this filter once the upstream library ships a fix.
-        with warnings.catch_warnings():
-            warnings.filterwarnings(
-                "ignore", category=SyntaxWarning, module=r"discogs_client\..*"
-            )
-            import discogs_client  # type: ignore[import-untyped]
+        import discogs_client  # type: ignore[import-untyped]
 
         return discogs_client.Client(_USER_AGENT, user_token=token)
     except ImportError:

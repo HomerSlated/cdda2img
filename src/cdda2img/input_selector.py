@@ -20,12 +20,16 @@ def get_audio_duration_minutes(path: Path) -> float:
         return 0.0
 
 
-def batch_fcfs(files: list[Path], durations: list[float]) -> list[list[Path]]:
+def batch_fcfs(
+    files: list[Path],
+    durations: list[float],
+    capacity_minutes: int = MAX_RUNTIME_MINUTES,
+) -> list[list[Path]]:
     batch = []
     total_runtime = 0.0
 
     for f, d in zip(files, durations):
-        if len(batch) >= MAX_TRACKS or total_runtime + d > MAX_RUNTIME_MINUTES:
+        if len(batch) >= MAX_TRACKS or total_runtime + d > capacity_minutes:
             break
         batch.append(f)
         total_runtime += d
@@ -33,13 +37,17 @@ def batch_fcfs(files: list[Path], durations: list[float]) -> list[list[Path]]:
     return [batch]
 
 
-def batch_aatc(files: list[Path], durations: list[float]) -> list[list[Path]]:
+def batch_aatc(
+    files: list[Path],
+    durations: list[float],
+    capacity_minutes: int = MAX_RUNTIME_MINUTES,
+) -> list[list[Path]]:
     batches = []
     batch = []
     total_runtime = 0.0
 
     for f, d in zip(files, durations):
-        if len(batch) >= MAX_TRACKS or total_runtime + d > MAX_RUNTIME_MINUTES:
+        if len(batch) >= MAX_TRACKS or total_runtime + d > capacity_minutes:
             batches.append(batch)
             batch = []
             total_runtime = 0.0
@@ -53,17 +61,21 @@ def batch_aatc(files: list[Path], durations: list[float]) -> list[list[Path]]:
     return batches
 
 
-def batch_best(files: list[Path], durations: list[float]) -> list[list[Path]]:
+def batch_best(
+    files: list[Path],
+    durations: list[float],
+    capacity_minutes: int = MAX_RUNTIME_MINUTES,
+) -> list[list[Path]]:
     """Best: global bin-packing to minimise total number of discs (track order not preserved)."""
     # Use aatc as the upper bound — best can only match or beat it
-    upper = batch_aatc(files, durations)
+    upper = batch_aatc(files, durations, capacity_minutes=capacity_minutes)
     if len(upper) <= 1:
         return upper
 
     n = len(files)
     max_discs = len(upper)
     int_durations = [math.ceil(d * SCALE) for d in durations]
-    int_capacity = int(MAX_RUNTIME_MINUTES * SCALE)
+    int_capacity = int(capacity_minutes * SCALE)
 
     model = cp_model.CpModel()
     y = [model.NewBoolVar(f"y{j}") for j in range(max_discs)]  # type: ignore[attr-defined]  # LINT-001
@@ -149,7 +161,11 @@ def batch_meta(files: list[Path]) -> list[list[Path]]:
     return batches
 
 
-def select_batches(files: list[Path], strategy: str) -> list[list[Path]]:
+def select_batches(
+    files: list[Path],
+    strategy: str,
+    capacity_minutes: int = MAX_RUNTIME_MINUTES,
+) -> list[list[Path]]:
     durations = [get_audio_duration_minutes(f) for f in files]
     files_and_durations = [(f, d) for f, d in zip(files, durations) if d > 0.0]
     if not files_and_durations:
@@ -158,12 +174,19 @@ def select_batches(files: list[Path], strategy: str) -> list[list[Path]]:
     files, durations = zip(*files_and_durations)
 
     if strategy == "fcfs":
-        return batch_fcfs(list(files), list(durations))
+        return batch_fcfs(
+            list(files), list(durations), capacity_minutes=capacity_minutes
+        )
     elif strategy == "aatc":
-        return batch_aatc(list(files), list(durations))
+        return batch_aatc(
+            list(files), list(durations), capacity_minutes=capacity_minutes
+        )
     elif strategy == "best":
-        return batch_best(list(files), list(durations))
+        return batch_best(
+            list(files), list(durations), capacity_minutes=capacity_minutes
+        )
     elif strategy == "meta":
+        # meta groups by embedded disc-number tag; capacity is not consulted.
         return batch_meta(list(files))
     else:
         msg = f"Unknown strategy: {strategy!r}"

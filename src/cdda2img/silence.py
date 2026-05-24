@@ -19,7 +19,7 @@ def setup_streams(in_container, out_container):
     return in_stream, out_stream
 
 
-def build_filter_graph(in_stream, pad_dur):
+def build_filter_graph(in_stream, pad_dur, threshold_db=55):
     graph = Graph()
     abuffer = graph.add_abuffer(
         template=in_stream,
@@ -29,15 +29,13 @@ def build_filter_graph(in_stream, pad_dur):
         channels=in_stream.codec_context.channels,
         time_base=in_stream.time_base,
     )
-    silenceremove1 = graph.add(
-        "silenceremove",
-        "start_periods=1:start_duration=0:start_threshold=-55dB:detection=peak",
+    spec = (
+        f"start_periods=1:start_duration=0:"
+        f"start_threshold=-{threshold_db}dB:detection=peak"
     )
+    silenceremove1 = graph.add("silenceremove", spec)
     reverse1 = graph.add("areverse")
-    silenceremove2 = graph.add(
-        "silenceremove",
-        "start_periods=1:start_duration=0:start_threshold=-55dB:detection=peak",
-    )
+    silenceremove2 = graph.add("silenceremove", spec)
     reverse2 = graph.add("areverse")
     apad = graph.add("apad", f"pad_dur={pad_dur}")
     sink = graph.add("abuffersink")
@@ -69,20 +67,21 @@ def process_frames(graph, in_container, in_stream, out_stream, out_container):
         out_container.mux(packet)
 
 
-def trim_silence_cd_da(input_path, output_path, pad_dur):
+def trim_silence_cd_da(input_path, output_path, pad_dur, threshold_db=55):
     in_container, out_container = open_containers(input_path, output_path)
     in_stream, out_stream = setup_streams(in_container, out_container)
-    graph = build_filter_graph(in_stream, pad_dur)
+    graph = build_filter_graph(in_stream, pad_dur, threshold_db=threshold_db)
     process_frames(graph, in_container, in_stream, out_stream, out_container)
     out_container.close()
     in_container.close()
 
 
 if __name__ == "__main__":
-    if len(sys.argv) != 4:
-        print("Usage: python silence.py <infile> <outfile> <pad>")
+    if len(sys.argv) not in (4, 5):
+        print("Usage: python silence.py <infile> <outfile> <pad> [threshold_db]")
         sys.exit(1)
     infile = sys.argv[1]
     outfile = sys.argv[2]
     pad = sys.argv[3]
-    trim_silence_cd_da(infile, outfile, pad)
+    threshold = int(sys.argv[4]) if len(sys.argv) == 5 else 55
+    trim_silence_cd_da(infile, outfile, pad, threshold_db=threshold)

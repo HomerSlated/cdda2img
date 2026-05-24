@@ -185,6 +185,20 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Output .rbi file, or a directory to receive album-derived names (default: CWD, name from album); multi-disc: stem used as base name",
     )
+    c.add_argument(
+        "--silence",
+        type=int,
+        default=None,
+        metavar="N",
+        help="Silence detection threshold in -dBFS (default: from config, 55)",
+    )
+    c.add_argument(
+        "--capacity",
+        type=int,
+        default=None,
+        metavar="N",
+        help="Disc capacity in minutes (default: from config, 80)",
+    )
 
     x = sub.add_parser("extract", help="Extract blocks from an RBI image")
     x.add_argument("rbi_file", type=Path, help="RBI file to extract")
@@ -257,6 +271,18 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=None,
         help="Output .rbi file, or a directory to receive an album-derived filename (default: CWD, name from album)",
+    )
+    r_cmd.add_argument(
+        "--preview",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Play track 1 on a loop in the background during rip (default: from config, true)",
+    )
+    r_cmd.add_argument(
+        "--tui",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Use terminal UI for live progress rendering (default: from config, true; no-op when stdin is not a TTY)",
     )
     i_cmd = sub.add_parser(
         "import",
@@ -395,15 +421,17 @@ def _resolve_output_path(output: Path | None, stem: str, disc_suffix: str = "") 
     return output
 
 
-def _check_batch_limits(batches: list[list[Path]]) -> None:
+def _check_batch_limits(
+    batches: list[list[Path]], capacity_minutes: int = MAX_RUNTIME_MINUTES
+) -> None:
     """Raise ValueError if any batch exceeds Red Book track or duration limits."""
     for disc_idx, batch in enumerate(batches, start=1):
         n = len(batch)
         total_min = sum(get_audio_duration_minutes(f) for f in batch)
-        if n > MAX_TRACKS or total_min > MAX_RUNTIME_MINUTES:
+        if n > MAX_TRACKS or total_min > capacity_minutes:
             msg = (
                 f"Disc {disc_idx} would have {n} tracks and {total_min:.1f} min"
-                f" (Red Book limit: {MAX_TRACKS} tracks / {MAX_RUNTIME_MINUTES} min)."
+                f" (limit: {MAX_TRACKS} tracks / {capacity_minutes} min)."
                 f" Re-tag files with correct disc numbers or choose a different strategy."
             )
             raise ValueError(msg)
@@ -416,16 +444,18 @@ def create_image(
     strategy: str = DEFAULT_STRATEGY,
     trim_silence: bool = True,
     output: Path | None = None,
+    silence: int = 55,
+    capacity: int = MAX_RUNTIME_MINUTES,
 ) -> None:
     files = sorted(
         p for p in input_dir.iterdir() if p.is_file() and not p.name.startswith(".")
     )
-    batches = select_batches(files, strategy)
+    batches = select_batches(files, strategy, capacity_minutes=capacity)
     if not batches:
         print("No audio files found.")
         return
 
-    _check_batch_limits(batches)
+    _check_batch_limits(batches, capacity_minutes=capacity)
 
     meta = derive_album_info(files)
     album = meta["album"]
@@ -448,7 +478,9 @@ def create_image(
                 if mode == "remaster" and trim_silence:
                     print(f"  Trimming      {i:2}: {track.stem}")
                     trim = temp.temp_track(i, "_trim.wav")
-                    trim_silence_cd_da(str(trans), str(trim), SILENCE_PAD_DUR)
+                    trim_silence_cd_da(
+                        str(trans), str(trim), SILENCE_PAD_DUR, threshold_db=silence
+                    )
                     source_wavs.append(trim)
                 else:
                     if mode == "remaster":
@@ -1092,14 +1124,15 @@ def _phase_progress_cb(
 
 
 def _start_track_preview(
-    device: str, work_dir: Path, ui: TerminalUI | None
+    device: str, work_dir: Path, ui: TerminalUI | None, enabled: bool = True
 ) -> TrackPreview | None:
     """Grab track 1 and start looping background playback (TTY sessions only).
 
     Cosmetic only — start_preview() swallows every failure and returns None,
-    so the rip is never affected.
+    so the rip is never affected. Returns None when *enabled* is False (--no-preview)
+    or when there is no TUI session to host the progress display.
     """
-    if ui is None:
+    if not enabled or ui is None:
         return None
     from cdda2img.track_preview import start_preview
 
@@ -1180,6 +1213,8 @@ def rip_image(
     device: str | None = None,
     loudness: str = "rg",
     output: Path | None = None,
+    preview: bool = True,
+    tui: bool = True,
 ) -> None:
     import sys
 
@@ -1196,16 +1231,16 @@ def rip_image(
     temp = TempFiles(temp_base)
 
     ui: TerminalUI | None = None
-    if sys.stdin.isatty():
+    if tui and sys.stdin.isatty():
         from cdda2img.terminal_ui import TerminalUI as _TUI
 
         ui = _TUI().start()
 
-    preview: TrackPreview | None = None
+    track_preview: TrackPreview | None = None
     try:
         # Grab track 1 first (drive is single-use), then play it on a loop in
         # the background while the rest of the rip runs.
-        preview = _start_track_preview(device, temp_base, ui)
+        track_preview = _start_track_preview(device, temp_base, ui, enabled=preview)
 
         info, rip_type = _rip_with_fallback(device, temp.pcm_file, read_offset, ui=ui)
 
@@ -1325,7 +1360,7 @@ def rip_image(
             ui=ui,
         )
     finally:
-        _stop_preview(preview)
+        _stop_preview(track_preview)
         if ui is not None:
             ui.stop()
         temp.cleanup()
@@ -1476,6 +1511,9 @@ def mount_image(
 
 def _dispatch(args: argparse.Namespace) -> None:
     if args.cmd == "create":
+        from cdda2img.config import load_config
+
+        cfg = load_config()
         create_image(
             args.input_dir,
             mode=args.mode,
@@ -1483,12 +1521,19 @@ def _dispatch(args: argparse.Namespace) -> None:
             strategy=args.strategy,
             trim_silence=args.trim_silence,
             output=args.output,
+            silence=args.silence if args.silence is not None else cfg.silence,
+            capacity=args.capacity if args.capacity is not None else cfg.capacity,
         )
     elif args.cmd == "rip":
+        from cdda2img.config import load_config
+
+        cfg = load_config()
         rip_image(
             args.device,
             loudness=args.loudness,
             output=args.output,
+            preview=args.preview if args.preview is not None else cfg.preview,
+            tui=args.tui if args.tui is not None else cfg.tui,
         )
     elif args.cmd == "import":
         if args.info:

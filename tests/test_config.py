@@ -414,3 +414,76 @@ def test_default_device_reads_from_config(
     cfg.write_text('default_device = "/dev/sr1"\n')
     monkeypatch.setattr("cdda2img.config.config_path", lambda: cfg)
     assert load_config().default_device == "/dev/sr1"
+
+
+# ---------------------------------------------------------------------------
+# silence / capacity / preview / tui
+# ---------------------------------------------------------------------------
+
+
+def test_silence_capacity_preview_tui_defaults(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cfg = tmp_path / "cfg.toml"
+    cfg.write_text("")
+    monkeypatch.setattr("cdda2img.config.config_path", lambda: cfg)
+    c = load_config()
+    assert c.silence == 55
+    assert c.capacity == 80
+    assert c.preview is True
+    assert c.tui is True
+
+
+def test_silence_capacity_preview_tui_overrides(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cfg = tmp_path / "cfg.toml"
+    cfg.write_text("silence = 40\ncapacity = 90\npreview = false\ntui = false\n")
+    monkeypatch.setattr("cdda2img.config.config_path", lambda: cfg)
+    c = load_config()
+    assert c.silence == 40
+    assert c.capacity == 90
+    assert c.preview is False
+    assert c.tui is False
+
+
+def test_silence_out_of_range_falls_back_to_default(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    cfg = tmp_path / "cfg.toml"
+    cfg.write_text("silence = 200\n")
+    monkeypatch.setattr("cdda2img.config.config_path", lambda: cfg)
+    with caplog.at_level(logging.WARNING):
+        c = load_config()
+    assert c.silence == 55
+    assert "Invalid silence" in caplog.text
+
+
+def test_capacity_out_of_range_falls_back_to_default(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    cfg = tmp_path / "cfg.toml"
+    cfg.write_text("capacity = 0\n")
+    monkeypatch.setattr("cdda2img.config.config_path", lambda: cfg)
+    with caplog.at_level(logging.WARNING):
+        c = load_config()
+    assert c.capacity == 80
+    assert "Invalid capacity" in caplog.text
+
+
+def test_silence_non_integer_falls_back_to_default(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    cfg = tmp_path / "cfg.toml"
+    cfg.write_text('silence = "loud"\n')
+    monkeypatch.setattr("cdda2img.config.config_path", lambda: cfg)
+    with caplog.at_level(logging.WARNING):
+        c = load_config()
+    assert c.silence == 55
+    assert "Invalid silence" in caplog.text

@@ -1203,16 +1203,20 @@ documented defaults if absent.
 
 - [x] Create `config.py` — `Config` dataclass (`drive_offset`, `cddb_server`); `load_config()`;
   `_prompt_create_config()` for first-run; XDG path via `config_path()`
-- [ ] `silence = 55` — silence detection threshold in dBFS (absolute value); replaces
-  the hardcoded constant in `silence.py`. Add `--silence N` flag to `create` subcommand for
-  one-off override. TUI will expose this as a live-adjustable control so the user can
-  preview the effect in real time — useful for corner-case albums (classical, ambient)
-  with unusually quiet passages.
-- [ ] `capacity = 80` — disc capacity in minutes (default 80, matching current
-  `MAX_RUNTIME_MINUTES`). Add `--capacity N` flag to `create` subcommand for one-off
-  override. Note: 80 min ≈ 703 MB (standard "700 MB" CD-R). Media up to 90 min exists;
-  "overburn" beyond nominal capacity is possible on some drive/media combinations —
-  document limits in the generated config comments.
+- [x] `silence = 55` — silence detection threshold in -dBFS; replaces the
+  hardcoded `-55dB` literal in `silence.py:build_filter_graph`. `--silence N`
+  flag on the `create` subcommand for one-off override; clamped to 1–90 with
+  warn-and-default on out-of-range. TUI live-adjustable control still pending.
+- [x] `capacity = 80` — disc capacity in minutes; threaded through
+  `select_batches` / `batch_fcfs` / `batch_aatc` / `batch_best` /
+  `_check_batch_limits` (the `meta` strategy is capacity-agnostic). `--capacity N`
+  flag on the `create` subcommand for one-off override; clamped to 1–99 with
+  warn-and-default on out-of-range. `MAX_RUNTIME_MINUTES = 80` retained as the
+  module-level default for direct API callers and tests.
+- [x] `preview = true` and `tui = true` — control track-1 audio preview and
+  TerminalUI rendering on the `rip` subcommand; `--preview/--no-preview` and
+  `--tui/--no-tui` flags via `BooleanOptionalAction`. TUI flag will expand to
+  `create` and `import` once those pipelines are wired up.
 
 ---
 

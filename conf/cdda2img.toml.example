@@ -39,6 +39,30 @@
 # Default: /dev/sr0
 # default_device = "/dev/sr0"
 
+# Silence detection threshold for the `create` pipeline's remaster mode, in -dBFS
+# (absolute value; lower number = stricter trim). Audio below this level at the
+# head and tail of each track is removed before the 2 s inter-track gap is added.
+# Useful range: 40 (loose) … 70 (strict). Range: 1–90.
+# Default: 55
+# silence = 55
+
+# Disc capacity in minutes for the `create` pipeline batcher.
+# 80 = standard "700 MB" CD-R; 90 = "900 MB" media exists; overburn beyond
+# nominal capacity is possible on some drive/media combinations. Range: 1–99.
+# Default: 80
+# capacity = 80
+
+# Play track 1 on a loop in the background during the `rip` pipeline.
+# Best-effort cosmetic preview; never blocks or fails the rip.
+# Default: true
+# preview = true
+
+# Use the terminal UI for live progress rendering (currently `rip` only;
+# `create` / `import` will follow). When false, progress falls back to plain
+# stdout. No-op when stdin is not a TTY (CI, pipes, etc.).
+# Default: true
+# tui = true
+
 # Per-drive read and write offsets.
 # read_offset is stored automatically after AccurateRip confirmation.
 # write_offset is stored automatically by tools/measure_write_offset.py.

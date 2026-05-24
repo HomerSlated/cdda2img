@@ -99,6 +99,10 @@ class Config:
     catalogue_path: Path | None = None
     enable_catalogue: bool = True
     default_device: str = "/dev/sr0"
+    silence: int = 55
+    capacity: int = 80
+    preview: bool = True
+    tui: bool = True
 
 
 def _parse_drives(raw_drives: object) -> list[DriveConfig]:
@@ -178,6 +182,27 @@ def load_config() -> Config:
     enable_catalogue = bool(data.get("enable_catalogue", True))
     default_device = str(data.get("default_device", "/dev/sr0"))
 
+    raw_silence = data.get("silence", 55)
+    try:
+        silence = int(raw_silence)
+    except (ValueError, TypeError):
+        silence = 0
+    if not 1 <= silence <= 90:
+        log.warning("Invalid silence %r in config; defaulting to 55", raw_silence)
+        silence = 55
+
+    raw_capacity = data.get("capacity", 80)
+    try:
+        capacity = int(raw_capacity)
+    except (ValueError, TypeError):
+        capacity = 0
+    if not 1 <= capacity <= 99:
+        log.warning("Invalid capacity %r in config; defaulting to 80", raw_capacity)
+        capacity = 80
+
+    preview = bool(data.get("preview", True))
+    tui = bool(data.get("tui", True))
+
     return Config(
         cddb_server=cddb_server,
         contact_email=contact_email,
@@ -189,6 +214,10 @@ def load_config() -> Config:
         catalogue_path=catalogue_path,
         enable_catalogue=enable_catalogue,
         default_device=default_device,
+        silence=silence,
+        capacity=capacity,
+        preview=preview,
+        tui=tui,
     )
 
 
