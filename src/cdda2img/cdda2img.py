@@ -734,52 +734,29 @@ def _collect_barcode_candidates(
     return candidates
 
 
-def _pick_canonical_mcn(
-    disc: RBIDisc,
-    candidates: list[str],
-    emit: Callable[[str], None],
-) -> str | None:
+def _pick_canonical_mcn(disc: RBIDisc, candidates: list[str]) -> str | None:
     """Choose the canonical 13-digit MCN for *disc* from *candidates*.
 
     Strategy (in priority order):
       1. **Substring match (deductive).** If disc.catalog contains raw digits
-         (any length) that appear as a substring of any candidate, that candidate
-         IS the MCN — printed barcodes are GTIN-12-without-check-digit, which are
-         a prefix of the GTIN-12, which is a suffix of the EAN-13. Matching by
-         substring bridges all three forms without losing information.
-      2. **First candidate (best-guess fallback).** If no substring match but
-         candidates exist, return the first one. "I'd rather have the wrong MCN
-         than none at all" — for archival provenance, blank is worse than a
-         best-effort guess the user can correct.
-      3. **None.** No candidates at all → no information to work with.
+         (>= 7) that appear as a substring of any candidate, that candidate IS
+         the MCN — printed barcodes are GTIN-12 without check digit, a prefix
+         of GTIN-12, which is a suffix of EAN-13. Substring bridges all three.
+      2. **First candidate (best-guess fallback).** No substring match but
+         candidates exist → first one wins. Blank is worse than a guess the
+         user can correct via [c] in the menu.
+      3. **None.** No candidates at all → nothing to work with.
     """
     import re
 
-    # Minimum digit count for substring-match to count as evidence. A few stray
-    # digits would spuriously match many candidates; real-world inputs (Q-channel
-    # MCN, printed barcodes, user-typed UPCs) are all ≥ 10 digits, so 7 is a safe
-    # floor that still allows partial inputs while rejecting noise.
-    _MIN_SUBSTRING_DIGITS = 7
+    _MIN_SUBSTRING_DIGITS = 7  # below this, false positives across hints
 
     raw_digits = re.sub(r"\D", "", disc.catalog) if disc.catalog else ""
     if len(raw_digits) >= _MIN_SUBSTRING_DIGITS:
         for c in candidates:
             if raw_digits in c:
-                emit(
-                    f"  MCN: substring-matched raw {raw_digits!r} → "
-                    f"canonical {c} (deductive)"
-                )
                 return c
-    if candidates:
-        chosen = candidates[0]
-        reason = (
-            "best-guess (raw not in any candidate)"
-            if raw_digits
-            else "best-guess (no raw barcode on disc)"
-        )
-        emit(f"  MCN: {chosen} ({reason})")
-        return chosen
-    return None
+    return candidates[0] if candidates else None
 
 
 def _albums_match(disc_album: str | None, result_album: str | None) -> bool:
@@ -811,7 +788,6 @@ def _prepopulate_from_discogs(
     ui: TerminalUI | None = None,
     *,
     barcode_hints: list[str] | None = None,
-    emit: Callable[[str], None] | None = None,
 ) -> RBIDisc:
     """Pre-populate disc.catalog and optionally enrich via Discogs barcode lookup.
 
@@ -827,50 +803,24 @@ def _prepopulate_from_discogs(
        result comes back and its album matches disc.album, merge full metadata
        (label, country, year, track listing). Otherwise, leave the additional
        fields alone — the MCN is still set from phase A.
-
-    *emit* receives every diagnostic line. If None, output falls back to
-    `_ui_print(ui, ...)` — useful for callers that don't need a recorded buffer.
     """
     from cdda2img import discogs_lookup
     from cdda2img.mb_lookup import _merge_into_disc
 
-    def _emit(text: str) -> None:
-        if emit is not None:
-            emit(text)
-        else:
-            _ui_print(ui, text)
-
     candidates = _collect_barcode_candidates(disc, barcode_hints)
-    _emit(
-        f"  Discogs prepop: {len(candidates)} barcode candidate(s)"
-        + (f" {candidates}" if candidates else "")
-    )
-
-    # Phase A: pick the canonical MCN and assign it (always, when possible).
-    chosen = _pick_canonical_mcn(disc, candidates, _emit)
+    chosen = _pick_canonical_mcn(disc, candidates)
     if chosen and disc.catalog != chosen:
         disc.catalog = chosen
-
-    if not chosen:
-        return disc
-    if not discogs_lookup.is_available():
-        _emit("  Discogs prepop: DISCOGS_TOKEN not set — MCN set, no enrichment")
+    if not chosen or not discogs_lookup.is_available():
         return disc
 
-    # Phase B: try to enrich full metadata via Discogs barcode lookup.
     _ui_status(ui, f"Querying Discogs by barcode {chosen}…")
     results = discogs_lookup.search_by_barcode(chosen)
-    _emit(f"  Discogs prepop: barcode {chosen} → {len(results)} result(s)")
     if len(results) != 1:
         return disc
     hit = results[0]
     if not _albums_match(disc.album, hit.album):
-        _emit(
-            f"  Discogs prepop: enrichment rejected — Discogs result "
-            f"{hit.album!r} doesn't match disc.album {disc.album!r}"
-        )
         return disc
-    _emit(f"  Discogs prepop: enriched from {hit.artist!r} — {hit.album!r}")
     return _merge_into_disc(hit, disc)
 
 
