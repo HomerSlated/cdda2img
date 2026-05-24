@@ -6,7 +6,7 @@ Usage:
     uv run python tools/import_eac_offsets.py <xml_path> [--conflicts-out <path>]
 
 Conflicting entries are NOT imported; they are written to --conflicts-out
-(default: private/research/incomming/offsets_check.xml) for manual review.
+(default: private/research/incoming/offsets_check.xml) for manual review.
 """
 
 from __future__ import annotations
@@ -50,7 +50,7 @@ def main() -> None:
     parser.add_argument(
         "--conflicts-out",
         type=Path,
-        default=Path("private/research/incomming/offsets_check.xml"),
+        default=Path("private/research/incoming/offsets_check.xml"),
         metavar="PATH",
         help="destination for conflicting entries (default: %(default)s)",
     )

@@ -8,10 +8,13 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 - **`rip`** — rip a physical disc via cdrdao (primary) with cd-paranoia fallback
 - **`create`** — create one or more RBIs from a directory of audio files
-- **`import`** — import a foreign disc image (cdrdao TOC+BIN or DDP 2.0 / GEAR Pro)
+- **`import`** — import a foreign disc image (cdrdao TOC+BIN, DDP 2.0 / GEAR Pro, Nero NRG, or CloneCD CCD/IMG)
 - **`extract`** — extract to per-track FLAC + CUE, or raw PCM + TOC, or both
 - **`list`** — list container sections and track index with offsets and checksums
-- **`test`** — verify all checksums and structural invariants (23 checks, exits 1 on failure)
+- **`test`** — verify all block checksums and structural invariants (27 checks, exits 1 on failure)
+- **`burn`** — burn an RBI back to a blank CD-DA disc via cdrdao
+- **`mount`** — extract a TOC+BIN scratch copy and load it into a cdemu virtual slot
+- **`catalogue`** — browse the local disc catalogue (summary, search, per-disc detail)
 
 The `rip`, `import`, and `create` pipelines all embed cdrdao-format TOC text, optional EBU R128 ReplayGain, and raw s16le PCM in a single RBI container. Metadata (album, artist, track titles, ISRC, CATALOG, remaster provenance) is sourced from CDDB, MusicBrainz, AcoustID, and Discogs lookups and an interactive confirmation menu.
 
@@ -105,11 +108,11 @@ All source lives under `src/cdda2img/`. The pipeline is fully wired end-to-end.
 10. `container.py:build_container()` — writes the RBI file
 
 ### Rip pipeline (`rip` subcommand)
-0. `cdda2img.py:_resolve_drive_offset(device, cfg) → (int, str | None)` — resolves `(drive_offset, drive_name)` before the rip:
-   1. `cfg.drives` (`[[drives]]` TOML entries keyed by normalised sysfs name) — always authoritative.
+0. `cdda2img.py:_resolve_drive_offset(device, cfg) → (int, int | None, str | None)` — resolves `(read_offset, write_offset, drive_name)` before the rip:
+   1. `cfg.drives` (`[[drives]]` TOML entries keyed by normalised sysfs name) — always authoritative; supplies both `read_offset` and optional `write_offset`.
    2. AccurateRip catalog: `drive_info.ensure_drive_offsets(conn)` + `find_drive_offset(conn, name)` — auto-applies at ≥ `_MIN_AR_CONFIDENCE=3` submissions; prompts if lower; no-op without a TTY.
-   3. `cfg.drive_offset` (global fallback).
-   Confirmed offsets written via `config.save_drive()` (atomic rename). `OSError` swallowed with warning. `drive_name` feeds `PROVENANCE_DRIVE_NAME`/`PROVENANCE_DRIVE_OFFSET` in the container TOC so `list` shows the drive.
+   3. Fallback: `read_offset=0` with a warning when the drive is not configured and no AccurateRip match is applied. There is no global `drive_offset` field on `Config`.
+   Confirmed read offsets written via `config.save_drive_read_offset()` (atomic rename); `OSError` swallowed with warning. `drive_name` feeds `PROVENANCE_DRIVE_NAME`/`PROVENANCE_DRIVE_OFFSET` in the container TOC so `list` shows the drive.
 1. `cdda2img.py:_rip_with_fallback()` — tries `cdrdao_ripper.rip_cdrdao()` (primary); falls back to `disc_reader.rip_disc(paranoia="full")` on RuntimeError
    - `cdrdao_ripper.py:rip_cdrdao()` — runs `cdrdao read-cd`; parses TOC via `toc_parser.py`, builds disc via `cdrdao_reader.parsed_to_rbi_disc()`, byte-swaps s16be BIN via `cdrdao_reader.convert_cdrdao_bin()`; returns `RipInfo(disc, track_lsns, disc_last_lsn)`
    - `disc_reader.py:rip_disc()` — cd-paranoia fallback; queries disc via `-Q`, rips via subprocess; returns same `RipInfo`
@@ -117,9 +120,11 @@ All source lives under `src/cdda2img/`. The pipeline is fully wired end-to-end.
 3. Shared finalization: `_finalize_import()` (see below)
 
 ### Import pipeline (`import` subcommand)
-Two source types, each producing s16le PCM, then both call `_finalize_import()`:
+Four source types, each producing s16le PCM, then all call `_finalize_import()`:
 - **DDP 2.0** (`ddp_reader.py:import_ddp()`): parses DDPID (MCN), PQDESCR (timing + ISRC), CDTEXT.BIN; PCM (TRACK*.DAT) is already s16le — no byte-swap
 - **cdrdao TOC+BIN** (`cdrdao_reader.py`): parses `.toc` text via `toc_parser.py`; byte-swaps s16be BIN → s16le WAV via `convert_cdrdao_bin_to_wav()`
+- **Nero NRG** (`nrg_reader.py:import_nrg()`): parses NER5 (64-bit offsets) and NERO (32-bit) DAOX/DAOI track blocks, CDTX (CD-Text), MTYP; PCM is s16le — no byte-swap
+- **CloneCD CCD/IMG** (`ccd_reader.py:import_ccd()`): parses the `.ccd` index file; byte-swaps the companion `.img` (s16be → s16le)
 
 ### Shared rip/import finalization (`_finalize_import`)
 1. `mb_lookup.py:prepopulate_from_mb()` — MusicBrainz disc ID SHA-1 fingerprint lookup; auto-applies single match
@@ -129,13 +134,13 @@ Two source types, each producing s16le PCM, then both call `_finalize_import()`:
 5. `container.py:build_container()` — writes the RBI file
 
 ### Extract pipeline (`extract` subcommand)
-1. `container.py:read_header()` — parses the 169-byte fixed RBI header
+1. `container.py:read_header()` — parses the 40-byte fixed RBI v4.0 header plus the block directory at end-of-file; returns `RBIHeader` with `find_block(type_id)`
 2. `toc_parser.py:parse_toc()` — parses the embedded cdrdao TOC into `ParsedDisc` / `ParsedTrack` dataclasses
-3. `container.py:extract_data()` — dispatches to raw and/or track output
+3. `container.py:extract_data()` — dispatches to raw and/or track output, plus optional `--rg`, `--ar`, `--log` sidecars
 4. `track_extract.py` — slices PCM per track, wraps in WAV, encodes to FLAC via PyAV with Vorbis comment metadata; writes CUE sheet; optionally applies −18 LUFS normalisation
 
 ### Key modules
-- **`rbi_format.py`** — RBI v3.0 constants, `HEADER_STRUCT`, `RBIHeader` / `RBIDisc` / `RBITocEntry` / `RBIReplayGain` dataclasses, `frames_from_timestamp()`, `timestamp_from_frames()`
+- **`rbi_format.py`** — RBI v4.0 constants (`VERSION_MAJOR = 4`, `VERSION_MINOR = 0`), `HEADER_STRUCT` (40-byte fixed header), `DIR_ENTRY_STRUCT` (54-byte directory entry), block type IDs (`BLOCK_TYPE_TOC`/`PROV`/`RGDB`/`ARIP`/`RLOG`/`PCM`), `RBIHeader` / `RBIDirEntry` / `RBIDisc` / `RBITocEntry` / `RBIReplayGain` dataclasses, `frames_from_timestamp()`, `timestamp_from_frames()`
 - **`cdda2img.py`** — CLI entry point; `create_image()`, `import_image()`, `rip_image()`, `extract_image()` top-level functions
 - **`container.py`** — `build_container()`, `read_header()`, `extract_data()`, `wav_to_raw_pcm()`
 - **`input_selector.py`** — four batching strategies: `fcfs`, `aatc`, `best` (OR-Tools CP-SAT global bin-packing), `meta` (groups by embedded disc-number tag)
@@ -153,7 +158,7 @@ Two source types, each producing s16le PCM, then both call `_finalize_import()`:
 - **`metadata.py`** — `derive_album_info()` from file tags via mutagen
 - **`metadata_menu.py`** — interactive metadata confirmation menu
 - **`replaygain.py`** — EBU R128 analysis via pyebur128; `analyse()`, `pack_rg_block()`
-- **`config.py`** — `Config` dataclass + `DriveConfig` (per-drive offset); `load_config()`, `save_drive()`, `_rewrite_config_drives()`; `[[drives]]` TOML array-of-tables round-trip; XDG path via `config_path()`
+- **`config.py`** — `Config` dataclass (`cddb_server`, `contact_email`, `database_backups`, `database_backup_frequency`, `catalogue_backups`, `catalogue_backup_frequency`, `drives`, `catalogue_path`, `enable_catalogue`, `default_device`) + `DriveConfig` (per-drive `name`/`read_offset`/optional `write_offset`); `load_config()`, `save_drive()`, `save_drive_read_offset()`, `save_drive_write_offset()`, `_rewrite_config_drives()`; `[[drives]]` TOML array-of-tables round-trip; XDG path via `config_path()`
 - **`db.py`** — SQLite management for `drive_offsets.db`; `open_drive_offsets_db()`, `ensure_backup()`, `parse_frequency()`; WAL + foreign_keys; schema: `ar_drives`, `fetch_log`, `fetch_state`
 - **`drive_info.py`** — sysfs drive name probe (`probe_drive_name`); AccurateRip `driveoffsets.htm` catalog (`ensure_drive_offsets` with 30-day cooldown, `find_drive_offset`); `_normalize_ar_name` handles `"VENDOR  - MODEL"` and `"- MODEL"` formats via two-pattern regex
 - **`transcode.py`** — PyAV audio transcoding to Red Book PCM WAV
@@ -163,19 +168,22 @@ Two source types, each producing s16le PCM, then both call `_finalize_import()`:
 - **`audition.py`** — ffplay subprocess wrapper for interactive audition (pause/resume via SIGSTOP/SIGCONT)
 - **`track_preview.py`** — cosmetic track-1 audio preview for the `rip` pipeline: grabs track 1 via cd-paranoia, loops it via ffplay in the background during the rip; best-effort (never fails a rip)
 
-## RBI Format (v3.0)
+## RBI Format (v4.0)
 
-169-byte fixed header: magic `RBIMAGE\x00`, version `3.0`, uint64 offsets and lengths for TOC, ReplayGain, and PCM blocks, flags (uint32), track count, disc number/total, PCM parameters (sample rate, channels, bit depth), SHA-256 checksums for all three blocks.
+40-byte fixed header: magic `RBIMAGE\x00`, version `4.0`, flags (uint32), track count (uint8), disc number/total (uint8/uint8), PCM parameters (sample rate uint32, channels uint8, bit depth uint8), block-directory offset (uint64), directory entry count (uint16), reserved bytes. The block directory is appended at end-of-file: each entry is 54 bytes (type ID, flags, offset, length, SHA-256).
 
-Three variable-length blocks:
+Variable-length blocks (TOC and PCM are mandatory; the rest are optional and signalled by directory presence):
 
 | Block | Contents |
 |-------|----------|
 | TOC | cdrdao-format text TOC; per-track pre-gap, ISRC, CATALOG (MCN), provenance comments |
-| ReplayGain | 17 + 12×N bytes: per-track and album gain, peak, and LRA (float32). Optional; signalled by a flag. |
+| PROV | Provenance key=value text: creator, mode, source, ripper, drive |
+| RGDB | 17 + 12×N bytes: per-track and album EBU R128 gain, peak, and LRA (float32) |
+| ARIP | 13 + 15×N bytes: per-track AccurateRip v1/v2 CRCs, confidence, status, disc IDs |
+| RLOG | Structured rip log: drive, engine, offsets, per-track AR results; SHA-256 self-seal |
 | PCM | Raw s16le — no WAV wrapper; parameters stored in fixed header |
 
-Pre-gap audio is stored contiguously in the PCM block; the TOC records the pre-gap duration separately so extraction skips it cleanly.
+Each block carries its SHA-256 in the directory entry. `BLOCK_FLAG_SKIP` signals blocks safe to ignore for forwards compatibility. Pre-gap audio is stored contiguously in the PCM block; the TOC records the pre-gap duration separately so extraction skips it cleanly.
 
 Full specification: `docs/reference/rbi_spec.md`.
 

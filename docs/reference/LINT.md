@@ -104,12 +104,16 @@ Format per entry:
 
 - **Rule:** `ruff: S101` (use of `assert`)
 - **Locations:**
-  - `rbi_format.py:104` — `assert HEADER_STRUCT_SIZE == HEADER_FIXED_SIZE`
-  - `rbi_format.py:113` — `assert RG_BLOCK_FIXED_SIZE == 17`
+  - `rbi_format.py:72` — `assert HEADER_STRUCT_SIZE == HEADER_FIXED_SIZE`
+  - `rbi_format.py:81` — `assert DIR_ENTRY_SIZE == 54`
+  - `rbi_format.py:90` — `assert RG_BLOCK_FIXED_SIZE == 17`
+  - `rbi_format.py:107` — `assert ARIP_HEADER_SIZE == 13`
+  - `rbi_format.py:110` — `assert ARIP_TRACK_SIZE == 15`
 - **Rationale:** S101 exists to flag assertions used as input validation, which can be
   silently stripped by `python -O`. These assertions are different: they verify at
   module-load time that `struct.calcsize()` matches the expected constant. If anyone
-  edits `HEADER_STRUCT` or `RG_BLOCK_FIXED_STRUCT` (the format strings), the error fires
+  edits any of the format strings (`HEADER_STRUCT`, `DIR_ENTRY_STRUCT`,
+  `RG_BLOCK_FIXED_STRUCT`, `ARIP_HEADER_STRUCT`, `ARIP_TRACK_STRUCT`), the error fires
   immediately on `import cdda2img.rbi_format` — not buried in a later write path. This is
   the correct place for this check: the struct definition and its size invariant live in
   the same module and should be co-located.
@@ -397,3 +401,27 @@ Format per entry:
     would not exercise real OS process termination; the real subprocess is the honest test.
   - *Absolute path to `sleep`* — fragile across distributions; `sleep` is universally on `PATH`.
 - **Decision:** `# noqa: S607` is correct — a hardcoded coreutils invocation in a test.
+
+---
+
+## LINT-018 — Deferred top-level import after `warnings.filterwarnings()` (`__main__.py`)
+
+- **Rule:** `ruff: E402` (module-level import not at top of file)
+- **Location:** `__main__.py:9` — `from cdda2img.cdda2img import main  # noqa: E402`
+- **Rationale:** The `discogs_client.fetchers` module ships a `SyntaxWarning` because one
+  of its regex literals uses `'\w'` in a non-raw string. The warning is emitted at import
+  time of `discogs_client`, which in turn is imported transitively via
+  `cdda2img.cdda2img → discogs_lookup → discogs_client`. To suppress this noise from
+  the user's terminal, `__main__.py` installs a narrowly-scoped filter
+  (`category=SyntaxWarning, module=r"discogs_client\..*"`) *before* the application
+  import. The deferred `from cdda2img.cdda2img import main` is therefore intentionally
+  not at the top of the file; E402 flags exactly this ordering and is suppressed in place.
+- **Alternatives:**
+  - *Patch `discogs_client`* — fix is upstream; pinning a vendored copy is disproportionate.
+  - *Suppress globally with `-W ignore::SyntaxWarning`* — too broad; would mask real
+    SyntaxWarnings in our own code or other dependencies.
+  - *Install the filter inside `main()`* — too late: `discogs_client` is imported during
+    the module-resolution of `cdda2img.cdda2img`, before `main()` executes.
+- **Decision:** `# noqa: E402` is correct. The filter must run before the application
+  import, and the filter itself is the narrowest scope that suppresses only this exact
+  third-party warning.

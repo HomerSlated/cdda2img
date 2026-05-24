@@ -85,9 +85,8 @@ section of
 .IR cdda2img.toml ;
 (2) the AccurateRip drive offset catalog, auto-applied when the entry has
 \(>=\~3 submissions and prompts interactively when confidence is lower;
-(3) the global
-.B drive_offset
-setting as a fallback.
+(3) a read offset of 0 with a warning when the drive is not configured
+and no AccurateRip match is applied.
 A confirmed offset is saved to
 .B [[drives]]
 automatically so subsequent rips skip the catalog lookup.
@@ -156,7 +155,7 @@ Skips loudness analysis.
 No ReplayGain block is written.
 .RE
 .TP
-.BI \-\-strategy " {fcfs|aatc|bech|ball}"
+.BI \-\-strategy " {fcfs|aatc|best|meta}"
 Disc batching strategy (default:
 .BR aatc ).
 .RS
@@ -169,16 +168,14 @@ Fills a single disc in input file order; stops when full.
 All\-as\-they\-come.
 Fills discs in input file order, creating as many discs as needed.
 .TP
-.B bech
-Best\-each.
-Packs each disc as full as possible in turn; input order is not preserved.
-Requires OR\-Tools.
-.TP
-.B ball
-Best\-all.
+.B best
 Global bin\-packing to minimise the total number of discs; input order is
 not preserved.
 Requires OR\-Tools.
+.TP
+.B meta
+Groups tracks by their embedded disc\-number tag; untagged tracks form a
+final group.
 .RE
 .TP
 .B \-\-no\-trim\-silence

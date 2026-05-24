@@ -589,7 +589,7 @@ optimisation.
 - [x] **`l` (list) subcommand** — `list_container()` in `container.py`; prints section table
   (Fixed header / Metadata / TOC / ReplayGain block / PCM audio with offsets, human-readable
   sizes, total duration) followed by a numbered track listing.
-- [x] **`t` (test) subcommand** — `verify_container()` in `container.py`; runs 23 checks:
+- [x] **`t` (test) subcommand** — `verify_container()` in `container.py`; runs 27 checks:
   magic bytes, version, reserved flags, track/disc bounds, PCM params, section layout
   continuity, file size, UTF-8 metadata, SHA-256 checksums for all three blocks, TOC
   parse, track-count match. Exits with code 1 on any failure.
@@ -1264,7 +1264,7 @@ archival quality (avoiding loudness-war mastering applied to many remasters).
 Detect fake-lossless source files in the `c` (create) pipeline: FLAC or WAV files that
 were transcoded from lossy sources (MP3, AAC) and will degrade archival quality.
 
-Research saved at `private/research/incomming/true-audio-checker.md`. Key findings:
+Research saved at `private/research/incoming/true-audio-checker.md`. Key findings:
 
 - **Algorithm**: FFT spectral analysis detects the characteristic "shelf" left by lossy
   codecs above their encoding cutoff (e.g. MP3 128 kbps ≈ 16 kHz, 320 kbps ≈ 20.5 kHz).
