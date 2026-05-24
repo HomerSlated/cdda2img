@@ -92,12 +92,12 @@ def parse_args() -> argparse.Namespace:
 
             rip options:
               --loudness {rg|none}  rg: embed EBU R128 ReplayGain block (default); none: skip
-              --output <path>       Output .rbi path (default: derived from album title)
+              --output <path>       Output .rbi file, or a directory to receive an album-derived filename (default: CWD, name from album)
               Note: rip always uses master mode (1:1 capture via cdrdao; falls back to cd-paranoia)
 
             import options:
               --loudness {rg|none}  rg: embed EBU R128 ReplayGain block (default); none: skip
-              --output <path>       Output .rbi path (default: derived from album title)
+              --output <path>       Output .rbi file, or a directory to receive an album-derived filename (default: CWD, name from album)
               --info                Dry-run: parse and display image metadata; do not import
               Note: import always uses master mode (1:1 conversion; s16be→s16le only)
               Accepts: cdrdao .toc file, or a DDP 2.0 image directory (must contain DDPID)
@@ -183,7 +183,7 @@ def parse_args() -> argparse.Namespace:
         "--output",
         type=Path,
         default=None,
-        help="Output .rbi file path (default: derived from album title); multi-disc: used as base name",
+        help="Output .rbi file, or a directory to receive album-derived names (default: CWD, name from album); multi-disc: stem used as base name",
     )
 
     x = sub.add_parser("extract", help="Extract blocks from an RBI image")
@@ -256,7 +256,7 @@ def parse_args() -> argparse.Namespace:
         "--output",
         type=Path,
         default=None,
-        help="Output .rbi file path (default: derived from album title)",
+        help="Output .rbi file, or a directory to receive an album-derived filename (default: CWD, name from album)",
     )
     i_cmd = sub.add_parser(
         "import",
@@ -277,7 +277,7 @@ def parse_args() -> argparse.Namespace:
         "--output",
         type=Path,
         default=None,
-        help="Output .rbi file path (default: derived from album title)",
+        help="Output .rbi file, or a directory to receive an album-derived filename (default: CWD, name from album)",
     )
     i_cmd.add_argument(
         "--info",
@@ -361,17 +361,38 @@ def _add_release_provenance(provenance: dict, disc: RBIDisc) -> None:
         provenance["set_title"] = disc.set_title
 
 
-def _unique_path(stem: str, ext: str) -> Path:
+def _unique_path(stem: str, ext: str, parent: Path | None = None) -> Path:
     """Return a non-colliding Path for {stem}.{ext}, appending _1, _2... if needed."""
-    p = Path(f"{stem}.{ext}")
+    base = parent if parent is not None else Path()
+    p = base / f"{stem}.{ext}"
     if not p.exists():
         return p
     for i in range(1, 10000):
-        p = Path(f"{stem}_{i}.{ext}")
+        p = base / f"{stem}_{i}.{ext}"
         if not p.exists():
             return p
     msg = f"Cannot find unique path for {stem}.{ext}"
     raise RuntimeError(msg)
+
+
+def _resolve_output_path(output: Path | None, stem: str, disc_suffix: str = "") -> Path:
+    """Resolve --output into a concrete file path.
+
+    Three cases:
+    - None: derive filename in CWD from `stem`.
+    - Existing directory: derive filename in that directory from `stem`.
+    - Anything else: treat as the file path the user named explicitly.
+
+    `disc_suffix` (e.g. ``"_disc2"``) is appended to the derived stem only in
+    the first two cases; an explicit user path is honoured verbatim.
+    """
+    if output is None:
+        return _unique_path(f"{stem}{disc_suffix}", "rbi")
+    if output.is_dir():
+        return _unique_path(f"{stem}{disc_suffix}", "rbi", parent=output)
+    if disc_suffix:
+        return output.parent / f"{output.stem}{disc_suffix}{output.suffix or '.rbi'}"
+    return output
 
 
 def _check_batch_limits(batches: list[list[Path]]) -> None:
@@ -476,17 +497,8 @@ def create_image(
                 )
                 rg_block = pack_rg_block(rg_result)
 
-            if output is not None:
-                if disc_total == 1:
-                    output_file = output
-                else:
-                    output_file = (
-                        output.parent
-                        / f"{output.stem}_disc{disc_num}{output.suffix or '.rbi'}"
-                    )
-            else:
-                stem = album if disc_total == 1 else f"{album}_disc{disc_num}"
-                output_file = _unique_path(stem, "rbi")
+            disc_suffix = "" if disc_total == 1 else f"_disc{disc_num}"
+            output_file = _resolve_output_path(output, album, disc_suffix)
             container_flags = FLAG_MASTER_MODE if mode == "master" else 0
             build_container(
                 temp.pcm_file,
@@ -926,8 +938,7 @@ def _finalize_import(
     rg_block = _measure_loudness_phase(disc, pcm_file, loudness, ui, diag.emit)
 
     _ui_status(ui, "Building container…")
-    if output is None:
-        output = _unique_path(output_stem, "rbi")
+    output = _resolve_output_path(output, output_stem)
 
     build_container(
         pcm_file,

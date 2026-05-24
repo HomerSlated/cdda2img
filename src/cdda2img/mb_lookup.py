@@ -42,8 +42,6 @@ from cdda2img.rbi_format import RBIDisc, RBITocEntry
 
 log = logging.getLogger(__name__)
 
-logging.basicConfig(level=logging.INFO)
-
 _LEAD_IN_SECTORS = 150  # standard 2-second Red Book lead-in
 
 

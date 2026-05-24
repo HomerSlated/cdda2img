@@ -1,6 +1,6 @@
 .\" cdda2img.1 — manual page for cdda2img
 .\" Install: doas install -m 644 docs/man/cdda2img.1 /usr/local/share/man/man1/
-.TH CDDA2IMG 1 "2026\-05\-15" "cdda2img 0.1.7" "User Commands"
+.TH CDDA2IMG 1 "2026\-05\-24" "cdda2img 0.1.7" "User Commands"
 .\"
 .SH NAME
 cdda2img \- create and extract RBI audio CD archive images
@@ -112,8 +112,14 @@ Default:
 .BI \-\-output " PATH"
 Output
 .B .rbi
-file path.
-Default: derived from the album title.
+file path, or a directory in which to place an album\-derived filename.
+If
+.I PATH
+is an existing directory the filename is derived from the album title and
+written into that directory; otherwise
+.I PATH
+is treated as the explicit output file.
+Default: the album\-derived filename in the current working directory.
 .\"
 .SS create \(em Create
 Creates one or more RBI images from a directory of audio files.
@@ -276,8 +282,14 @@ Default:
 .BI \-\-output " PATH"
 Output
 .B .rbi
-file path.
-Default: derived from the album title.
+file path, or a directory in which to place an album\-derived filename.
+If
+.I PATH
+is an existing directory the filename is derived from the album title and
+written into that directory; otherwise
+.I PATH
+is treated as the explicit output file.
+Default: the album\-derived filename in the current working directory.
 .\"
 .SS burn \(em Burn
 Burns an RBI image to a blank CD\-DA disc via cdrdao.
