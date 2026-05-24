@@ -250,7 +250,34 @@ def test_discogs_parse_full_release_prefers_scanned_barcode():
         }
     )
     meta = _parse_full_release(r)
-    assert meta.catalog == "075992377423"
+    # 12-digit UPC-A is padded to 13-digit GTIN-13 (leading '0').
+    assert meta.catalog == "0075992377423"
+
+
+def test_discogs_parse_full_release_drops_printed_only_invalid_barcode():
+    """When only 'Printed' format is available and it cannot normalise, catalog is None."""
+    from cdda2img.discogs_lookup import _parse_full_release
+
+    r = SimpleNamespace(
+        data={
+            "id": 99,
+            "title": "Variant Pressing",
+            "artists": [{"name": "ZZ Top", "join": ""}],
+            "year": 1983,
+            "country": "US",
+            "labels": [{"name": "Warner Bros. Records", "catno": "9 23774-4"}],
+            "identifiers": [
+                {
+                    "type": "Barcode",
+                    "value": "0 7599-23774-4",  # 11 digits after stripping
+                    "description": "Printed",
+                },
+            ],
+            "tracklist": [],
+        }
+    )
+    meta = _parse_full_release(r)
+    assert meta.catalog is None
 
 
 def test_discogs_parse_full_release_falls_back_to_first_barcode():
@@ -280,6 +307,217 @@ def test_normalize_barcode_eleven_digits_returns_none():
     from cdda2img.discogs_lookup import normalize_barcode
 
     assert normalize_barcode("0 7599-23774-2") is None
+
+
+# ---------------------------------------------------------------------------
+# _prepopulate_from_discogs — barcode hint fallback
+# ---------------------------------------------------------------------------
+
+
+def test_prepopulate_discogs_no_mcn_no_hints_returns_unchanged():
+    """No MCN on disc and no hints → no Discogs query, disc unchanged."""
+    from cdda2img.cdda2img import _prepopulate_from_discogs
+
+    disc = _disc()
+    with (
+        patch("cdda2img.discogs_lookup.is_available", return_value=True),
+        patch("cdda2img.discogs_lookup.search_by_barcode") as mock_search,
+    ):
+        result = _prepopulate_from_discogs(disc, ui=None)
+    assert result is disc
+    assert result.catalog is None
+    mock_search.assert_not_called()
+
+
+def test_prepopulate_discogs_hint_fires_when_disc_has_no_mcn():
+    """No MCN on disc, single hint, Discogs single-result with matching album → enriched."""
+    from cdda2img.cdda2img import _prepopulate_from_discogs
+
+    disc = _disc(album="Eliminator", artist="ZZ Top")
+    assert disc.catalog is None
+    hit = DiscMeta(
+        album="Eliminator", artist="ZZ Top", catalog="0075992377423", tracks=[]
+    )
+    with (
+        patch("cdda2img.discogs_lookup.is_available", return_value=True),
+        patch(
+            "cdda2img.discogs_lookup.search_by_barcode", return_value=[hit]
+        ) as mock_search,
+    ):
+        result = _prepopulate_from_discogs(
+            disc, ui=None, barcode_hints=["0075992377423"]
+        )
+    mock_search.assert_called_once_with("0075992377423")
+    assert result.catalog == "0075992377423"
+
+
+def test_prepopulate_discogs_substring_match_picks_correct_hint():
+    """Real ZZ Top Eliminator case: 11-digit raw MCN substring-matches the right EAN.
+
+    Disc Q-channel has a non-standard 11-digit value (printed GTIN-12 without
+    check digit). MB returns 2 hints; the raw digits are a substring of the
+    correct one, deductively selecting it without needing album matching.
+    """
+    from cdda2img.cdda2img import _prepopulate_from_discogs
+
+    disc = _disc(album="Eliminator", artist="ZZ Top")
+    disc.catalog = "0 7599-23774-2"  # 11 digits stripped = "07599237742"
+    # Discogs returns 23 results for the correct EAN — ambiguous, no enrichment.
+    ambiguous = [DiscMeta(album=f"Eliminator (Pressing {i})") for i in range(23)]
+    with (
+        patch("cdda2img.discogs_lookup.is_available", return_value=True),
+        patch(
+            "cdda2img.discogs_lookup.search_by_barcode", return_value=ambiguous
+        ) as mock_search,
+    ):
+        result = _prepopulate_from_discogs(
+            disc,
+            ui=None,
+            barcode_hints=["0075992377423", "0081227991159"],
+        )
+    # Substring match picks "0075992377423" (which contains "07599237742").
+    # Discogs returns 23 → no enrichment, but disc.catalog is set deductively.
+    mock_search.assert_called_once_with("0075992377423")
+    assert result.catalog == "0075992377423"
+
+
+def test_prepopulate_discogs_substring_skips_wrong_hint():
+    """Substring match must not pick the wrong release.
+
+    Hypothetical: raw digits are a substring of hint A but not hint B. Even if
+    hint B comes first in the hint list, substring match overrides order.
+    """
+    from cdda2img.cdda2img import _prepopulate_from_discogs
+
+    disc = _disc(album="X", artist="Y")
+    disc.catalog = "9923774"  # only matches the Eliminator EAN, not the other
+    with (
+        patch("cdda2img.discogs_lookup.is_available", return_value=True),
+        patch(
+            "cdda2img.discogs_lookup.search_by_barcode", return_value=[]
+        ) as mock_search,
+    ):
+        result = _prepopulate_from_discogs(
+            disc,
+            ui=None,
+            barcode_hints=["0081227991159", "0075992377423"],
+        )
+    mock_search.assert_called_once_with("0075992377423")
+    assert result.catalog == "0075992377423"
+
+
+def test_prepopulate_discogs_fallback_to_first_hint_when_no_raw_mcn():
+    """No raw barcode + multiple hints → first hint becomes the best-guess MCN.
+
+    "I'd rather have the wrong MCN than none at all" — provenance over blank.
+    The user can override via [c] in the menu.
+    """
+    from cdda2img.cdda2img import _prepopulate_from_discogs
+
+    disc = _disc(album="Eliminator", artist="ZZ Top")
+    assert disc.catalog is None
+    ambiguous = [DiscMeta(album=f"Eliminator (Pressing {i})") for i in range(23)]
+    with (
+        patch("cdda2img.discogs_lookup.is_available", return_value=True),
+        patch(
+            "cdda2img.discogs_lookup.search_by_barcode", return_value=ambiguous
+        ) as mock_search,
+    ):
+        result = _prepopulate_from_discogs(
+            disc,
+            ui=None,
+            barcode_hints=["0075992377423", "0081227991159"],
+        )
+    # First hint chosen as best-guess; Discogs returns 23 (no enrichment).
+    mock_search.assert_called_once_with("0075992377423")
+    assert result.catalog == "0075992377423"
+
+
+def test_prepopulate_discogs_enrichment_rejects_wrong_album():
+    """Phase B enrichment guards against compilation false-matches via album validator.
+
+    The MCN is still set from Phase A, but full-metadata merge is skipped when
+    Discogs's single result has a clearly-different album title.
+    """
+    from cdda2img.cdda2img import _prepopulate_from_discogs
+
+    disc = _disc(album="Eliminator", artist="ZZ Top")
+    compilation = [DiscMeta(album="Afterburner / Eliminator", artist="ZZ Top")]
+    with (
+        patch("cdda2img.discogs_lookup.is_available", return_value=True),
+        patch("cdda2img.discogs_lookup.search_by_barcode", return_value=compilation),
+    ):
+        result = _prepopulate_from_discogs(
+            disc, ui=None, barcode_hints=["0081227991159"]
+        )
+    # MCN set from Phase A (only candidate is the hint); enrichment rejected.
+    assert result.catalog == "0081227991159"
+    assert result.album == "Eliminator"  # NOT overwritten by compilation
+
+
+def test_prepopulate_discogs_valid_mcn_querys_once():
+    """Valid 13-digit MCN already in disc.catalog → single Discogs query."""
+    from cdda2img.cdda2img import _prepopulate_from_discogs
+
+    disc = _disc()
+    disc.catalog = "0075992377423"
+    with (
+        patch("cdda2img.discogs_lookup.is_available", return_value=True),
+        patch(
+            "cdda2img.discogs_lookup.search_by_barcode", return_value=[]
+        ) as mock_search,
+    ):
+        _prepopulate_from_discogs(disc, ui=None, barcode_hints=["0075992377423"])
+    assert mock_search.call_count == 1
+
+
+def test_albums_match_compilation_separator_asymmetry():
+    """Album-match validator for Phase B enrichment guard."""
+    from cdda2img.cdda2img import _albums_match
+
+    # Exact / casefold equality
+    assert _albums_match("Eliminator", "Eliminator")
+    assert _albums_match("Eliminator", "eliminator")
+    # Substring without separators — accept (covers reissues, deluxe editions)
+    assert _albums_match("Eliminator", "Eliminator (Remastered)")
+    assert _albums_match("Eliminator [Deluxe]", "Eliminator")
+    # Compilation separator only on one side — reject
+    assert not _albums_match("Eliminator", "Afterburner / Eliminator")
+    assert not _albums_match("Eliminator", "Eliminator & Other Hits")
+    assert not _albums_match("Eliminator", "Eliminator + Bonus Tracks")
+    # Empty fields — nothing to compare, allow
+    assert _albums_match(None, "Anything")
+    assert _albums_match("", "Anything")
+    assert _albums_match("Anything", None)
+
+
+def test_pick_canonical_mcn_substring_match():
+    """_pick_canonical_mcn deduces the correct EAN from raw printed barcode digits."""
+    from cdda2img.cdda2img import _pick_canonical_mcn
+    from cdda2img.rbi_format import RBIDisc
+
+    disc = RBIDisc(album="X", artist="Y", catalog="0 7599-23774-2")
+    candidates = ["0081227991159", "0075992377423"]
+    assert _pick_canonical_mcn(disc, candidates, lambda _: None) == "0075992377423"
+
+
+def test_pick_canonical_mcn_fallback_to_first():
+    """_pick_canonical_mcn falls back to first candidate when no substring match."""
+    from cdda2img.cdda2img import _pick_canonical_mcn
+    from cdda2img.rbi_format import RBIDisc
+
+    disc = RBIDisc(album="X", artist="Y")  # no catalog
+    candidates = ["0075992377423", "0081227991159"]
+    assert _pick_canonical_mcn(disc, candidates, lambda _: None) == "0075992377423"
+
+
+def test_pick_canonical_mcn_returns_none_when_no_candidates():
+    """_pick_canonical_mcn returns None when there's nothing to choose from."""
+    from cdda2img.cdda2img import _pick_canonical_mcn
+    from cdda2img.rbi_format import RBIDisc
+
+    disc = RBIDisc(album="X", artist="Y")
+    assert _pick_canonical_mcn(disc, [], lambda _: None) is None
 
 
 # ---------------------------------------------------------------------------

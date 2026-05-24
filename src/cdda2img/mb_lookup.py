@@ -2,9 +2,20 @@
 mb_lookup.py — MusicBrainz metadata lookups.
 
 Provides disc ID computation from RBI TOC data and network lookups via musicbrainzngs.
-The disc ID is computed in pure Python (no native libdiscid required):
-  SHA1 of (first_track_byte, last_track_byte, lead_out_uint32, track_offsets[99] uint32s),
-  all big-endian, then base64 with +→. /→_ =→-.
+The disc ID is computed in pure Python (no native libdiscid required), per the
+MusicBrainz spec at https://musicbrainz.org/doc/Disc_ID_Calculation:
+
+  1. Build an 804-character ASCII string concatenating:
+       - first_track  as 2-char  uppercase hex
+       - last_track   as 2-char  uppercase hex
+       - lead_out_lba as 8-char  uppercase hex (zero-padded)
+       - 99 x track_lba as 8-char uppercase hex each (zero-padded; unused slots = 0)
+  2. SHA-1 over those 804 ASCII bytes.
+  3. Base64-encode with the URL-safe variant: '+'→'.', '/'→'_', '='→'-'.
+
+Critically, the hash input is the *ASCII hex text*, not the raw binary integers.
+A SHA-1 over raw 402-byte binary input produces a valid-looking but incorrect
+disc-ID that MB will never match (silent failure mode — burned us once already).
 """
 
 from __future__ import annotations
@@ -13,7 +24,7 @@ import base64
 import hashlib
 import importlib.metadata
 import logging
-import struct
+from typing import NamedTuple
 
 import musicbrainzngs  # type: ignore[import-untyped]
 
@@ -30,6 +41,8 @@ from cdda2img.lookup_result import (
 from cdda2img.rbi_format import RBIDisc, RBITocEntry
 
 log = logging.getLogger(__name__)
+
+logging.basicConfig(level=logging.INFO)
 
 _LEAD_IN_SECTORS = 150  # standard 2-second Red Book lead-in
 
@@ -67,12 +80,15 @@ def compute_disc_id(
 
     All offsets are absolute LBA sectors; track 1 conventionally starts at 150.
     *track_offsets* must be in track-number order; up to 99 entries.
+
+    The hash input is an 804-char uppercase-hex ASCII string (NOT raw bytes) —
+    see this module's docstring for the full spec. Verified against libdiscid
+    output for ZZ Top *Eliminator* (EU 1983, MB pressing nRQLbh4...).
     """
-    data = struct.pack(">BB", first_track, last_track)
-    data += struct.pack(">I", lead_out_offset)
+    parts = [f"{first_track:02X}", f"{last_track:02X}", f"{lead_out_offset:08X}"]
     for i in range(99):
-        data += struct.pack(">I", track_offsets[i] if i < len(track_offsets) else 0)
-    sha1 = hashlib.sha1(data).digest()  # noqa: S324  # MB spec mandates SHA-1
+        parts.append(f"{(track_offsets[i] if i < len(track_offsets) else 0):08X}")
+    sha1 = hashlib.sha1("".join(parts).encode("ascii")).digest()  # noqa: S324
     b64 = base64.b64encode(sha1).decode("ascii")
     return b64.replace("+", ".").replace("/", "_").replace("=", "-")
 
@@ -269,10 +285,21 @@ def _parse_release(
                 )
             )
 
+    from cdda2img.discogs_lookup import normalize_barcode
+
+    raw_barcode = release.get("barcode") or ""
+    catalog = normalize_barcode(raw_barcode)
+    if raw_barcode and not catalog:
+        log.info(
+            "MB release %r: raw barcode %r failed normalisation (dropped)",
+            release.get("id"),
+            raw_barcode,
+        )
+
     return DiscMeta(
         album=album_title,
         artist=artist or None,
-        catalog=release.get("barcode") or None,
+        catalog=catalog,
         mb_release_id=release.get("id") or None,
         mb_release_group_id=rg.get("id") or None,
         release_date=date or None,
@@ -585,23 +612,41 @@ def _overwrite_disc(meta: DiscMeta, disc: RBIDisc) -> RBIDisc:
     )
 
 
-def prepopulate_from_mb(disc: RBIDisc, *, verbose: bool = True) -> RBIDisc:
+class MBPrepopResult(NamedTuple):
+    """Aggregate of a MusicBrainz disc-ID prepop run, including diagnostic counts."""
+
+    disc: RBIDisc
+    barcode_hints: list[str]  # de-duplicated, normalised, in match order
+    match_count: int  # total MB matches returned (0 = disc-ID unknown to MB)
+
+
+def prepopulate_from_mb(disc: RBIDisc, *, verbose: bool = True) -> MBPrepopResult:
     """Attempt a silent MusicBrainz Disc ID lookup and fill in missing fields.
 
     If exactly one match is found, missing fields in *disc* are filled from the
     MusicBrainz result and a summary line is printed (when *verbose* is True).
     On zero or multiple matches (or network error) *disc* is returned unchanged.
+
+    *barcode_hints* are normalised 13-digit barcodes drawn from **every** match
+    (whether or not the merge ran), suitable for seeding a downstream Discogs
+    search when the disc has no embedded MCN. *match_count* lets the caller
+    distinguish "MB knows this disc but lacks barcodes" from "MB doesn't know it"
+    in diagnostic output.
     """
     _setup_useragent()
     matches = lookup_disc_id(disc)
+    # Preserve match order while deduplicating (set iteration is hash-randomised).
+    hints = list(dict.fromkeys(m.catalog for m in matches if m.catalog))
+    if hints:
+        log.debug("MB barcode hints from %d match(es): %s", len(matches), hints)
     if not matches:
-        return disc
+        return MBPrepopResult(disc, hints, 0)
     if len(matches) > 1:
         log.debug("MB disc ID returned %d matches; skipping auto-fill", len(matches))
-        return disc
+        return MBPrepopResult(disc, hints, len(matches))
     meta = matches[0]
     updated = _merge_into_disc(meta, disc)
     if verbose:
         date_str = f"  ({meta.release_date})" if meta.release_date else ""
         print(f'  MusicBrainz: matched "{meta.album}" by {meta.artist}{date_str}')
-    return updated
+    return MBPrepopResult(updated, hints, len(matches))

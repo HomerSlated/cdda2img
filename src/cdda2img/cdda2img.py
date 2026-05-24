@@ -707,28 +707,226 @@ def import_image(
         temp.cleanup()
 
 
-def _prepopulate_from_discogs(disc: RBIDisc, ui: TerminalUI | None = None) -> RBIDisc:
-    """Auto-apply Discogs metadata via MCN barcode (single-match merge only)."""
-    if not disc.catalog:
-        return disc
+def _collect_barcode_candidates(
+    disc: RBIDisc,
+    barcode_hints: list[str] | None,
+) -> list[str]:
+    """Build the de-duplicated 13-digit candidate list (disc.catalog first, then hints).
+
+    Only the *normalised* form of disc.catalog enters the list. A non-normalising
+    raw value (e.g. 11-digit printed barcode) is *not* skipped silently — the
+    caller uses `_pick_canonical_mcn` to substring-match raw digits against this
+    candidate list as a separate, deductive step.
+    """
+    from cdda2img import discogs_lookup
+
+    candidates: list[str] = []
+    seen: set[str] = set()
+    if disc.catalog:
+        norm = discogs_lookup.normalize_barcode(disc.catalog)
+        if norm:
+            candidates.append(norm)
+            seen.add(norm)
+    for hint in barcode_hints or []:
+        if hint and hint not in seen:
+            candidates.append(hint)
+            seen.add(hint)
+    return candidates
+
+
+def _pick_canonical_mcn(
+    disc: RBIDisc,
+    candidates: list[str],
+    emit: Callable[[str], None],
+) -> str | None:
+    """Choose the canonical 13-digit MCN for *disc* from *candidates*.
+
+    Strategy (in priority order):
+      1. **Substring match (deductive).** If disc.catalog contains raw digits
+         (any length) that appear as a substring of any candidate, that candidate
+         IS the MCN — printed barcodes are GTIN-12-without-check-digit, which are
+         a prefix of the GTIN-12, which is a suffix of the EAN-13. Matching by
+         substring bridges all three forms without losing information.
+      2. **First candidate (best-guess fallback).** If no substring match but
+         candidates exist, return the first one. "I'd rather have the wrong MCN
+         than none at all" — for archival provenance, blank is worse than a
+         best-effort guess the user can correct.
+      3. **None.** No candidates at all → no information to work with.
+    """
+    import re
+
+    # Minimum digit count for substring-match to count as evidence. A few stray
+    # digits would spuriously match many candidates; real-world inputs (Q-channel
+    # MCN, printed barcodes, user-typed UPCs) are all ≥ 10 digits, so 7 is a safe
+    # floor that still allows partial inputs while rejecting noise.
+    _MIN_SUBSTRING_DIGITS = 7
+
+    raw_digits = re.sub(r"\D", "", disc.catalog) if disc.catalog else ""
+    if len(raw_digits) >= _MIN_SUBSTRING_DIGITS:
+        for c in candidates:
+            if raw_digits in c:
+                emit(
+                    f"  MCN: substring-matched raw {raw_digits!r} → "
+                    f"canonical {c} (deductive)"
+                )
+                return c
+    if candidates:
+        chosen = candidates[0]
+        reason = (
+            "best-guess (raw not in any candidate)"
+            if raw_digits
+            else "best-guess (no raw barcode on disc)"
+        )
+        emit(f"  MCN: {chosen} ({reason})")
+        return chosen
+    return None
+
+
+def _albums_match(disc_album: str | None, result_album: str | None) -> bool:
+    """Heuristic: does *result_album* plausibly name the same release as *disc_album*?
+
+    Returns True when either side is empty (nothing to compare against), when the
+    two are casefold-equal, or when one is a substring of the other AND neither
+    side contains a compilation/combined-release separator (``" / "``, ``" & "``,
+    ``" + "``) that the other lacks. The separator asymmetry catches "Eliminator"
+    vs. "Afterburner / Eliminator" — same disc-ID in MB, but different releases
+    that must not auto-merge.
+    """
+    if not disc_album or not result_album:
+        return True
+    a = disc_album.strip().casefold()
+    b = result_album.strip().casefold()
+    if a == b:
+        return True
+    separators = (" / ", " & ", " + ")
+    a_comp = any(sep in a for sep in separators)
+    b_comp = any(sep in b for sep in separators)
+    if a_comp != b_comp:
+        return False
+    return a in b or b in a
+
+
+def _prepopulate_from_discogs(
+    disc: RBIDisc,
+    ui: TerminalUI | None = None,
+    *,
+    barcode_hints: list[str] | None = None,
+    emit: Callable[[str], None] | None = None,
+) -> RBIDisc:
+    """Pre-populate disc.catalog and optionally enrich via Discogs barcode lookup.
+
+    Two distinct phases:
+
+    A. **Canonical MCN.** Build a candidate list from disc.catalog (when it
+       normalises) and any MB barcode hints; pick one via `_pick_canonical_mcn`.
+       The chosen MCN is *always* written to disc.catalog — provenance trumps
+       a blank field, and the menu's [c] flow lets the user correct a wrong
+       guess. This is the cornerstone of metadata handling.
+
+    B. **Metadata enrichment.** Query Discogs by the chosen MCN. If exactly one
+       result comes back and its album matches disc.album, merge full metadata
+       (label, country, year, track listing). Otherwise, leave the additional
+       fields alone — the MCN is still set from phase A.
+
+    *emit* receives every diagnostic line. If None, output falls back to
+    `_ui_print(ui, ...)` — useful for callers that don't need a recorded buffer.
+    """
     from cdda2img import discogs_lookup
     from cdda2img.mb_lookup import _merge_into_disc
 
-    barcode = discogs_lookup.normalize_barcode(disc.catalog)
-    if not barcode:
-        _ui_print(
-            ui,
-            f"  Note: disc MCN {disc.catalog!r} is not a valid barcode "
-            f"(expected 12 or 13 digits after stripping) — skipping Discogs lookup",
-        )
+    def _emit(text: str) -> None:
+        if emit is not None:
+            emit(text)
+        else:
+            _ui_print(ui, text)
+
+    candidates = _collect_barcode_candidates(disc, barcode_hints)
+    _emit(
+        f"  Discogs prepop: {len(candidates)} barcode candidate(s)"
+        + (f" {candidates}" if candidates else "")
+    )
+
+    # Phase A: pick the canonical MCN and assign it (always, when possible).
+    chosen = _pick_canonical_mcn(disc, candidates, _emit)
+    if chosen and disc.catalog != chosen:
+        disc.catalog = chosen
+
+    if not chosen:
         return disc
     if not discogs_lookup.is_available():
+        _emit("  Discogs prepop: DISCOGS_TOKEN not set — MCN set, no enrichment")
         return disc
-    _ui_status(ui, "Querying Discogs by barcode…")
-    results = discogs_lookup.search_by_barcode(barcode)
-    if len(results) == 1:
-        return _merge_into_disc(results[0], disc)
-    return disc
+
+    # Phase B: try to enrich full metadata via Discogs barcode lookup.
+    _ui_status(ui, f"Querying Discogs by barcode {chosen}…")
+    results = discogs_lookup.search_by_barcode(chosen)
+    _emit(f"  Discogs prepop: barcode {chosen} → {len(results)} result(s)")
+    if len(results) != 1:
+        return disc
+    hit = results[0]
+    if not _albums_match(disc.album, hit.album):
+        _emit(
+            f"  Discogs prepop: enrichment rejected — Discogs result "
+            f"{hit.album!r} doesn't match disc.album {disc.album!r}"
+        )
+        return disc
+    _emit(f"  Discogs prepop: enriched from {hit.artist!r} — {hit.album!r}")
+    return _merge_into_disc(hit, disc)
+
+
+class _Notes:
+    """Buffered diagnostic emitter for the rip/import pipeline.
+
+    `_ui_status()` clears the TUI output region on every phase transition, so any
+    in-phase `_ui_print` is transient. `emit()` writes live *and* records to the
+    buffer; `flush()` prints the buffer to stdout once the TUI is paused. In
+    non-TUI mode the live print already covered it, so `flush()` just clears.
+    """
+
+    def __init__(self, ui: TerminalUI | None) -> None:
+        self._ui = ui
+        self._buf: list[str] = []
+
+    def emit(self, text: str) -> None:
+        _ui_print(self._ui, text)
+        self._buf.append(text)
+
+    def flush(self) -> None:
+        if self._ui is None:
+            self._buf.clear()
+            return
+        for note in self._buf:
+            print(note)
+        self._buf.clear()
+
+
+def _measure_loudness_phase(
+    disc: RBIDisc,
+    pcm_file: Path,
+    loudness: str,
+    ui: TerminalUI | None,
+    emit: Callable[[str], None],
+) -> bytes | None:
+    """Run the EBU R128 phase and return the packed RG block, or None when skipped."""
+    if loudness != "rg":
+        return None
+    from cdda2img.replaygain import analyse_raw, pack_rg_block
+
+    _ui_status(ui, "Measuring loudness (EBU R128)…")
+    rg_result = analyse_raw(
+        disc,
+        pcm_file,
+        progress_cb=_phase_progress_cb(ui, "Measuring loudness (EBU R128)…"),
+    )
+    for warning in rg_result.warnings:
+        emit(f"  Warning: {warning}")
+    _ui_status(
+        ui,
+        f"Album gain: {rg_result.album_gain:+.2f} dB  "
+        f"peak: {rg_result.album_peak:.4f}  "
+        f"LRA: {rg_result.album_lra:.1f} LU",
+    )
+    return pack_rg_block(rg_result)
 
 
 def _finalize_import(
@@ -745,18 +943,35 @@ def _finalize_import(
     """Shared post-rip/import pipeline: MB lookup → metadata menu → TOC → RG → container."""
     import sys
 
-    from cdda2img.mb_lookup import prepopulate_from_mb
+    from cdda2img.mb_lookup import disc_id_from_rbi, prepopulate_from_mb
     from cdda2img.metadata_menu import run_metadata_menu
 
-    _ui_status(ui, "Querying MusicBrainz…")
-    # Suppress verbose MB output when TUI is active — status line serves that role.
-    disc = prepopulate_from_mb(disc, verbose=(ui is None) and sys.stdin.isatty())
+    diag = _Notes(ui)
 
-    disc = _prepopulate_from_discogs(disc, ui)
+    _ui_status(ui, "Querying MusicBrainz…")
+    # Surface the disc-ID so the user can manually verify it at
+    # https://musicbrainz.org/cdtoc/<id> when prepop returns 0 matches.
+    disc_id = disc_id_from_rbi(disc)
+    diag.emit(f"  MusicBrainz disc ID: {disc_id or '(no tracks)'}")
+    # Suppress verbose MB output when TUI is active — status line serves that role.
+    mb_result = prepopulate_from_mb(disc, verbose=(ui is None) and sys.stdin.isatty())
+    disc = mb_result.disc
+    diag.emit(
+        f"  MusicBrainz prepop: {mb_result.match_count} match(es), "
+        f"{len(mb_result.barcode_hints)} barcode hint(s)"
+        + (f" {mb_result.barcode_hints}" if mb_result.barcode_hints else "")
+    )
+
+    disc = _prepopulate_from_discogs(
+        disc, ui, barcode_hints=mb_result.barcode_hints, emit=diag.emit
+    )
 
     # Hand the terminal over to the interactive metadata menu.
     if ui is not None:
         ui.pause()
+    # Flush the prepop diagnostics *before* the menu opens so the user can see
+    # what MB/Discogs returned when deciding whether to use [c]/[u].
+    diag.flush()
     disc = run_metadata_menu(disc, source_pcm=pcm_file)
     if ui is not None:
         ui.resume()
@@ -773,25 +988,7 @@ def _finalize_import(
     _add_release_provenance(provenance, disc)
     toc_data = generate_toc(disc)
 
-    rg_block: bytes | None = None
-    if loudness == "rg":
-        from cdda2img.replaygain import analyse_raw, pack_rg_block
-
-        _ui_status(ui, "Measuring loudness (EBU R128)…")
-        rg_result = analyse_raw(
-            disc,
-            pcm_file,
-            progress_cb=_phase_progress_cb(ui, "Measuring loudness (EBU R128)…"),
-        )
-        for warning in rg_result.warnings:
-            _ui_print(ui, f"  Warning: {warning}")
-        rg_summary = (
-            f"Album gain: {rg_result.album_gain:+.2f} dB  "
-            f"peak: {rg_result.album_peak:.4f}  "
-            f"LRA: {rg_result.album_lra:.1f} LU"
-        )
-        _ui_status(ui, rg_summary)
-        rg_block = pack_rg_block(rg_result)
+    rg_block = _measure_loudness_phase(disc, pcm_file, loudness, ui, diag.emit)
 
     _ui_status(ui, "Building container…")
     if output is None:
@@ -812,8 +1009,11 @@ def _finalize_import(
     # register_rbi() has interactive input() prompts — pause TUI before handing
     # the terminal over so they're visible. No resume needed; this is the last step.
     if ui is not None:
-        ui.add_output(f"  Container: {output}")
+        # pause() clears the TUI output region, so any post-menu notes (RG
+        # warnings) must be printed *after* pause.
         ui.pause()
+        diag.flush()
+        print(f"  Container: {output}")
     from cdda2img.catalogue import register_rbi
 
     register_rbi(output)

@@ -205,6 +205,38 @@ def test_toc_optional_fields_absent_when_none() -> None:
     assert "TRACK_TITLE_UNICODE" not in toc_text
 
 
+def test_toc_drops_invalid_catalog() -> None:
+    """Safety net: invalid disc.catalog (not 12/13 digits) is omitted, not emitted raw."""
+    disc = RBIDisc(album="X", artist="Y", catalog="0 7599-23774-2")
+    disc.tracks = [
+        RBITocEntry(
+            track_number=1,
+            title="T",
+            performer="Y",
+            start_frame=0,
+            duration_frames=_FRAMES_PER_MIN,
+        )
+    ]
+    toc_text = generate_toc(disc).decode("utf-8")
+    assert "CATALOG" not in toc_text
+
+
+def test_toc_normalises_upc_to_gtin13() -> None:
+    """A 12-digit UPC-A in disc.catalog is padded to 13-digit GTIN-13 in the TOC."""
+    disc = RBIDisc(album="X", artist="Y", catalog="075992377423")
+    disc.tracks = [
+        RBITocEntry(
+            track_number=1,
+            title="T",
+            performer="Y",
+            start_frame=0,
+            duration_frames=_FRAMES_PER_MIN,
+        )
+    ]
+    toc_text = generate_toc(disc).decode("utf-8")
+    assert 'CATALOG "0075992377423"' in toc_text
+
+
 # ---------------------------------------------------------------------------
 # PERFORMER fallback
 # ---------------------------------------------------------------------------

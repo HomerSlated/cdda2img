@@ -90,13 +90,13 @@ def _parse_result(r) -> DiscMeta:
     catalog_number = data.get("catno") or ""
 
     barcodes: list = data.get("barcode") or []
-    barcode = barcodes[0] if barcodes else ""
+    barcode = next((n for n in (normalize_barcode(b) for b in barcodes) if n), None)
 
     release_id = data.get("id") or getattr(r, "id", None)
     return DiscMeta(
         album=album or None,
         artist=artist or None,
-        catalog=barcode or None,
+        catalog=barcode,
         discogs_release_id=int(release_id) if release_id else None,
         release_date=year,
         country=str(country) if country else None,
@@ -167,19 +167,23 @@ def _parse_full_release(r) -> DiscMeta:
         for ident in (data.get("identifiers") or [])
         if isinstance(ident, dict) and (ident.get("type") or "").lower() == "barcode"
     ]
+    scanned = [
+        ident
+        for ident in barcode_idents
+        if "scanned" in (ident.get("description") or "").lower()
+    ]
+    # Prefer Scanned; within each group take the first value that normalises.
     barcode = next(
-        (
-            ident.get("value") or ""
-            for ident in barcode_idents
-            if "scanned" in (ident.get("description") or "").lower()
-        ),
-        "",
-    ) or next((ident.get("value") or "" for ident in barcode_idents), "")
+        (n for n in (normalize_barcode(i.get("value")) for i in scanned) if n), None
+    ) or next(
+        (n for n in (normalize_barcode(i.get("value")) for i in barcode_idents) if n),
+        None,
+    )
 
     return DiscMeta(
         album=album or None,
         artist=artist or None,
-        catalog=barcode or None,
+        catalog=barcode,
         discogs_release_id=int(data["id"]) if data.get("id") else None,
         release_date=year,
         country=str(country) if country else None,

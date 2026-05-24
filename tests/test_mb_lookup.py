@@ -93,6 +93,33 @@ def test_compute_disc_id_single_track():
     assert len(disc_id) == 28
 
 
+def test_compute_disc_id_matches_libdiscid_for_eliminator():
+    """ZZ Top — Eliminator (EU 1983) pressing.
+
+    Anchor against libdiscid's canonical output for a known disc, computed
+    from the verified LBA set (cross-checked against cd-discid --musicbrainz
+    and libdiscid itself). Pins us to the real MB spec — a regression to the
+    old raw-byte implementation would change this output and fail this test.
+    """
+    track_lbas = [
+        150,
+        18495,
+        36708,
+        56065,
+        84368,
+        97545,
+        118123,
+        137535,
+        155030,
+        173148,
+        189728,
+    ]
+    lead_out = 204293
+    assert (
+        compute_disc_id(1, 11, track_lbas, lead_out) == "nRQLbh410ePjmaAHHVpt9purZJI-"
+    )
+
+
 # ---------------------------------------------------------------------------
 # disc_id_from_rbi
 # ---------------------------------------------------------------------------
@@ -547,21 +574,43 @@ def test_prepopulate_single_match_fills_fields():
     disc.artist = "Unknown Artist"
     match = DiscMeta(album="Found Album", artist="Found Artist", tracks=[])
     with patch("cdda2img.mb_lookup.lookup_disc_id", return_value=[match]):
-        result = prepopulate_from_mb(disc, verbose=False)
-    assert result.artist == "Found Artist"
-    assert result.album == "Test Album"  # existing album preserved
+        r = prepopulate_from_mb(disc, verbose=False)
+    assert r.disc.artist == "Found Artist"
+    assert r.disc.album == "Test Album"  # existing album preserved
+    assert r.barcode_hints == []  # match had no catalog
+    assert r.match_count == 1
 
 
 def test_prepopulate_multiple_matches_no_change():
     disc = _make_disc(tracks=[(1, 0, 18000)])
     matches = [DiscMeta(album="A"), DiscMeta(album="B")]
     with patch("cdda2img.mb_lookup.lookup_disc_id", return_value=matches):
-        result = prepopulate_from_mb(disc, verbose=False)
-    assert result.album == "Test Album"  # unchanged
+        r = prepopulate_from_mb(disc, verbose=False)
+    assert r.disc.album == "Test Album"  # unchanged
+    assert r.barcode_hints == []
+    assert r.match_count == 2
 
 
 def test_prepopulate_no_matches_no_change():
     disc = _make_disc(tracks=[(1, 0, 18000)])
     with patch("cdda2img.mb_lookup.lookup_disc_id", return_value=[]):
-        result = prepopulate_from_mb(disc, verbose=False)
-    assert result is disc  # same object, not a copy
+        r = prepopulate_from_mb(disc, verbose=False)
+    assert r.disc is disc  # same object, not a copy
+    assert r.barcode_hints == []
+    assert r.match_count == 0
+
+
+def test_prepopulate_returns_barcode_hints_from_all_matches():
+    """Hints are drawn from every match, even when len(matches) > 1 skips the merge."""
+    disc = _make_disc(tracks=[(1, 0, 18000)])
+    matches = [
+        DiscMeta(album="A", catalog="0075992377423"),
+        DiscMeta(album="B", catalog="0075992377423"),  # duplicate dropped
+        DiscMeta(album="C", catalog="4012345678901"),
+        DiscMeta(album="D"),  # no catalog
+    ]
+    with patch("cdda2img.mb_lookup.lookup_disc_id", return_value=matches):
+        r = prepopulate_from_mb(disc, verbose=False)
+    assert r.disc.album == "Test Album"  # multi-match → no merge
+    assert sorted(r.barcode_hints) == ["0075992377423", "4012345678901"]
+    assert r.match_count == 4

@@ -7,6 +7,7 @@ import re
 import wave
 from pathlib import Path
 
+from cdda2img.discogs_lookup import normalize_barcode
 from cdda2img.rbi_format import CD_FRAMES_PER_SECOND, RBIDisc, RBITocEntry
 
 _TITLE_REPLACEMENTS: dict[str, str] = {
@@ -80,8 +81,12 @@ def generate_toc(
 
     lines: list[str] = ["CD_DA\n"]
 
-    if disc.catalog:
-        lines.append(f'CATALOG "{disc.catalog}"\n')
+    # Safety net: every populator should normalise, but if any source leaks a
+    # raw MCN/barcode through, drop the CATALOG line rather than emit an invalid
+    # 13-digit value that cdrdao will reject at burn time.
+    catalog_norm = normalize_barcode(disc.catalog)
+    if catalog_norm:
+        lines.append(f'CATALOG "{catalog_norm}"\n')
 
     disc_text_lines = []
     if album:
