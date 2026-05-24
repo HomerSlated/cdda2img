@@ -498,7 +498,7 @@ def test_pick_canonical_mcn_substring_match():
 
     disc = RBIDisc(album="X", artist="Y", catalog="0 7599-23774-2")
     candidates = ["0081227991159", "0075992377423"]
-    assert _pick_canonical_mcn(disc, candidates, lambda _: None) == "0075992377423"
+    assert _pick_canonical_mcn(disc, candidates) == "0075992377423"
 
 
 def test_pick_canonical_mcn_fallback_to_first():
@@ -508,7 +508,7 @@ def test_pick_canonical_mcn_fallback_to_first():
 
     disc = RBIDisc(album="X", artist="Y")  # no catalog
     candidates = ["0075992377423", "0081227991159"]
-    assert _pick_canonical_mcn(disc, candidates, lambda _: None) == "0075992377423"
+    assert _pick_canonical_mcn(disc, candidates) == "0075992377423"
 
 
 def test_pick_canonical_mcn_returns_none_when_no_candidates():
@@ -517,7 +517,7 @@ def test_pick_canonical_mcn_returns_none_when_no_candidates():
     from cdda2img.rbi_format import RBIDisc
 
     disc = RBIDisc(album="X", artist="Y")
-    assert _pick_canonical_mcn(disc, [], lambda _: None) is None
+    assert _pick_canonical_mcn(disc, []) is None
 
 
 # ---------------------------------------------------------------------------

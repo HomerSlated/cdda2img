@@ -893,35 +893,20 @@ def _finalize_import(
     """Shared post-rip/import pipeline: MB lookup → metadata menu → TOC → RG → container."""
     import sys
 
-    from cdda2img.mb_lookup import disc_id_from_rbi, prepopulate_from_mb
+    from cdda2img.mb_lookup import prepopulate_from_mb
     from cdda2img.metadata_menu import run_metadata_menu
 
     diag = _Notes(ui)
 
     _ui_status(ui, "Querying MusicBrainz…")
-    # Surface the disc-ID so the user can manually verify it at
-    # https://musicbrainz.org/cdtoc/<id> when prepop returns 0 matches.
-    disc_id = disc_id_from_rbi(disc)
-    diag.emit(f"  MusicBrainz disc ID: {disc_id or '(no tracks)'}")
     # Suppress verbose MB output when TUI is active — status line serves that role.
     mb_result = prepopulate_from_mb(disc, verbose=(ui is None) and sys.stdin.isatty())
     disc = mb_result.disc
-    diag.emit(
-        f"  MusicBrainz prepop: {mb_result.match_count} match(es), "
-        f"{len(mb_result.barcode_hints)} barcode hint(s)"
-        + (f" {mb_result.barcode_hints}" if mb_result.barcode_hints else "")
-    )
-
-    disc = _prepopulate_from_discogs(
-        disc, ui, barcode_hints=mb_result.barcode_hints, emit=diag.emit
-    )
+    disc = _prepopulate_from_discogs(disc, ui, barcode_hints=mb_result.barcode_hints)
 
     # Hand the terminal over to the interactive metadata menu.
     if ui is not None:
         ui.pause()
-    # Flush the prepop diagnostics *before* the menu opens so the user can see
-    # what MB/Discogs returned when deciding whether to use [c]/[u].
-    diag.flush()
     disc = run_metadata_menu(disc, source_pcm=pcm_file)
     if ui is not None:
         ui.resume()
