@@ -1,6 +1,6 @@
 .\" cdda2img.1 — manual page for cdda2img
 .\" Install: doas install -m 644 docs/man/cdda2img.1 /usr/local/share/man/man1/
-.TH CDDA2IMG 1 "2026\-05\-24" "cdda2img 0.1.7" "User Commands"
+.TH CDDA2IMG 1 "2026\-05\-25" "cdda2img 0.1.7" "User Commands"
 .\"
 .SH NAME
 cdda2img \- create and extract RBI audio CD archive images
@@ -51,15 +51,19 @@ ReplayGain data, AccurateRip verification results, rip provenance, and rip log,
 and per\-block SHA\-256 integrity checksums in a single self\-contained file.
 The current format version is RBI v4.0.
 .PP
-Metadata \(em album title, artist, per\-track titles, ISRC codes, and remaster
+Metadata \(em album title, artist, per\-track titles, ISRC codes, and original\-release
 provenance \(em is sourced interactively from MusicBrainz, AcoustID, and Discogs
 lookups and embedded in the TOC block.
 .\"
 .SH SUBCOMMANDS
 .SS rip \(em Rip
 Rips a physical CD\-DA disc to an RBI image.
-Rip always uses master mode: raw audio is captured 1:1 and encapsulated in
-the RBI container without any silence trimming or gap insertion.
+Rip captures audio verbatim: raw PCM is encapsulated in the RBI container
+1:1, with no silence trimming or gap insertion (this is intrinsic to the
+ripping path \(em there is no
+.B \-\-silence
+flag on
+.BR rip ).
 .PP
 The primary rip path uses
 .BR cdrdao ,
@@ -128,19 +132,26 @@ Each track is transcoded to Red Book PCM (44100\~Hz, 16\-bit, stereo) via PyAV.
 .PP
 .BI "cdda2img create " "[options] INPUT_DIR"
 .TP
-.BI \-\-mode " {master|remaster}"
+.BI \-\-silence " {trim|notrim}"
 .RS
 .TP
-.B master
+.B trim
+Trims leading and trailing silence (threshold from
+.B \-\-silence\-threshold ,
+default \-55\~dBFS) and appends a 2\-second inter\-track gap per track.
+This is the default.
+.TP
+.B notrim
 Transcodes audio to Red Book PCM without further processing.
 Silence trimming and inter\-track gap padding are disabled.
 Use this mode for 1:1 preservation of source audio.
-.TP
-.B remaster
-Trims leading and trailing silence (threshold: \-55\~dBFS) and appends a
-2\-second inter\-track gap per track.
-This is the default.
 .RE
+.TP
+.BI \-\-silence\-threshold " N"
+Silence detection threshold in \-dBFS (default: from config, 55).
+Only applied when
+.B \-\-silence trim
+is in effect.
 .TP
 .BI \-\-loudness " {rg|none}"
 .RS
@@ -178,11 +189,8 @@ Groups tracks by their embedded disc\-number tag; untagged tracks form a
 final group.
 .RE
 .TP
-.B \-\-no\-trim\-silence
-Disables silence trimming in remaster mode.
-.TP
 .B \-\-preserve\-pregaps
-Preserves pre\-gaps in remaster mode (no\-op for audio\-file input).
+Preserves pre\-gaps in trim mode (no\-op for audio\-file input).
 .\"
 .SS extract \(em Extract
 Extracts one or more block types from an RBI image.
@@ -239,8 +247,9 @@ Mutually exclusive with ReplayGain tag embedding.
 .\"
 .SS import \(em Import
 Imports a foreign disc image into an RBI container.
-Import always uses master mode: the source audio is preserved 1:1,
-with only byte\-order conversion and container encapsulation applied.
+Import preserves the source audio verbatim: only byte\-order conversion
+and container encapsulation are applied; there is no silence trim or
+gap insertion (the source image already encodes the disc layout).
 .PP
 .BI "cdda2img import " "[options] SOURCE"
 .PP
@@ -710,11 +719,11 @@ cdda2img create /music/Technotronic\ \-\ Pump\ Up\ the\ Jam
 .fi
 .RE
 .PP
-Create in master mode without loudness analysis:
+Create without silence trimming or loudness analysis (1:1 preservation):
 .PP
 .RS
 .nf
-cdda2img create /music/album \-\-mode master \-\-loudness none
+cdda2img create /music/album \-\-silence notrim \-\-loudness none
 .fi
 .RE
 .PP
@@ -722,7 +731,7 @@ Use global bin\-packing to minimise disc count across a large collection:
 .PP
 .RS
 .nf
-cdda2img create /music/album \-\-strategy ball
+cdda2img create /music/album \-\-strategy best
 .fi
 .RE
 .PP
@@ -822,6 +831,8 @@ Interrupted by SIGINT
 .\"
 .SH SEE ALSO
 .BR cdrdao (1),
+.BR cd\-paranoia (1),
+.BR cdemu (1),
 .BR flac (1),
 .BR ffmpeg (1),
 .BR fpcalc (1)

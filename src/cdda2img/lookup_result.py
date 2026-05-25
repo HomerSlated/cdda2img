@@ -6,24 +6,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-# Remaster status constants stored in RBI provenance metadata
-REMASTERED_UNKNOWN = "UNKNOWN"
-REMASTERED_NO = "NO"
-REMASTERED_POSSIBLE = "POSSIBLE"
-REMASTERED_YES = "YES"
-
-# Conservative Loudness War inflection point for CD
-LOUDNESS_WAR_YEAR = 1994
-
-# Substrings in album titles that strongly suggest a remaster release
-REMASTER_KEYWORDS: frozenset[str] = frozenset({
-    "remaster",
-    "deluxe",
-    "anniversary",
-    "reissue",
-    "expanded",
-})
-
 
 @dataclass
 class TrackMeta:
@@ -59,7 +41,6 @@ class DiscMeta:
     set_title: str | None = (
         None  # box set / release title when disc has its own album title
     )
-    remastered_source: str = REMASTERED_UNKNOWN
     source: str = (
         "unknown"  # "cdtext" | "embedded" | "musicbrainz" | "discogs" | "manual"
     )
@@ -71,7 +52,6 @@ def merge_disc_meta(base: DiscMeta, update: DiscMeta) -> DiscMeta:
 
     Existing non-None values in *base* are never overwritten.
     Track lists use *base* if non-empty, otherwise *update*.
-    Remaster status uses *base* unless it is UNKNOWN.
     """
     scalar_fields = (
         "album",
@@ -92,10 +72,5 @@ def merge_disc_meta(base: DiscMeta, update: DiscMeta) -> DiscMeta:
     )
     kwargs: dict = {f: getattr(base, f) or getattr(update, f) for f in scalar_fields}
     kwargs["source"] = base.source
-    kwargs["remastered_source"] = (
-        update.remastered_source
-        if base.remastered_source == REMASTERED_UNKNOWN
-        else base.remastered_source
-    )
     kwargs["tracks"] = base.tracks if base.tracks else update.tracks
     return DiscMeta(**kwargs)

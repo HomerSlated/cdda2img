@@ -284,8 +284,16 @@ class RBIDisc:
     tracks: list[RBITocEntry] = field(default_factory=list)
     release_date: str | None = None  # YYYY, YYYY-MM, or YYYY-MM-DD
     original_release_date: str | None = None  # release-group first-release-date
-    remastered_source: str = "UNKNOWN"  # UNKNOWN | NO | POSSIBLE | YES
+    low_dynamic_range: bool | None = (
+        None  # set after EBU R128 analysis; None if RG skipped
+    )
+    original_release_found: bool = False
+    original_release_title: str | None = None
+    original_release_year: int | None = None
     mb_release_id: str | None = None  # MusicBrainz release UUID for provenance
+    mb_release_group_id: str | None = (
+        None  # MB release-group UUID for original-release lookup
+    )
     set_title: str | None = (
         None  # box set / release title when medium has its own album title
     )

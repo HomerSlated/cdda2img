@@ -63,7 +63,7 @@ def test_open_catalogue_db_sets_meta(tmp_path):
             "SELECT value FROM db_meta WHERE key='schema_version'"
         ).fetchone()
         assert row is not None
-        assert row[0] == "1"
+        assert row[0] == "2"
     finally:
         conn.close()
 
@@ -171,8 +171,8 @@ def _insert_disc(
         """INSERT INTO catalogue
            (album, artist, year, disc_number, disc_total, track_count, mcn,
             file_basename, file_path, file_size, registered_at,
-            created_by, mode, remaster)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            created_by, mode)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (
             album,
             artist,
@@ -187,7 +187,6 @@ def _insert_disc(
             now,
             "test",
             "?",
-            "UNKNOWN",
         ),
     )
     assert cur.lastrowid is not None

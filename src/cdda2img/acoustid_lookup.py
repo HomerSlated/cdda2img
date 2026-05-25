@@ -54,7 +54,7 @@ def _chain_to_mb(top: list, *, verbose: bool = False) -> list[DiscMeta]:
     import musicbrainzngs  # type: ignore[import-untyped]
 
     from cdda2img.lookup_result import TrackMeta
-    from cdda2img.mb_lookup import _artist_credit_name, _classify_remaster, _parse_year
+    from cdda2img.mb_lookup import _artist_credit_name
 
     results: list[DiscMeta] = []
     seen_releases: set[str] = set()
@@ -128,11 +128,6 @@ def _chain_to_mb(top: list, *, verbose: bool = False) -> list[DiscMeta]:
                     release_date=date or None,
                     original_release_date=original_date or None,
                     country=release.get("country") or None,
-                    remastered_source=_classify_remaster(
-                        release.get("title") or "",
-                        _parse_year(original_date),
-                        _parse_year(date),
-                    ),
                     source="acoustid",
                     tracks=[
                         TrackMeta(title=rec_title, performer=rec_artist, isrc=isrc)

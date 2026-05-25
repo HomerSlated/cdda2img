@@ -217,15 +217,6 @@ def test_discogs_parse_result_no_separator():
     assert meta.album == "Just An Album"
 
 
-def test_discogs_parse_result_remaster_classification():
-    from cdda2img.discogs_lookup import _parse_result
-    from cdda2img.lookup_result import REMASTERED_POSSIBLE
-
-    r = SimpleNamespace(data={"title": "Artist - Album", "year": 2005})
-    meta = _parse_result(r)
-    assert meta.remastered_source == REMASTERED_POSSIBLE
-
-
 def test_discogs_parse_full_release_prefers_scanned_barcode():
     """_parse_full_release picks 'Scanned' barcode over 'Printed' when both present."""
     from cdda2img.discogs_lookup import _parse_full_release

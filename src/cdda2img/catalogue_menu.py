@@ -282,7 +282,9 @@ def _show_record(conn: object, catalogue_id: int) -> None:  # noqa: C901
 
     row = conn.execute(
         "SELECT album, artist, year, original_year, disc_number, disc_total, "
-        "track_count, mcn, remaster, mode, source, ripper, drive, "
+        "track_count, mcn, low_dynamic_range, original_release_found, "
+        "original_release_title, original_release_year, "
+        "mode, source, ripper, drive, "
         "rg_album_gain, rg_album_peak, rg_album_range, "
         "file_basename, file_path, file_size, registered_at, created_by "
         "FROM catalogue WHERE id=?",
@@ -301,7 +303,10 @@ def _show_record(conn: object, catalogue_id: int) -> None:  # noqa: C901
         disc_total,
         _track_count,
         mcn,
-        remaster,
+        low_dynamic_range,
+        original_release_found,
+        original_release_title,
+        original_release_year,
         mode,
         source,
         ripper,
@@ -327,8 +332,11 @@ def _show_record(conn: object, catalogue_id: int) -> None:  # noqa: C901
         print(f"  Original year: {orig_year}")
     if mcn:
         print(f"  MCN:           {mcn}")
-    if remaster and remaster != "UNKNOWN":
-        print(f"  Remaster:      {remaster}")
+    if low_dynamic_range is not None:
+        print(f"  Low DR:        {'YES' if low_dynamic_range else 'NO'}")
+    if original_release_found:
+        year_disp = f" ({original_release_year})" if original_release_year else ""
+        print(f"  Original:      {original_release_title or ''}{year_disp}")
     if mode and mode != "?":
         print(f"  Mode:          {mode}")
     if source:

@@ -58,9 +58,11 @@ def parse_args() -> argparse.Namespace:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=textwrap.dedent("""\
             create options:
-              --mode {master|remaster}
-                                    master: preserve source as-is (no silence trim)
-                                    remaster: trim silence and add inter-track gap (default)
+              --silence {trim|notrim}
+                                    trim: remove leading/trailing silence and add a
+                                          2 s inter-track gap (default)
+                                    notrim: preserve source audio as-is
+              --silence-threshold N Silence detection threshold in -dBFS (default: 55)
               --loudness {rg|none}  rg: measure EBU R128 and embed RG block (default)
                                     none: skip loudness analysis
               --strategy {fcfs,aatc,best,meta}
@@ -69,8 +71,7 @@ def parse_args() -> argparse.Namespace:
                 aatc  all-as-they-come: fill discs in input order, as many as needed
                 best  global bin-packing to minimise total disc count (order not preserved)
                 meta  group tracks by embedded disc-number tag; untagged tracks form a final group
-              --no-trim-silence     Skip silence trimming in remaster mode
-              --preserve-pregaps    Preserve pre-gaps in remaster mode (no-op for audio-file sources)
+              --preserve-pregaps    Preserve pre-gaps in trim mode (no-op for audio-file sources)
 
             extract options:
               --tracks              Write per-track FLAC files and CUE sheet
@@ -93,13 +94,13 @@ def parse_args() -> argparse.Namespace:
             rip options:
               --loudness {rg|none}  rg: embed EBU R128 ReplayGain block (default); none: skip
               --output <path>       Output .rbi file, or a directory to receive an album-derived filename (default: CWD, name from album)
-              Note: rip always uses master mode (1:1 capture via cdrdao; falls back to cd-paranoia)
+              Note: rip captures audio verbatim (1:1 via cdrdao; falls back to cd-paranoia); no silence trim or gap insertion
 
             import options:
               --loudness {rg|none}  rg: embed EBU R128 ReplayGain block (default); none: skip
               --output <path>       Output .rbi file, or a directory to receive an album-derived filename (default: CWD, name from album)
               --info                Dry-run: parse and display image metadata; do not import
-              Note: import always uses master mode (1:1 conversion; s16be→s16le only)
+              Note: import preserves source audio verbatim (s16be→s16le byte-swap only); no silence trim or gap insertion
               Accepts: cdrdao .toc file, or a DDP 2.0 image directory (must contain DDPID)
 
             burn options:
@@ -116,9 +117,9 @@ def parse_args() -> argparse.Namespace:
               cdda2img rip
               cdda2img rip --device /dev/sr0 --loudness none --output mydisc.rbi
               cdda2img create /music/album
-              cdda2img create /music/album --mode master --loudness none
+              cdda2img create /music/album --silence notrim --loudness none
               cdda2img create /music/album --strategy best
-              cdda2img create /music/album --no-trim-silence
+              cdda2img create /music/album --silence-threshold 60
               cdda2img extract album.rbi
               cdda2img extract album.rbi --tracks
               cdda2img extract album.rbi --raw
@@ -150,10 +151,10 @@ def parse_args() -> argparse.Namespace:
     )
     c.add_argument("input_dir", type=Path, help="Directory containing audio files")
     c.add_argument(
-        "--mode",
-        default="remaster",
-        choices=["master", "remaster"],
-        help="master: no silence trim; remaster: trim silence and add gap (default: remaster)",
+        "--silence",
+        default="trim",
+        choices=["trim", "notrim"],
+        help="trim: remove silence and add inter-track gap (default); notrim: preserve source as-is",
     )
     c.add_argument(
         "--loudness",
@@ -168,16 +169,10 @@ def parse_args() -> argparse.Namespace:
         help="Disc batching strategy (default: aatc)",
     )
     c.add_argument(
-        "--trim-silence",
-        action=argparse.BooleanOptionalAction,
-        default=True,
-        help="Trim leading/trailing silence in remaster mode (default: enabled; no-op in master mode)",
-    )
-    c.add_argument(
         "--preserve-pregaps",
         action=argparse.BooleanOptionalAction,
         default=False,
-        help="Preserve pre-gaps in remaster mode (default: disabled; no-op for audio-file sources)",
+        help="Preserve pre-gaps in trim mode (default: disabled; no-op for audio-file sources)",
     )
     c.add_argument(
         "--output",
@@ -186,7 +181,7 @@ def parse_args() -> argparse.Namespace:
         help="Output .rbi file, or a directory to receive album-derived names (default: CWD, name from album); multi-disc: stem used as base name",
     )
     c.add_argument(
-        "--silence",
+        "--silence-threshold",
         type=int,
         default=None,
         metavar="N",
@@ -375,14 +370,22 @@ def parse_args() -> argparse.Namespace:
 
 def _add_release_provenance(provenance: dict, disc: RBIDisc) -> None:
     """Append release-intelligence fields to *provenance* if populated on *disc*."""
-    if disc.remastered_source != "UNKNOWN":
-        provenance["remastered"] = disc.remastered_source
+    if disc.low_dynamic_range is not None:
+        provenance["low_dynamic_range"] = "YES" if disc.low_dynamic_range else "NO"
+    if disc.original_release_found:
+        provenance["original_release_found"] = "YES"
+        if disc.original_release_title:
+            provenance["original_release_title"] = disc.original_release_title
+        if disc.original_release_year is not None:
+            provenance["original_release_year"] = str(disc.original_release_year)
     if disc.release_date:
         provenance["release_date"] = disc.release_date
     if disc.original_release_date:
         provenance["original_release_date"] = disc.original_release_date
     if disc.mb_release_id:
         provenance["mb_release_id"] = disc.mb_release_id
+    if disc.mb_release_group_id:
+        provenance["mb_release_group_id"] = disc.mb_release_group_id
     if disc.set_title:
         provenance["set_title"] = disc.set_title
 
@@ -439,13 +442,13 @@ def _check_batch_limits(
 
 def create_image(
     input_dir: Path,
-    mode: str = "remaster",
+    silence_mode: str = "trim",
     loudness: str = "rg",
     strategy: str = DEFAULT_STRATEGY,
-    trim_silence: bool = True,
     output: Path | None = None,
-    silence: int = 55,
+    silence_threshold: int = 55,
     capacity: int = MAX_RUNTIME_MINUTES,
+    low_dr_threshold: float = 5.0,
 ) -> None:
     files = sorted(
         p for p in input_dir.iterdir() if p.is_file() and not p.name.startswith(".")
@@ -475,20 +478,18 @@ def create_image(
                 trans = temp.temp_track(i, "_trans.wav")
                 transcode_audio(track, trans)
 
-                if mode == "remaster" and trim_silence:
+                if silence_mode == "trim":
                     print(f"  Trimming      {i:2}: {track.stem}")
                     trim = temp.temp_track(i, "_trim.wav")
                     trim_silence_cd_da(
-                        str(trans), str(trim), SILENCE_PAD_DUR, threshold_db=silence
+                        str(trans),
+                        str(trim),
+                        SILENCE_PAD_DUR,
+                        threshold_db=silence_threshold,
                     )
                     source_wavs.append(trim)
                 else:
-                    if mode == "remaster":
-                        print(
-                            f"  Skipping silence trim (--no-trim-silence): {track.stem}"
-                        )
-                    else:
-                        print(f"  Skipping silence trim (master mode): {track.stem}")
+                    print(f"  Skipping silence trim (--silence notrim): {track.stem}")
                     source_wavs.append(trans)
 
             print("  Concatenating tracks")
@@ -505,7 +506,27 @@ def create_image(
 
             disc = run_metadata_menu(disc, source_wavs=source_wavs)
 
+            from cdda2img.original_release import populate_original_release
+
+            populate_original_release(disc)
+
             raw_titles = [re.sub(r"^\d{1,2}[-. ]+", "", p.stem) for p in batch]
+
+            # Loudness first, so disc.low_dynamic_range is set before PROV is built.
+            rg_block: bytes | None = None
+            if loudness == "rg":
+                from cdda2img.replaygain import analyse, pack_rg_block
+
+                print("  Measuring loudness (EBU R128)...")
+                rg_result = analyse(source_wavs)
+                disc.low_dynamic_range = rg_result.album_lra < low_dr_threshold
+                print(
+                    f"  Album gain: {rg_result.album_gain:+.2f} dB  "
+                    f"peak: {rg_result.album_peak:.4f}  "
+                    f"LRA: {rg_result.album_lra:.1f} LU"
+                )
+                rg_block = pack_rg_block(rg_result)
+
             provenance = {
                 "mode": "create",
                 "source": str(input_dir.resolve()),
@@ -514,24 +535,9 @@ def create_image(
             _add_release_provenance(provenance, disc)
             toc_data = generate_toc(disc, raw_titles=raw_titles)
 
-            rg_block: bytes | None = None
-            if loudness == "rg":
-                from cdda2img.replaygain import analyse, pack_rg_block
-
-                print("  Measuring loudness (EBU R128)...")
-                rg_result = analyse(source_wavs)
-                for warning in rg_result.warnings:
-                    print(f"  Warning: {warning}")
-                print(
-                    f"  Album gain: {rg_result.album_gain:+.2f} dB  "
-                    f"peak: {rg_result.album_peak:.4f}  "
-                    f"LRA: {rg_result.album_lra:.1f} LU"
-                )
-                rg_block = pack_rg_block(rg_result)
-
             disc_suffix = "" if disc_total == 1 else f"_disc{disc_num}"
             output_file = _resolve_output_path(output, album, disc_suffix)
-            container_flags = FLAG_MASTER_MODE if mode == "master" else 0
+            container_flags = FLAG_MASTER_MODE if silence_mode == "notrim" else 0
             build_container(
                 temp.pcm_file,
                 toc_data,
@@ -657,7 +663,10 @@ def info_image(source: Path) -> None:
 
 
 def import_image(
-    source: Path, loudness: str = "rg", output: Path | None = None
+    source: Path,
+    loudness: str = "rg",
+    output: Path | None = None,
+    low_dr_threshold: float = 5.0,
 ) -> None:
     import sys
 
@@ -743,7 +752,14 @@ def import_image(
             raise ValueError(msg)
 
         _finalize_import(
-            disc, temp.pcm_file, provenance, output_stem, loudness, output, ui=ui
+            disc,
+            temp.pcm_file,
+            provenance,
+            output_stem,
+            loudness,
+            output,
+            ui=ui,
+            low_dr_threshold=low_dr_threshold,
         )
     finally:
         if ui is not None:
@@ -900,8 +916,13 @@ def _measure_loudness_phase(
     loudness: str,
     ui: TerminalUI | None,
     emit: Callable[[str], None],
+    low_dr_threshold: float = 5.0,
 ) -> bytes | None:
-    """Run the EBU R128 phase and return the packed RG block, or None when skipped."""
+    """Run the EBU R128 phase and return the packed RG block, or None when skipped.
+
+    Sets ``disc.low_dynamic_range`` from the measured album LRA against
+    *low_dr_threshold*. Leaves it ``None`` when loudness analysis is skipped.
+    """
     if loudness != "rg":
         return None
     from cdda2img.replaygain import analyse_raw, pack_rg_block
@@ -912,8 +933,7 @@ def _measure_loudness_phase(
         pcm_file,
         progress_cb=_phase_progress_cb(ui, "Measuring loudness (EBU R128)…"),
     )
-    for warning in rg_result.warnings:
-        emit(f"  Warning: {warning}")
+    disc.low_dynamic_range = rg_result.album_lra < low_dr_threshold
     _ui_status(
         ui,
         f"Album gain: {rg_result.album_gain:+.2f} dB  "
@@ -933,6 +953,7 @@ def _finalize_import(
     arip_block: bytes | None = None,
     rlog_builder: RipLogBuilder | None = None,
     ui: TerminalUI | None = None,
+    low_dr_threshold: float = 5.0,
 ) -> None:
     """Shared post-rip/import pipeline: MB lookup → metadata menu → TOC → RG → container."""
     import sys
@@ -955,10 +976,23 @@ def _finalize_import(
     if ui is not None:
         ui.resume()
 
+    # After the menu: any manual override the user made is preserved by
+    # populate_original_release's internal gate.
+    from cdda2img.original_release import populate_original_release
+
+    _ui_status(ui, "Identifying original release…")
+    populate_original_release(disc)
+
     if output is None:
         new_stem = sanitize_title(disc.album)
         if new_stem:
             output_stem = new_stem
+
+    # Loudness analysis must run BEFORE provenance is finalised: it sets
+    # disc.low_dynamic_range which _add_release_provenance writes into PROV.
+    rg_block = _measure_loudness_phase(
+        disc, pcm_file, loudness, ui, diag.emit, low_dr_threshold
+    )
 
     rlog_block: bytes | None = None
     if rlog_builder is not None:
@@ -966,8 +1000,6 @@ def _finalize_import(
 
     _add_release_provenance(provenance, disc)
     toc_data = generate_toc(disc)
-
-    rg_block = _measure_loudness_phase(disc, pcm_file, loudness, ui, diag.emit)
 
     _ui_status(ui, "Building container…")
     output = _resolve_output_path(output, output_stem)
@@ -1215,6 +1247,7 @@ def rip_image(
     output: Path | None = None,
     preview: bool = True,
     tui: bool = True,
+    low_dr_threshold: float = 5.0,
 ) -> None:
     import sys
 
@@ -1358,6 +1391,7 @@ def rip_image(
             arip_block=arip_block,
             rlog_builder=rlog_builder,
             ui=ui,
+            low_dr_threshold=low_dr_threshold,
         )
     finally:
         _stop_preview(track_preview)
@@ -1516,13 +1550,17 @@ def _dispatch(args: argparse.Namespace) -> None:
         cfg = load_config()
         create_image(
             args.input_dir,
-            mode=args.mode,
+            silence_mode=args.silence,
             loudness=args.loudness,
             strategy=args.strategy,
-            trim_silence=args.trim_silence,
             output=args.output,
-            silence=args.silence if args.silence is not None else cfg.silence,
+            silence_threshold=(
+                args.silence_threshold
+                if args.silence_threshold is not None
+                else cfg.silence_threshold
+            ),
             capacity=args.capacity if args.capacity is not None else cfg.capacity,
+            low_dr_threshold=cfg.low_dr_threshold,
         )
     elif args.cmd == "rip":
         from cdda2img.config import load_config
@@ -1534,12 +1572,21 @@ def _dispatch(args: argparse.Namespace) -> None:
             output=args.output,
             preview=args.preview if args.preview is not None else cfg.preview,
             tui=args.tui if args.tui is not None else cfg.tui,
+            low_dr_threshold=cfg.low_dr_threshold,
         )
     elif args.cmd == "import":
         if args.info:
             info_image(args.source)
         else:
-            import_image(args.source, loudness=args.loudness, output=args.output)
+            from cdda2img.config import load_config
+
+            cfg = load_config()
+            import_image(
+                args.source,
+                loudness=args.loudness,
+                output=args.output,
+                low_dr_threshold=cfg.low_dr_threshold,
+            )
     elif args.cmd == "extract":
         extract_image(
             args.rbi_file,

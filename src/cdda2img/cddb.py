@@ -296,8 +296,12 @@ def prepopulate_from_cddb(
         tracks=new_tracks,
         release_date=release_date,
         original_release_date=disc.original_release_date,
-        remastered_source=disc.remastered_source,
+        low_dynamic_range=disc.low_dynamic_range,
+        original_release_found=disc.original_release_found,
+        original_release_title=disc.original_release_title,
+        original_release_year=disc.original_release_year,
         mb_release_id=disc.mb_release_id,
+        mb_release_group_id=disc.mb_release_group_id,
     )
 
     if verbose:

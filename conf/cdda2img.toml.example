@@ -39,12 +39,13 @@
 # Default: /dev/sr0
 # default_device = "/dev/sr0"
 
-# Silence detection threshold for the `create` pipeline's remaster mode, in -dBFS
-# (absolute value; lower number = stricter trim). Audio below this level at the
-# head and tail of each track is removed before the 2 s inter-track gap is added.
+# Silence detection threshold for the `create` pipeline, in -dBFS (absolute
+# value; lower number = stricter trim). Audio below this level at the head and
+# tail of each track is removed before the 2 s inter-track gap is added.  Only
+# applied when `--silence trim` is in effect.
 # Useful range: 40 (loose) … 70 (strict). Range: 1–90.
 # Default: 55
-# silence = 55
+# silence_threshold = 55
 
 # Disc capacity in minutes for the `create` pipeline batcher.
 # 80 = standard "700 MB" CD-R; 90 = "900 MB" media exists; overburn beyond
@@ -62,6 +63,13 @@
 # stdout. No-op when stdin is not a TTY (CI, pipes, etc.).
 # Default: true
 # tui = true
+
+# Album EBU R128 loudness range (LU) below which the disc is flagged
+# `low_dynamic_range = YES`. The flag is recorded in the RBI provenance block
+# and the catalogue. The default of 5.0 LU corresponds to a heavily compressed
+# master — adjust upward for stricter classification. Range: 0.5–20.0.
+# Default: 5.0
+# low_dr_threshold = 5.0
 
 # Per-drive read and write offsets.
 # read_offset is stored automatically after AccurateRip confirmation.

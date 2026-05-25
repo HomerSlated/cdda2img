@@ -1,5 +1,51 @@
 # TODO
 
+## ✅ DONE — Release intelligence refactor: low_dynamic_range + original_release (2026-05-25)
+
+449 tests; ruff + ty clean. Catalogue schema bumped to v2 (drop and re-scan; userbase is zero).
+
+- [x] **Killed the `remastered` enum entirely** — `_classify_remaster`, `guess_remaster_status`,
+  `REMASTERED_*` / `REMASTER_KEYWORDS` / `LOUDNESS_WAR_YEAR` constants, the `remastered_source`
+  field on RBIDisc/DiscMeta, the PROV `remastered` key, the catalogue `remaster` column, the
+  metadata-menu remaster classifier, and all associated tests. The four-valued guess
+  (UNKNOWN/NO/POSSIBLE/YES) conflated "is this a re-mastering?" with "does this sound
+  compressed?" — neither question was being answered factually. ZZ Top *Eliminator* (1983,
+  LRA 3.8 LU) was the canonical counterexample: an objectively low-DR album that predates
+  the loudness war by a decade.
+- [x] **`low_dynamic_range: bool | None` on RBIDisc** — derived from `rg_result.album_lra <
+  cfg.low_dr_threshold`. `None` when `--loudness none` was used. Threshold configurable via
+  `Config.low_dr_threshold` (default 5.0 LU, range 0.5–20.0). Persisted to PROV (`YES`/`NO`)
+  and the catalogue (`low_dynamic_range INTEGER`).
+- [x] **`original_release_*` on RBIDisc** — `original_release_found: bool` +
+  `original_release_title: str | None` + `original_release_year: int | None`. Populated by
+  `original_release.py:find_original_release()` via MusicBrainz release-group lookup. Rejects
+  derivative secondary types (Compilation, Live, Remix, etc.). Self-match rejected: a 1983
+  album whose RG first-release-date is 1983 does not "have an earlier release". Manual override
+  available via the metadata-menu `[m]` Set manually action.
+- [x] **`--silence trim|notrim` replaces `--mode master|remaster`** — clearer naming; drops
+  the confusion between "studio remaster" and "cdda2img's remaster mode". The existing
+  `--silence N` (threshold) renamed to `--silence-threshold N` and Config field
+  `silence` → `silence_threshold` to free up the `--silence` name. `--no-trim-silence`
+  dropped (redundant with `--silence notrim`).
+- [x] **PROV reader/display** — `Low DR:` and `Original:` lines replace the old `Remaster:`
+  line in `list` output and the metadata menu summary. `RGResult.warnings` (the editorial
+  "loudness war mastering" message) deleted — measurement is reported, not editorialised.
+- [x] **Catalogue schema v2** — `remaster TEXT` dropped; `low_dynamic_range INTEGER`,
+  `original_release_found INTEGER NOT NULL DEFAULT 0`, `original_release_title TEXT`,
+  `original_release_year INTEGER` added. `_check_schema_version` hard-aborts on v1 with a
+  clear "delete and re-scan" message.
+- [x] **Research delivered** — `private/research/incoming/original-release-detection.md`
+  (~28 KB) documents the allow-list, deny-list, MB release-group API, Discogs masters,
+  fuzzy-match algorithm (rapidfuzz `token_set_ratio` @ 88), and DR-database survey. Powers
+  Phase 3b (title-fuzz fallback) when picked up.
+
+Not yet done (deliberately deferred):
+- [ ] **Title-fuzz fallback for MB-miss cases** — when MB has no disc-ID hit, fuzzy-match
+  against artist catalogue via Discogs/MB. Algorithm fully specified in the research file;
+  requires the `rapidfuzz` dependency. Open question.
+
+---
+
 ## ✅ DONE — Track-1 audio preview during rip (2026-05-20)
 
 387 tests; ruff + ty clean. Verified on hardware (PX-716A).

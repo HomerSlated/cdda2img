@@ -428,23 +428,28 @@ def test_silence_capacity_preview_tui_defaults(
     cfg.write_text("")
     monkeypatch.setattr("cdda2img.config.config_path", lambda: cfg)
     c = load_config()
-    assert c.silence == 55
+    assert c.silence_threshold == 55
     assert c.capacity == 80
     assert c.preview is True
     assert c.tui is True
+    assert c.low_dr_threshold == 5.0
 
 
 def test_silence_capacity_preview_tui_overrides(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     cfg = tmp_path / "cfg.toml"
-    cfg.write_text("silence = 40\ncapacity = 90\npreview = false\ntui = false\n")
+    cfg.write_text(
+        "silence_threshold = 40\ncapacity = 90\npreview = false\ntui = false\n"
+        "low_dr_threshold = 6.5\n"
+    )
     monkeypatch.setattr("cdda2img.config.config_path", lambda: cfg)
     c = load_config()
-    assert c.silence == 40
+    assert c.silence_threshold == 40
     assert c.capacity == 90
     assert c.preview is False
     assert c.tui is False
+    assert c.low_dr_threshold == 6.5
 
 
 def test_silence_out_of_range_falls_back_to_default(
@@ -453,12 +458,12 @@ def test_silence_out_of_range_falls_back_to_default(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     cfg = tmp_path / "cfg.toml"
-    cfg.write_text("silence = 200\n")
+    cfg.write_text("silence_threshold = 200\n")
     monkeypatch.setattr("cdda2img.config.config_path", lambda: cfg)
     with caplog.at_level(logging.WARNING):
         c = load_config()
-    assert c.silence == 55
-    assert "Invalid silence" in caplog.text
+    assert c.silence_threshold == 55
+    assert "Invalid silence_threshold" in caplog.text
 
 
 def test_capacity_out_of_range_falls_back_to_default(
@@ -481,9 +486,37 @@ def test_silence_non_integer_falls_back_to_default(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     cfg = tmp_path / "cfg.toml"
-    cfg.write_text('silence = "loud"\n')
+    cfg.write_text('silence_threshold = "loud"\n')
     monkeypatch.setattr("cdda2img.config.config_path", lambda: cfg)
     with caplog.at_level(logging.WARNING):
         c = load_config()
-    assert c.silence == 55
-    assert "Invalid silence" in caplog.text
+    assert c.silence_threshold == 55
+    assert "Invalid silence_threshold" in caplog.text
+
+
+def test_low_dr_threshold_out_of_range_falls_back_to_default(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    cfg = tmp_path / "cfg.toml"
+    cfg.write_text("low_dr_threshold = 99\n")
+    monkeypatch.setattr("cdda2img.config.config_path", lambda: cfg)
+    with caplog.at_level(logging.WARNING):
+        c = load_config()
+    assert c.low_dr_threshold == 5.0
+    assert "Invalid low_dr_threshold" in caplog.text
+
+
+def test_low_dr_threshold_non_numeric_falls_back_to_default(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    cfg = tmp_path / "cfg.toml"
+    cfg.write_text('low_dr_threshold = "loud"\n')
+    monkeypatch.setattr("cdda2img.config.config_path", lambda: cfg)
+    with caplog.at_level(logging.WARNING):
+        c = load_config()
+    assert c.low_dr_threshold == 5.0
+    assert "Invalid low_dr_threshold" in caplog.text

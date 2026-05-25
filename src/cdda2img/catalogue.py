@@ -18,7 +18,7 @@ from pathlib import Path
 
 log = logging.getLogger(__name__)
 
-_SCHEMA_VERSION = "1"
+_SCHEMA_VERSION = "2"
 _APP_NAME = "cdda2img"
 
 
@@ -55,8 +55,19 @@ CREATE TABLE IF NOT EXISTS catalogue (
     source           TEXT,
     ripper           TEXT,
     drive            TEXT,
-    remaster         TEXT NOT NULL DEFAULT 'UNKNOWN',
-    original_year    INTEGER
+    -- Release intelligence (see docs/reference/rbi_spec.md §6.3.2):
+    --   low_dynamic_range:        derived from EBU R128 album LRA vs Config.low_dr_threshold.
+    --                             NULL = not measured (RG skipped); 0 = no; 1 = yes.
+    --   original_release_*:       MB release-group lookup result (auto + user-curated trio).
+    --                             original_release_found is the searchable boolean.
+    --   original_year:            raw MB release-group first-release-date (context only).
+    --                             Kept distinct from original_release_year so the
+    --                             user-confirmed value isn't overwritten by the raw signal.
+    low_dynamic_range          INTEGER,
+    original_release_found     INTEGER NOT NULL DEFAULT 0,
+    original_release_title     TEXT,
+    original_release_year      INTEGER,
+    original_year              INTEGER
 );
 
 CREATE TABLE IF NOT EXISTS catalogue_tracks (
@@ -134,6 +145,12 @@ def _check_schema_version(conn: sqlite3.Connection) -> None:
             _SCHEMA_VERSION,
         )
         msg = f"catalogue schema v{row[0]} > supported v{_SCHEMA_VERSION}"
+        raise RuntimeError(msg)
+    if row[0] < _SCHEMA_VERSION:
+        msg = (
+            f"catalogue schema v{row[0]} predates current v{_SCHEMA_VERSION}; "
+            f"delete the catalogue and re-scan the archive: rm {catalogue_db_path()}"
+        )
         raise RuntimeError(msg)
 
 
@@ -341,7 +358,13 @@ def _register_impl(rbi_path: Path, catalogue_path: Path | None) -> None:  # noqa
     mcn = disc.catalog
     year = _parse_year(prov.get("release_date"))
     original_year = _parse_year(prov.get("original_release_date"))
-    remaster = prov.get("remastered", "UNKNOWN")
+    low_dr_str = prov.get("low_dynamic_range")
+    low_dynamic_range: int | None = (
+        1 if low_dr_str == "YES" else 0 if low_dr_str == "NO" else None
+    )
+    original_release_found = 1 if prov.get("original_release_found") == "YES" else 0
+    original_release_title = prov.get("original_release_title")
+    original_release_year = _parse_year(prov.get("original_release_year"))
     created_by = prov.get("creator", "")
     mode = prov.get("mode", "?")
     source = prov.get("source")
@@ -397,8 +420,9 @@ def _register_impl(rbi_path: Path, catalogue_path: Path | None) -> None:  # noqa
                     rg_album_gain, rg_album_peak, rg_album_range,
                     file_basename, file_path, file_size,
                     registered_at, created_by, mode, source, ripper, drive,
-                    remaster, original_year)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    low_dynamic_range, original_release_found,
+                    original_release_title, original_release_year, original_year)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (
                     mcn,
                     album,
@@ -419,7 +443,10 @@ def _register_impl(rbi_path: Path, catalogue_path: Path | None) -> None:  # noqa
                     source,
                     ripper,
                     drive,
-                    remaster,
+                    low_dynamic_range,
+                    original_release_found,
+                    original_release_title,
+                    original_release_year,
                     original_year,
                 ),
             )

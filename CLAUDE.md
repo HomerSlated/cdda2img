@@ -16,7 +16,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - **`mount`** — extract a TOC+BIN scratch copy and load it into a cdemu virtual slot
 - **`catalogue`** — browse the local disc catalogue (summary, search, per-disc detail)
 
-The `rip`, `import`, and `create` pipelines all embed cdrdao-format TOC text, optional EBU R128 ReplayGain, and raw s16le PCM in a single RBI container. Metadata (album, artist, track titles, ISRC, CATALOG, remaster provenance) is sourced from CDDB, MusicBrainz, AcoustID, and Discogs lookups and an interactive confirmation menu.
+The `rip`, `import`, and `create` pipelines all embed cdrdao-format TOC text, optional EBU R128 ReplayGain, and raw s16le PCM in a single RBI container. Metadata (album, artist, track titles, ISRC, CATALOG, low-dynamic-range flag, original-release lookup) is sourced from CDDB, MusicBrainz, AcoustID, and Discogs lookups and an interactive confirmation menu.
 
 This is a prototype; a Rust reimplementation is planned once the design has stabilised.
 
@@ -34,7 +34,7 @@ uv run python -m cdda2img rip --loudness none
 # Create an RBI image from a directory of audio files
 uv run python -m cdda2img create <input_dir>
 uv run python -m cdda2img create <input_dir> --loudness rg --strategy best
-uv run python -m cdda2img create <input_dir> --mode master --loudness none
+uv run python -m cdda2img create <input_dir> --silence notrim --loudness none
 
 # Import a foreign disc image
 uv run python -m cdda2img import disc.toc
@@ -98,7 +98,7 @@ All source lives under `src/cdda2img/`. The pipeline is fully wired end-to-end.
 ### Create pipeline (`create` subcommand)
 1. `input_selector.py:select_batches()` — groups audio files into CD-sized batches (≤99 tracks, ≤80 min)
 2. `transcode.py:transcode_audio()` — converts each track to 16-bit stereo 44.1 kHz PCM WAV via PyAV
-3. `silence.py:trim_silence_cd_da()` — remaster mode only: trims leading/trailing silence (−55 dBFS) and appends 2-second inter-track gap
+3. `silence.py:trim_silence_cd_da()` — `--silence trim` mode only: trims leading/trailing silence (threshold from `Config.silence_threshold`, default −55 dBFS) and appends 2-second inter-track gap
 4. `concat.py:concat_wav()` — concatenates per-track WAVs into a single WAV
 5. `container.py:wav_to_raw_pcm()` — strips WAV header, leaving raw s16le
 6. `metadata.py:derive_album_info()` — extracts album/artist from file tags (mutagen)
@@ -158,7 +158,8 @@ Four source types, each producing s16le PCM, then all call `_finalize_import()`:
 - **`metadata.py`** — `derive_album_info()` from file tags via mutagen
 - **`metadata_menu.py`** — interactive metadata confirmation menu
 - **`replaygain.py`** — EBU R128 analysis via pyebur128; `analyse()`, `pack_rg_block()`
-- **`config.py`** — `Config` dataclass (`cddb_server`, `contact_email`, `database_backups`, `database_backup_frequency`, `catalogue_backups`, `catalogue_backup_frequency`, `drives`, `catalogue_path`, `enable_catalogue`, `default_device`) + `DriveConfig` (per-drive `name`/`read_offset`/optional `write_offset`); `load_config()`, `save_drive()`, `save_drive_read_offset()`, `save_drive_write_offset()`, `_rewrite_config_drives()`; `[[drives]]` TOML array-of-tables round-trip; XDG path via `config_path()`
+- **`config.py`** — `Config` dataclass (`cddb_server`, `contact_email`, `database_backups`, `database_backup_frequency`, `catalogue_backups`, `catalogue_backup_frequency`, `drives`, `catalogue_path`, `enable_catalogue`, `default_device`, `silence_threshold`, `capacity`, `preview`, `tui`, `low_dr_threshold`) + `DriveConfig` (per-drive `name`/`read_offset`/optional `write_offset`); `load_config()`, `save_drive()`, `save_drive_read_offset()`, `save_drive_write_offset()`, `_rewrite_config_drives()`; `[[drives]]` TOML array-of-tables round-trip; XDG path via `config_path()`
+- **`original_release.py`** — MusicBrainz release-group based lookup of the earliest known release of the same logical album. `find_original_release(disc)` returns `(found, title, year)`; `populate_original_release(disc)` assigns the result onto `RBIDisc` and skips when the user has already set the field manually via the metadata menu. Derivative secondary types (Compilation, Live, Remix, DJ-mix, Demo, etc.) are rejected — they're not "originals" in the sense the field captures
 - **`db.py`** — SQLite management for `drive_offsets.db`; `open_drive_offsets_db()`, `ensure_backup()`, `parse_frequency()`; WAL + foreign_keys; schema: `ar_drives`, `fetch_log`, `fetch_state`
 - **`drive_info.py`** — sysfs drive name probe (`probe_drive_name`); AccurateRip `driveoffsets.htm` catalog (`ensure_drive_offsets` with 30-day cooldown, `find_drive_offset`); `_normalize_ar_name` handles `"VENDOR  - MODEL"` and `"- MODEL"` formats via two-pattern regex
 - **`transcode.py`** — PyAV audio transcoding to Red Book PCM WAV

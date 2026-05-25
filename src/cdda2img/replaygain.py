@@ -51,7 +51,6 @@ _EBUR128_MODE = _MODE_I | _MODE_LRA | _MODE_TRUE_PK  # = 63
 RG_REFERENCE: float = -18.0  # LUFS — ReplayGain 2.0 / ITU-R BS.1770-3
 RG_VERSION: int = 1  # RG block format version stored in the container
 
-_LRA_WARN_LU: float = 5.0  # album LRA below this indicates heavily compressed source
 _INT16_PER_FRAME = 1176  # 2352 bytes per CD frame / 2 bytes per int16
 # CD frames per analysis chunk (~10 s); also bounds the float32 conversion buffer.
 _RG_CHUNK_FRAMES = 750
@@ -80,16 +79,6 @@ class RGResult:
     album_peak: float  # linear true peak
     album_lra: float  # LU
     tracks: list[TrackRG] = field(default_factory=list)
-
-    @property
-    def warnings(self) -> list[str]:
-        """Human-readable warnings for heavily compressed source material."""
-        if self.album_lra < _LRA_WARN_LU:
-            return [
-                f"Album LRA {self.album_lra:.1f} LU is below {_LRA_WARN_LU} LU — "
-                "source may be heavily compressed (loudness war mastering)"
-            ]
-        return []
 
 
 # ---------------------------------------------------------------------------

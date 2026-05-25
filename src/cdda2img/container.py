@@ -633,8 +633,6 @@ def extract_data(  # noqa: C901
                     disc, header.disc_number, header.disc_total, base_dir
                 )
                 rg_result = analyse(flac_paths)
-                for warning in rg_result.warnings:
-                    print(f"  Warning: {warning}")
                 print(
                     f"  Album gain: {rg_result.album_gain:+.2f} dB  "
                     f"peak: {rg_result.album_peak:.4f}  "
@@ -751,13 +749,6 @@ def _parse_provenance(prov_bytes: bytes) -> dict[str, str]:
     return result
 
 
-_REMASTER_LABELS = {
-    "YES": "Yes (confirmed)",
-    "POSSIBLE": "Possible",
-    "NO": "No",
-    "UNKNOWN": "Unknown",
-}
-
 _BLOCK_NAMES = {
     BLOCK_TYPE_TOC: "TOC",
     BLOCK_TYPE_PCM: "PCM audio",
@@ -791,15 +782,18 @@ def _print_provenance(provenance: dict[str, str]) -> None:
         print(f"Drive:     {drive_name}  (offset {offset_str})")
     if set_title := provenance.get("set_title"):
         print(f"Set:       {set_title}")
-    if rms := provenance.get("remastered"):
-        label = _REMASTER_LABELS.get(rms, rms)
-        extra = ""
-        if rd := provenance.get("release_date"):
-            extra += f"  (this release: {rd}"
-            if od := provenance.get("original_release_date"):
-                extra += f", original: {od}"
-            extra += ")"
-        print(f"Remaster:  {label}{extra}")
+    if ldr := provenance.get("low_dynamic_range"):
+        print(f"Low DR:    {ldr}")
+    if provenance.get("original_release_found") == "YES":
+        title = provenance.get("original_release_title", "")
+        year = provenance.get("original_release_year", "")
+        year_disp = f" ({year})" if year else ""
+        print(f"Original:  {title}{year_disp}")
+    elif rd := provenance.get("release_date"):
+        extra = f"this release: {rd}"
+        if od := provenance.get("original_release_date"):
+            extra += f", original: {od}"
+        print(f"Dates:     {extra}")
 
 
 def _list_info(rbi_file: Path) -> str:  # noqa: C901
@@ -821,7 +815,7 @@ def _list_info(rbi_file: Path) -> str:  # noqa: C901
         msg = "No TOC block in container"
         raise ValueError(msg)
 
-    mode_flags: list[str] = ["master" if header.is_master else "remaster"]
+    mode_flags: list[str] = ["notrim" if header.is_master else "trim"]
     if header.find_block(BLOCK_TYPE_RGDB) is not None:
         mode_flags.append("ReplayGain")
     flags_str = ", ".join(mode_flags)
@@ -863,15 +857,18 @@ def _list_info(rbi_file: Path) -> str:  # noqa: C901
     if drive_name := prov.get("drive_name"):
         offset_str = prov.get("drive_read_offset", "?")
         lines.append(f"Drive:     {drive_name}  (offset {offset_str})")
-    if rms := prov.get("remastered"):
-        label = _REMASTER_LABELS.get(rms, rms)
-        extra = ""
-        if rd := prov.get("release_date"):
-            extra += f"  (this release: {rd}"
-            if od := prov.get("original_release_date"):
-                extra += f", original: {od}"
-            extra += ")"
-        lines.append(f"Remaster:  {label}{extra}")
+    if ldr := prov.get("low_dynamic_range"):
+        lines.append(f"Low DR:    {ldr}")
+    if prov.get("original_release_found") == "YES":
+        title = prov.get("original_release_title", "")
+        year = prov.get("original_release_year", "")
+        year_disp = f" ({year})" if year else ""
+        lines.append(f"Original:  {title}{year_disp}")
+    elif rd := prov.get("release_date"):
+        extra = f"this release: {rd}"
+        if od := prov.get("original_release_date"):
+            extra += f", original: {od}"
+        lines.append(f"Dates:     {extra}")
 
     lines.append("")
 

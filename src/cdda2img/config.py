@@ -99,10 +99,11 @@ class Config:
     catalogue_path: Path | None = None
     enable_catalogue: bool = True
     default_device: str = "/dev/sr0"
-    silence: int = 55
+    silence_threshold: int = 55
     capacity: int = 80
     preview: bool = True
     tui: bool = True
+    low_dr_threshold: float = 5.0  # album LRA (LU) below which low_dynamic_range=YES
 
 
 def _parse_drives(raw_drives: object) -> list[DriveConfig]:
@@ -182,14 +183,23 @@ def load_config() -> Config:
     enable_catalogue = bool(data.get("enable_catalogue", True))
     default_device = str(data.get("default_device", "/dev/sr0"))
 
-    raw_silence = data.get("silence", 55)
+    if "silence" in data and "silence_threshold" not in data:
+        log.warning(
+            "Config key 'silence' was renamed to 'silence_threshold' — "
+            "the old key is ignored. Update %s to silence the warning.",
+            config_path(),
+        )
+    raw_silence_threshold = data.get("silence_threshold", 55)
     try:
-        silence = int(raw_silence)
+        silence_threshold = int(raw_silence_threshold)
     except (ValueError, TypeError):
-        silence = 0
-    if not 1 <= silence <= 90:
-        log.warning("Invalid silence %r in config; defaulting to 55", raw_silence)
-        silence = 55
+        silence_threshold = 0
+    if not 1 <= silence_threshold <= 90:
+        log.warning(
+            "Invalid silence_threshold %r in config; defaulting to 55",
+            raw_silence_threshold,
+        )
+        silence_threshold = 55
 
     raw_capacity = data.get("capacity", 80)
     try:
@@ -203,6 +213,17 @@ def load_config() -> Config:
     preview = bool(data.get("preview", True))
     tui = bool(data.get("tui", True))
 
+    raw_low_dr = data.get("low_dr_threshold", 5.0)
+    try:
+        low_dr_threshold = float(raw_low_dr)
+    except (ValueError, TypeError):
+        low_dr_threshold = 0.0
+    if not 0.5 <= low_dr_threshold <= 20.0:
+        log.warning(
+            "Invalid low_dr_threshold %r in config; defaulting to 5.0", raw_low_dr
+        )
+        low_dr_threshold = 5.0
+
     return Config(
         cddb_server=cddb_server,
         contact_email=contact_email,
@@ -214,10 +235,11 @@ def load_config() -> Config:
         catalogue_path=catalogue_path,
         enable_catalogue=enable_catalogue,
         default_device=default_device,
-        silence=silence,
+        silence_threshold=silence_threshold,
         capacity=capacity,
         preview=preview,
         tui=tui,
+        low_dr_threshold=low_dr_threshold,
     )
 
 

@@ -14,7 +14,6 @@ import os
 import re
 
 from cdda2img.lookup_result import DiscMeta, TrackMeta
-from cdda2img.mb_lookup import _classify_remaster, _parse_year
 
 log = logging.getLogger(__name__)
 
@@ -93,7 +92,6 @@ def _parse_result(r) -> DiscMeta:
         country=str(country) if country else None,
         label=str(label) if label else None,
         catalog_number=catalog_number or None,
-        remastered_source=_classify_remaster(album, None, _parse_year(year)),
         source="discogs",
     )
 
@@ -180,7 +178,6 @@ def _parse_full_release(r) -> DiscMeta:
         country=str(country) if country else None,
         label=str(label) if label else None,
         catalog_number=catalog_number or None,
-        remastered_source=_classify_remaster(album, None, _parse_year(year)),
         source="discogs",
         tracks=_discogs_parse_tracklist(data.get("tracklist") or []),
     )

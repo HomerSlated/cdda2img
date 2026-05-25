@@ -23,8 +23,9 @@ This is an active prototype. A Rust reimplementation is planned once the design 
 - **Format-agnostic ingestion** — any audio format supported by PyAV (FLAC, MP3, OGG,
   M4A, WAV, …); no ffmpeg subprocess required
 - **Red Book transcoding** — 16-bit stereo 44.1 kHz s16le PCM, enforced by PyAV
-- **Master / Remaster modes** — master preserves audio as-is; remaster applies silence
-  trimming (−55 dBFS) and 2-second Red Book inter-track gaps
+- **Silence trim mode** — `--silence trim` (default) removes leading/trailing silence
+  (configurable threshold in -dBFS) and inserts 2-second Red Book inter-track gaps;
+  `--silence notrim` preserves the source audio as-is
 - **Physical disc ripping** — `rip` subcommand rips directly from `/dev/sr0` (or any
   optical drive); primary path uses cdrdao (captures MCN, ISRC, and CD-Text in one pass);
   fallback uses cd-paranoia (full paranoia correction) when cdrdao fails; AccurateRip
@@ -40,7 +41,8 @@ This is an active prototype. A Rust reimplementation is planned once the design 
 
   Confirmed offsets are persisted to `[[drives]]` so subsequent rips skip the catalog lookup
 - **Disc image import** — `import` subcommand converts professional mastering images to
-  master-mode RBIs; pre-gaps, CATALOG, ISRC, and CD-TEXT are preserved:
+  RBIs verbatim (1:1 audio with byte-order conversion only); pre-gaps, CATALOG, ISRC,
+  and CD-TEXT are preserved:
   - *DDP 2.0* (GEAR Pro Mastering Edition) — parses DDPID (MCN), PQDESCR (timing + ISRC),
     and CDTEXT.BIN; audio stored as s16le (no byte-swap)
   - *cdrdao TOC+BIN* — parses `.toc` text; byte-swaps s16be→s16le
@@ -59,9 +61,13 @@ This is an active prototype. A Rust reimplementation is planned once the design 
      if exactly one Discogs result matches the album title, full metadata is merged
   4. *Interactive menu* — confirm or correct all fields; can invoke AcoustID/Chromaprint
      per-track acoustic fingerprinting for discs not in the MB disc database
-- **Release intelligence** — detects remasters from release title keywords and
-  release-group first-release-date; embeds remaster provenance and original release year
-  in the TOC so your archive records whether the source predates the loudness war
+- **Release intelligence** — two factual signals captured at archive time and recorded
+  in both the RBI provenance block and the disc catalogue:
+  - *Low dynamic range* — boolean derived from the measured EBU R128 album LRA against
+    a configurable threshold (default 5.0 LU); no guesswork about loudness-war eras
+  - *Original release* — MusicBrainz release-group lookup identifies the earliest known
+    release of the same logical album; reports `(found, title, year)` so a remaster of a
+    1985 album shows what its first edition was, while a 1983 original shows nothing
 - **ReplayGain 2.0** — EBU R128 loudness analysis via pyebur128; stored as a binary block
   inside the RBI container; embedded as Vorbis comment tags in extracted FLACs; computed
   per-track and at album level
@@ -129,9 +135,9 @@ uv run python -m cdda2img rip --loudness none --output mydisc.rbi
 
 # Create an RBI from a directory of audio files
 uv run python -m cdda2img create /music/album
-uv run python -m cdda2img create /music/album --mode remaster --loudness rg --strategy best
-uv run python -m cdda2img create /music/album --mode master --loudness none
-uv run python -m cdda2img create /music/album --no-trim-silence
+uv run python -m cdda2img create /music/album --silence trim --loudness rg --strategy best
+uv run python -m cdda2img create /music/album --silence notrim --loudness none
+uv run python -m cdda2img create /music/album --silence-threshold 60
 
 # Import a foreign disc image (master mode, 1:1)
 uv run python -m cdda2img import /path/to/ddp_dir

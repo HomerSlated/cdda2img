@@ -86,6 +86,7 @@ album/
 # Machine-local Claude Code context (see CLAUDE.md for the committed portion)
 CLAUDE.local.md
 .claude/
+claude-prompt-*.md
 
 # OS generated files #
 ######################

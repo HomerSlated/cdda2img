@@ -19,13 +19,7 @@ import tempfile
 import wave
 from pathlib import Path
 
-from cdda2img.lookup_result import (
-    REMASTERED_NO,
-    REMASTERED_POSSIBLE,
-    REMASTERED_UNKNOWN,
-    REMASTERED_YES,
-    DiscMeta,
-)
+from cdda2img.lookup_result import DiscMeta
 from cdda2img.rbi_format import (
     CD_FRAMES_PER_SECOND,
     PCM_BIT_DEPTH,
@@ -102,13 +96,12 @@ def _print_disc_summary(disc: RBIDisc) -> None:
     if disc.disc_total > 1 or disc.disc_number != 1:
         print(f"  Disc:    {disc.disc_number} of {disc.disc_total}")
     print(f"  Tracks:  {len(disc.tracks)}")
-    if disc.remastered_source != REMASTERED_UNKNOWN:
-        orig = (
-            f"  (orig. {disc.original_release_date[:4]})"
-            if disc.original_release_date
-            else ""
-        )
-        print(f"  Remaster: {disc.remastered_source}{orig}")
+    if disc.original_release_found and disc.original_release_title:
+        year = f" ({disc.original_release_year})" if disc.original_release_year else ""
+        print(f"  Original: {disc.original_release_title}{year}")
+    if disc.low_dynamic_range is not None:
+        flag = "YES" if disc.low_dynamic_range else "NO"
+        print(f"  Low DR:  {flag}")
     if disc.tracks:
         print()
         print(f"  {'#':>2}  {'Title':<40}  {'ISRC'}")
@@ -151,8 +144,6 @@ def _print_meta_summary(meta: DiscMeta) -> None:
         label_str = "(none)"
     print(f"  Label:         {label_str}")
     print(f"  UPC:           {meta.catalog or '(none)'}")
-    if meta.remastered_source != REMASTERED_UNKNOWN:
-        print(f"  Remaster:      {meta.remastered_source}")
     _print_meta_tracks(meta)
 
 
@@ -788,25 +779,6 @@ def _edit_track(disc: RBIDisc, track_number: int) -> RBIDisc:
 # Find Original Release sub-menu
 # ---------------------------------------------------------------------------
 
-_LOUDNESS_WAR_YEAR = 1994
-
-
-def _assess_remaster(meta: DiscMeta) -> str:
-    """Determine and print the REMASTERED_SOURCE assessment for a release."""
-    date_prefix = (meta.release_date or "")[:4]
-    orig_year = int(date_prefix) if date_prefix.isdigit() else None
-    if orig_year and orig_year < _LOUDNESS_WAR_YEAR:
-        print(f"  Pre-Loudness-War release ({orig_year}): REMASTERED_SOURCE -> NO")
-        return REMASTERED_NO
-    if meta.remastered_source == REMASTERED_YES:
-        print("  Known remaster (title keyword + post-1994): REMASTERED_SOURCE -> YES")
-        return REMASTERED_YES
-    if orig_year and orig_year >= _LOUDNESS_WAR_YEAR:
-        print(f"  Loudness-War era ({orig_year}): REMASTERED_SOURCE -> POSSIBLE")
-        return REMASTERED_POSSIBLE
-    print("  Insufficient date data: REMASTERED_SOURCE -> UNKNOWN")
-    return REMASTERED_UNKNOWN
-
 
 def _fetch_releases_for_group(
     disc: RBIDisc, mb_rg_id: str | None
@@ -830,52 +802,83 @@ def _fetch_releases_for_group(
     return search_releases(query, limit=50), mb_rg_id
 
 
-def _set_remaster_manually(disc: RBIDisc) -> RBIDisc:
-    """Prompt the user to set remaster status and optional original year."""
-    _header("Set Remaster Status Manually")
-    print("  Is this a remaster?")
-    print()
-    print("  1  YES")
-    print("  2  NO")
-    print("  3  POSSIBLE")
-    print("  4  UNKNOWN")
-    print()
-    _status_map = {
-        "1": REMASTERED_YES,
-        "2": REMASTERED_NO,
-        "3": REMASTERED_POSSIBLE,
-        "4": REMASTERED_UNKNOWN,
-    }
+def _set_original_manually(disc: RBIDisc) -> RBIDisc:
+    """Prompt the user to enter the original release title and year by hand."""
+    _header("Set Original Release Manually")
+    title = _prompt("  Original album title (blank = none) > ").strip()
+    if not title:
+        disc.original_release_found = False
+        disc.original_release_title = None
+        disc.original_release_year = None
+        print("  Cleared.")
+        return disc
+    year: int | None = None
     while True:
-        choice = _prompt("  > ").strip()
-        if choice in _status_map:
-            status = _status_map[choice]
-            break
-        if choice in ("b", "q", ""):
+        raw = _prompt("  Year of original release (4 digits) > ").strip()
+        if raw in ("b", "q", ""):
             return disc
-        print("  Enter 1, 2, 3, or 4.")
-
-    orig_year: str | None = None
-    if status == REMASTERED_YES:
-        error_flag = False
-        while True:
-            suffix = "  <- Must be a valid year!" if error_flag else ""
-            raw = _prompt(f"  Year of original release?{suffix} > ").strip()
-            if raw in ("b", "q", ""):
-                return disc
-            if len(raw) == 4 and raw.isdigit():
-                orig_year = raw
-                break
-            error_flag = True
-
-    disc.remastered_source = status
-    if orig_year is not None:
-        disc.original_release_date = orig_year
-    print(
-        f"  Set. REMASTERED_SOURCE: {status}"
-        + (f"  orig. {orig_year}" if orig_year else "")
-    )
+        if len(raw) == 4 and raw.isdigit():
+            year = int(raw)
+            break
+        print("  Enter a 4-digit year.")
+    disc.original_release_found = True
+    disc.original_release_title = title
+    disc.original_release_year = year
+    print(f"  Set: {title} ({year})")
     return disc
+
+
+def _apply_selected_release(disc: RBIDisc, selected: DiscMeta) -> str | None:
+    """Apply *selected* as the disc's original release; return its mb_rg_id or None."""
+    raw_date = selected.release_date or ""
+    year_str = raw_date[:4] if len(raw_date) >= 4 else ""
+    year = int(year_str) if year_str.isdigit() else None
+    disc.original_release_found = True
+    disc.original_release_title = selected.album or disc.album
+    disc.original_release_year = year
+    if year_str.isdigit():
+        disc.original_release_date = year_str
+    year_disp = f" ({year})" if year else ""
+    print(f"  Applied: {disc.original_release_title}{year_disp}")
+    return selected.mb_release_group_id
+
+
+def _search_and_select_original(
+    disc: RBIDisc, mb_rg_id: str | None
+) -> tuple[bool, str | None]:
+    """Run the MB search/select loop.
+
+    Returns ``(applied, new_mb_rg_id)``.  ``applied=True`` means the user
+    pressed [a] on a result — the menu should exit even when the chosen
+    release carries no RG id of its own.  ``applied=False`` means the user
+    backed out without applying anything.
+    """
+    releases, mb_rg_id = _fetch_releases_for_group(disc, mb_rg_id)
+    if not releases:
+        print("  No results found.")
+        _prompt("  [Enter to return] ")
+        return (False, mb_rg_id)
+
+    releases_sorted = sorted(releases, key=lambda m: m.release_date or "9999")
+    print(f"\n  {len(releases_sorted)} release(s) found, sorted earliest first.")
+
+    while True:
+        selected = _select_from_results(
+            releases_sorted, "Original Release - Earliest First"
+        )
+        if selected is None:
+            return (False, mb_rg_id)
+
+        _header("Selected Release")
+        _print_meta_summary(selected)
+        print()
+        print("  [a]  Apply as original release")
+        print("  [b]  Back to list")
+        sel_choice = _prompt("  > ").strip().lower()
+
+        if sel_choice == "a":
+            new_rg = _apply_selected_release(disc, selected)
+            return (True, new_rg or mb_rg_id)
 
 
 def _original_release_menu(
@@ -885,55 +888,29 @@ def _original_release_menu(
         _header("Find Original Release")
         print("  [s]  Search MusicBrainz")
         print("  [m]  Set manually")
+        print("  [c]  Clear")
         print("  [b]  Back")
         choice = _prompt("  > ").strip().lower()
 
         if choice in ("b", "q", ""):
             return disc, mb_rg_id
-        elif choice == "m":
-            disc = _set_remaster_manually(disc)
+        if choice == "m":
+            disc = _set_original_manually(disc)
             return disc, mb_rg_id
-        elif choice != "s":
-            print("  Enter s, m, or b.")
+        if choice == "c":
+            disc.original_release_found = False
+            disc.original_release_title = None
+            disc.original_release_year = None
+            print("  Cleared.")
+            return disc, mb_rg_id
+        if choice != "s":
+            print("  Enter s, m, c, or b.")
             continue
 
-        releases, mb_rg_id = _fetch_releases_for_group(disc, mb_rg_id)
-
-        if not releases:
-            print("  No results found.")
-            _prompt("  [Enter to return] ")
-            continue
-
-        releases_sorted = sorted(releases, key=lambda m: m.release_date or "9999")
-        print(f"\n  {len(releases_sorted)} release(s) found, sorted earliest first.")
-
-        while True:
-            selected = _select_from_results(
-                releases_sorted, "Original Release - Earliest First"
-            )
-            if selected is None:
-                break
-
-            _header("Selected Release")
-            _print_meta_summary(selected)
-            print()
-            assessment = _assess_remaster(selected)
-            print()
-            print("  [a]  Apply and set REMASTERED_SOURCE")
-            print("  [b]  Back to list")
-            sel_choice = _prompt("  > ").strip().lower()
-
-            if sel_choice == "a":
-                raw_date = selected.release_date or ""
-                disc.original_release_date = (
-                    raw_date[:4]
-                    if len(raw_date) >= 4 and raw_date[:4].isdigit()
-                    else (raw_date or disc.original_release_date)
-                )
-                disc.remastered_source = assessment
-                mb_rg_id = selected.mb_release_group_id or mb_rg_id
-                print(f"  Applied. REMASTERED_SOURCE: {assessment}")
-                return disc, mb_rg_id
+        applied, mb_rg_id = _search_and_select_original(disc, mb_rg_id)
+        if applied:
+            return disc, mb_rg_id
+        # Otherwise loop back to the top menu.
 
 
 # ---------------------------------------------------------------------------
@@ -985,11 +962,6 @@ def run_metadata_menu(
     Returns the (possibly updated) RBIDisc. Returns *disc* unchanged when stdin
     is not a TTY (batch/scripted mode).
     """
-    if disc.remastered_source == REMASTERED_UNKNOWN:
-        from cdda2img.mb_lookup import guess_remaster_status
-
-        disc.remastered_source = guess_remaster_status(disc)
-
     if not sys.stdin.isatty():
         return disc
 

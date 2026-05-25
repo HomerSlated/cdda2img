@@ -115,7 +115,7 @@ def cmd_search(args: argparse.Namespace) -> int:
         kwargs["to_date"] = args.to_date
 
     try:
-        results = client.search(args.url, **kwargs)
+        results = client.search(args.original, **kwargs)
     except Exception as exc:
         print(f"error: CDX search failed: {exc}", file=sys.stderr)
         return 1
@@ -128,10 +128,10 @@ def cmd_search(args: argparse.Namespace) -> int:
             if args.limit and count >= args.limit:
                 break
             ts = record.timestamp.strftime("%Y%m%d%H%M%S") if record.timestamp else "?"
-            status = str(record.status_code) if record.status_code else "?"
+            status = str(record.statuscode) if record.statuscode else "?"
             mime = (record.mime_type or "")[:24]
             length = str(record.length) if record.length else "?"
-            print(f"{ts:<16}  {status:>6}  {mime:<24}  {length:>8}  {record.url}")
+            print(f"{ts:<16}  {status:>6}  {mime:<24}  {length:>8}  {record.original}")
             count += 1
     except StopIteration:
         pass
@@ -147,7 +147,7 @@ def cmd_search(args: argparse.Namespace) -> int:
 
 def _find_best_record(
     client: WaybackClient,
-    url: str,
+    original: str,
     timestamp: str | None,
     from_date: datetime | None,
     to_date: datetime | None,
@@ -169,18 +169,18 @@ def _find_best_record(
         ts_dt = _parse_date(timestamp)
         if "from_date" not in kwargs:
             kwargs["from_date"] = ts_dt
-        results = client.search(url, **kwargs)
+        results = client.search(original, **kwargs)
         for record in results:
-            if record.status_code == 200:
+            if record.statuscode == 200:
                 return record  # first 200 at or after ts_dt
         return None
     else:
         # CDX is oldest-first; iterate forward, keep the latest 200 seen.
         # Cap iteration to avoid hanging on heavily-archived URLs.
-        results = client.search(url, **kwargs)
+        results = client.search(original, **kwargs)
         best = None
         for i, record in enumerate(results):
-            if record.status_code == 200:
+            if record.statuscode == 200:
                 best = record
             if i >= _MAX_CDX_SCAN - 1:
                 print(
@@ -198,7 +198,7 @@ def cmd_get(args: argparse.Namespace) -> int:
 
     record = _find_best_record(
         client,
-        args.url,
+        args.original,
         args.timestamp,
         args.from_date,
         args.to_date,
@@ -206,7 +206,7 @@ def cmd_get(args: argparse.Namespace) -> int:
 
     if record is None:
         print(
-            f"error: no successful (HTTP 200) snapshot found for {args.url!r}",
+            f"error: no successful (HTTP 200) snapshot found for {args.original!r}",
             file=sys.stderr,
         )
         if args.from_date or args.to_date:
@@ -219,7 +219,7 @@ def cmd_get(args: argparse.Namespace) -> int:
     ts_str = (
         record.timestamp.strftime("%Y%m%d%H%M%S") if record.timestamp else "unknown"
     )
-    print(f"fetching snapshot {ts_str}  {record.url}", file=sys.stderr)
+    print(f"fetching snapshot {ts_str}  {record.original}", file=sys.stderr)
 
     try:
         response = client.get_memento(record, mode=Mode.original)
@@ -230,7 +230,7 @@ def cmd_get(args: argparse.Namespace) -> int:
         return 1
     except BlockedByRobotsError:
         print(
-            f"error: archive.org blocked access to {record.url!r} (robots.txt)",
+            f"error: archive.org blocked access to {record.original!r} (robots.txt)",
             file=sys.stderr,
         )
         return 1
@@ -268,7 +268,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
     # search
     p_search = sub.add_parser("search", help="list snapshots for a URL via CDX")
-    p_search.add_argument("url", help="URL to search")
+    p_search.add_argument("original", help="URL to search")
     p_search.add_argument(
         "--from",
         dest="from_date",
@@ -289,7 +289,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
     # get
     p_get = sub.add_parser("get", help="fetch the content of a snapshot")
-    p_get.add_argument("url", help="URL to retrieve")
+    p_get.add_argument("original", help="URL to retrieve")
     p_get.add_argument(
         "--timestamp",
         metavar="TS",

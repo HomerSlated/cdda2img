@@ -332,24 +332,25 @@ The PROV block stores provenance and extended metadata that has no natural home 
 | `drive_name`           | Human-readable drive name, e.g. `Plextor PX-716A` |
 | `drive_read_offset`    | Read offset applied during rip, as a signed integer string, e.g. `+30` or `-6` |
 | `drive_write_offset`   | Write offset for this drive (informational), e.g. `-30` |
-| `remastered`           | Remaster status guess: `UNKNOWN` \| `NO` \| `POSSIBLE` \| `YES` |
-| `release_date`         | Release date of this specific release (YYYY, YYYY-MM, or YYYY-MM-DD) |
-| `mb_release_id`        | MusicBrainz release UUID, e.g. `9d8f7a02-3851-4c49-9dc4-b08e7cb0ad7c` |
-| `original_release_date`| First-release date of the release group (YYYY, YYYY-MM, or YYYY-MM-DD) |
-| `discogs_release_id`   | Discogs release ID (integer as decimal string) |
+| `low_dynamic_range`        | `YES` \| `NO`. Derived from EBU R128 album LRA against the user's configured threshold (default 5.0 LU). Absent when no loudness analysis was performed (`--loudness none`) |
+| `original_release_found`   | `YES` when MusicBrainz release-group lookup identified a strictly earlier release of the same logical album. Absent (or unwritten) implies "no earlier release identified" — *not* a guarantee that none exists |
+| `original_release_title`   | Title of the earliest known release in the same MB release-group; present only when `original_release_found = YES` |
+| `original_release_year`    | Year of that earliest release as a 4-digit integer string; present only when `original_release_found = YES` |
+| `release_date`             | Release date of this specific release (YYYY, YYYY-MM, or YYYY-MM-DD) |
+| `mb_release_id`            | MusicBrainz release UUID, e.g. `9d8f7a02-3851-4c49-9dc4-b08e7cb0ad7c` |
+| `original_release_date`    | First-release date of the release group (YYYY, YYYY-MM, or YYYY-MM-DD). This is the raw MB string; for the human-curated trio see `original_release_*` above |
+| `discogs_release_id`       | Discogs release ID (integer as decimal string) |
 
 All keys are optional. A v4.0 writer **SHOULD** emit at minimum `creator` and `created`. A reader **MUST NOT** fail on a missing key.
 
 Values may contain any UTF-8 character except `\n`. Leading and trailing whitespace in values is significant and **MUST** be preserved.
 
-#### 6.3.2 Remaster status values
+#### 6.3.2 Release intelligence
 
-| Value     | Meaning |
-|-----------|---------|
-| `UNKNOWN` | Default; no determination has been made |
-| `NO`      | No evidence of remastering; earliest known release |
-| `POSSIBLE`| Release date ≥ 1991 but no earlier version found; loudness war era |
-| `YES`     | Strong evidence: "remaster"/"deluxe"/"anniversary"/etc. keyword in metadata, or an earlier release of the same album exists |
+The pair `low_dynamic_range` and `original_release_found` replaces the v3-era `remastered` enum. Rationale: `remastered` conflated two unrelated questions (provenance and loudness), and both questions were being answered by heuristic guesses. The v4 fields each carry a single, factual signal:
+
+- `low_dynamic_range` is a *measurement* — we computed the album LRA and compared it to a user-set threshold. A value of `YES` does not imply "loudness war remaster"; it states only that the source is heavily compressed, which can be an artistic choice on an original release (cf. ZZ Top *Eliminator*, 1983).
+- `original_release_found` is a *lookup result* — when present and `YES`, MB's release-group endpoint identified at least one strictly earlier release of the same logical album. Absent means the lookup did not produce a usable answer, not that this disc is the original.
 
 ---
 

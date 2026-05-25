@@ -29,12 +29,6 @@ from typing import NamedTuple
 import musicbrainzngs  # type: ignore[import-untyped]
 
 from cdda2img.lookup_result import (
-    LOUDNESS_WAR_YEAR,
-    REMASTER_KEYWORDS,
-    REMASTERED_NO,
-    REMASTERED_POSSIBLE,
-    REMASTERED_UNKNOWN,
-    REMASTERED_YES,
     DiscMeta,
     TrackMeta,
 )
@@ -119,40 +113,6 @@ def _parse_year(date_str: str | None) -> int | None:
         return int(str(date_str)[:4])
     except (ValueError, IndexError):
         return None
-
-
-def _classify_remaster(
-    title: str, original_year: int | None, current_year: int | None
-) -> str:
-    has_keyword = "remaster" in title.lower()
-    if original_year and original_year < LOUDNESS_WAR_YEAR:
-        if current_year and current_year >= LOUDNESS_WAR_YEAR:
-            return REMASTERED_YES if has_keyword else REMASTERED_POSSIBLE
-        return REMASTERED_NO
-    if current_year and current_year >= LOUDNESS_WAR_YEAR:
-        return REMASTERED_YES if has_keyword else REMASTERED_POSSIBLE
-    return REMASTERED_UNKNOWN
-
-
-def guess_remaster_status(disc: RBIDisc) -> str:
-    """Auto-guess remaster status from the disc's populated metadata.
-
-    Called when disc.remastered_source is UNKNOWN after pre-population.
-    Makes no network requests.
-    """
-    title_lower = (disc.album or "").lower()
-    has_keyword = any(kw in title_lower for kw in REMASTER_KEYWORDS)
-    release_year = _parse_year(disc.release_date)
-    original_year = _parse_year(disc.original_release_date)
-    if has_keyword:
-        return REMASTERED_YES
-    if original_year and release_year and original_year < release_year:
-        return REMASTERED_YES
-    if release_year and release_year >= LOUDNESS_WAR_YEAR:
-        return REMASTERED_POSSIBLE
-    if release_year and release_year < LOUDNESS_WAR_YEAR:
-        return REMASTERED_NO
-    return REMASTERED_UNKNOWN
 
 
 def _artist_credit_name(artist_credits: list) -> str:
@@ -308,11 +268,6 @@ def _parse_release(
         disc_number=disc_number,
         disc_total=disc_total,
         set_title=set_title,
-        remastered_source=_classify_remaster(
-            release.get("title") or "",
-            _parse_year(original_date),
-            _parse_year(date),
-        ),
         source="musicbrainz",
         tracks=tracks,
     )
@@ -483,11 +438,6 @@ def lookup_isrc(isrc: str) -> list[DiscMeta]:
                     mb_release_group_id=rg.get("id") or None,
                     release_date=date or None,
                     original_release_date=original_date or None,
-                    remastered_source=_classify_remaster(
-                        release.get("title") or "",
-                        _parse_year(original_date),
-                        _parse_year(date),
-                    ),
                     source="musicbrainz",
                 )
             )
@@ -549,12 +499,14 @@ def _merge_into_disc(meta: DiscMeta, disc: RBIDisc) -> RBIDisc:
         original_release_date=disc.original_release_date
         or meta.original_release_date
         or None,
-        remastered_source=(
-            meta.remastered_source
-            if disc.remastered_source == REMASTERED_UNKNOWN
-            else disc.remastered_source
-        ),
+        low_dynamic_range=disc.low_dynamic_range,
+        original_release_found=disc.original_release_found,
+        original_release_title=disc.original_release_title,
+        original_release_year=disc.original_release_year,
         mb_release_id=disc.mb_release_id or meta.mb_release_id or None,
+        mb_release_group_id=disc.mb_release_group_id
+        or meta.mb_release_group_id
+        or None,
         set_title=disc.set_title or meta.set_title,
     )
 
@@ -600,12 +552,14 @@ def _overwrite_disc(meta: DiscMeta, disc: RBIDisc) -> RBIDisc:
         original_release_date=meta.original_release_date
         or disc.original_release_date
         or None,
-        remastered_source=(
-            meta.remastered_source
-            if meta.remastered_source != REMASTERED_UNKNOWN
-            else disc.remastered_source
-        ),
+        low_dynamic_range=disc.low_dynamic_range,
+        original_release_found=disc.original_release_found,
+        original_release_title=disc.original_release_title,
+        original_release_year=disc.original_release_year,
         mb_release_id=meta.mb_release_id or disc.mb_release_id or None,
+        mb_release_group_id=meta.mb_release_group_id
+        or disc.mb_release_group_id
+        or None,
         set_title=meta.set_title or disc.set_title,
     )
 
