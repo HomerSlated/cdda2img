@@ -380,8 +380,6 @@ def _add_release_provenance(provenance: dict, disc: RBIDisc) -> None:
             provenance["original_release_year"] = str(disc.original_release_year)
     if disc.release_date:
         provenance["release_date"] = disc.release_date
-    if disc.original_release_date:
-        provenance["original_release_date"] = disc.original_release_date
     if disc.mb_release_id:
         provenance["mb_release_id"] = disc.mb_release_id
     if disc.mb_release_group_id:

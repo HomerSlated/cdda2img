@@ -281,7 +281,7 @@ def _show_record(conn: object, catalogue_id: int) -> None:  # noqa: C901
     assert isinstance(conn, sqlite3.Connection)  # noqa: S101
 
     row = conn.execute(
-        "SELECT album, artist, year, original_year, disc_number, disc_total, "
+        "SELECT album, artist, year, disc_number, disc_total, "
         "track_count, mcn, low_dynamic_range, original_release_found, "
         "original_release_title, original_release_year, "
         "mode, source, ripper, drive, "
@@ -298,7 +298,6 @@ def _show_record(conn: object, catalogue_id: int) -> None:  # noqa: C901
         album,
         artist,
         year,
-        orig_year,
         disc_number,
         disc_total,
         _track_count,
@@ -325,18 +324,27 @@ def _show_record(conn: object, catalogue_id: int) -> None:  # noqa: C901
         f" (disc {disc_number}/{disc_total})" if disc_total and disc_total > 1 else ""
     )
     year_str = f" ({year})" if year else ""
-    orig_str = f"  orig. {orig_year}" if orig_year and orig_year != year else ""
 
     _header(f"{artist} — {album}{year_str}{disc_str}")
-    if orig_str:
-        print(f"  Original year: {orig_year}")
     if mcn:
         print(f"  MCN:           {mcn}")
     if low_dynamic_range is not None:
         print(f"  Low DR:        {'YES' if low_dynamic_range else 'NO'}")
     if original_release_found:
         year_disp = f" ({original_release_year})" if original_release_year else ""
-        print(f"  Original:      {original_release_title or ''}{year_disp}")
+        same_title = (original_release_title or "").strip().lower() == (
+            album or ""
+        ).strip().lower()
+        # Year column may be None when MB returned only an RG date; treat
+        # absence as "matches" so we render "This release" rather than
+        # spuriously claiming a separate original.
+        same_year = (year is None) or (
+            original_release_year is not None and year == original_release_year
+        )
+        if same_title and same_year:
+            print(f"  Released:      This release{year_disp}")
+        else:
+            print(f"  Original:      {original_release_title or ''}{year_disp}")
     if mode and mode != "?":
         print(f"  Mode:          {mode}")
     if source:

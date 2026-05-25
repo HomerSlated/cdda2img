@@ -594,7 +594,7 @@ def extract_data(  # noqa: C901
         _write_bin_format_hint(raw_dir, stem)
         if comment:
             print(f"Created:   {comment}")
-        _print_provenance(prov)
+        _print_provenance(prov, disc_album=disc.title)
 
     if opts.tracks:
         gain_factor: float | None = None
@@ -760,7 +760,39 @@ _BLOCK_NAMES = {
 }
 
 
-def _print_provenance(provenance: dict[str, str]) -> None:
+def _release_intelligence_line(
+    prov: dict[str, str], disc_album: str | None
+) -> str | None:
+    """Return the display line for the release-intelligence section, or None.
+
+    When the disc's MB lookup populated the ``original_release_*`` trio:
+    if title + year match the disc's own album + release-date year, render
+    as ``Released:  This release (YYYY)`` — the disc IS the original. When
+    they differ (e.g. a remaster), render as ``Original:  <title> (YYYY)``.
+    When only ``release_date`` is present (no MB release-group hit), render
+    as a bare ``Released:  <date>``.
+    """
+    if prov.get("original_release_found") == "YES":
+        title = prov.get("original_release_title", "")
+        year = prov.get("original_release_year", "")
+        disc_year = (prov.get("release_date") or "")[:4]
+        same_title = title.strip().lower() == (disc_album or "").strip().lower()
+        # Empty release_date in PROV is common (MB returned only an RG date);
+        # in that case we cannot prove the disc is a reissue, so favour
+        # "This release" — the more informative rendering.
+        same_year = (not disc_year) or (year and disc_year == year)
+        year_disp = f" ({year})" if year else ""
+        if same_title and same_year:
+            return f"Released:  This release{year_disp}"
+        return f"Original:  {title}{year_disp}"
+    if rd := prov.get("release_date"):
+        return f"Released:  {rd}"
+    return None
+
+
+def _print_provenance(
+    provenance: dict[str, str], disc_album: str | None = None
+) -> None:
     if not provenance:
         return
     mode = provenance.get("mode", "?")
@@ -784,16 +816,8 @@ def _print_provenance(provenance: dict[str, str]) -> None:
         print(f"Set:       {set_title}")
     if ldr := provenance.get("low_dynamic_range"):
         print(f"Low DR:    {ldr}")
-    if provenance.get("original_release_found") == "YES":
-        title = provenance.get("original_release_title", "")
-        year = provenance.get("original_release_year", "")
-        year_disp = f" ({year})" if year else ""
-        print(f"Original:  {title}{year_disp}")
-    elif rd := provenance.get("release_date"):
-        extra = f"this release: {rd}"
-        if od := provenance.get("original_release_date"):
-            extra += f", original: {od}"
-        print(f"Dates:     {extra}")
+    if line := _release_intelligence_line(provenance, disc_album):
+        print(line)
 
 
 def _list_info(rbi_file: Path) -> str:  # noqa: C901
@@ -859,16 +883,14 @@ def _list_info(rbi_file: Path) -> str:  # noqa: C901
         lines.append(f"Drive:     {drive_name}  (offset {offset_str})")
     if ldr := prov.get("low_dynamic_range"):
         lines.append(f"Low DR:    {ldr}")
-    if prov.get("original_release_found") == "YES":
-        title = prov.get("original_release_title", "")
-        year = prov.get("original_release_year", "")
-        year_disp = f" ({year})" if year else ""
-        lines.append(f"Original:  {title}{year_disp}")
-    elif rd := prov.get("release_date"):
-        extra = f"this release: {rd}"
-        if od := prov.get("original_release_date"):
-            extra += f", original: {od}"
-        lines.append(f"Dates:     {extra}")
+    # Parse TOC early to know the disc's own album title for the
+    # release-intelligence "This release vs Original" comparison.
+    with open(rbi_file, "rb") as f:
+        f.seek(toc_entry.offset)
+        toc_bytes = f.read(toc_entry.length)
+    disc_for_label = parse_toc(toc_bytes)
+    if line := _release_intelligence_line(prov, disc_for_label.title):
+        lines.append(line)
 
     lines.append("")
 

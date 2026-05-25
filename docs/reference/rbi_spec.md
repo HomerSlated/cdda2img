@@ -333,12 +333,12 @@ The PROV block stores provenance and extended metadata that has no natural home 
 | `drive_read_offset`    | Read offset applied during rip, as a signed integer string, e.g. `+30` or `-6` |
 | `drive_write_offset`   | Write offset for this drive (informational), e.g. `-30` |
 | `low_dynamic_range`        | `YES` \| `NO`. Derived from EBU R128 album LRA against the user's configured threshold (default 5.0 LU). Absent when no loudness analysis was performed (`--loudness none`) |
-| `original_release_found`   | `YES` when MusicBrainz release-group lookup identified a strictly earlier release of the same logical album. Absent (or unwritten) implies "no earlier release identified" — *not* a guarantee that none exists |
-| `original_release_title`   | Title of the earliest known release in the same MB release-group; present only when `original_release_found = YES` |
+| `original_release_found`   | `YES` when MB release-group lookup (primary) or title-fuzz fallback yielded a usable answer. Absent / unwritten = lookup found nothing — *not* a guarantee that no earlier release exists |
+| `original_release_title`   | Title of the earliest known release of the same logical album. Present only when `original_release_found = YES`. When this matches the disc's own album and `original_release_year` matches the disc's release year, the display renders "This release ($year)"; otherwise "Original: $title ($year)" |
 | `original_release_year`    | Year of that earliest release as a 4-digit integer string; present only when `original_release_found = YES` |
 | `release_date`             | Release date of this specific release (YYYY, YYYY-MM, or YYYY-MM-DD) |
 | `mb_release_id`            | MusicBrainz release UUID, e.g. `9d8f7a02-3851-4c49-9dc4-b08e7cb0ad7c` |
-| `original_release_date`    | First-release date of the release group (YYYY, YYYY-MM, or YYYY-MM-DD). This is the raw MB string; for the human-curated trio see `original_release_*` above |
+| `mb_release_group_id`      | MusicBrainz release-group UUID (used to re-run the original-release lookup from an existing RBI without redoing the disc-ID query) |
 | `discogs_release_id`       | Discogs release ID (integer as decimal string) |
 
 All keys are optional. A v4.0 writer **SHOULD** emit at minimum `creator` and `created`. A reader **MUST NOT** fail on a missing key.

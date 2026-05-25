@@ -18,7 +18,7 @@ from pathlib import Path
 
 log = logging.getLogger(__name__)
 
-_SCHEMA_VERSION = "2"
+_SCHEMA_VERSION = "3"
 _APP_NAME = "cdda2img"
 
 
@@ -56,18 +56,20 @@ CREATE TABLE IF NOT EXISTS catalogue (
     ripper           TEXT,
     drive            TEXT,
     -- Release intelligence (see docs/reference/rbi_spec.md §6.3.2):
-    --   low_dynamic_range:        derived from EBU R128 album LRA vs Config.low_dr_threshold.
-    --                             NULL = not measured (RG skipped); 0 = no; 1 = yes.
-    --   original_release_*:       MB release-group lookup result (auto + user-curated trio).
-    --                             original_release_found is the searchable boolean.
-    --   original_year:            raw MB release-group first-release-date (context only).
-    --                             Kept distinct from original_release_year so the
-    --                             user-confirmed value isn't overwritten by the raw signal.
+    --   low_dynamic_range:        derived from EBU R128 album LRA vs
+    --                             Config.low_dr_threshold. NULL = not
+    --                             measured; 0 = no; 1 = yes.
+    --   original_release_*:       MB release-group lookup result (the
+    --                             auto-detected trio + user override).
+    --                             original_release_found is the boolean
+    --                             gate; the trio is shown as either
+    --                             "This release (year)" when title+year
+    --                             match the disc itself, or "Original:
+    --                             title (year)" when they differ.
     low_dynamic_range          INTEGER,
     original_release_found     INTEGER NOT NULL DEFAULT 0,
     original_release_title     TEXT,
-    original_release_year      INTEGER,
-    original_year              INTEGER
+    original_release_year      INTEGER
 );
 
 CREATE TABLE IF NOT EXISTS catalogue_tracks (
@@ -357,7 +359,6 @@ def _register_impl(rbi_path: Path, catalogue_path: Path | None) -> None:  # noqa
     artist = disc.performer or ""
     mcn = disc.catalog
     year = _parse_year(prov.get("release_date"))
-    original_year = _parse_year(prov.get("original_release_date"))
     low_dr_str = prov.get("low_dynamic_range")
     low_dynamic_range: int | None = (
         1 if low_dr_str == "YES" else 0 if low_dr_str == "NO" else None
@@ -421,8 +422,8 @@ def _register_impl(rbi_path: Path, catalogue_path: Path | None) -> None:  # noqa
                     file_basename, file_path, file_size,
                     registered_at, created_by, mode, source, ripper, drive,
                     low_dynamic_range, original_release_found,
-                    original_release_title, original_release_year, original_year)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    original_release_title, original_release_year)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (
                     mcn,
                     album,
@@ -447,7 +448,6 @@ def _register_impl(rbi_path: Path, catalogue_path: Path | None) -> None:  # noqa
                     original_release_found,
                     original_release_title,
                     original_release_year,
-                    original_year,
                 ),
             )
             catalogue_id = cur.lastrowid

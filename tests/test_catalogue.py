@@ -63,7 +63,7 @@ def test_open_catalogue_db_sets_meta(tmp_path):
             "SELECT value FROM db_meta WHERE key='schema_version'"
         ).fetchone()
         assert row is not None
-        assert row[0] == "2"
+        assert row[0] == "3"
     finally:
         conn.close()
 
