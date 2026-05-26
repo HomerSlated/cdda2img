@@ -69,8 +69,8 @@ Standalone utility scripts live in `tools/` (tracked, not part of the installed 
 
 - **`tools/measure_write_offset.py`** — burn-and-read-back write offset measurement.
   Generates a synthetic test signal, burns it via `cdrdao write`, rips via `cdrdao read-cd`,
-  and measures where the known pulses landed. Accumulates cycles in
-  `rips/write_offset_results.toml`. Run from project root:
+  and measures where the known pulses landed. Accumulates cycles per drive in
+  `rips/write_offset_<drive-slug>.toml`. Run from project root:
   ```
   uv run python tools/measure_write_offset.py --device /dev/sr0 --read-offset 30
   ```

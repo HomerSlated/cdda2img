@@ -22,7 +22,8 @@ Burn correction (future b subcommand) — apply -W shift to the full disc stream
 
 Each cycle burns a synthetic test signal to a blank disc, rips it back with the
 read offset corrected, and measures where the known noise pulses landed.
-Results accumulate in rips/write_offset_results.toml; re-run to add cycles.
+Results accumulate per drive in rips/write_offset_<drive-slug>.toml; re-run to
+add cycles.
 """
 
 from __future__ import annotations
