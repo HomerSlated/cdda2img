@@ -69,7 +69,14 @@ classDiagram
         disc_number: uint8
         disc_total: uint8
         catalog: string?
-        remastered_source: enum
+        low_dynamic_range: bool?
+        original_release_found: bool
+        original_release_title: string?
+        original_release_year: int?
+        pre_emphasis: bool?
+        mb_release_id: string?
+        mb_release_group_id: string?
+        discogs_release_id: int?
     }
     class RBITocEntry {
         track_number: uint8
@@ -118,7 +125,6 @@ classDiagram
         album: string?
         artist: string?
         source: enum
-        remastered_source: enum
     }
     class TrackMeta {
         number: uint8?
@@ -220,18 +226,39 @@ The central in-memory representation of a disc. Built up across pipeline stages.
 
 ```typescript
 interface RBIDisc {
-  album: string                   // non-empty; confirmed by metadata menu
-  artist: string                  // non-empty; confirmed by metadata menu
-  disc_number: uint8              // 1-based; 1 for single-disc releases
-  disc_total: uint8               // ≥ disc_number; 1 for single-disc releases
-  catalog: string?                // MCN: exactly 13 decimal digits; null if absent
-  disc_id: string?                // PTI 0x86 catalogue/label reference; null if absent
-  tracks: RBITocEntry[]           // 1–99 entries in disc order
-  release_date: string?           // "YYYY", "YYYY-MM", or "YYYY-MM-DD"
-  original_release_date: string?  // release-group first-release date
-  remastered_source: "UNKNOWN" | "NO" | "POSSIBLE" | "YES"
-  mb_release_id: string?          // MusicBrainz release UUID (hyphenated 8-4-4-4-12 form)
-  set_title: string?              // box set title when this disc has its own album title
+  album: string                       // non-empty; confirmed by metadata menu
+  artist: string                      // non-empty; confirmed by metadata menu
+  disc_number: uint8                  // 1-based; 1 for single-disc releases
+  disc_total: uint8                   // ≥ disc_number; 1 for single-disc releases
+  catalog: string?                    // MCN: exactly 13 decimal digits with valid GS1 check
+                                      //   digit; null if absent. R13: rejects bad check digits.
+  disc_id: string?                    // PTI 0x86 catalogue/label reference; null if absent
+  tracks: RBITocEntry[]               // 1–99 entries in disc order
+  release_date: string?               // "YYYY", "YYYY-MM", or "YYYY-MM-DD"
+  original_release_date: string?      // release-group first-release date
+  // ----- v4.0 release-intelligence fields (replaces v3-era remastered_source enum):
+  low_dynamic_range: bool?            // measurement: EBU R128 album LRA < user threshold (default
+                                      //   5.0 LU). null = loudness analysis was skipped
+                                      //   (--loudness none). YES does not imply "loudness war
+                                      //   remaster" — it states only that the source is
+                                      //   heavily compressed (cf. ZZ Top *Eliminator*, 1983).
+  original_release_found: bool        // lookup result: true when MB RG primary path or
+                                      //   title-fuzz fallback identified ≥1 strictly earlier
+                                      //   release of the same logical album.
+  original_release_title: string?     // title of the earliest known release; populated only
+                                      //   when original_release_found is true.
+  original_release_year: int?         // 4-digit year of the earliest known release; populated
+                                      //   only when original_release_found is true.
+  pre_emphasis: bool?                 // aggregate disc-level pre-emphasis (R14). true if any
+                                      //   track has CONTROL bit 0. null = not captured by the
+                                      //   source parser (today only cdrdao_reader populates).
+                                      //   Used as a year ≤ 1986 upper-bound on original-release
+                                      //   candidates.
+  // ----- Identifiers for cross-source corroboration:
+  mb_release_id: string?              // MusicBrainz release UUID (hyphenated 8-4-4-4-12 form)
+  mb_release_group_id: string?        // MB release-group UUID (drives the original-release lookup)
+  discogs_release_id: int?            // Discogs release ID (drives the R11 master-year corroboration)
+  set_title: string?                  // box set title when this disc has its own album title
 }
 ```
 
@@ -388,13 +415,15 @@ audio_start_frame = start_frame + pregap_frames
 
 #### `DiscMeta` / `TrackMeta`
 
-Produced by all four lookup sources (CDDB, MusicBrainz, AcoustID, Discogs) and by CD-Text extraction. All fields except `source` and `remastered_source` are optional — any individual lookup may return partial data.
+Produced by all four lookup sources (CDDB, MusicBrainz, AcoustID, Discogs) and by CD-Text extraction. All fields except `source` are optional — any individual lookup may return partial data.
 
 ```typescript
 interface DiscMeta {
   album: string?
   artist: string?
-  catalog: string?                  // MCN / EAN-13 / barcode
+  catalog: string?                  // MCN / EAN-13 / barcode. R13: passed through
+                                    //   barcode.normalize_barcode at every ingress;
+                                    //   13 digits + valid GS1 check digit, or null.
   mb_disc_id: string?               // SHA-1 disc ID, base64url-encoded, 28 chars
   mb_release_id: string?            // MusicBrainz release UUID (hyphenated)
   mb_release_group_id: string?      // MusicBrainz release group UUID
@@ -407,7 +436,6 @@ interface DiscMeta {
   disc_number: uint8?               // 1-based; null = unknown
   disc_total: uint8?                // null = unknown
   set_title: string?                // box set title when disc has its own album title
-  remastered_source: "UNKNOWN" | "NO" | "POSSIBLE" | "YES"
   source: "cdtext" | "embedded" | "cddb" | "musicbrainz" | "acoustid" | "discogs" | "manual"
   tracks: TrackMeta[]               // empty if source did not return track-level data
 }
@@ -416,19 +444,24 @@ interface TrackMeta {
   number: uint8?       // 1-based; null if source did not provide
   title: string?
   performer: string?   // track-level performer; null if same as disc artist or unknown
-  isrc: string?        // 12 chars, no hyphens
+  isrc: string?        // 12 chars, no hyphens. R13: passed through validators.validate_isrc
+                       //   at MB ingress and merge sites; malformed values are dropped.
   duration_ms: uint32? // from MusicBrainz only; for track-length verification against TOC
 }
 ```
 
-#### Merge rule for `DiscMeta`
+#### Merge rule for `DiscMeta` → `RBIDisc`
 
-When two `DiscMeta` values are merged (base priority over update), the result follows:
+The DiscMeta-to-RBIDisc merge is the canonical confluence: `mb_lookup._merge_into_disc(meta, disc)` (and its sibling `_overwrite_disc` for the menu's "Overwrite All" mode). The DiscMeta-to-DiscMeta merge step from the v3 design is no longer used (the `merge_disc_meta` helper was removed under R17).
 
-1. Any non-null scalar field from `base` is kept; null fields are filled from `update`.
-2. `tracks`: use `base.tracks` if non-empty; otherwise use `update.tracks`.
-3. `remastered_source`: keep `base` value unless it is `"UNKNOWN"`, in which case use `update`.
-4. `source`: always keep `base.source` — the earlier, higher-priority source wins.
+Merge semantics:
+
+1. Any non-blank disc-side scalar field is kept; blank fields are filled from `meta`.
+2. `tracks`: per-track, preserve `entry.title` / `entry.performer` / `entry.isrc` when non-blank; otherwise fill from the matching `TrackMeta`.
+3. ISRC is filtered through `validators.validate_isrc` at the merge chokepoint (R13).
+4. `mb_release_id`, `mb_release_group_id`, `discogs_release_id` use disc-then-meta non-blank-wins ordering, so prior identifiers are not lost.
+
+The pre-v4 `remastered_source` enum has been replaced by independent fields that carry single factual signals — see `RBIDisc.low_dynamic_range` (measurement) and `RBIDisc.original_release_*` (lookup result). Conflating the two questions (loudness and provenance) into one enum was the design smell R5/R11 fixed.
 
 ---
 

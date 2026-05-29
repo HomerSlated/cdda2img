@@ -13,8 +13,6 @@ Menu structure:
 
 from __future__ import annotations
 
-import copy
-import sys
 import tempfile
 import wave
 from pathlib import Path
@@ -372,11 +370,12 @@ def _discogs_execute_search(
 ) -> RBIDisc:
     """Run one Discogs search (barcode or structured artist/title) and apply if confirmed."""
     from cdda2img import discogs_lookup
+    from cdda2img.barcode import normalize_barcode
     from cdda2img.mb_lookup import _merge_into_disc, _overwrite_disc
 
     if use_barcode:
         effective = barcode or disc.catalog or ""
-        normalized = discogs_lookup.normalize_barcode(effective) or effective
+        normalized = normalize_barcode(effective) or effective
         label = f"barcode {normalized!r}"
         results = discogs_lookup.search_by_barcode(normalized)
     else:
@@ -951,6 +950,7 @@ def run_metadata_menu(
     disc: RBIDisc,
     source_pcm: Path | None = None,
     source_wavs: list[Path] | None = None,
+    ar_summary: str | None = None,
 ) -> RBIDisc:
     """Display current metadata and run the interactive enrichment/confirmation menu.
 
@@ -958,53 +958,22 @@ def run_metadata_menu(
     extraction for AcoustID fingerprinting.
     *source_wavs* — per-track WAV list (create pipeline): used directly for
     AcoustID fingerprinting without extraction.
+    *ar_summary* — pre-rendered AccurateRip report (rip pipeline). When
+    provided, an AR_PAUSE state is shown before the main menu so the user
+    can review the verification before editing metadata.
 
     Returns the (possibly updated) RBIDisc. Returns *disc* unchanged when stdin
     is not a TTY (batch/scripted mode).
+
+    Backed by ``menu_state.MenuController`` — the top-level event loop is
+    a state machine over ``MenuState``. Each state's renderer clears the
+    screen and draws from origin (fixed-position / redraw semantics).
     """
-    if not sys.stdin.isatty():
-        return disc
+    from cdda2img.menu_state import MenuController
 
-    _original_disc = copy.deepcopy(disc)  # savepoint for Reset
-    seed_artist = disc.artist or ""  # immutable anchor for search fields
-    seed_title = disc.album or ""
-    mb_rg_id: str | None = None  # MB release group ID, threaded across sub-menus
-
-    while True:
-        _header("Metadata")
-        _print_disc_summary(disc)
-        print()
-        print("  [a]  Accept and continue")
-        print("  [f]  Fetch metadata from remote services")
-        print("  [e]  Edit metadata")
-        print("  [r]  Find original release")
-        print("  [u]  Reset to original (undo all changes this session)")
-        print("  [c]  Clear all metadata")
-        print()
-        choice = _prompt("  > ").strip().lower()
-
-        if choice == "a":
-            return disc
-        elif choice == "f":
-            disc, mb_rg_id = _fetch_menu(
-                disc,
-                mb_rg_id,
-                source_pcm=source_pcm,
-                source_wavs=source_wavs,
-                seed_artist=seed_artist,
-                seed_title=seed_title,
-            )
-        elif choice == "e":
-            disc = _edit_menu(disc)
-        elif choice == "r":
-            disc, mb_rg_id = _original_release_menu(disc, mb_rg_id)
-        elif choice == "u":
-            disc = copy.deepcopy(_original_disc)
-            mb_rg_id = None
-            print("  Reset to original metadata.")
-        elif choice == "c":
-            disc = _clear_disc(disc)
-            mb_rg_id = None
-            print("  All metadata cleared.")
-        else:
-            print("  Unknown command. Use a / f / e / r / u / c.")
+    return MenuController(
+        disc,
+        source_pcm=source_pcm,
+        source_wavs=source_wavs,
+        ar_summary=ar_summary,
+    ).run()

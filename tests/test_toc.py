@@ -2,8 +2,8 @@
 test_toc.py — Round-trip and canonical-format tests for generate_toc / parse_toc.
 """
 
+from cdda2img.barcode import normalize_barcode
 from cdda2img.cdrdao_reader import parsed_to_rbi_disc
-from cdda2img.discogs_lookup import normalize_barcode
 from cdda2img.rbi_format import RBIDisc, RBITocEntry
 from cdda2img.toc import generate_toc, sanitize_title
 from cdda2img.toc_parser import parse_toc

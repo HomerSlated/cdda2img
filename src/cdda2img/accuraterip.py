@@ -378,31 +378,34 @@ def verify_rip(
     return ARVerifyResult(tracks=results, transport=transport, dbar_sha256=dbar_sha256)
 
 
-def print_ar_report(results: list[ARTrackResult], read_offset: int = 0) -> None:
-    """Print a per-track AccurateRip verification report to stdout."""
+def format_ar_report(results: list[ARTrackResult], read_offset: int = 0) -> str:
+    """Return a per-track AccurateRip verification report as a multi-line string.
+
+    Used by the metadata menu's AR_PAUSE state to render the report into a
+    fixed-position panel. ``print_ar_report`` is a thin wrapper that prints
+    this string verbatim — the two functions are otherwise identical.
+    """
     if not results:
-        return
+        return ""
     if results[0].max_confidence is None:
-        print("  AccurateRip: disc not found in database")
-        return
+        return "AccurateRip: disc not found in database"
 
     n = len(results)
     n_ok = sum(
         1 for r in results if r.confidence_v1 is not None or r.confidence_v2 is not None
     )
 
-    # All tracks mismatch on a disc that IS in the database — almost always a
-    # drive offset configuration gap, not data corruption.
+    # All tracks mismatch on a disc that IS in the database — almost always
+    # a drive offset configuration gap, not data corruption.
     if n_ok == 0:
         max_conf = max(r.max_confidence or 0 for r in results)
-        print(
-            f"  AccurateRip: disc found (max confidence {max_conf}) but no CRC match"
-            f" at read_offset={read_offset}"
+        return (
+            f"AccurateRip: disc found (max confidence {max_conf}) but no CRC "
+            f"match at read_offset={read_offset}\n"
+            f"  Add a [[drives]] entry in ~/.config/cdda2img/cdda2img.toml"
         )
-        print("    Add a [[drives]] entry in ~/.config/cdda2img/cdda2img.toml")
-        return
 
-    print("  AccurateRip:")
+    lines: list[str] = ["AccurateRip:"]
     for r in results:
         if r.confidence_v1 is not None:
             status = f"OK  [conf {r.confidence_v1}/{r.max_confidence}]"
@@ -410,13 +413,23 @@ def print_ar_report(results: list[ARTrackResult], read_offset: int = 0) -> None:
             status = f"OK v2  [conf {r.confidence_v2}/{r.max_confidence}]"
         else:
             status = f"MISMATCH  [max conf {r.max_confidence}]"
-        print(f"    Track {r.track:2d}: v1={r.v1_crc}  {status}")
+        lines.append(f"  Track {r.track:2d}: v1={r.v1_crc}  {status}")
 
     if n_ok == n:
         confs = [r.confidence_v1 or r.confidence_v2 or 0 for r in results]
-        print(f"    {n}/{n} tracks verified (min confidence {min(confs)})")
+        lines.append(f"  {n}/{n} tracks verified (min confidence {min(confs)})")
     else:
-        print(f"    {n_ok}/{n} tracks verified ({n - n_ok} mismatch)")
+        lines.append(f"  {n_ok}/{n} tracks verified ({n - n_ok} mismatch)")
+    return "\n".join(lines)
+
+
+def print_ar_report(results: list[ARTrackResult], read_offset: int = 0) -> None:
+    """Print a per-track AccurateRip verification report to stdout."""
+    text = format_ar_report(results, read_offset)
+    if text:
+        # Indent two spaces to match the legacy formatting.
+        for line in text.splitlines():
+            print(f"  {line}")
 
 
 # ---------------------------------------------------------------------------

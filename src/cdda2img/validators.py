@@ -3,7 +3,7 @@ validators.py — Shared format / check-digit validators (R13).
 
 Two validators, both narrow scope:
   * ``is_valid_gtin13`` — GS1 §1.3.1 Modulo-10 check digit (EAN-13 / UPC-A).
-    Used by ``discogs_lookup.normalize_barcode`` to reject 13-digit strings
+    Used by ``barcode.normalize_barcode`` to reject 13-digit strings
     whose check digit is wrong (e.g. typo in a manual override).
   * ``validate_isrc`` — ISO 3901 structural check
     (``^[A-Z]{2}[A-Z0-9]{3}\\d{7}$``). Used by ``mb_lookup`` to drop
@@ -45,9 +45,10 @@ def gtin13_check_digit(twelve_digits: str) -> int:
 def is_valid_gtin13(thirteen_digits: str) -> bool:
     """Return True iff *thirteen_digits* is a 13-digit string with a valid check digit.
 
-    Used as a final gate after ``normalize_barcode`` has stripped non-digits
-    and applied UPC-A → GTIN-13 padding. Non-13-digit / non-digit input
-    returns False without raising — callers want a clean boolean here.
+    Used as a final gate after ``barcode.normalize_barcode`` has stripped
+    non-digits and applied UPC-A → GTIN-13 padding. Non-13-digit /
+    non-digit input returns False without raising — callers want a clean
+    boolean here.
     """
     if len(thirteen_digits) != 13 or not thirteen_digits.isdigit():
         return False

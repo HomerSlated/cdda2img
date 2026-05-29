@@ -11,8 +11,8 @@ from __future__ import annotations
 import importlib.metadata
 import logging
 import os
-import re
 
+from cdda2img.barcode import normalize_barcode
 from cdda2img.lookup_result import DiscMeta, TrackMeta
 
 log = logging.getLogger(__name__)
@@ -65,30 +65,6 @@ def lookup_master_year(release_id: int) -> int | None:
     except Exception as exc:
         log.debug("Discogs master year lookup failed for %s: %s", release_id, exc)
         return None
-
-
-def normalize_barcode(raw: str | None) -> str | None:
-    """Normalize a raw barcode to GTIN-13 (EAN-13), or return None.
-
-    Strips non-digit characters; pads a 12-digit UPC-A with a leading '0'
-    (GS1 §1.3.1 Table 1-9: GTIN-12 → GTIN-13). Rejects anything that isn't
-    exactly 13 digits after stripping and padding. R13: also rejects
-    13-digit candidates whose GS1 §1.3.1 check digit is wrong (catches
-    typos / digit transpositions in manual overrides or upstream data).
-    """
-    from cdda2img.validators import is_valid_gtin13
-
-    if not raw:
-        return None
-    digits = re.sub(r"\D", "", raw)
-    if len(digits) == 12:
-        digits = "0" + digits
-    if len(digits) != 13:
-        return None
-    if not is_valid_gtin13(digits):
-        log.warning("Rejecting barcode with invalid check digit: %r", raw)
-        return None
-    return digits
 
 
 def _get_client():
@@ -284,14 +260,28 @@ def search_releases(
 
 
 def search_by_barcode(barcode: str) -> list[DiscMeta]:
-    """Lookup by barcode (EAN-13 / UPC). Returns [] if token not set or on error."""
+    """Lookup by barcode (EAN-13 / UPC). Returns [] if token not set or on error.
+
+    R7: results cached in ``discogs_barcode`` with a 30-day TTL.
+    """
+    from cdda2img.lookup_cache import (
+        get_cached_discogs_barcode,
+        put_cached_discogs_barcode,
+    )
+
+    cached = get_cached_discogs_barcode(barcode)
+    if cached is not None:
+        log.debug("Discogs barcode cache hit: %s", barcode)
+        return cached
     client = _get_client()
     if not client:
         return []
     try:
         results = client.search(barcode, type="release")
         page1 = results.page(1)
-        return [_parse_result(r) for r in page1[:25]]
+        parsed = [_parse_result(r) for r in page1[:25]]
     except Exception as exc:
         log.debug("Discogs barcode search failed: %s", exc)
         return []
+    put_cached_discogs_barcode(barcode, parsed)
+    return parsed

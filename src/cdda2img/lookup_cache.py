@@ -1,10 +1,13 @@
 """
 lookup_cache.py — SQLite cache for remote lookups (R7).
 
-Scoped to **MB disc-ID lookups** in the initial implementation. The other
-three caches planned by the analysis report — ISRC lookups, Discogs
-barcode lookups, CDDB disc-ID lookups — follow the same shape and can
-be added later by replicating the `disc_id_lookups` table pattern.
+Four tables, all following the same ``(key, fetched_at, payload)`` shape:
+
+  * ``disc_id_lookups``  — MB disc-ID  →  DiscMeta[]      (30-day TTL)
+  * ``isrc_lookups``     — MB ISRC     →  DiscMeta[]      (infinite TTL,
+        because the ISRC→recording mapping is immutable in practice)
+  * ``discogs_barcode``  — barcode     →  DiscMeta[]      (30-day TTL)
+  * ``cddb_lookups``     — CDDB id     →  DiscMeta[]      (30-day TTL)
 
 The cache co-locates with `drive_offsets.db` under XDG data home but
 lives in a separate SQLite file (`lookup_cache.db`) so that a cache
@@ -12,14 +15,14 @@ delete / corruption / TTL eviction can never damage the authoritative
 AccurateRip drive catalogue.
 
 Cache semantics:
-  * **TTL:** 30 days. Stale entries are treated as misses and over-written
-    on the next successful fetch.
+  * **TTL:** per-table (see above). Stale entries are treated as misses
+    and over-written on the next successful fetch.
   * **Failure-tolerant:** cache open / read / write errors degrade to
     "behave as if uncached". The cache is never authoritative — a miss
-    always falls through to a live MB query.
-  * **Empty results are cacheable.** An MB disc-ID that returns 0 matches
-    today will almost certainly return 0 again tomorrow; caching the empty
-    list saves the network round-trip.
+    always falls through to a live query.
+  * **Empty results are cacheable.** An MB disc-ID that returns 0
+    matches today will almost certainly return 0 again tomorrow;
+    caching the empty list saves the network round-trip.
 """
 
 from __future__ import annotations
@@ -37,8 +40,14 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
-# 30 days. Matches the drive-offsets catalogue cooldown.
+# 30 days. Matches the drive-offsets catalogue cooldown. Applies to
+# disc-ID, Discogs-barcode, and CDDB tables.
 _CACHE_TTL_SECONDS = 30 * 86400
+
+# ISRC mappings are immutable in practice (an ISRC is bound to a single
+# recording for its lifetime). A None TTL is the in-band signal for
+# "never expires"; consumers must handle None explicitly.
+_ISRC_CACHE_TTL_SECONDS: int | None = None
 
 
 def cache_db_path() -> Path:
@@ -51,6 +60,21 @@ def cache_db_path() -> Path:
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS disc_id_lookups (
     mb_disc_id TEXT PRIMARY KEY,
+    fetched_at INTEGER NOT NULL,
+    payload TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS isrc_lookups (
+    isrc TEXT PRIMARY KEY,
+    fetched_at INTEGER NOT NULL,
+    payload TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS discogs_barcode (
+    barcode TEXT PRIMARY KEY,
+    fetched_at INTEGER NOT NULL,
+    payload TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS cddb_lookups (
+    cddb_disc_id TEXT PRIMARY KEY,
     fetched_at INTEGER NOT NULL,
     payload TEXT NOT NULL
 );
@@ -81,13 +105,10 @@ def _deserialise_meta(d: dict) -> DiscMeta:
     )
 
 
-def get_cached_disc_id_lookup(mb_disc_id: str) -> list[DiscMeta] | None:
-    """Return the cached lookup result for *mb_disc_id*, or None.
-
-    Returns None on cache miss, TTL expiry, deserialisation failure, or
-    any sqlite error — callers MUST treat None as "no cache" and fall
-    through to a live network query.
-    """
+def _get_generic(
+    table: str, key_col: str, key: str, ttl_seconds: int | None
+) -> list[DiscMeta] | None:
+    """Generic cache read. *ttl_seconds=None* means "never expires"."""
     try:
         conn = _open_cache_db()
     except sqlite3.Error as exc:
@@ -95,26 +116,28 @@ def get_cached_disc_id_lookup(mb_disc_id: str) -> list[DiscMeta] | None:
         return None
     try:
         row = conn.execute(
-            "SELECT fetched_at, payload FROM disc_id_lookups WHERE mb_disc_id = ?",
-            (mb_disc_id,),
+            f"SELECT fetched_at, payload FROM {table} WHERE {key_col} = ?",  # noqa: S608
+            (key,),
         ).fetchone()
         if row is None:
             return None
         fetched_at, payload = row
-        if time.time() - fetched_at > _CACHE_TTL_SECONDS:
+        if ttl_seconds is not None and time.time() - fetched_at > ttl_seconds:
             return None
         try:
             data = json.loads(payload)
             return [_deserialise_meta(d) for d in data]
         except (TypeError, ValueError, KeyError) as exc:
-            log.warning("lookup_cache deserialise failed for %s: %s", mb_disc_id, exc)
+            log.warning(
+                "lookup_cache deserialise failed for %s/%s: %s", table, key, exc
+            )
             return None
     finally:
         conn.close()
 
 
-def put_cached_disc_id_lookup(mb_disc_id: str, metas: list[DiscMeta]) -> None:
-    """Write *metas* to the cache for *mb_disc_id*. Over-writes any prior entry."""
+def _put_generic(table: str, key_col: str, key: str, metas: list[DiscMeta]) -> None:
+    """Generic cache write. Over-writes any prior entry."""
     try:
         conn = _open_cache_db()
     except sqlite3.Error as exc:
@@ -123,12 +146,55 @@ def put_cached_disc_id_lookup(mb_disc_id: str, metas: list[DiscMeta]) -> None:
     try:
         payload = json.dumps([_serialise_meta(m) for m in metas])
         conn.execute(
-            "INSERT OR REPLACE INTO disc_id_lookups "
-            "(mb_disc_id, fetched_at, payload) VALUES (?, ?, ?)",
-            (mb_disc_id, int(time.time()), payload),
+            f"INSERT OR REPLACE INTO {table} "  # noqa: S608
+            f"({key_col}, fetched_at, payload) VALUES (?, ?, ?)",
+            (key, int(time.time()), payload),
         )
         conn.commit()
     except sqlite3.Error as exc:
-        log.warning("lookup_cache write failed for %s: %s", mb_disc_id, exc)
+        log.warning("lookup_cache write failed for %s/%s: %s", table, key, exc)
     finally:
         conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Per-table thin wrappers — each pins (table, key_col, ttl).
+# ---------------------------------------------------------------------------
+
+
+def get_cached_disc_id_lookup(mb_disc_id: str) -> list[DiscMeta] | None:
+    """R7: cached MB disc-ID lookup. 30-day TTL."""
+    return _get_generic("disc_id_lookups", "mb_disc_id", mb_disc_id, _CACHE_TTL_SECONDS)
+
+
+def put_cached_disc_id_lookup(mb_disc_id: str, metas: list[DiscMeta]) -> None:
+    _put_generic("disc_id_lookups", "mb_disc_id", mb_disc_id, metas)
+
+
+def get_cached_isrc_lookup(isrc: str) -> list[DiscMeta] | None:
+    """R7: cached MB ISRC lookup. Infinite TTL — ISRC mappings are immutable."""
+    return _get_generic("isrc_lookups", "isrc", isrc, _ISRC_CACHE_TTL_SECONDS)
+
+
+def put_cached_isrc_lookup(isrc: str, metas: list[DiscMeta]) -> None:
+    _put_generic("isrc_lookups", "isrc", isrc, metas)
+
+
+def get_cached_discogs_barcode(barcode: str) -> list[DiscMeta] | None:
+    """R7: cached Discogs barcode lookup. 30-day TTL."""
+    return _get_generic("discogs_barcode", "barcode", barcode, _CACHE_TTL_SECONDS)
+
+
+def put_cached_discogs_barcode(barcode: str, metas: list[DiscMeta]) -> None:
+    _put_generic("discogs_barcode", "barcode", barcode, metas)
+
+
+def get_cached_cddb_lookup(cddb_disc_id: str) -> list[DiscMeta] | None:
+    """R7: cached CDDB disc-ID lookup. 30-day TTL."""
+    return _get_generic(
+        "cddb_lookups", "cddb_disc_id", cddb_disc_id, _CACHE_TTL_SECONDS
+    )
+
+
+def put_cached_cddb_lookup(cddb_disc_id: str, metas: list[DiscMeta]) -> None:
+    _put_generic("cddb_lookups", "cddb_disc_id", cddb_disc_id, metas)

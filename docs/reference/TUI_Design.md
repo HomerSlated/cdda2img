@@ -46,8 +46,8 @@ Two top-level modes, switchable from the header or via a tab bar:
 | Element | Type | Notes |
 |---------|------|-------|
 | Input directory | Path field + browse | Shows resolved path; warns if empty or no audio files found |
-| Mode | Toggle: `Master` / `Remaster` | Master = verbatim; Remaster = silence trim + RG |
-| Loudness | Radio: `ReplayGain 2.0` / `None` | Only visible in Remaster mode |
+| Silence | Toggle: `trim` / `notrim` | `trim` = remove leading/trailing silence and add 2 s inter-track gap; `notrim` = preserve source as-is |
+| Loudness | Radio: `ReplayGain 2.0` / `None` | Measure EBU R128 and embed RG block, or skip loudness analysis entirely |
 | Strategy | Dropdown/radio: `fcfs` / `aatc` / `bech` / `ball` | With one-line description of each |
 | Disc count | Read-only display | Auto-computed from strategy + file list |
 | Output location | Path field | Defaults to current directory |

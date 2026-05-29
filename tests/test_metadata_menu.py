@@ -295,7 +295,7 @@ def test_discogs_parse_full_release_falls_back_to_first_barcode():
 
 def test_normalize_barcode_eleven_digits_returns_none():
     """Printed barcode without check digit (11 digits) is rejected, not silently mangled."""
-    from cdda2img.discogs_lookup import normalize_barcode
+    from cdda2img.barcode import normalize_barcode
 
     assert normalize_barcode("0 7599-23774-2") is None
 

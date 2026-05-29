@@ -7,7 +7,7 @@ import re
 import wave
 from pathlib import Path
 
-from cdda2img.discogs_lookup import normalize_barcode
+from cdda2img.barcode import normalize_barcode
 from cdda2img.rbi_format import CD_FRAMES_PER_SECOND, RBIDisc, RBITocEntry
 
 _TITLE_REPLACEMENTS: dict[str, str] = {

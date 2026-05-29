@@ -797,12 +797,12 @@ def _collect_barcode_candidates(
     candidate list as a separate, deductive step. *barcode_hints* is the R16
     tuple form ``(mb_release_id, barcode)``; the MBID is unused here.
     """
-    from cdda2img import discogs_lookup
+    from cdda2img.barcode import normalize_barcode
 
     candidates: list[str] = []
     seen: set[str] = set()
     if disc.catalog:
-        norm = discogs_lookup.normalize_barcode(disc.catalog)
+        norm = normalize_barcode(disc.catalog)
         if norm:
             candidates.append(norm)
             seen.add(norm)
@@ -1179,23 +1179,79 @@ def _finalize_import(
     rlog_builder: RipLogBuilder | None = None,
     ui: TerminalUI | None = None,
     low_dr_threshold: float = 5.0,
+    cddb_track_lsns: list[int] | None = None,
+    cddb_disc_last_lsn: int | None = None,
+    cddb_server: str | None = None,
+    ar_summary: str | None = None,
 ) -> None:
-    """Shared post-rip/import pipeline: MB lookup → metadata menu → TOC → RG → container."""
+    """Shared post-rip/import pipeline: MB lookup → metadata menu → TOC → RG → container.
+
+    R8: when *cddb_track_lsns*, *cddb_disc_last_lsn*, and *cddb_server* are
+    provided (rip path only), CDDB and MB pre-pop run concurrently in a
+    2-worker ``ThreadPoolExecutor``. Merge order is CDDB-first → MB-second
+    with non-blank-wins semantics — identical to the pre-R8 serial path
+    when both services return data, with the bonus that a slow CDDB no
+    longer blocks MB latency. When CDDB params are None (import path)
+    only MB runs.
+    """
     import sys
 
-    from cdda2img.mb_lookup import prepopulate_from_mb
+    from cdda2img.cddb import prepopulate_from_cddb
+    from cdda2img.mb_lookup import _merge_into_disc, prepopulate_from_mb
     from cdda2img.metadata_menu import run_metadata_menu
 
     diag = _Notes(ui)
+    do_cddb = cddb_track_lsns is not None and cddb_disc_last_lsn is not None
+    cddb_verbose = ui is None
+    mb_verbose = (ui is None) and sys.stdin.isatty()
 
-    _ui_status(ui, "Querying MusicBrainz…")
-    # R9: snapshot the pre-MB album/artist (filled by CDDB or by raw data)
-    # so we can detect CDDB↔MB disagreement after the merge.
-    pre_mb_album = disc.album
-    pre_mb_artist = disc.artist
-    # Suppress verbose MB output when TUI is active — status line serves that role.
-    mb_result = prepopulate_from_mb(disc, verbose=(ui is None) and sys.stdin.isatty())
-    disc = mb_result.disc
+    _ui_status(
+        ui, "Querying CDDB + MusicBrainz…" if do_cddb else "Querying MusicBrainz…"
+    )
+    pre_cddb_album = disc.album
+
+    if do_cddb:
+        # R8: launch both prepops concurrently. Each operates on a copy of
+        # the original disc, so their results are independent and can be
+        # merged serially after both return.
+        from concurrent.futures import ThreadPoolExecutor
+
+        with ThreadPoolExecutor(max_workers=2) as ex:
+            cddb_future = ex.submit(
+                prepopulate_from_cddb,
+                disc,
+                cddb_track_lsns,
+                cddb_disc_last_lsn,
+                server=cddb_server,
+                verbose=cddb_verbose,
+            )
+            mb_future = ex.submit(prepopulate_from_mb, disc, verbose=mb_verbose)
+            cddb_disc = cddb_future.result()
+            mb_result = mb_future.result()
+
+        # Serial merge: CDDB first (already applied in cddb_disc), then re-apply
+        # MB's winning meta on top with non-blank-wins.
+        disc = cddb_disc
+        if mb_result.meta is not None:
+            disc = _merge_into_disc(mb_result.meta, disc)
+        # R12: CDDB status.
+        provenance["lookup_status_cddb"] = _r12_status(
+            attempted=True,
+            has_data=bool(disc.album) and disc.album != pre_cddb_album,
+            errored=False,
+        )
+    else:
+        # Import path: MB only, sequential.
+        mb_result = prepopulate_from_mb(disc, verbose=mb_verbose)
+        disc = mb_result.disc
+
+    # R9: snapshot the pre-MB album/artist (= post-CDDB or original)
+    # so we can detect CDDB↔MB disagreement when both ran.
+    pre_mb_album = pre_cddb_album if not do_cddb else cddb_disc.album
+    pre_mb_artist = (
+        disc.artist if not do_cddb else cddb_disc.artist  # post-CDDB pre-MB
+    )
+
     if mb_result.isrc_disambiguated:
         provenance["multi_match_isrc_disambiguated"] = "YES"
     _emit_r9_disagreement(
@@ -1233,10 +1289,11 @@ def _finalize_import(
         errored=False,
     )
 
-    # Hand the terminal over to the interactive metadata menu.
+    # Hand the terminal over to the interactive metadata menu. The
+    # ar_summary kwarg drives the AR_PAUSE state (rip pipeline only).
     if ui is not None:
         ui.pause()
-    disc = run_metadata_menu(disc, source_pcm=pcm_file)
+    disc = run_metadata_menu(disc, source_pcm=pcm_file, ar_summary=ar_summary)
     if ui is not None:
         ui.resume()
 
@@ -1517,8 +1574,13 @@ def rip_image(  # noqa: C901
 ) -> None:
     import sys
 
-    from cdda2img.accuraterip import pack_arip_block, print_ar_report, verify_rip
-    from cdda2img.cddb import compute_cddb_disc_id, prepopulate_from_cddb
+    from cdda2img.accuraterip import (
+        format_ar_report,
+        pack_arip_block,
+        print_ar_report,
+        verify_rip,
+    )
+    from cdda2img.cddb import compute_cddb_disc_id
     from cdda2img.config import load_config
 
     cfg = load_config()
@@ -1558,23 +1620,10 @@ def rip_image(  # noqa: C901
             _ui_status(ui, "Applying drive offset correction…")
             apply_offset(temp.pcm_file, read_offset)
 
-        _ui_status(ui, "Querying CDDB…")
-        # R12: capture pre-CDDB album to detect whether CDDB filled anything.
-        pre_cddb_album = info.disc.album
-        disc = prepopulate_from_cddb(
-            info.disc,
-            info.track_lsns,
-            info.disc_last_lsn,
-            server=cfg.cddb_server,
-            verbose=ui is None,
-        )
-        # status will be stamped into provenance below, after the dict is built.
-        cddb_status = _r12_status(
-            attempted=True,
-            has_data=bool(disc.album) and disc.album != pre_cddb_album,
-            errored=False,
-        )
-
+        # R8: CDDB query now happens inside _finalize_import in parallel
+        # with the MB disc-ID lookup. The standalone call is gone; we just
+        # capture the disc as-is and pass the LSN data through.
+        disc = info.disc
         cddb_id = int(compute_cddb_disc_id(info.track_lsns, info.disc_last_lsn), 16)
         # Track which LSNs fed the final verify_rip call — may change if paranoia fallback fires.
         final_track_lsns = info.track_lsns
@@ -1655,16 +1704,13 @@ def rip_image(  # noqa: C901
         if drive_name is not None:
             provenance["drive_name"] = drive_name
             provenance["drive_read_offset"] = f"{read_offset:+d}"
-        # R12: CDDB status captured pre-emptively, stamped here so
-        # _finalize_import can layer the other three lookup_status keys
-        # on top.
-        provenance["lookup_status_cddb"] = cddb_status
         # R2: surface the AccurateRip transport choice + dBAR body hash so
         # later re-fetches can detect AR-side changes / mirror tampering.
         if ar_verify.transport is not None:
             provenance["arip_transport"] = ar_verify.transport
         if ar_verify.dbar_sha256 is not None:
             provenance["arip_dbar_sha256"] = ar_verify.dbar_sha256
+        ar_summary = format_ar_report(ar_verify.tracks, read_offset=read_offset)
         _finalize_import(
             disc,
             temp.pcm_file,
@@ -1676,6 +1722,10 @@ def rip_image(  # noqa: C901
             rlog_builder=rlog_builder,
             ui=ui,
             low_dr_threshold=low_dr_threshold,
+            cddb_track_lsns=info.track_lsns,
+            cddb_disc_last_lsn=info.disc_last_lsn,
+            cddb_server=cfg.cddb_server,
+            ar_summary=ar_summary,
         )
     finally:
         _stop_preview(track_preview)

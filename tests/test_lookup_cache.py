@@ -8,8 +8,15 @@ from unittest.mock import patch
 
 from cdda2img.lookup_cache import (
     _CACHE_TTL_SECONDS,
+    _ISRC_CACHE_TTL_SECONDS,
+    get_cached_cddb_lookup,
     get_cached_disc_id_lookup,
+    get_cached_discogs_barcode,
+    get_cached_isrc_lookup,
+    put_cached_cddb_lookup,
     put_cached_disc_id_lookup,
+    put_cached_discogs_barcode,
+    put_cached_isrc_lookup,
 )
 from cdda2img.lookup_result import DiscMeta, TrackMeta
 
@@ -119,3 +126,67 @@ def test_lookup_disc_id_uses_cache(monkeypatch) -> None:
 def test_ttl_constant_is_30_days() -> None:
     """Sanity-pin the documented 30-day TTL."""
     assert _CACHE_TTL_SECONDS == 30 * 86400
+
+
+def test_isrc_cache_ttl_is_infinite() -> None:
+    """ISRC bindings are immutable — the sentinel is None."""
+    assert _ISRC_CACHE_TTL_SECONDS is None
+
+
+# ---------------------------------------------------------------------------
+# ISRC cache (infinite TTL)
+# ---------------------------------------------------------------------------
+
+
+def test_isrc_cache_round_trip() -> None:
+    put_cached_isrc_lookup("USEE18300025", [DiscMeta(album="X")])
+    result = get_cached_isrc_lookup("USEE18300025")
+    assert result is not None
+    assert result[0].album == "X"
+
+
+def test_isrc_cache_does_not_expire_with_time() -> None:
+    """A row from epoch 0 is still served — ISRC mappings don't decay."""
+    put_cached_isrc_lookup("USEE18300026", [DiscMeta(album="Y")])
+    fake_future = 99_999_999_999
+    with patch("cdda2img.lookup_cache.time.time", return_value=fake_future):
+        result = get_cached_isrc_lookup("USEE18300026")
+    assert result is not None
+
+
+# ---------------------------------------------------------------------------
+# Discogs barcode cache
+# ---------------------------------------------------------------------------
+
+
+def test_discogs_barcode_round_trip() -> None:
+    put_cached_discogs_barcode("0075992377423", [DiscMeta(album="ZZ")])
+    result = get_cached_discogs_barcode("0075992377423")
+    assert result is not None
+    assert result[0].album == "ZZ"
+
+
+def test_discogs_barcode_ttl_expiry() -> None:
+    put_cached_discogs_barcode("0724383697724", [DiscMeta(album="OK")])
+    fake_future = 99_999_999_999
+    with patch("cdda2img.lookup_cache.time.time", return_value=fake_future):
+        result = get_cached_discogs_barcode("0724383697724")
+    assert result is None
+
+
+# ---------------------------------------------------------------------------
+# CDDB cache
+# ---------------------------------------------------------------------------
+
+
+def test_cddb_cache_round_trip() -> None:
+    put_cached_cddb_lookup("aabbcc01", [DiscMeta(album="Album1")])
+    result = get_cached_cddb_lookup("aabbcc01")
+    assert result is not None
+    assert result[0].album == "Album1"
+
+
+def test_cddb_cache_caches_empty_too() -> None:
+    """Empty CDDB hit is cacheable (no-match-today probably means no-match-tomorrow)."""
+    put_cached_cddb_lookup("aabbcc02", [])
+    assert get_cached_cddb_lookup("aabbcc02") == []

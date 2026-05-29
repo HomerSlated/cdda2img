@@ -180,13 +180,25 @@ def query_cddb(
     Returns an empty list on network error, no match, or unexpected response.
     *server* should be "host:port"; defaults to cddb.retrobridge.org:888.
     Returns [] when offline mode is active (R10).
+
+    R7: results cached in ``cddb_lookups`` keyed by the CDDB disc-ID with
+    a 30-day TTL. Cache reads work in offline mode.
     """
     from cdda2img.config import is_no_network_active
+    from cdda2img.lookup_cache import (
+        get_cached_cddb_lookup,
+        put_cached_cddb_lookup,
+    )
 
+    disc_id = compute_cddb_disc_id(track_lsns, disc_last_lsn)
+    cached = get_cached_cddb_lookup(disc_id)
+    if cached is not None:
+        log.debug("CDDB cache hit: %s", disc_id)
+        return cached
     if is_no_network_active():
+        log.debug("CDDB offline (cache miss for %s)", disc_id)
         return []
     host, port = _resolve_server(server)
-    disc_id = compute_cddb_disc_id(track_lsns, disc_last_lsn)
     n = len(track_lsns)
     offsets = [lsn + 150 for lsn in track_lsns]
     total_secs = (disc_last_lsn - track_lsns[0] + 1) // 75
@@ -210,6 +222,7 @@ def query_cddb(
 
             code = r[:3]
             if code == "202":
+                put_cached_cddb_lookup(disc_id, [])  # cache the empty result too
                 return []
             if code not in ("200", "210", "211"):
                 log.warning("CDDB: unexpected query response: %r", r)
@@ -226,6 +239,7 @@ def query_cddb(
                 xmcd_lines = sess.read_until_dot()
                 results.append(_parse_xmcd(xmcd_lines, n))
 
+            put_cached_cddb_lookup(disc_id, results)
             return results
 
     except OSError as exc:

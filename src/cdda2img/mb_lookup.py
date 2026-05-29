@@ -253,7 +253,7 @@ def _parse_release(
                 )
             )
 
-    from cdda2img.discogs_lookup import normalize_barcode
+    from cdda2img.barcode import normalize_barcode
 
     raw_barcode = release.get("barcode") or ""
     catalog = normalize_barcode(raw_barcode)
@@ -456,10 +456,22 @@ def lookup_isrc(isrc: str) -> list[DiscMeta]:
     Returns a list of DiscMeta for releases that contain a recording with this ISRC.
     Results are basic (no per-track tracklist) due to the two-step lookup.
     Returns [] when offline mode is active (R10).
+
+    R7: results cached in ``isrc_lookups`` with no TTL — ISRC→recording
+    bindings are immutable in practice. Cache reads work in offline mode.
     """
     from cdda2img.config import is_no_network_active
+    from cdda2img.lookup_cache import (
+        get_cached_isrc_lookup,
+        put_cached_isrc_lookup,
+    )
 
+    cached = get_cached_isrc_lookup(isrc)
+    if cached is not None:
+        log.debug("MB ISRC cache hit: %s", isrc)
+        return cached
     if is_no_network_active():
+        log.debug("MB ISRC offline (cache miss for %s)", isrc)
         return []
     _setup_useragent()
     log.debug("MusicBrainz ISRC lookup: %s", isrc)
@@ -495,6 +507,7 @@ def lookup_isrc(isrc: str) -> list[DiscMeta]:
                     source="musicbrainz",
                 )
             )
+    put_cached_isrc_lookup(isrc, results)
     return results
 
 
@@ -746,6 +759,11 @@ class MBPrepopResult(NamedTuple):
     # detect CDDB↔MB disagreement.
     mb_candidate_album: str | None = None
     mb_candidate_artist: str | None = None
+    # R8: the winning candidate DiscMeta itself. None when no candidate
+    # was picked (zero matches, ambiguous multi-match, etc.). Lets the
+    # parallel pre-menu pipeline re-apply ``_merge_into_disc(meta, ...)``
+    # on top of a CDDB-merged disc.
+    meta: DiscMeta | None = None
 
 
 def prepopulate_from_mb(disc: RBIDisc, *, verbose: bool = True) -> MBPrepopResult:
@@ -795,6 +813,7 @@ def prepopulate_from_mb(disc: RBIDisc, *, verbose: bool = True) -> MBPrepopResul
                 isrc_disambiguated=False,
                 mb_candidate_album=winner.album,
                 mb_candidate_artist=winner.artist,
+                meta=winner,
             )
         return MBPrepopResult(disc, hints, 0, isrc_disambiguated=False)
     if len(matches) > 1:
@@ -814,6 +833,7 @@ def prepopulate_from_mb(disc: RBIDisc, *, verbose: bool = True) -> MBPrepopResul
                 isrc_disambiguated=True,
                 mb_candidate_album=winner.album,
                 mb_candidate_artist=winner.artist,
+                meta=winner,
             )
         log.debug("MB disc ID returned %d matches; skipping auto-fill", len(matches))
         return MBPrepopResult(disc, hints, len(matches), isrc_disambiguated=False)
@@ -829,4 +849,5 @@ def prepopulate_from_mb(disc: RBIDisc, *, verbose: bool = True) -> MBPrepopResul
         isrc_disambiguated=False,
         mb_candidate_album=meta.album,
         mb_candidate_artist=meta.artist,
+        meta=meta,
     )
