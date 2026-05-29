@@ -786,3 +786,45 @@ def test_verify_rip_rejects_block_with_wrong_disc_ids(tmp_path: Path) -> None:
     assert result.tracks[0].confidence_v1 is None
     assert result.transport == "https"
     assert result.dbar_sha256 is not None  # the body was still hashed pre-parse
+
+
+# ---------------------------------------------------------------------------
+# 9. -v / --verbose tracing — DEBUG-level surface for AR fetches
+# ---------------------------------------------------------------------------
+
+
+def test_fetch_ar_debug_log_includes_url_and_body_size(caplog) -> None:
+    """A successful AR fetch logs the URL at DEBUG and the body size + sha256."""
+    import logging
+
+    from cdda2img.accuraterip import _fetch_ar
+
+    body = struct.pack("<BLLL", 1, 0xAABBCCDD, 0x11223344, 0xDEADBEEF)
+    body += struct.pack("<BLL", 1, 0, 0)
+    fake, _calls = _fake_urlopen({"https://": body})
+    with (
+        caplog.at_level(logging.DEBUG, logger="cdda2img.accuraterip"),
+        patch("cdda2img.accuraterip.urllib.request.urlopen", side_effect=fake),
+    ):
+        _fetch_ar(1, "aabbccdd", "11223344", 0xDEADBEEF)
+    messages = [rec.getMessage() for rec in caplog.records]
+    # URL line:
+    assert any("AccurateRip URL (https)" in m for m in messages)
+    # Success line includes byte count + sha256 prefix:
+    assert any("200 OK" in m and "sha256=" in m for m in messages)
+
+
+def test_fetch_ar_debug_log_includes_404(caplog) -> None:
+    """A 404 from AR also emits a DEBUG line so `-v` users see the negative."""
+    import logging
+
+    from cdda2img.accuraterip import _fetch_ar
+
+    fake, _calls = _fake_urlopen({})  # default branch raises 404
+    with (
+        caplog.at_level(logging.DEBUG, logger="cdda2img.accuraterip"),
+        patch("cdda2img.accuraterip.urllib.request.urlopen", side_effect=fake),
+    ):
+        _fetch_ar(1, "00000000", "00000000", 0)
+    messages = [rec.getMessage() for rec in caplog.records]
+    assert any("disc not found (404)" in m for m in messages)

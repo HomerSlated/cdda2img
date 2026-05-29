@@ -153,6 +153,16 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Disable all remote metadata lookups (CDDB/MB/Discogs/AcoustID/AR).",
     )
+    # Diagnostic-level logging. Surfaces every URL queried (AccurateRip,
+    # MusicBrainz, Discogs, AcoustID, CDDB) and the HTTP outcome, so
+    # "disc not found" / "no match" failures can be traced to the exact
+    # request that was made.
+    parser.add_argument(
+        "-v",
+        "--verbose",
+        action="store_true",
+        help="Verbose (DEBUG) logging — traces remote queries and HTTP outcomes.",
+    )
     sub = parser.add_subparsers(dest="cmd", required=True)
 
     c = sub.add_parser(
@@ -520,13 +530,15 @@ def create_image(
             )
             disc.tracks = build_toc_entries(batch, durations, disc)
 
-            from cdda2img.metadata_menu import run_metadata_menu
-
-            disc = run_metadata_menu(disc, source_wavs=source_wavs)
-
+            # Identify the original release before the menu so the user
+            # sees "Original: <title> (<year>)" in the initial summary.
             from cdda2img.original_release import populate_original_release
 
             populate_original_release(disc)
+
+            from cdda2img.metadata_menu import run_metadata_menu
+
+            disc = run_metadata_menu(disc, source_wavs=source_wavs)
 
             raw_titles = [re.sub(r"^\d{1,2}[-. ]+", "", p.stem) for p in batch]
 
@@ -1289,6 +1301,18 @@ def _finalize_import(
         errored=False,
     )
 
+    # Identify the original release BEFORE the menu so the user sees
+    # "Original: <title> (<year>)" in the initial summary. The menu's
+    # [r] flow lets the user override; populate_original_release's
+    # internal gate (skip when original_release_found is already True)
+    # makes the call here idempotent with any later override.
+    from cdda2img.original_release import populate_original_release
+
+    _ui_status(ui, "Identifying original release…")
+    populate_original_release(disc)
+    # R11: corroborate with Discogs master if both sources are present.
+    _r11_corroborate_with_discogs_master(disc, provenance)
+
     # Hand the terminal over to the interactive metadata menu. The
     # ar_summary kwarg drives the AR_PAUSE state (rip pipeline only).
     if ui is not None:
@@ -1296,15 +1320,6 @@ def _finalize_import(
     disc = run_metadata_menu(disc, source_pcm=pcm_file, ar_summary=ar_summary)
     if ui is not None:
         ui.resume()
-
-    # After the menu: any manual override the user made is preserved by
-    # populate_original_release's internal gate.
-    from cdda2img.original_release import populate_original_release
-
-    _ui_status(ui, "Identifying original release…")
-    populate_original_release(disc)
-    # R11: corroborate with Discogs master if both sources are present.
-    _r11_corroborate_with_discogs_master(disc, provenance)
 
     if output is None:
         new_stem = sanitize_title(disc.album)
@@ -1975,6 +1990,16 @@ def _dispatch_utility(args: argparse.Namespace) -> None:
 
 def main() -> None:
     args = parse_args()
+    if args.verbose:
+        # CLI entry only — keeps the library boundary clean per the
+        # CLAUDE.md "no global logging mutation in library" rule.
+        import logging
+
+        logging.basicConfig(
+            level=logging.DEBUG,
+            format="%(asctime)s %(levelname)-5s %(name)s: %(message)s",
+            datefmt="%H:%M:%S",
+        )
     try:
         _dispatch(args)
     except FileNotFoundError as e:

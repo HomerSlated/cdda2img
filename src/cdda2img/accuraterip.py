@@ -187,6 +187,12 @@ def _fetch_ar(
                 _AR_DBAR_MAX,
             )
             return None, name
+        log.debug(
+            "AccurateRip %s: 200 OK, %d bytes, sha256=%s",
+            name,
+            len(body),
+            hashlib.sha256(body).hexdigest(),
+        )
         return body, name
     return None, last_transport
 

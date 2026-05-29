@@ -15,3 +15,7 @@
   by AR_PAUSE's screen-clear. Cheap to keep for now (batch / non-TTY
   mode still needs it); a refactor can route both paths through one
   helper.
+- Research private/code/beets and analyse its metadata workflow and
+  methods, then compare to cdda2img
+- Housekeeping: resolve the persistent permissions issue with
+  `.git/COMMIT_EDITMSG`
