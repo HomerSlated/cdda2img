@@ -47,7 +47,12 @@ def compute_cddb_disc_id(track_lsns: list[int], disc_last_lsn: int) -> str:
     offsets = [lsn + 150 for lsn in track_lsns]  # LSN → absolute CD frame
     offset_secs = [off // 75 for off in offsets]  # frames → whole seconds
     checksum = sum(_digit_sum(s) for s in offset_secs) % 255
-    total_secs = (disc_last_lsn - track_lsns[0] + 1) // 75
+    # CDDB rounds each endpoint to seconds independently, then subtracts.
+    # `(leadout - start) // 75` is NOT equivalent when the floor remainders
+    # cross: e.g. Sheryl Crow has track_lsns[0]=33 and leadout=270475, so
+    # 33//75 + (leadout-33)//75 = 0 + 3605 but leadout//75 - 33//75 = 3606.
+    # The latter is what freedb/cd-discid/whipper compute.
+    total_secs = (disc_last_lsn + 1) // 75 - track_lsns[0] // 75
     disc_id = (checksum << 24) | (total_secs << 8) | n
     return f"{disc_id:08x}"
 
