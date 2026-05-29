@@ -144,6 +144,15 @@ def parse_args() -> argparse.Namespace:
         action="version",
         version=f"cdda2img {importlib.metadata.version('cdda2img')}",
     )
+    # R10: process-wide offline-mode toggle. When set, every remote metadata
+    # lookup (CDDB, MB, Discogs, AcoustID, AccurateRip) short-circuits to
+    # "unavailable". Combine with R7's SQLite cache to reproduce a prior
+    # rip's metadata without network access.
+    parser.add_argument(
+        "--no-network-services",
+        action="store_true",
+        help="Disable all remote metadata lookups (CDDB/MB/Discogs/AcoustID/AR).",
+    )
     sub = parser.add_subparsers(dest="cmd", required=True)
 
     c = sub.add_parser(
@@ -368,8 +377,13 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def _add_release_provenance(provenance: dict, disc: RBIDisc) -> None:
-    """Append release-intelligence fields to *provenance* if populated on *disc*."""
+def _add_release_provenance(provenance: dict, disc: RBIDisc) -> None:  # noqa: C901
+    """Append release-intelligence fields to *provenance* if populated on *disc*.
+
+    C901 noqa: branchy logic is inherent — one ``if`` per RBIDisc field that
+    has a corresponding PROV key. Splitting into sub-helpers would obscure
+    the 1:1 correspondence with the spec table.
+    """
     if disc.low_dynamic_range is not None:
         provenance["low_dynamic_range"] = "YES" if disc.low_dynamic_range else "NO"
     if disc.original_release_found:
@@ -384,8 +398,14 @@ def _add_release_provenance(provenance: dict, disc: RBIDisc) -> None:
         provenance["mb_release_id"] = disc.mb_release_id
     if disc.mb_release_group_id:
         provenance["mb_release_group_id"] = disc.mb_release_group_id
+    if disc.discogs_release_id is not None:
+        provenance["discogs_release_id"] = str(disc.discogs_release_id)
     if disc.set_title:
         provenance["set_title"] = disc.set_title
+    # R14: aggregate pre-emphasis flag (cdrdao path populates; other parsers
+    # leave None and the key is omitted).
+    if disc.pre_emphasis is not None:
+        provenance["pre_emphasis"] = "YES" if disc.pre_emphasis else "NO"
 
 
 def _unique_path(stem: str, ext: str, parent: Path | None = None) -> Path:
@@ -767,14 +787,15 @@ def import_image(
 
 def _collect_barcode_candidates(
     disc: RBIDisc,
-    barcode_hints: list[str] | None,
+    barcode_hints: list[tuple[str, str]] | None,
 ) -> list[str]:
     """Build the de-duplicated 13-digit candidate list (disc.catalog first, then hints).
 
     Only the *normalised* form of disc.catalog enters the list. A non-normalising
     raw value (e.g. 11-digit printed barcode) is *not* skipped silently — the
     caller uses `_pick_canonical_mcn` to substring-match raw digits against this
-    candidate list as a separate, deductive step.
+    candidate list as a separate, deductive step. *barcode_hints* is the R16
+    tuple form ``(mb_release_id, barcode)``; the MBID is unused here.
     """
     from cdda2img import discogs_lookup
 
@@ -785,7 +806,7 @@ def _collect_barcode_candidates(
         if norm:
             candidates.append(norm)
             seen.add(norm)
-    for hint in barcode_hints or []:
+    for _mbid, hint in barcode_hints or []:
         if hint and hint not in seen:
             candidates.append(hint)
             seen.add(hint)
@@ -845,7 +866,7 @@ def _prepopulate_from_discogs(
     disc: RBIDisc,
     ui: TerminalUI | None = None,
     *,
-    barcode_hints: list[str] | None = None,
+    barcode_hints: list[tuple[str, str]] | None = None,
 ) -> RBIDisc:
     """Pre-populate disc.catalog and optionally enrich via Discogs barcode lookup.
 
@@ -941,6 +962,212 @@ def _measure_loudness_phase(
     return pack_rg_block(rg_result)
 
 
+_R6_BYTES_PER_FRAME = 2352
+_R6_MIN_TRACKS_FOR_SECOND_SAMPLE = 4
+
+
+def _r9_normalise_for_compare(s: str | None) -> str:
+    """NFC + casefold + collapse whitespace, for the R9 disagreement compare.
+
+    Strips a small documented allow-list of release-suffix tokens
+    (Remastered / Deluxe Edition / Anniversary / ...) — these are
+    expected differences between CDDB's title-of-this-pressing and MB's
+    canonical-album-title, and they don't constitute disagreement.
+    """
+    import re
+    import unicodedata
+
+    if not s:
+        return ""
+    out = unicodedata.normalize("NFC", s).strip().casefold()
+    # Strip the documented suffix allow-list (mirrors original_release._REISSUE_ALLOWLIST
+    # at the canonical-token level — keep this list short / well-known).
+    for tok in (
+        "remastered",
+        "remaster",
+        "deluxe edition",
+        "deluxe",
+        "anniversary edition",
+        "expanded edition",
+        "expanded",
+        "special edition",
+    ):
+        out = re.sub(r"\(\s*" + re.escape(tok) + r"[^)]*\)", "", out)
+        out = re.sub(r"\[\s*" + re.escape(tok) + r"[^\]]*\]", "", out)
+    return re.sub(r"\s+", " ", out).strip()
+
+
+def _r12_status(*, attempted: bool, has_data: bool, errored: bool) -> str:
+    """R12 lookup_status mapping. *attempted*=False → disabled."""
+    if not attempted:
+        return "disabled"
+    if errored:
+        return "down"
+    return "OK" if has_data else "empty"
+
+
+def _r11_corroborate_with_discogs_master(
+    disc: RBIDisc, provenance: dict[str, str]
+) -> None:
+    """R11: cross-check ``disc.original_release_year`` against Discogs master.
+
+    Fires only when MB already produced an answer (``original_release_found``
+    is True) and the disc has a known Discogs release MBID. On agreement
+    (same 4-digit year) emits ``original_release_corroborated=discogs,mb``.
+    On disagreement, emits ``original_release_disagreement=discogs:YYYY|mb:YYYY``
+    *and* updates ``disc.original_release_year`` to the earlier of the two
+    (per the analysis report's "prefer the earlier" rule).
+    """
+    if not disc.original_release_found or disc.original_release_year is None:
+        return
+    if disc.discogs_release_id is None:
+        return
+    from cdda2img.discogs_lookup import lookup_master_year
+
+    discogs_year = lookup_master_year(disc.discogs_release_id)
+    if discogs_year is None:
+        return
+    mb_year = disc.original_release_year
+    if discogs_year == mb_year:
+        provenance["original_release_corroborated"] = "discogs,mb"
+        return
+    provenance["original_release_disagreement"] = f"discogs:{discogs_year}|mb:{mb_year}"
+    if discogs_year < mb_year:
+        log.warning(
+            "R11: Discogs master year %d earlier than MB %d — preferring Discogs",
+            discogs_year,
+            mb_year,
+        )
+        disc.original_release_year = discogs_year
+
+
+def _emit_r9_disagreement(
+    provenance: dict[str, str],
+    pre_mb_album: str | None,
+    pre_mb_artist: str | None,
+    mb_album: str | None,
+    mb_artist: str | None,
+) -> None:
+    """Emit ``provenance["disagreement_cddb_mb"]`` when both services disagree.
+
+    The pre-MB album/artist were filled by CDDB (or by raw embedded
+    metadata); the MB-candidate values come from the candidate that drove
+    the merge. Disagreement is computed after NFC + casefold + reissue
+    suffix stripping. Value is a comma-separated list of fields that
+    disagreed (``album``, ``artist``, or ``album,artist``). Absent when
+    one side is blank or both agree.
+    """
+    fields: list[str] = []
+    if (
+        pre_mb_album
+        and mb_album
+        and _r9_normalise_for_compare(pre_mb_album)
+        != _r9_normalise_for_compare(mb_album)
+    ):
+        fields.append("album")
+    if (
+        pre_mb_artist
+        and mb_artist
+        and pre_mb_artist != "Unknown Artist"  # raw default; not from CDDB
+        and _r9_normalise_for_compare(pre_mb_artist)
+        != _r9_normalise_for_compare(mb_artist)
+    ):
+        fields.append("artist")
+    if fields:
+        provenance["disagreement_cddb_mb"] = ",".join(fields)
+
+
+def _r6_acoustid_corroborate(  # noqa: C901
+    disc: RBIDisc,
+    pcm_file: Path,
+    provenance: dict[str, str],
+    ui: TerminalUI | None,
+) -> RBIDisc:
+    """R6: pre-menu AcoustID fingerprint of tracks 1 and ceil(N/2).
+
+    Emits ``provenance["acoustid_corroborates"]`` as YES (best AcoustID hit
+    agrees with the disc's existing MB release MBID) or NO (disagrees).
+    When the disc has no MB release MBID yet AND AcoustID converges
+    consistently across all fingerprinted tracks on a single MBID, merge
+    that release into the disc via ``_merge_into_disc``.
+
+    No-op when ``acoustid_lookup.is_available()`` is False. Failures from
+    AcoustID propagate as empty results; the function never raises.
+    """
+    import tempfile
+    import wave
+
+    from cdda2img import acoustid_lookup
+    from cdda2img.mb_lookup import _merge_into_disc
+
+    if not disc.tracks or not acoustid_lookup.is_available():
+        return disc
+
+    n = len(disc.tracks)
+    indexes = [1]
+    if n >= _R6_MIN_TRACKS_FOR_SECOND_SAMPLE:
+        indexes.append((n + 1) // 2)
+    _ui_status(ui, "Fingerprinting via AcoustID…")
+
+    per_track_hits: list[list] = []
+    with tempfile.TemporaryDirectory() as td:
+        td_path = Path(td)
+        for idx in indexes:
+            entry = disc.tracks[idx - 1]
+            byte_offset = (
+                sum(
+                    (t.pregap_frames + t.duration_frames) * _R6_BYTES_PER_FRAME
+                    for t in disc.tracks[: idx - 1]
+                )
+                + entry.pregap_frames * _R6_BYTES_PER_FRAME
+            )
+            byte_count = entry.duration_frames * _R6_BYTES_PER_FRAME
+            with open(pcm_file, "rb") as f:
+                f.seek(byte_offset)
+                pcm = f.read(byte_count)
+            wav_path = td_path / f"r6-track-{idx:02d}.wav"
+            with wave.open(str(wav_path), "wb") as w:
+                w.setnchannels(2)
+                w.setsampwidth(2)
+                w.setframerate(44100)
+                w.writeframes(pcm)
+            per_track_hits.append(acoustid_lookup.fingerprint_and_lookup(wav_path))
+
+    # Tally release MBIDs across all fingerprinted tracks. A consistent
+    # winner is one that appears in every per-track result set.
+    all_rids: set[str] = set()
+    for hits in per_track_hits:
+        for hit in hits:
+            if hit.mb_release_id:
+                all_rids.add(hit.mb_release_id)
+    if not all_rids:
+        return disc
+
+    consistent_rids = [
+        rid
+        for rid in all_rids
+        if all(any(h.mb_release_id == rid for h in hits) for hits in per_track_hits)
+    ]
+    top_rid = consistent_rids[0] if consistent_rids else None
+
+    if disc.mb_release_id:
+        provenance["acoustid_corroborates"] = (
+            "YES" if top_rid == disc.mb_release_id else "NO"
+        )
+        return disc
+
+    # Prepop missed; merge AcoustID's consistent winner.
+    if top_rid is not None:
+        merged_meta = next(
+            (h for hits in per_track_hits for h in hits if h.mb_release_id == top_rid),
+            None,
+        )
+        if merged_meta is not None:
+            disc = _merge_into_disc(merged_meta, disc)
+            provenance["acoustid_corroborates"] = "YES"
+    return disc
+
+
 def _finalize_import(
     disc: RBIDisc,
     pcm_file: Path,
@@ -962,10 +1189,49 @@ def _finalize_import(
     diag = _Notes(ui)
 
     _ui_status(ui, "Querying MusicBrainz…")
+    # R9: snapshot the pre-MB album/artist (filled by CDDB or by raw data)
+    # so we can detect CDDB↔MB disagreement after the merge.
+    pre_mb_album = disc.album
+    pre_mb_artist = disc.artist
     # Suppress verbose MB output when TUI is active — status line serves that role.
     mb_result = prepopulate_from_mb(disc, verbose=(ui is None) and sys.stdin.isatty())
     disc = mb_result.disc
+    if mb_result.isrc_disambiguated:
+        provenance["multi_match_isrc_disambiguated"] = "YES"
+    _emit_r9_disagreement(
+        provenance,
+        pre_mb_album,
+        pre_mb_artist,
+        mb_result.mb_candidate_album,
+        mb_result.mb_candidate_artist,
+    )
+    # R12: MB status follows match_count (0 = empty, ≥1 = OK; network
+    # errors inside lookup_disc_id yield 0 too — undistinguishable here).
+    provenance["lookup_status_mb"] = _r12_status(
+        attempted=True, has_data=mb_result.match_count > 0, errored=False
+    )
+    # R12: Discogs status — checked before the call.
+    from cdda2img import discogs_lookup as _discogs
+
+    discogs_attempted = _discogs.is_available()
+    pre_discogs_catalog = disc.catalog
     disc = _prepopulate_from_discogs(disc, ui, barcode_hints=mb_result.barcode_hints)
+    provenance["lookup_status_discogs"] = _r12_status(
+        attempted=discogs_attempted,
+        has_data=bool(disc.catalog) and disc.catalog != pre_discogs_catalog,
+        errored=False,
+    )
+    # R6: pre-menu AcoustID auto-fingerprint. Gated on availability; never
+    # blocks the menu. Tracks 1 and ceil(N/2) are the canonical sample.
+    from cdda2img import acoustid_lookup as _acoustid
+
+    acoustid_attempted = _acoustid.is_available()
+    disc = _r6_acoustid_corroborate(disc, pcm_file, provenance, ui)
+    provenance["lookup_status_acoustid"] = _r12_status(
+        attempted=acoustid_attempted,
+        has_data="acoustid_corroborates" in provenance,
+        errored=False,
+    )
 
     # Hand the terminal over to the interactive metadata menu.
     if ui is not None:
@@ -980,6 +1246,8 @@ def _finalize_import(
 
     _ui_status(ui, "Identifying original release…")
     populate_original_release(disc)
+    # R11: corroborate with Discogs master if both sources are present.
+    _r11_corroborate_with_discogs_master(disc, provenance)
 
     if output is None:
         new_stem = sanitize_title(disc.album)
@@ -1239,7 +1507,7 @@ def _ar_has_partial_mismatch(results: list) -> bool:
     return 0 < n_ok < len(in_db)
 
 
-def rip_image(
+def rip_image(  # noqa: C901
     device: str | None = None,
     loudness: str = "rg",
     output: Path | None = None,
@@ -1291,12 +1559,20 @@ def rip_image(
             apply_offset(temp.pcm_file, read_offset)
 
         _ui_status(ui, "Querying CDDB…")
+        # R12: capture pre-CDDB album to detect whether CDDB filled anything.
+        pre_cddb_album = info.disc.album
         disc = prepopulate_from_cddb(
             info.disc,
             info.track_lsns,
             info.disc_last_lsn,
             server=cfg.cddb_server,
             verbose=ui is None,
+        )
+        # status will be stamped into provenance below, after the dict is built.
+        cddb_status = _r12_status(
+            attempted=True,
+            has_data=bool(disc.album) and disc.album != pre_cddb_album,
+            errored=False,
         )
 
         cddb_id = int(compute_cddb_disc_id(info.track_lsns, info.disc_last_lsn), 16)
@@ -1306,7 +1582,7 @@ def rip_image(
 
         # PCM is now offset-corrected for both paths; verify_rip reads from correct positions.
         _ui_status(ui, "Verifying AccurateRip…")
-        ar_results = verify_rip(
+        ar_verify = verify_rip(
             temp.pcm_file,
             final_track_lsns,
             final_disc_last_lsn,
@@ -1315,19 +1591,19 @@ def rip_image(
         )
         if ui is not None:
             ui.pause()
-        print_ar_report(ar_results, read_offset=read_offset)
+        print_ar_report(ar_verify.tracks, read_offset=read_offset)
         if ui is not None:
             ui.resume()
 
         # AR-triggered fallback: partial mismatch → read error on specific tracks.
         # Re-rip with cd-paranoia full paranoia; keep disc metadata from cdrdao scan
         # (cdrdao captures ISRC/MCN/CD-Text from subchannel; cd-paranoia -Q does not).
-        if rip_type == "cdrdao" and _ar_has_partial_mismatch(ar_results):
+        if rip_type == "cdrdao" and _ar_has_partial_mismatch(ar_verify.tracks):
             from cdda2img.disc_reader import rip_disc
 
             n_bad = sum(
                 1
-                for r in ar_results
+                for r in ar_verify.tracks
                 if r.max_confidence is not None
                 and r.confidence_v1 is None
                 and r.confidence_v2 is None
@@ -1343,7 +1619,7 @@ def rip_image(
             final_track_lsns = paranoia_info.track_lsns
             final_disc_last_lsn = paranoia_info.disc_last_lsn
             _ui_status(ui, "Verifying AccurateRip (re-rip)…")
-            ar_results = verify_rip(
+            ar_verify = verify_rip(
                 temp.pcm_file,
                 final_track_lsns,
                 final_disc_last_lsn,
@@ -1352,12 +1628,12 @@ def rip_image(
             )
             if ui is not None:
                 ui.pause()
-            print_ar_report(ar_results, read_offset=read_offset)
+            print_ar_report(ar_verify.tracks, read_offset=read_offset)
             if ui is not None:
                 ui.resume()
 
         arip_block = pack_arip_block(
-            ar_results, final_track_lsns, final_disc_last_lsn, cddb_id
+            ar_verify.tracks, final_track_lsns, final_disc_last_lsn, cddb_id
         )
 
         from cdda2img.rip_log import RipLogBuilder
@@ -1367,7 +1643,7 @@ def rip_image(
             drive_name=drive_name,
             read_offset=read_offset,
         )
-        rlog_builder.ar_results = ar_results
+        rlog_builder.ar_results = ar_verify.tracks
         rlog_builder.cddb_id = cddb_id
 
         output_stem = sanitize_title(disc.album) or device.lstrip("/").replace("/", "_")
@@ -1379,6 +1655,16 @@ def rip_image(
         if drive_name is not None:
             provenance["drive_name"] = drive_name
             provenance["drive_read_offset"] = f"{read_offset:+d}"
+        # R12: CDDB status captured pre-emptively, stamped here so
+        # _finalize_import can layer the other three lookup_status keys
+        # on top.
+        provenance["lookup_status_cddb"] = cddb_status
+        # R2: surface the AccurateRip transport choice + dBAR body hash so
+        # later re-fetches can detect AR-side changes / mirror tampering.
+        if ar_verify.transport is not None:
+            provenance["arip_transport"] = ar_verify.transport
+        if ar_verify.dbar_sha256 is not None:
+            provenance["arip_dbar_sha256"] = ar_verify.dbar_sha256
         _finalize_import(
             disc,
             temp.pcm_file,
@@ -1542,6 +1828,13 @@ def mount_image(
 
 
 def _dispatch(args: argparse.Namespace) -> None:
+    # R10: apply the CLI offline-mode override before any subcommand
+    # imports a lookup module. None lets the TOML config value stand;
+    # True forces offline; False forces online (overrides config).
+    from cdda2img.config import set_no_network_override
+
+    if args.no_network_services:
+        set_no_network_override(True)
     if args.cmd == "create":
         from cdda2img.config import load_config
 

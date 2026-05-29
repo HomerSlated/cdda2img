@@ -294,9 +294,15 @@ class RBIDisc:
     mb_release_group_id: str | None = (
         None  # MB release-group UUID for original-release lookup
     )
+    discogs_release_id: int | None = None  # Discogs release ID (for R11 master lookup)
     set_title: str | None = (
         None  # box set / release title when medium has its own album title
     )
+    # R14: aggregate disc-level pre-emphasis flag. True = at least one track
+    # has the CONTROL bit set. None = not captured (pre-R14 containers,
+    # parsers that don't propagate it). Used as a year upper-bound (≤ 1986)
+    # in the original-release lookup.
+    pre_emphasis: bool | None = None
 
     @property
     def total_frames(self) -> int:

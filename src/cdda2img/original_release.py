@@ -24,10 +24,24 @@ from __future__ import annotations
 import logging
 import re
 import unicodedata
+from typing import TYPE_CHECKING
 
 from cdda2img.rbi_format import RBIDisc
 
+if TYPE_CHECKING:
+    from cdda2img.lookup_result import DiscMeta
+
 log = logging.getLogger(__name__)
+
+# R3: tolerances for the track-set / runtime verifier.
+_R3_SUM_DURATION_TOLERANCE_MS = 2_000  # ±2 seconds across all tracks
+_R3_PER_TRACK_TOLERANCE_MS = 27  # ±2 CD frames (588 samples / 44.1 kHz x 1000)
+_R3_TITLE_FUZZ_CUTOFF = 80  # aggregate token_set_ratio across the tracklist
+
+# R14: pre-emphasis ≈ early 1980s. After 1986 it's extremely rare in
+# new releases — a candidate year above this with disc.pre_emphasis=True
+# is almost certainly the wrong identification.
+_R14_PRE_EMPH_YEAR_CAP = 1986
 
 # Release-group secondary types that disqualify a release group as the
 # "original release" of a studio album.  A disc whose release group is
@@ -61,6 +75,139 @@ def _parse_year(date_str: str | None) -> int | None:
     return None
 
 
+# ---------------------------------------------------------------------------
+# R3 — Track-set / runtime verification
+# ---------------------------------------------------------------------------
+
+
+def _verify_release_matches_disc(meta: DiscMeta, disc: RBIDisc) -> bool:
+    """R3: conjunctive verifier — does *meta* plausibly describe *disc*?
+
+    Four gates, all skip-on-no-evidence (innocent until proven guilty):
+
+    * **Track count** — exact match required when both sides have ≥1 track.
+      Empty-on-either-side skips (can't compare what isn't there). This is
+      the strictest single signal — a track-count mismatch is positive
+      evidence that we're looking at the wrong release.
+    * **Sum-of-durations** — within ±2 s when both sides have lengths.
+      Catches structural mismatches (different versions, extra/missing
+      track) even when track counts agree.
+    * **Per-track ISRC** — agreement at matching track numbers when both
+      sides have ISRCs. Reuses R1's helper. Positive evidence of identity
+      when present; absent ISRCs skip.
+    * **Per-track title fuzzy** — aggregate token_set_ratio ≥ 80 across
+      tracks where both sides have titles. Skip when either side has no
+      titles or no overlap.
+
+    Returns True iff no gate produces positive evidence of a mismatch.
+    "Confidence over coverage": when in doubt, accept (the upstream
+    identification was probably right). When we have a hard contradiction,
+    reject.
+    """
+    from cdda2img.mb_lookup import _score_candidate_by_isrcs
+
+    # Gate 1: track count. Only fires when both sides have tracks.
+    if disc.tracks and meta.tracks and len(disc.tracks) != len(meta.tracks):
+        log.warning(
+            "R3 reject (track count): disc has %d tracks, meta has %d (%s)",
+            len(disc.tracks),
+            len(meta.tracks),
+            meta.mb_release_id or "<no MBID>",
+        )
+        return False
+
+    # Gate 2: sum-of-durations within ±2 s. Frame_to_ms via 1000/75 ≈ 13.33.
+    disc_sum_ms = sum(
+        int(t.duration_frames * 1000 / 75) for t in disc.tracks if t.duration_frames
+    )
+    meta_sum_ms = sum(t.duration_ms or 0 for t in meta.tracks if t.duration_ms)
+    if disc_sum_ms > 0 and meta_sum_ms > 0:
+        diff = abs(disc_sum_ms - meta_sum_ms)
+        if diff > _R3_SUM_DURATION_TOLERANCE_MS:
+            log.warning(
+                "R3 reject (sum durations): disc %.1fs, meta %.1fs (%s)",
+                disc_sum_ms / 1000,
+                meta_sum_ms / 1000,
+                meta.mb_release_id or "<no MBID>",
+            )
+            return False
+
+    # Gate 3: ISRC overlap. Use R1's helper. Score == 0 means either side
+    # had no ISRCs, or none agreed — only reject when we have ISRCs on
+    # both sides AND none agreed (strong contradiction).
+    disc_isrc_count = sum(1 for t in disc.tracks if t.isrc)
+    meta_isrc_count = sum(1 for t in meta.tracks if t.isrc)
+    if disc_isrc_count >= 2 and meta_isrc_count >= 2:
+        score = _score_candidate_by_isrcs(meta, disc)
+        if score == 0:
+            log.warning(
+                "R3 reject (ISRC overlap): %d / %d disc ISRCs scored zero "
+                "against meta (%s)",
+                disc_isrc_count,
+                meta_isrc_count,
+                meta.mb_release_id or "<no MBID>",
+            )
+            return False
+
+    # Gate 4: aggregate title fuzzy ≥ _R3_TITLE_FUZZ_CUTOFF. Skip when either
+    # side has no titles for ≥2 tracks (need at least some overlap to score).
+    title_score = _aggregate_title_fuzz_score(meta, disc)
+    if title_score is not None and title_score < _R3_TITLE_FUZZ_CUTOFF:
+        log.warning(
+            "R3 reject (title fuzz): aggregate score %d < %d (%s)",
+            title_score,
+            _R3_TITLE_FUZZ_CUTOFF,
+            meta.mb_release_id or "<no MBID>",
+        )
+        return False
+
+    return True
+
+
+def _aggregate_title_fuzz_score(meta: DiscMeta, disc: RBIDisc) -> int | None:
+    """Mean token_set_ratio across paired track titles, or None on no overlap.
+
+    Pairs by track number. Only scores pairs where both sides have a title;
+    returns None when fewer than 2 paired titles exist (insufficient signal).
+    """
+    from rapidfuzz import fuzz
+
+    meta_titles = {t.number: t.title for t in meta.tracks if t.number is not None}
+    pairs: list[int] = []
+    for entry in disc.tracks:
+        if not entry.title:
+            continue
+        mt = meta_titles.get(entry.track_number)
+        if not mt:
+            continue
+        pairs.append(int(fuzz.token_set_ratio(entry.title.lower(), mt.lower())))
+    if len(pairs) < 2:
+        return None
+    return sum(pairs) // len(pairs)
+
+
+def _verify_rg_path_for_disc(disc: RBIDisc) -> bool:
+    """R3 gate for the RG-primary path.
+
+    Fast path: verify the disc's own MB release MBID (set by MB disc-ID
+    prepop) against the disc. The RG identification came from this MBID
+    — if the disc verifies against it, the RG is correct. If it doesn't,
+    the RG identification was wrong upstream; fall through to fuzzy.
+
+    When ``disc.mb_release_id`` is unset or the MB fetch fails, return
+    True (no evidence to reject — the RG answer stands). Network failure
+    is not evidence of mismatch.
+    """
+    from cdda2img.mb_lookup import lookup_release
+
+    if disc.mb_release_id is None:
+        return True
+    meta = lookup_release(disc.mb_release_id, disc_number=disc.disc_number)
+    if meta is None:
+        return True
+    return _verify_release_matches_disc(meta, disc)
+
+
 def _fetch_release_group(rg_id: str):  # type: ignore[no-untyped-def]
     """Return the raw MB release-group dict for *rg_id*, or None on error.
 
@@ -82,7 +229,14 @@ def _fetch_release_group(rg_id: str):  # type: ignore[no-untyped-def]
 def _find_original_release_via_rg(
     disc: RBIDisc,
 ) -> tuple[bool, str | None, int | None]:
-    """Primary path: MB release-group lookup by MBID."""
+    """Primary path: MB release-group lookup by MBID.
+
+    R3: also verifies that the disc tracklist matches the disc's own MB
+    release (via ``_verify_rg_path_for_disc``) before accepting the RG
+    first-release-date. A mismatch indicates the RG identification was
+    wrong upstream (e.g. a different disc with similar TOC matched the
+    same MB disc-ID); fall through to fuzzy.
+    """
     rg_id = disc.mb_release_group_id
     if not rg_id:
         return (False, None, None)
@@ -102,6 +256,23 @@ def _find_original_release_via_rg(
     first_date = rg.get("first-release-date") or ""
     year = _parse_year(first_date)
     if year is None:
+        return (False, None, None)
+
+    # R14: pre-emphasis effectively died with the early-80s catalogue.
+    # When the disc has pre-emphasis but the RG says > 1986, the
+    # identification is almost certainly wrong (RG describes a digital-only
+    # reissue that wouldn't carry pre-emphasis).
+    if disc.pre_emphasis is True and year > _R14_PRE_EMPH_YEAR_CAP:
+        log.warning(
+            "R14 reject RG: disc has PRE_EMPHASIS but RG year %d > %d (%s)",
+            year,
+            _R14_PRE_EMPH_YEAR_CAP,
+            rg_id,
+        )
+        return (False, None, None)
+
+    # R3: gate the RG identification against the disc tracklist.
+    if not _verify_rg_path_for_disc(disc):
         return (False, None, None)
 
     title = rg.get("title") or disc.album
@@ -372,6 +543,24 @@ def _gather_artist_catalogue_via_mb(artist: str, album: str) -> list[tuple[str, 
     Returns a list of ``(title, year)`` from MB releases matching the
     artist+album query, deduped by release-group and sorted oldest-first.
     Returns empty list on lookup failure.
+
+    Used by ``find_original_release_fuzzy`` for the pre-R3 scoring path.
+    R3's fuzzy gating uses ``_gather_artist_catalogue_metas_via_mb`` for
+    the metas (carries release IDs needed to fetch and verify).
+    """
+    metas = _gather_artist_catalogue_metas_via_mb(artist, album)
+    return [
+        (m.album, _parse_year(m.original_release_date) or 0) for m in metas if m.album
+    ]
+
+
+def _gather_artist_catalogue_metas_via_mb(artist: str, album: str) -> list[DiscMeta]:
+    """R3 fuzzy-path helper: returns *DiscMeta* objects (preserves release IDs).
+
+    Deduped by release-group, sorted by first-release-date ascending.
+    A non-blank ``original_release_date`` and album title are required —
+    matches the R5 rule (the per-release-date fallback was the
+    pre-album-promo-pressing false-positive class).
     """
     from cdda2img.mb_lookup import build_mb_search_query, search_releases
 
@@ -383,20 +572,52 @@ def _gather_artist_catalogue_via_mb(artist: str, album: str) -> list[tuple[str, 
         return []
 
     seen_rg: set[str] = set()
-    out: list[tuple[str, int]] = []
+    out: list[DiscMeta] = []
     for r in releases:
         rg_id = r.mb_release_group_id
         if rg_id and rg_id in seen_rg:
             continue
         if rg_id:
             seen_rg.add(rg_id)
-        # Use original_release_date (release-group first-release-date) where
-        # available; fall back to per-release date for stub results.
-        year = _parse_year(r.original_release_date) or _parse_year(r.release_date)
+        year = _parse_year(r.original_release_date)
         if year is None or not r.album:
             continue
-        out.append((r.album, year))
+        out.append(r)
+    out.sort(key=lambda m: _parse_year(m.original_release_date) or 9999)
     return out
+
+
+def _qualified_fuzzy_candidates(
+    disc_title: str, metas: list[DiscMeta]
+) -> list[DiscMeta]:
+    """Return *metas* that pass the deny-list + fuzzy-cutoff, sorted by year then score.
+
+    R3 fuzzy-path companion to ``_best_fuzzy_match``: returns *every*
+    qualifying candidate (not just the top pick) so the caller can iterate
+    and verify each via ``_verify_release_matches_disc`` until one passes.
+    """
+    from rapidfuzz import fuzz
+
+    disc_norm = _normalise_title(disc_title)
+    if not disc_norm:
+        return []
+    qualified: list[tuple[int, float, DiscMeta]] = []
+    for meta in metas:
+        title = meta.album
+        if not title:
+            continue
+        if _deny_match(disc_title, title):
+            continue
+        cand_norm = _normalise_title(title)
+        if not cand_norm:
+            continue
+        score = fuzz.token_set_ratio(disc_norm, cand_norm)
+        if score < _FUZZ_SCORE_CUTOFF:
+            continue
+        year = _parse_year(meta.original_release_date) or 9999
+        qualified.append((year, score, meta))
+    qualified.sort(key=lambda t: (t[0], -t[1]))
+    return [m for _y, _s, m in qualified]
 
 
 def find_original_release_fuzzy(
@@ -406,15 +627,40 @@ def find_original_release_fuzzy(
 
     Searches MB by artist+title text, normalises and scores candidates per
     the research-derived algorithm, returns the earliest match passing all
-    deny-list rules with score ≥ cutoff.
+    deny-list rules with score ≥ cutoff *and* (R3) ``_verify_release_matches_disc``
+    against the disc tracklist. Each candidate verification costs one MB
+    release lookup; the loop stops at the first verified candidate.
     """
     if not (disc.artist and disc.album):
         return (False, None, None)
-    catalogue = _gather_artist_catalogue_via_mb(disc.artist, disc.album)
-    if not catalogue:
+    metas = _gather_artist_catalogue_metas_via_mb(disc.artist, disc.album)
+    if not metas:
         return (False, None, None)
-    hit = _best_fuzzy_match(disc.album, catalogue)
-    if hit is None:
+    qualified = _qualified_fuzzy_candidates(disc.album, metas)
+    if not qualified:
         return (False, None, None)
-    title, year, _score = hit
-    return (True, title, year)
+
+    from cdda2img.mb_lookup import lookup_release
+
+    for meta in qualified:
+        year = _parse_year(meta.original_release_date)
+        if year is None or not meta.album:
+            continue
+        # R14: pre-emphasis year upper-bound on fuzzy candidates too.
+        if disc.pre_emphasis is True and year > _R14_PRE_EMPH_YEAR_CAP:
+            continue
+        # R3: fetch the candidate release and verify against the disc.
+        # Stub metadata from search_releases lacks per-track durations /
+        # ISRCs / titles, so the verifier would skip every gate; only the
+        # fetched release has enough data to gate meaningfully.
+        if meta.mb_release_id is None:
+            # No way to fetch full release data → can't verify → trust the
+            # candidate (skip-on-no-evidence applies at the meta-level too).
+            return (True, meta.album, year)
+        full = lookup_release(meta.mb_release_id, disc_number=disc.disc_number)
+        if full is None:
+            # Network failure ≠ evidence of mismatch — accept stub.
+            return (True, meta.album, year)
+        if _verify_release_matches_disc(full, disc):
+            return (True, meta.album, year)
+    return (False, None, None)

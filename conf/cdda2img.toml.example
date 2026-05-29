@@ -71,6 +71,14 @@
 # Default: 5.0
 # low_dr_threshold = 5.0
 
+# R10: when true, every remote metadata lookup (CDDB / MB / Discogs /
+# AcoustID / AccurateRip) short-circuits to "unavailable". Combined with
+# the R7 SQLite cache (~/.local/share/cdda2img/lookup_cache.db), a re-run
+# can reproduce a previously-seen disc's metadata without network access.
+# The same effect is available per-invocation via --no-network-services.
+# Default: false
+# no_network_services = false
+
 # Per-drive read and write offsets.
 # read_offset is stored automatically after AccurateRip confirmation.
 # write_offset is stored automatically by tools/measure_write_offset.py.

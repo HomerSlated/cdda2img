@@ -13,11 +13,13 @@ from __future__ import annotations
 
 import array
 import struct
+import urllib.error
 from pathlib import Path
 from unittest.mock import patch
 
 from cdda2img.accuraterip import (
     ARTrackResult,
+    ARVerifyResult,
     _ar_checksums,
     _ar_disc_ids,
     _parse_dbar,
@@ -261,17 +263,24 @@ def test_parse_dbar_wrong_track_count_second_block_stops() -> None:
 
 
 def test_verify_rip_disc_not_in_database(tmp_path: Path) -> None:
-    """When _fetch_ar returns None, all results have max_confidence=None."""
+    """When _fetch_ar returns (None, "https"), all results have max_confidence=None.
+
+    The "https" transport is preserved on a 404 (the server cleanly answered)
+    so PROV records the attempt even when no body was fetched.
+    """
     pcm = tmp_path / "disc.pcm"
     pcm.write_bytes(bytes(100 * 2352))
 
-    with patch("cdda2img.accuraterip._fetch_ar", return_value=None):
-        results = verify_rip(pcm, track_lsns=[0, 50], disc_last_lsn=99)
+    with patch("cdda2img.accuraterip._fetch_ar", return_value=(None, "https")):
+        result = verify_rip(pcm, track_lsns=[0, 50], disc_last_lsn=99)
 
-    assert len(results) == 2
-    assert all(r.max_confidence is None for r in results)
-    assert all(r.confidence_v1 is None for r in results)
-    assert all(r.confidence_v2 is None for r in results)
+    assert isinstance(result, ARVerifyResult)
+    assert len(result.tracks) == 2
+    assert all(r.max_confidence is None for r in result.tracks)
+    assert all(r.confidence_v1 is None for r in result.tracks)
+    assert all(r.confidence_v2 is None for r in result.tracks)
+    assert result.transport == "https"
+    assert result.dbar_sha256 is None  # no body → no hash
 
 
 def test_verify_rip_last_track_zero_padding(tmp_path: Path) -> None:
@@ -339,19 +348,24 @@ def test_verify_rip_last_track_zero_padding(tmp_path: Path) -> None:
     assert v1_clipped != v1_expected, "test setup: clipped CRC must differ from padded"
 
     # --- Integration: verify_rip must produce the padded CRC ---
-    dbar = struct.pack("<BLLL", 1, 0, 0, 0)  # header: 1 track
+    # Header IDs computed via _ar_disc_ids; if they mismatched, R2's per-block
+    # verify would skip the block and the test would fail with confidence_v1=None.
+    id1_hex, id2_hex = _ar_disc_ids([0], n_sectors - 1)
+    dbar = struct.pack(
+        "<BLLL", 1, int(id1_hex, 16), int(id2_hex, 16), 0
+    )  # header: 1 track + real IDs
     dbar += struct.pack("<BLL", 15, v1_expected, v2_expected)  # conf=15
 
-    with patch("cdda2img.accuraterip._fetch_ar", return_value=dbar):
-        results = verify_rip(
+    with patch("cdda2img.accuraterip._fetch_ar", return_value=(dbar, "https")):
+        result = verify_rip(
             pcm_path,
             track_lsns=[0],
             disc_last_lsn=n_sectors - 1,
             read_offset=drive_offset,
         )
 
-    assert len(results) == 1
-    assert results[0].confidence_v1 == 15, (
+    assert len(result.tracks) == 1
+    assert result.tracks[0].confidence_v1 == 15, (
         "last track should match the zero-padded CRC; "
         "if confidence_v1 is None, the buffer was clipped instead of padded"
     )
@@ -507,19 +521,268 @@ def test_arip_unpack_too_short() -> None:
 
 
 def test_verify_rip_total_confidence(tmp_path: Path) -> None:
-    """total_confidence sums all dBAR blocks; max_confidence tracks the maximum."""
+    """total_confidence sums all dBAR blocks; max_confidence tracks the maximum.
+
+    Both dBAR blocks must carry the queried (id1, id2, cddb_id) triple so
+    R2's per-block header verification accepts them.
+    """
     n_sectors = 10 * 75  # 10 seconds
     pcm_data = bytes(n_sectors * 2352)
     pcm_path = tmp_path / "disc.pcm"
     pcm_path.write_bytes(pcm_data)
 
-    # Two dBAR blocks: conf=14 and conf=130 — total should be 144, max should be 130
-    dbar = struct.pack("<BLLL", 1, 0, 0, 0) + struct.pack("<BLL", 14, 0, 0)
-    dbar += struct.pack("<BLLL", 1, 0, 0, 0) + struct.pack("<BLL", 130, 0, 0)
+    id1_hex, id2_hex = _ar_disc_ids([0], n_sectors - 1)
+    h_id1 = int(id1_hex, 16)
+    h_id2 = int(id2_hex, 16)
+    # Two dBAR blocks: conf=14 and conf=130 — total should be 144, max 130.
+    dbar = struct.pack("<BLLL", 1, h_id1, h_id2, 0) + struct.pack("<BLL", 14, 0, 0)
+    dbar += struct.pack("<BLLL", 1, h_id1, h_id2, 0) + struct.pack("<BLL", 130, 0, 0)
 
-    with patch("cdda2img.accuraterip._fetch_ar", return_value=dbar):
-        results = verify_rip(pcm_path, track_lsns=[0], disc_last_lsn=n_sectors - 1)
+    with patch("cdda2img.accuraterip._fetch_ar", return_value=(dbar, "https")):
+        result = verify_rip(pcm_path, track_lsns=[0], disc_last_lsn=n_sectors - 1)
 
-    assert len(results) == 1
-    assert results[0].max_confidence == 130
-    assert results[0].total_confidence == 144
+    assert len(result.tracks) == 1
+    assert result.tracks[0].max_confidence == 130
+    assert result.tracks[0].total_confidence == 144
+    assert result.transport == "https"
+    assert result.dbar_sha256 is not None  # body was fetched → hash present
+
+
+# ---------------------------------------------------------------------------
+# 6. R2 — HTTPS-first transport with HTTP fallback + bounded read
+# ---------------------------------------------------------------------------
+
+
+def _fake_urlopen(url_to_body: dict[str, bytes | Exception]):
+    """Build a urlopen-shaped fake that dispatches by URL.
+
+    Each value is either a bytes body (returned by .read()) or an Exception
+    to raise immediately. Tracks called URLs in `.calls` (list[str]).
+    """
+    calls: list[str] = []
+
+    class _Resp:
+        def __init__(self, body: bytes) -> None:
+            self._body = body
+
+        def read(self, n: int = -1) -> bytes:
+            return self._body[:n] if n > 0 else self._body
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+    def _fake(url: str, timeout: float = 10):
+        calls.append(url)
+        for key, value in url_to_body.items():
+            if key in url:
+                if isinstance(value, Exception):
+                    raise value
+                return _Resp(value)
+        # Default: raise 404
+        raise urllib.error.HTTPError(url, 404, "Not Found", {}, None)  # type: ignore[arg-type]
+
+    return _fake, calls
+
+
+def test_fetch_ar_prefers_https() -> None:
+    """The first attempted URL must be HTTPS."""
+    from cdda2img.accuraterip import _fetch_ar
+
+    body = struct.pack("<BLLL", 1, 0xAABBCCDD, 0x11223344, 0xDEADBEEF)
+    body += struct.pack("<BLL", 1, 0, 0)
+
+    fake, calls = _fake_urlopen({"https://": body})
+    with patch("cdda2img.accuraterip.urllib.request.urlopen", side_effect=fake):
+        result, transport = _fetch_ar(1, "aabbccdd", "11223344", 0xDEADBEEF)
+
+    assert result == body
+    assert transport == "https"
+    assert calls[0].startswith("https://")
+    assert len(calls) == 1  # no fallback needed
+
+
+def test_fetch_ar_falls_back_to_http_on_tls_failure() -> None:
+    """A URLError / OSError on HTTPS must trigger a single HTTP retry."""
+    from cdda2img.accuraterip import _fetch_ar
+
+    body = b"OK-via-http"
+    fake, calls = _fake_urlopen({
+        "https://": urllib.error.URLError("TLS handshake failed"),
+        "http://": body,
+    })
+    with patch("cdda2img.accuraterip.urllib.request.urlopen", side_effect=fake):
+        result, transport = _fetch_ar(1, "deadbeef", "cafebabe", 0)
+
+    assert result == body
+    assert transport == "http"
+    assert calls[0].startswith("https://")
+    assert calls[1].startswith("http://")
+    assert len(calls) == 2
+
+
+def test_fetch_ar_404_does_not_fall_back() -> None:
+    """A 404 over HTTPS is a legitimate negative — no HTTP retry.
+
+    The server cleanly answered; the disc isn't in the database and won't
+    be at the other transport either. Fallback would waste an RTT.
+    """
+    from cdda2img.accuraterip import _fetch_ar
+
+    fake, calls = _fake_urlopen({})  # default = 404 everywhere
+    with patch("cdda2img.accuraterip.urllib.request.urlopen", side_effect=fake):
+        result, transport = _fetch_ar(1, "00000000", "00000000", 0)
+
+    assert result is None
+    assert transport == "https"  # we *did* make contact, just not a body
+    assert len(calls) == 1  # no fallback
+
+
+def test_fetch_ar_both_transports_fail() -> None:
+    """Network failure on both → (None, None)."""
+    from cdda2img.accuraterip import _fetch_ar
+
+    fake, calls = _fake_urlopen({
+        "https://": urllib.error.URLError("net down"),
+        "http://": urllib.error.URLError("net down"),
+    })
+    with patch("cdda2img.accuraterip.urllib.request.urlopen", side_effect=fake):
+        result, transport = _fetch_ar(1, "00000000", "00000000", 0)
+
+    assert result is None
+    assert transport is None
+    assert len(calls) == 2
+
+
+def test_fetch_ar_oversized_response_rejected() -> None:
+    """Response > 1 MB is dropped as malformed; transport is still recorded."""
+    from cdda2img.accuraterip import _AR_DBAR_MAX, _fetch_ar
+
+    oversize = b"\x00" * (_AR_DBAR_MAX + 100)
+    fake, _calls = _fake_urlopen({"https://": oversize})
+    with patch("cdda2img.accuraterip.urllib.request.urlopen", side_effect=fake):
+        result, transport = _fetch_ar(1, "00000000", "00000000", 0)
+
+    assert result is None  # rejected
+    assert transport == "https"  # the server did answer
+
+
+# ---------------------------------------------------------------------------
+# 7. R2 — _parse_dbar per-block header verification
+# ---------------------------------------------------------------------------
+
+
+def test_parse_dbar_rejects_mismatching_id1() -> None:
+    """A block whose id1 does not match the queried value is skipped, not returned."""
+    good_id1, good_id2, good_cddb = 0xAABBCCDD, 0x11223344, 0xDEADBEEF
+    bad_block = struct.pack("<BLLL", 1, 0x99999999, good_id2, good_cddb)
+    bad_block += struct.pack("<BLL", 10, 0xCAFEBABE, 0)
+    good_block = struct.pack("<BLLL", 1, good_id1, good_id2, good_cddb)
+    good_block += struct.pack("<BLL", 5, 0x12345678, 0)
+
+    result = _parse_dbar(
+        bad_block + good_block,
+        n_tracks=1,
+        expected_id1=good_id1,
+        expected_id2=good_id2,
+        expected_cddb_id=good_cddb,
+    )
+    # The bad block is skipped; the good block is returned.
+    assert len(result) == 1
+    assert result[0][0]["v1"] == 0x12345678
+    assert result[0][0]["conf"] == 5
+
+
+def test_parse_dbar_rejects_mismatching_cddb_id() -> None:
+    """A block whose cddb_id differs is dropped."""
+    good_id1, good_id2, good_cddb = 0xAABBCCDD, 0x11223344, 0xDEADBEEF
+    bad_cddb = 0x00000000
+    bad_block = struct.pack("<BLLL", 1, good_id1, good_id2, bad_cddb)
+    bad_block += struct.pack("<BLL", 7, 0xCAFEBABE, 0)
+    result = _parse_dbar(
+        bad_block,
+        n_tracks=1,
+        expected_id1=good_id1,
+        expected_id2=good_id2,
+        expected_cddb_id=good_cddb,
+    )
+    assert result == []
+
+
+def test_parse_dbar_legacy_call_unchanged() -> None:
+    """When no expected_* args are passed, behaviour is pre-R2 (no header check)."""
+    data = _build_dbar(n_tracks=1, blocks=[[(5, 0x11111111, 0x22222222)]])
+    result = _parse_dbar(data, n_tracks=1)
+    # IDs in _build_dbar are all zero; without verification this is still accepted.
+    assert len(result) == 1
+    assert result[0][0]["v1"] == 0x11111111
+
+
+# ---------------------------------------------------------------------------
+# 8. R2 — verify_rip end-to-end provenance fields
+# ---------------------------------------------------------------------------
+
+
+def test_verify_rip_dbar_sha256_matches_body(tmp_path: Path) -> None:
+    """ARVerifyResult.dbar_sha256 is the SHA-256 of the raw fetched body."""
+    import hashlib
+
+    n_sectors = 10 * 75
+    pcm_path = tmp_path / "disc.pcm"
+    pcm_path.write_bytes(bytes(n_sectors * 2352))
+
+    id1_hex, id2_hex = _ar_disc_ids([0], n_sectors - 1)
+    body = struct.pack("<BLLL", 1, int(id1_hex, 16), int(id2_hex, 16), 0) + struct.pack(
+        "<BLL", 50, 0, 0
+    )
+    expected_hex = hashlib.sha256(body).hexdigest()
+
+    with patch("cdda2img.accuraterip._fetch_ar", return_value=(body, "https")):
+        result = verify_rip(pcm_path, track_lsns=[0], disc_last_lsn=n_sectors - 1)
+
+    assert result.dbar_sha256 == expected_hex
+    assert result.dbar_sha256 is not None
+    assert len(result.dbar_sha256) == 64
+    assert all(c in "0123456789abcdef" for c in result.dbar_sha256)
+
+
+def test_verify_rip_propagates_http_transport(tmp_path: Path) -> None:
+    """When _fetch_ar reports HTTP fallback, verify_rip surfaces it."""
+    pcm_path = tmp_path / "disc.pcm"
+    pcm_path.write_bytes(bytes(75 * 2352))
+
+    with patch("cdda2img.accuraterip._fetch_ar", return_value=(None, "http")):
+        result = verify_rip(pcm_path, track_lsns=[0], disc_last_lsn=74)
+
+    assert result.transport == "http"
+    assert result.dbar_sha256 is None
+    assert all(r.max_confidence is None for r in result.tracks)
+
+
+def test_verify_rip_rejects_block_with_wrong_disc_ids(tmp_path: Path) -> None:
+    """A dBAR with a mismatching (id1, id2, cddb_id) triple yields no matches.
+
+    The block is silently dropped by _parse_dbar; verify_rip then returns
+    not-in-DB-style results (max_confidence=None) even though _fetch_ar
+    returned a body. transport and dbar_sha256 are still preserved.
+    """
+    n_sectors = 10 * 75
+    pcm_path = tmp_path / "disc.pcm"
+    pcm_path.write_bytes(bytes(n_sectors * 2352))
+
+    # Poisoned block carrying a body for a *different* disc's IDs.
+    poisoned = struct.pack("<BLLL", 1, 0xDEAD0000, 0xBEEF0000, 0xCAFE0000)
+    poisoned += struct.pack("<BLL", 99, 0xAAAA, 0xBBBB)  # would have been conf=99
+
+    with patch("cdda2img.accuraterip._fetch_ar", return_value=(poisoned, "https")):
+        result = verify_rip(
+            pcm_path, track_lsns=[0], disc_last_lsn=n_sectors - 1, cddb_id=0
+        )
+
+    assert len(result.tracks) == 1
+    assert result.tracks[0].max_confidence is None  # block was rejected
+    assert result.tracks[0].confidence_v1 is None
+    assert result.transport == "https"
+    assert result.dbar_sha256 is not None  # the body was still hashed pre-parse

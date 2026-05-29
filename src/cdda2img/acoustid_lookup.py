@@ -24,7 +24,14 @@ _SCORE_THRESHOLD = 0.5
 
 
 def is_available() -> bool:
-    """Return True when pyacoustid, libchromaprint, and ACOUSTID_API_KEY are all present."""
+    """Return True when pyacoustid, libchromaprint, and ACOUSTID_API_KEY are all present.
+
+    R10: returns False unconditionally when offline mode is active.
+    """
+    from cdda2img.config import is_no_network_active
+
+    if is_no_network_active():
+        return False
     if not os.environ.get("ACOUSTID_API_KEY"):
         return False
     try:

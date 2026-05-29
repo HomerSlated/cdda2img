@@ -54,6 +54,10 @@ def _setup_useragent() -> None:
         importlib.metadata.version("cdda2img"),
         cfg.contact_email or None,
     )
+    # R15: pin the rate limit explicitly so the project does not silently
+    # inherit a future library default change. MB's documented limit is
+    # 1 request per second per host.
+    musicbrainzngs.set_rate_limit(limit_or_interval=1.0, new_requests=1)
     _useragent_set = True
 
 
@@ -227,18 +231,24 @@ def _parse_release(
         medium_list, album_title, _disc_id, _disc_number
     )
 
+    from cdda2img.validators import validate_isrc
+
     tracks: list[TrackMeta] = []
     for medium in matched_mediums:
         for track in medium.get("track-list") or []:
             recording = track.get("recording") or {}
             isrc_list = recording.get("isrc-list") or []
             length = recording.get("length")
+            # R13: structure-check each ISRC at MB ingress; malformed entries
+            # are dropped (with a WARNING log) rather than propagated through
+            # the rest of the pipeline.
+            isrc = validate_isrc(isrc_list[0]) if isrc_list else None
             tracks.append(
                 TrackMeta(
                     number=_parse_track_number(track),
                     title=track.get("title") or recording.get("title"),
                     performer=artist or None,
-                    isrc=isrc_list[0] if isrc_list else None,
+                    isrc=isrc,
                     duration_ms=int(length) if length else None,
                 )
             )
@@ -282,11 +292,31 @@ def lookup_disc_id(disc: RBIDisc) -> list[DiscMeta]:
     """Look up releases on MusicBrainz by Disc ID computed from the disc TOC.
 
     Returns a list of matching DiscMeta (empty on no match or network error).
+
+    R7: results are cached in ``lookup_cache.db`` with a 30-day TTL.
+    Cache hits short-circuit the network call; failures (TTL, parse error,
+    sqlite error) degrade silently to a live request.
+
+    R10: when offline mode is active, the function still reads the cache
+    (cached responses are usable offline) but never makes a network call.
     """
-    _setup_useragent()
+    from cdda2img.config import is_no_network_active
+    from cdda2img.lookup_cache import (
+        get_cached_disc_id_lookup,
+        put_cached_disc_id_lookup,
+    )
+
     disc_id_str = disc_id_from_rbi(disc)
     if not disc_id_str:
         return []
+    cached = get_cached_disc_id_lookup(disc_id_str)
+    if cached is not None:
+        log.debug("MB disc ID cache hit: %s", disc_id_str)
+        return cached
+    if is_no_network_active():
+        log.debug("MB disc ID offline (cache miss for %s)", disc_id_str)
+        return []
+    _setup_useragent()
     log.debug("MusicBrainz disc ID lookup: %s", disc_id_str)
     try:
         result = musicbrainzngs.get_releases_by_discid(
@@ -300,7 +330,9 @@ def lookup_disc_id(disc: RBIDisc) -> list[DiscMeta]:
         log.debug("MusicBrainz network error: %s", exc)
         return []
     releases = (result.get("disc") or {}).get("release-list") or []
-    return [_parse_release(r, _disc_id=disc_id_str) for r in releases]
+    parsed = [_parse_release(r, _disc_id=disc_id_str) for r in releases]
+    put_cached_disc_id_lookup(disc_id_str, parsed)
+    return parsed
 
 
 def lookup_release(release_id: str, disc_number: int | None = None) -> DiscMeta | None:
@@ -310,8 +342,12 @@ def lookup_release(release_id: str, disc_number: int | None = None) -> DiscMeta 
     only that disc's tracks are returned.  Pass ``disc.disc_number`` when
     applying to a known disc in a set.
 
-    Returns None on network/response error.
+    Returns None on network/response error or when offline mode is active (R10).
     """
+    from cdda2img.config import is_no_network_active
+
+    if is_no_network_active():
+        return None
     _setup_useragent()
     log.debug("MusicBrainz release lookup: %s", release_id)
     try:
@@ -351,7 +387,11 @@ def build_mb_search_query(artist: str | None, album: str | None) -> str:
 
 
 def search_releases(query: str, limit: int = 25) -> list[DiscMeta]:
-    """Text search for releases on MusicBrainz. Returns empty list on error."""
+    """Text search for releases on MusicBrainz. Returns empty list on error or offline (R10)."""
+    from cdda2img.config import is_no_network_active
+
+    if is_no_network_active():
+        return []
     _setup_useragent()
     log.debug("MusicBrainz text search: %r", query)
     try:
@@ -363,7 +403,11 @@ def search_releases(query: str, limit: int = 25) -> list[DiscMeta]:
 
 
 def search_releases_by_barcode(barcode: str, limit: int = 25) -> list[DiscMeta]:
-    """Search MusicBrainz for releases by barcode. Returns empty list on error."""
+    """Search MusicBrainz for releases by barcode. Returns [] on error or offline (R10)."""
+    from cdda2img.config import is_no_network_active
+
+    if is_no_network_active():
+        return []
     _setup_useragent()
     log.debug("MusicBrainz barcode search: %r", barcode)
     try:
@@ -378,7 +422,12 @@ def lookup_release_group(rg_id: str) -> list[DiscMeta]:
     """Fetch all releases in a MusicBrainz release group, sorted by date (oldest first).
 
     Used by the 'Find Original Release' menu to browse all pressings in a release group.
+    Returns [] when offline mode is active (R10).
     """
+    from cdda2img.config import is_no_network_active
+
+    if is_no_network_active():
+        return []
     _setup_useragent()
     log.debug("MusicBrainz release group lookup: %s", rg_id)
     try:
@@ -406,7 +455,12 @@ def lookup_isrc(isrc: str) -> list[DiscMeta]:
 
     Returns a list of DiscMeta for releases that contain a recording with this ISRC.
     Results are basic (no per-track tracklist) due to the two-step lookup.
+    Returns [] when offline mode is active (R10).
     """
+    from cdda2img.config import is_no_network_active
+
+    if is_no_network_active():
+        return []
     _setup_useragent()
     log.debug("MusicBrainz ISRC lookup: %s", isrc)
     try:
@@ -451,6 +505,8 @@ def lookup_isrc(isrc: str) -> list[DiscMeta]:
 
 def _merge_into_disc(meta: DiscMeta, disc: RBIDisc) -> RBIDisc:
     """Return a new RBIDisc with None/empty/unknown fields filled from *meta*."""
+    from cdda2img.validators import validate_isrc
+
     _unknown = "Unknown Artist"
     album = disc.album if disc.album else (meta.album or disc.album)
     artist = (
@@ -465,6 +521,10 @@ def _merge_into_disc(meta: DiscMeta, disc: RBIDisc) -> RBIDisc:
     for entry in disc.tracks:
         mt = meta_by_num.get(entry.track_number)
         if mt:
+            # R13: validate the raw-side ISRC at the merge chokepoint; if it
+            # fails (malformed input from a foreign-image parser), fall back
+            # to the meta-side ISRC which was already validated at MB ingress.
+            entry_isrc = validate_isrc(entry.isrc) if entry.isrc else None
             new_tracks.append(
                 RBITocEntry(
                     track_number=entry.track_number,
@@ -477,7 +537,7 @@ def _merge_into_disc(meta: DiscMeta, disc: RBIDisc) -> RBIDisc:
                     start_frame=entry.start_frame,
                     duration_frames=entry.duration_frames,
                     pregap_frames=entry.pregap_frames,
-                    isrc=entry.isrc or mt.isrc,
+                    isrc=entry_isrc or mt.isrc,
                 )
             )
         else:
@@ -507,6 +567,7 @@ def _merge_into_disc(meta: DiscMeta, disc: RBIDisc) -> RBIDisc:
         mb_release_group_id=disc.mb_release_group_id
         or meta.mb_release_group_id
         or None,
+        discogs_release_id=disc.discogs_release_id or meta.discogs_release_id,
         set_title=disc.set_title or meta.set_title,
     )
 
@@ -517,11 +578,16 @@ def _overwrite_disc(meta: DiscMeta, disc: RBIDisc) -> RBIDisc:
     Unlike _merge_into_disc (which keeps existing disc values), this always
     prefers meta's values when set — used for the 'Overwrite All' apply mode.
     """
+    from cdda2img.validators import validate_isrc
+
     meta_by_num = {t.number: t for t in meta.tracks if t.number is not None}
     new_tracks: list[RBITocEntry] = []
     for entry in disc.tracks:
         mt = meta_by_num.get(entry.track_number)
         if mt:
+            # R13: validate the raw-side ISRC; mt.isrc was already validated
+            # at MB ingress.
+            entry_isrc = validate_isrc(entry.isrc) if entry.isrc else None
             new_tracks.append(
                 RBITocEntry(
                     track_number=entry.track_number,
@@ -530,7 +596,7 @@ def _overwrite_disc(meta: DiscMeta, disc: RBIDisc) -> RBIDisc:
                     start_frame=entry.start_frame,
                     duration_frames=entry.duration_frames,
                     pregap_frames=entry.pregap_frames,
-                    isrc=mt.isrc or entry.isrc,
+                    isrc=mt.isrc or entry_isrc,
                 )
             )
         else:
@@ -564,41 +630,203 @@ def _overwrite_disc(meta: DiscMeta, disc: RBIDisc) -> RBIDisc:
     )
 
 
+# R1: minimum number of agreeing per-track ISRC pairs required to commit a
+# multi-match disambiguation. Below this we prefer no-auto-merge (blank but
+# correctable) over a confident-but-possibly-wrong choice.
+_MIN_ISRC_AGREE = 2
+
+
+def _score_candidate_by_isrcs(meta: DiscMeta, disc: RBIDisc) -> int:
+    """Count per-track ISRC agreements between *meta* and *disc*.
+
+    A point is scored when *both* sides have an ISRC for the same track
+    number and the ISRC strings are equal. Tracks where either side lacks
+    an ISRC contribute nothing. Returns 0 when no ISRC pairs exist, which
+    `_disambiguate_by_isrcs` reads as "no evidence, do not auto-merge".
+    """
+    disc_isrcs = {t.track_number: t.isrc for t in disc.tracks if t.isrc}
+    if not disc_isrcs:
+        return 0
+    meta_isrcs = {
+        t.number: t.isrc for t in meta.tracks if t.number is not None and t.isrc
+    }
+    return sum(1 for tn, isrc in disc_isrcs.items() if meta_isrcs.get(tn) == isrc)
+
+
+# R4: minimum ISRC-bearing tracks required before the zero-match tally
+# fires. Below this the signal is too noisy (sparse ISRC data can land
+# many false-positive convergences).
+_R4_MIN_ISRC_BEARING_TRACKS = 3
+
+
+def _resolve_via_isrc_tally(disc: RBIDisc) -> DiscMeta | None:
+    """R4: zero-disc-ID-match fallback via per-track ISRC release tally.
+
+    Fires only when ``lookup_disc_id`` returned no matches *and* the disc
+    has at least ``_R4_MIN_ISRC_BEARING_TRACKS`` ISRC-bearing tracks. For
+    each ISRC, ``lookup_isrc`` is called and the returned release MBIDs
+    are tallied. The release with the strictly highest tally wins, but
+    only when it converges across ≥ ceil(N/2) of the ISRC-bearing tracks
+    (where N is the number of ISRC-bearing tracks). Ties or sub-threshold
+    top tallies return None.
+
+    Cost: N sequential MB calls at 1 req/s (~20 s for a 20-track disc).
+    A successful tally feeds the existing barcode-hint / RG-MBID pipeline
+    via ``_merge_into_disc``, exactly as the single-disc-ID match would.
+    """
+    isrcs = [t.isrc for t in disc.tracks if t.isrc]
+    if len(isrcs) < _R4_MIN_ISRC_BEARING_TRACKS:
+        return None
+    tally: dict[str, int] = {}
+    candidates: dict[str, DiscMeta] = {}
+    for isrc in isrcs:
+        responses = lookup_isrc(isrc)
+        seen: set[str] = set()
+        for r in responses:
+            rid = r.mb_release_id
+            if rid is None or rid in seen:
+                continue
+            seen.add(rid)
+            tally[rid] = tally.get(rid, 0) + 1
+            candidates.setdefault(rid, r)
+    if not tally:
+        return None
+    ranked = sorted(tally.items(), key=lambda kv: (-kv[1], kv[0]))
+    top_rid, top_count = ranked[0]
+    floor = max(_R4_MIN_ISRC_BEARING_TRACKS, (len(isrcs) + 1) // 2)
+    if top_count < floor:
+        log.debug(
+            "R4: top tally %d for %s is below floor %d (%d ISRCs queried)",
+            top_count,
+            top_rid,
+            floor,
+            len(isrcs),
+        )
+        return None
+    if len(ranked) > 1 and ranked[1][1] == top_count:
+        log.debug("R4: tied top tally %d — no auto-merge", top_count)
+        return None
+    return candidates[top_rid]
+
+
+def _disambiguate_by_isrcs(matches: list[DiscMeta], disc: RBIDisc) -> DiscMeta | None:
+    """Pick the strict ISRC-score winner from MB's multi-match response.
+
+    A unique candidate with score >= ``_MIN_ISRC_AGREE`` and a strictly
+    higher score than every other candidate wins. Ties at the top score or
+    a top score below the floor return None — the caller preserves the
+    no-auto-merge fallback. Zero new API calls: `lookup_disc_id` already
+    requested ``recordings`` + ``isrcs`` for every candidate.
+    """
+    scored = [(_score_candidate_by_isrcs(m, disc), i, m) for i, m in enumerate(matches)]
+    scored.sort(key=lambda t: (-t[0], t[1]))
+    top_score, _, top_meta = scored[0]
+    if top_score < _MIN_ISRC_AGREE:
+        return None
+    if len(scored) > 1 and scored[1][0] == top_score:
+        return None
+    return top_meta
+
+
 class MBPrepopResult(NamedTuple):
     """Aggregate of a MusicBrainz disc-ID prepop run, including diagnostic counts."""
 
     disc: RBIDisc
-    barcode_hints: list[str]  # de-duplicated, normalised, in match order
+    # R16: each hint is (mb_release_id, normalised barcode). Empty-string MBID
+    # is acceptable for releases that lack one (defensive); R1 will simply not
+    # match such entries. Order follows MB's match order.
+    barcode_hints: list[tuple[str, str]]
     match_count: int  # total MB matches returned (0 = disc-ID unknown to MB)
+    # R1: True iff len(matches) > 1 and ISRC scoring picked a strict winner
+    # that was then auto-merged. Surfaces as PROV ``multi_match_isrc_disambiguated``.
+    isrc_disambiguated: bool = False
+    # R9: (album, artist) of the MB candidate that drove the merge. None when
+    # no single candidate was selected (zero matches, sub-threshold tally,
+    # etc.). Callers can compare these against the pre-MB disc state to
+    # detect CDDB↔MB disagreement.
+    mb_candidate_album: str | None = None
+    mb_candidate_artist: str | None = None
 
 
 def prepopulate_from_mb(disc: RBIDisc, *, verbose: bool = True) -> MBPrepopResult:
     """Attempt a silent MusicBrainz Disc ID lookup and fill in missing fields.
 
-    If exactly one match is found, missing fields in *disc* are filled from the
-    MusicBrainz result and a summary line is printed (when *verbose* is True).
-    On zero or multiple matches (or network error) *disc* is returned unchanged.
+    If exactly one match is found, missing fields in *disc* are filled from
+    the MusicBrainz result and a summary line is printed (when *verbose* is
+    True). When MB returns multiple matches, an ISRC-tally disambiguator
+    (R1) tries to pick a unique winner using the per-track ISRCs already
+    fetched in the same response — no extra network calls. On zero matches,
+    a tie, a sub-threshold top score, or a network error, *disc* is
+    returned unchanged.
 
-    *barcode_hints* are normalised 13-digit barcodes drawn from **every** match
-    (whether or not the merge ran), suitable for seeding a downstream Discogs
-    search when the disc has no embedded MCN. *match_count* lets the caller
-    distinguish "MB knows this disc but lacks barcodes" from "MB doesn't know it"
-    in diagnostic output.
+    *barcode_hints* is a list of ``(mb_release_id, barcode)`` tuples drawn
+    from **every** match (R16), suitable for seeding a downstream Discogs
+    search and for resolving R1's winning candidate to its deterministic
+    barcode without a second MB call. *match_count* lets the caller
+    distinguish "MB knows this disc but lacks barcodes" from "MB doesn't
+    know it" in diagnostic output. *isrc_disambiguated* records whether
+    the multi-match path was resolved by R1.
     """
     _setup_useragent()
     matches = lookup_disc_id(disc)
-    # Preserve match order while deduplicating (set iteration is hash-randomised).
-    hints = list(dict.fromkeys(m.catalog for m in matches if m.catalog))
+    # R16: tag each hint with its source MBID. Preserve match order while
+    # deduplicating exact (mbid, barcode) pairs — different releases with the
+    # same barcode keep separate entries so future lookups can disambiguate.
+    hints: list[tuple[str, str]] = list(
+        dict.fromkeys((m.mb_release_id or "", m.catalog) for m in matches if m.catalog)
+    )
     if hints:
         log.debug("MB barcode hints from %d match(es): %s", len(matches), hints)
     if not matches:
-        return MBPrepopResult(disc, hints, 0)
+        # R4: zero-disc-ID match → try ISRC tally as a fallback.
+        winner = _resolve_via_isrc_tally(disc)
+        if winner is not None:
+            updated = _merge_into_disc(winner, disc)
+            if verbose:
+                date_str = f"  ({winner.release_date})" if winner.release_date else ""
+                print(
+                    f'  MusicBrainz: matched "{winner.album}" by {winner.artist}'
+                    f"{date_str} (via ISRC tally)"
+                )
+            return MBPrepopResult(
+                updated,
+                hints,
+                0,
+                isrc_disambiguated=False,
+                mb_candidate_album=winner.album,
+                mb_candidate_artist=winner.artist,
+            )
+        return MBPrepopResult(disc, hints, 0, isrc_disambiguated=False)
     if len(matches) > 1:
+        winner = _disambiguate_by_isrcs(matches, disc)
+        if winner is not None:
+            updated = _merge_into_disc(winner, disc)
+            if verbose:
+                date_str = f"  ({winner.release_date})" if winner.release_date else ""
+                print(
+                    f'  MusicBrainz: matched "{winner.album}" by {winner.artist}'
+                    f"{date_str} (via ISRC disambiguation)"
+                )
+            return MBPrepopResult(
+                updated,
+                hints,
+                len(matches),
+                isrc_disambiguated=True,
+                mb_candidate_album=winner.album,
+                mb_candidate_artist=winner.artist,
+            )
         log.debug("MB disc ID returned %d matches; skipping auto-fill", len(matches))
-        return MBPrepopResult(disc, hints, len(matches))
+        return MBPrepopResult(disc, hints, len(matches), isrc_disambiguated=False)
     meta = matches[0]
     updated = _merge_into_disc(meta, disc)
     if verbose:
         date_str = f"  ({meta.release_date})" if meta.release_date else ""
         print(f'  MusicBrainz: matched "{meta.album}" by {meta.artist}{date_str}')
-    return MBPrepopResult(updated, hints, len(matches))
+    return MBPrepopResult(
+        updated,
+        hints,
+        len(matches),
+        isrc_disambiguated=False,
+        mb_candidate_album=meta.album,
+        mb_candidate_artist=meta.artist,
+    )

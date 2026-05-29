@@ -336,7 +336,7 @@ def test_prepopulate_discogs_hint_fires_when_disc_has_no_mcn():
         ) as mock_search,
     ):
         result = _prepopulate_from_discogs(
-            disc, ui=None, barcode_hints=["0075992377423"]
+            disc, ui=None, barcode_hints=[("", "0075992377423")]
         )
     mock_search.assert_called_once_with("0075992377423")
     assert result.catalog == "0075992377423"
@@ -364,7 +364,7 @@ def test_prepopulate_discogs_substring_match_picks_correct_hint():
         result = _prepopulate_from_discogs(
             disc,
             ui=None,
-            barcode_hints=["0075992377423", "0081227991159"],
+            barcode_hints=[("", "0075992377423"), ("", "0081227991159")],
         )
     # Substring match picks "0075992377423" (which contains "07599237742").
     # Discogs returns 23 → no enrichment, but disc.catalog is set deductively.
@@ -391,7 +391,7 @@ def test_prepopulate_discogs_substring_skips_wrong_hint():
         result = _prepopulate_from_discogs(
             disc,
             ui=None,
-            barcode_hints=["0081227991159", "0075992377423"],
+            barcode_hints=[("", "0081227991159"), ("", "0075992377423")],
         )
     mock_search.assert_called_once_with("0075992377423")
     assert result.catalog == "0075992377423"
@@ -417,7 +417,7 @@ def test_prepopulate_discogs_fallback_to_first_hint_when_no_raw_mcn():
         result = _prepopulate_from_discogs(
             disc,
             ui=None,
-            barcode_hints=["0075992377423", "0081227991159"],
+            barcode_hints=[("", "0075992377423"), ("", "0081227991159")],
         )
     # First hint chosen as best-guess; Discogs returns 23 (no enrichment).
     mock_search.assert_called_once_with("0075992377423")
@@ -439,7 +439,7 @@ def test_prepopulate_discogs_enrichment_rejects_wrong_album():
         patch("cdda2img.discogs_lookup.search_by_barcode", return_value=compilation),
     ):
         result = _prepopulate_from_discogs(
-            disc, ui=None, barcode_hints=["0081227991159"]
+            disc, ui=None, barcode_hints=[("", "0081227991159")]
         )
     # MCN set from Phase A (only candidate is the hint); enrichment rejected.
     assert result.catalog == "0081227991159"
@@ -458,7 +458,7 @@ def test_prepopulate_discogs_valid_mcn_querys_once():
             "cdda2img.discogs_lookup.search_by_barcode", return_value=[]
         ) as mock_search,
     ):
-        _prepopulate_from_discogs(disc, ui=None, barcode_hints=["0075992377423"])
+        _prepopulate_from_discogs(disc, ui=None, barcode_hints=[("", "0075992377423")])
     assert mock_search.call_count == 1
 
 

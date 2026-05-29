@@ -11,11 +11,12 @@ Public interface:
 from __future__ import annotations
 
 import array
+import hashlib
 import logging
 import struct
 import urllib.error
 import urllib.request
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -33,7 +34,18 @@ if array.array("I").itemsize != 4:  # LINT-014
     raise RuntimeError(msg)
 
 _SKIP_FRAMES = 5 * 588  # 2940 frames — excluded from each boundary per AR spec
-_AR_BASE = "http://www.accuraterip.com/accuraterip"
+
+# R2: HTTPS-first transport with HTTP fallback. accuraterip.com serves a valid
+# Let's Encrypt cert at the dBAR namespace (verified 2026-05-28). HTTP remains
+# as fallback only — when reachable, the `arip_transport=http` PROV signal
+# tells downstream readers to treat the confidence values with reduced trust.
+_AR_BASE_HTTPS = "https://www.accuraterip.com/accuraterip"
+_AR_BASE_HTTP = "http://www.accuraterip.com/accuraterip"
+
+# R2: dBAR response cap. A 99-track block is ~900 bytes, total response is
+# usually <5 KB; 1 MB is a generous defensive ceiling that bounds any
+# pathological / hostile response without truncating real ones.
+_AR_DBAR_MAX = 1_048_576
 
 
 @dataclass
@@ -51,6 +63,27 @@ class ARTrackResult:
     total_confidence: int | None = (
         None  # None = not in DB; sum of all dBAR block confidences
     )
+
+
+@dataclass
+class ARVerifyResult:
+    """Disc-level outcome of an AccurateRip verification pass (R2).
+
+    *tracks* preserves the existing per-track API; the new fields surface
+    R2's provenance signals for the PROV block.
+    """
+
+    tracks: list[ARTrackResult] = field(default_factory=list)
+    # "https" | "http" | None. None when both transports failed at the network
+    # level (DNS, TLS handshake, connection refused, 5xx). "https" is also the
+    # value used when the server cleanly returned 404 over HTTPS — the disc is
+    # not in the database, and we made successful contact at that transport.
+    transport: str | None = None
+    # 64 lowercase hex chars; None when no body was fetched (404 / network
+    # failure). SHA-256 of the *raw* response bytes lets later re-fetches
+    # detect AR-side changes or mirror tampering without re-running the
+    # full verification pipeline.
+    dbar_sha256: str | None = None
 
 
 def _ar_checksums(
@@ -97,30 +130,75 @@ def _ar_disc_ids(track_lsns: list[int], disc_last_lsn: int) -> tuple[str, str]:
     return f"{id1 & 0xFFFFFFFF:08x}", f"{id2 & 0xFFFFFFFF:08x}"
 
 
-def _ar_url(track_count: int, id1: str, id2: str, cddb_id: int) -> str:
+def _ar_url(
+    track_count: int, id1: str, id2: str, cddb_id: int, *, base: str = _AR_BASE_HTTPS
+) -> str:
     # Directory path uses the LAST three chars of id1 in reverse order (LSBs first).
     return (
-        f"{_AR_BASE}/{id1[-1]}/{id1[-2]}/{id1[-3]}/"
+        f"{base}/{id1[-1]}/{id1[-2]}/{id1[-3]}/"
         f"dBAR-{track_count:03d}-{id1}-{id2}-{cddb_id:08x}.bin"
     )
 
 
-def _fetch_ar(url: str) -> bytes | None:
-    try:
-        with urllib.request.urlopen(url, timeout=10) as resp:  # noqa: S310  # LINT-014
-            return resp.read()
-    except urllib.error.HTTPError as exc:
-        if exc.code == 404:
-            log.debug("AccurateRip: disc not found (404)")
-        else:
-            log.warning("AccurateRip fetch failed: HTTP %d", exc.code)
-        return None
-    except OSError as exc:
-        log.warning("AccurateRip fetch failed: %s", exc)
-        return None
+def _fetch_ar(
+    track_count: int, id1: str, id2: str, cddb_id: int
+) -> tuple[bytes | None, str | None]:
+    """Fetch the dBAR over HTTPS; fall back to HTTP on network/TLS failure.
+
+    Returns ``(body, transport)``:
+      * ``(<bytes>, "https")`` — TLS attempt succeeded with a body.
+      * ``(<bytes>, "http")``  — TLS failed; plaintext fallback succeeded.
+      * ``(None, "https")``    — TLS reached the server but the disc is not
+        in the database (HTTP 404). No HTTP fallback in this case — the
+        same disc will 404 over either transport.
+      * ``(None, "http")``     — analogous 404 on the HTTP fallback.
+      * ``(None, None)``       — both transports failed at the network level.
+
+    Responses larger than ``_AR_DBAR_MAX`` are treated as malformed: body
+    is dropped, transport is still recorded (the server *did* answer).
+    """
+    from cdda2img.config import is_no_network_active
+
+    if is_no_network_active():
+        return None, None
+    last_transport: str | None = None
+    for base, name in ((_AR_BASE_HTTPS, "https"), (_AR_BASE_HTTP, "http")):
+        url = _ar_url(track_count, id1, id2, cddb_id, base=base)
+        log.debug("AccurateRip URL (%s): %s", name, url)
+        try:
+            with urllib.request.urlopen(url, timeout=10) as resp:  # noqa: S310  # LINT-014
+                # read(N+1) detects oversize without unbounded buffering.
+                body = resp.read(_AR_DBAR_MAX + 1)
+        except urllib.error.HTTPError as exc:
+            if exc.code == 404:
+                log.debug("AccurateRip %s: disc not found (404)", name)
+                # 404 is a legitimate negative — same disc will 404 over HTTP too.
+                return None, name
+            log.warning("AccurateRip %s fetch failed: HTTP %d", name, exc.code)
+            last_transport = name
+            continue
+        except (urllib.error.URLError, OSError) as exc:
+            log.warning("AccurateRip %s fetch failed: %s", name, exc)
+            continue
+        if len(body) > _AR_DBAR_MAX:
+            log.warning(
+                "AccurateRip %s response > %d bytes; rejecting as malformed",
+                name,
+                _AR_DBAR_MAX,
+            )
+            return None, name
+        return body, name
+    return None, last_transport
 
 
-def _parse_dbar(data: bytes, n_tracks: int) -> list[list[dict]]:
+def _parse_dbar(
+    data: bytes,
+    n_tracks: int,
+    *,
+    expected_id1: int | None = None,
+    expected_id2: int | None = None,
+    expected_cddb_id: int | None = None,
+) -> list[list[dict]]:
     """Parse AccurateRip dBAR binary into response blocks.
 
     Returns a list of responses; each response is a list of n_tracks dicts
@@ -128,12 +206,19 @@ def _parse_dbar(data: bytes, n_tracks: int) -> list[list[dict]]:
 
     Binary layout: repeated blocks of (13-byte header + n_tracks x 9-byte entries).
     Header: <BLLL (n_tracks, id1, id2, cddb_id). Entry: <BLL (conf, v1_crc, v2_crc).
+
+    R2: when *expected_id1*, *expected_id2*, and *expected_cddb_id* are
+    provided, each block's header is verified against them. Blocks with a
+    mismatching identifier are skipped (logged at WARNING) — this defends
+    against a poisoned response that interleaves attacker-controlled blocks
+    for unrelated discs. With all three None (legacy callers), the check is
+    bypassed and behaviour matches pre-R2.
     """
     responses: list[list[dict]] = []
     pos = 0
     block_size = 13 + n_tracks * 9
     while pos + block_size <= len(data):
-        header_n, _, _, _ = struct.unpack_from("<BLLL", data, pos)
+        header_n, h_id1, h_id2, h_cddb = struct.unpack_from("<BLLL", data, pos)
         if header_n != n_tracks:
             log.debug(
                 "AccurateRip: unexpected track count %d in dBAR block (expected %d)",
@@ -141,6 +226,24 @@ def _parse_dbar(data: bytes, n_tracks: int) -> list[list[dict]]:
                 n_tracks,
             )
             break
+        if (
+            (expected_id1 is not None and h_id1 != expected_id1)
+            or (expected_id2 is not None and h_id2 != expected_id2)
+            or (expected_cddb_id is not None and h_cddb != expected_cddb_id)
+        ):
+            log.warning(
+                "AccurateRip: dBAR block at offset %d has mismatching IDs "
+                "(got %08x-%08x-%08x, expected %08x-%08x-%08x); skipping",
+                pos,
+                h_id1,
+                h_id2,
+                h_cddb,
+                expected_id1 or 0,
+                expected_id2 or 0,
+                expected_cddb_id or 0,
+            )
+            pos += block_size
+            continue
         pos += 13
         tracks: list[dict] = []
         for _ in range(n_tracks):
@@ -157,11 +260,13 @@ def verify_rip(
     disc_last_lsn: int,
     read_offset: int = 0,
     cddb_id: int = 0,
-) -> list[ARTrackResult]:
+) -> ARVerifyResult:
     """Verify a ripped disc against the AccurateRip database.
 
-    Returns per-track results. Never raises — network or I/O errors yield results
-    with max_confidence=None (disc not in database or unreachable).
+    Returns an ``ARVerifyResult`` carrying per-track results plus the R2
+    provenance signals (``transport``, ``dbar_sha256``). Never raises —
+    network or I/O errors yield ``max_confidence=None`` per track (disc
+    not in database or unreachable).
 
     read_offset: CD drive read offset in samples (4 bytes/sample). Applied as a
     byte shift to each track's read window in the PCM file before checksum computation.
@@ -169,25 +274,37 @@ def verify_rip(
     """
     n = len(track_lsns)
     ar_id1, ar_id2 = _ar_disc_ids(track_lsns, disc_last_lsn)
-    url = _ar_url(n, ar_id1, ar_id2, cddb_id)
-    log.debug("AccurateRip URL: %s", url)
-
-    ar_data = _fetch_ar(url)
-    responses = _parse_dbar(ar_data, n) if ar_data else []
+    ar_data, transport = _fetch_ar(n, ar_id1, ar_id2, cddb_id)
+    dbar_sha256 = hashlib.sha256(ar_data).hexdigest() if ar_data else None
+    responses = (
+        _parse_dbar(
+            ar_data,
+            n,
+            expected_id1=int(ar_id1, 16),
+            expected_id2=int(ar_id2, 16),
+            expected_cddb_id=cddb_id,
+        )
+        if ar_data
+        else []
+    )
 
     # Skip the checksum loop entirely when the disc is not in the database.
     if not responses:
-        return [
-            ARTrackResult(
-                track=i + 1,
-                v1_crc="00000000",
-                v2_crc="00000000",
-                confidence_v1=None,
-                confidence_v2=None,
-                max_confidence=None,
-            )
-            for i in range(n)
-        ]
+        return ARVerifyResult(
+            tracks=[
+                ARTrackResult(
+                    track=i + 1,
+                    v1_crc="00000000",
+                    v2_crc="00000000",
+                    confidence_v1=None,
+                    confidence_v2=None,
+                    max_confidence=None,
+                )
+                for i in range(n)
+            ],
+            transport=transport,
+            dbar_sha256=dbar_sha256,
+        )
 
     # Drive offset shifts the read window by offset_bytes relative to track boundaries.
     offset_bytes = read_offset * 4
@@ -258,7 +375,7 @@ def verify_rip(
                 )
             )
 
-    return results
+    return ARVerifyResult(tracks=results, transport=transport, dbar_sha256=dbar_sha256)
 
 
 def print_ar_report(results: list[ARTrackResult], read_offset: int = 0) -> None:

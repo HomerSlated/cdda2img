@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from unittest.mock import patch
 
+from cdda2img.lookup_result import DiscMeta, TrackMeta
 from cdda2img.original_release import (
     _best_fuzzy_match,
     _deny_match,
@@ -402,3 +403,677 @@ def test_prov_writes_mb_release_group_id():
     prov: dict[str, str] = {}
     _add_release_provenance(prov, disc)
     assert prov["mb_release_group_id"] == "rg-uuid-1"
+
+
+# ---------------------------------------------------------------------------
+# R3 — Track-set / runtime verifier
+# ---------------------------------------------------------------------------
+
+
+def _disc_with_tracks(
+    track_specs: list[tuple[int, int, str, str | None]],
+    *,
+    album: str = "Album",
+    artist: str = "Artist",
+    rg_id: str | None = "rg-uuid-1",
+    release_id: str | None = "rel-uuid-1",
+) -> RBIDisc:
+    """Build an RBIDisc with tracks: (number, duration_frames, title, isrc)."""
+    from cdda2img.rbi_format import RBITocEntry
+
+    return RBIDisc(
+        album=album,
+        artist=artist,
+        mb_release_group_id=rg_id,
+        mb_release_id=release_id,
+        tracks=[
+            RBITocEntry(
+                track_number=n,
+                title=title,
+                performer=artist,
+                start_frame=0,
+                duration_frames=dur,
+                isrc=isrc,
+            )
+            for n, dur, title, isrc in track_specs
+        ],
+    )
+
+
+def _meta_with_tracks(
+    track_specs: list[tuple[int, int | None, str | None, str | None]],
+    *,
+    album: str = "Album",
+    mb_release_id: str = "rel-meta-1",
+) -> DiscMeta:
+    """Build a DiscMeta with tracks: (number, duration_ms, title, isrc)."""
+    return DiscMeta(
+        album=album,
+        mb_release_id=mb_release_id,
+        tracks=[
+            TrackMeta(number=n, duration_ms=dur, title=title, isrc=isrc)
+            for n, dur, title, isrc in track_specs
+        ],
+    )
+
+
+def test_r3_verifier_accepts_empty_tracklists() -> None:
+    """Both sides empty → no evidence to reject → True (innocent until guilty)."""
+    from cdda2img.original_release import _verify_release_matches_disc
+
+    disc = _disc()  # empty tracks
+    meta = _meta_with_tracks([])
+    assert _verify_release_matches_disc(meta, disc) is True
+
+
+def test_r3_verifier_rejects_track_count_mismatch() -> None:
+    """Track-count is a hard gate when both sides have tracks."""
+    from cdda2img.original_release import _verify_release_matches_disc
+
+    disc = _disc_with_tracks([(1, 18000, "T1", None), (2, 18000, "T2", None)])
+    meta = _meta_with_tracks([
+        (1, 240000, "T1", None),
+        (2, 240000, "T2", None),
+        (3, 200000, "T3", None),
+    ])
+    assert _verify_release_matches_disc(meta, disc) is False
+
+
+def test_r3_verifier_accepts_track_count_match_no_other_data() -> None:
+    """Matching track counts + no durations / ISRCs / titles → pass."""
+    from cdda2img.original_release import _verify_release_matches_disc
+
+    disc = _disc_with_tracks([(1, 0, "", None), (2, 0, "", None)])
+    meta = _meta_with_tracks([(1, None, None, None), (2, None, None, None)])
+    assert _verify_release_matches_disc(meta, disc) is True
+
+
+def test_r3_verifier_accepts_durations_within_tolerance() -> None:
+    """Sum-of-durations within ±2 s → pass."""
+    from cdda2img.original_release import _verify_release_matches_disc
+
+    # 75 frames = 1 s. disc total = 600 frames = 8 s. meta total = 9000 ms = 9 s.
+    disc = _disc_with_tracks([(1, 300, "Same", None), (2, 300, "Same", None)])
+    meta = _meta_with_tracks([(1, 5000, "Same", None), (2, 4000, "Same", None)])
+    # diff = 1 s, well within 2 s tolerance
+    assert _verify_release_matches_disc(meta, disc) is True
+
+
+def test_r3_verifier_rejects_durations_outside_tolerance() -> None:
+    """Sum-of-durations beyond ±2 s → reject (positive evidence)."""
+    from cdda2img.original_release import _verify_release_matches_disc
+
+    # disc total = 8 s. meta total = 20 s. diff = 12 s, well past 2 s.
+    disc = _disc_with_tracks([(1, 300, "Same", None), (2, 300, "Same", None)])
+    meta = _meta_with_tracks([(1, 10000, "Same", None), (2, 10000, "Same", None)])
+    assert _verify_release_matches_disc(meta, disc) is False
+
+
+def test_r3_verifier_rejects_isrc_total_disagreement() -> None:
+    """When both sides have ≥2 ISRCs and zero agree → reject."""
+    from cdda2img.original_release import _verify_release_matches_disc
+
+    disc = _disc_with_tracks([
+        (1, 18000, "T1", "USAA10100001"),
+        (2, 18000, "T2", "USAA10100002"),
+    ])
+    meta = _meta_with_tracks([
+        (1, None, None, "USBB10100001"),
+        (2, None, None, "USBB10100002"),
+    ])
+    assert _verify_release_matches_disc(meta, disc) is False
+
+
+def test_r3_verifier_accepts_isrc_partial_agreement() -> None:
+    """≥1 ISRC agrees (even partial) → not zero score → pass that gate."""
+    from cdda2img.original_release import _verify_release_matches_disc
+
+    disc = _disc_with_tracks([
+        (1, 18000, "T1", "USAA10100001"),
+        (2, 18000, "T2", "USAA10100002"),
+    ])
+    meta = _meta_with_tracks([
+        (1, None, None, "USAA10100001"),
+        (2, None, None, "USBB10100002"),
+    ])
+    assert _verify_release_matches_disc(meta, disc) is True
+
+
+def test_r3_verifier_rejects_title_fuzz_below_cutoff() -> None:
+    """Aggregate token_set_ratio < 80 across paired titles → reject."""
+    from cdda2img.original_release import _verify_release_matches_disc
+
+    disc = _disc_with_tracks([
+        (1, 18000, "Sharp Dressed Man", None),
+        (2, 18000, "Gimme All Your Lovin'", None),
+    ])
+    meta = _meta_with_tracks([
+        (1, None, "Bohemian Rhapsody", None),
+        (2, None, "Wish You Were Here", None),
+    ])
+    assert _verify_release_matches_disc(meta, disc) is False
+
+
+def test_r3_verifier_accepts_title_fuzz_above_cutoff() -> None:
+    """Aggregate token_set_ratio ≥ 80 → pass."""
+    from cdda2img.original_release import _verify_release_matches_disc
+
+    disc = _disc_with_tracks([
+        (1, 18000, "Sharp Dressed Man", None),
+        (2, 18000, "Gimme All Your Lovin'", None),
+    ])
+    meta = _meta_with_tracks([
+        (1, None, "Sharp Dressed Man (Remaster)", None),
+        (2, None, "Gimme All Your Lovin' (Remaster)", None),
+    ])
+    assert _verify_release_matches_disc(meta, disc) is True
+
+
+def test_r3_rg_path_passes_when_disc_has_no_release_id() -> None:
+    """No mb_release_id → can't verify → no evidence to reject → pass."""
+    from cdda2img.original_release import _verify_rg_path_for_disc
+
+    disc = RBIDisc(
+        album="A", artist="B", mb_release_group_id="rg-1", mb_release_id=None
+    )
+    assert _verify_rg_path_for_disc(disc) is True
+
+
+def test_r3_rg_path_passes_when_lookup_release_fails() -> None:
+    """Network failure during release fetch ≠ evidence of mismatch → pass."""
+    from cdda2img.original_release import _verify_rg_path_for_disc
+
+    disc = RBIDisc(
+        album="A", artist="B", mb_release_group_id="rg-1", mb_release_id="rel-1"
+    )
+    with patch("cdda2img.mb_lookup.lookup_release", return_value=None):
+        assert _verify_rg_path_for_disc(disc) is True
+
+
+def test_r3_rg_path_rejects_on_track_count_mismatch() -> None:
+    """A successful fetch with a hard mismatch → reject (R3 fires)."""
+    from cdda2img.original_release import _verify_rg_path_for_disc
+
+    disc = _disc_with_tracks(
+        [(1, 300, "T1", None), (2, 300, "T2", None)], release_id="rel-1"
+    )
+    meta = _meta_with_tracks(
+        [(1, None, None, None)],  # 1 track in meta vs 2 in disc
+        mb_release_id="rel-1",
+    )
+    with patch("cdda2img.mb_lookup.lookup_release", return_value=meta):
+        assert _verify_rg_path_for_disc(disc) is False
+
+
+def test_r3_fuzzy_loop_drops_unverified_candidates() -> None:
+    """If the earliest candidate fails verify, fall through to the next."""
+    from cdda2img.lookup_result import DiscMeta
+    from cdda2img.original_release import find_original_release_fuzzy
+
+    disc = _disc_with_tracks(
+        [(1, 300, "T1", None), (2, 300, "T2", None)],
+        album="Album",
+        artist="Artist",
+        rg_id=None,
+        release_id=None,
+    )
+    # Two candidates from MB search, both at year=1983 (sorted by year asc).
+    # First one's full release has 5 tracks → fails verify; second one matches.
+    bad = DiscMeta(
+        album="Album",
+        mb_release_id="rel-bad",
+        mb_release_group_id="rg-bad",
+        original_release_date="1983",
+    )
+    good = DiscMeta(
+        album="Album",
+        mb_release_id="rel-good",
+        mb_release_group_id="rg-good",
+        original_release_date="1985",
+    )
+
+    bad_full = _meta_with_tracks(
+        [(i + 1, None, None, None) for i in range(5)], mb_release_id="rel-bad"
+    )
+    good_full = _meta_with_tracks(
+        [(1, None, None, None), (2, None, None, None)], mb_release_id="rel-good"
+    )
+
+    def fake_lookup_release(rid: str, disc_number: int | None = None):
+        return {"rel-bad": bad_full, "rel-good": good_full}.get(rid)
+
+    with (
+        patch("cdda2img.mb_lookup.search_releases", return_value=[bad, good]),
+        patch("cdda2img.mb_lookup.lookup_release", side_effect=fake_lookup_release),
+    ):
+        found, title, year = find_original_release_fuzzy(disc)
+
+    assert found is True
+    assert title == "Album"
+    assert year == 1985  # 'bad' rejected, 'good' (1985) accepted
+
+
+# ---------------------------------------------------------------------------
+# R14 — Pre-emphasis year upper-bound
+# ---------------------------------------------------------------------------
+
+
+def test_r14_rg_path_rejects_year_after_1986_when_pre_emphasis():
+    """Disc with PRE_EMPHASIS but RG year > 1986 → reject and fall through."""
+    disc = _disc(rg_id="rg-1")
+    disc.pre_emphasis = True
+    with (
+        patch(
+            "cdda2img.original_release._fetch_release_group",
+            return_value=_rg(first_date="1995"),
+        ),
+        _no_fuzzy(),
+    ):
+        found, _title, _year = find_original_release(disc)
+    assert found is False
+
+
+def test_r14_rg_path_accepts_pre_1987_year_when_pre_emphasis():
+    """Disc with PRE_EMPHASIS and RG year ≤ 1986 → accept."""
+    disc = _disc(rg_id="rg-1", release_date="1985")
+    disc.pre_emphasis = True
+    with (
+        patch(
+            "cdda2img.original_release._fetch_release_group",
+            return_value=_rg(first_date="1985"),
+        ),
+        _no_fuzzy(),
+    ):
+        found, _title, year = find_original_release(disc)
+    assert found is True
+    assert year == 1985
+
+
+def test_r14_rg_path_year_unchanged_when_no_pre_emphasis():
+    """Disc without PRE_EMPHASIS → R14 cap doesn't fire even on late year."""
+    disc = _disc(rg_id="rg-1")
+    disc.pre_emphasis = False
+    with (
+        patch(
+            "cdda2img.original_release._fetch_release_group",
+            return_value=_rg(first_date="2009"),
+        ),
+        _no_fuzzy(),
+    ):
+        found, _title, year = find_original_release(disc)
+    assert found is True
+    assert year == 2009
+
+
+def test_r14_fuzzy_path_filters_late_candidates():
+    """Fuzzy candidates with year > 1986 are skipped when pre_emphasis=True."""
+    from cdda2img.lookup_result import DiscMeta
+
+    disc = _disc_with_tracks(
+        [(1, 300, "T1", None)],
+        album="Album",
+        artist="Artist",
+        rg_id=None,
+        release_id=None,
+    )
+    disc.pre_emphasis = True
+    # 2 candidates: 2009 (would be the earliest qualifying without R14)
+    # and 1986 (under the cap).
+    late = DiscMeta(
+        album="Album",
+        mb_release_id="rel-late",
+        mb_release_group_id="rg-late",
+        original_release_date="2009",
+    )
+    early = DiscMeta(
+        album="Album",
+        mb_release_id="rel-early",
+        mb_release_group_id="rg-early",
+        original_release_date="1986",
+    )
+
+    early_full = _meta_with_tracks([(1, None, None, None)], mb_release_id="rel-early")
+
+    def fake_lookup_release(rid: str, disc_number: int | None = None):
+        return early_full if rid == "rel-early" else None
+
+    with (
+        patch("cdda2img.mb_lookup.search_releases", return_value=[late, early]),
+        patch("cdda2img.mb_lookup.lookup_release", side_effect=fake_lookup_release),
+    ):
+        found, _title, year = find_original_release_fuzzy(disc)
+    assert found is True
+    assert year == 1986  # late (2009) skipped by R14
+
+
+# ---------------------------------------------------------------------------
+# R14 — toc_parser PRE_EMPHASIS detection
+# ---------------------------------------------------------------------------
+
+
+def test_r14_toc_parser_detects_pre_emphasis():
+    """parse_toc sets pre_emphasis=True when any track has PRE_EMPHASIS."""
+    from cdda2img.toc_parser import parse_toc
+
+    toc_text = b"""CD_DA
+
+// Track 1
+TRACK AUDIO
+NO PRE_EMPHASIS
+FILE "data.bin" 0 04:00:00
+
+// Track 2
+TRACK AUDIO
+PRE_EMPHASIS
+FILE "data.bin" 04:00:00 04:00:00
+"""
+    parsed = parse_toc(toc_text)
+    assert parsed.pre_emphasis is True
+
+
+def test_r14_toc_parser_no_pre_emphasis_when_all_negate():
+    """All NO PRE_EMPHASIS tracks → pre_emphasis=False."""
+    from cdda2img.toc_parser import parse_toc
+
+    toc_text = b"""CD_DA
+
+// Track 1
+TRACK AUDIO
+NO PRE_EMPHASIS
+FILE "data.bin" 0 04:00:00
+
+// Track 2
+TRACK AUDIO
+NO PRE_EMPHASIS
+FILE "data.bin" 04:00:00 04:00:00
+"""
+    parsed = parse_toc(toc_text)
+    assert parsed.pre_emphasis is False
+
+
+def test_r14_toc_parser_no_tracks_returns_none():
+    """parse_toc with no tracks returns pre_emphasis=None (unknown)."""
+    from cdda2img.toc_parser import parse_toc
+
+    parsed = parse_toc(b"CD_DA\n")
+    assert parsed.pre_emphasis is None
+
+
+# ---------------------------------------------------------------------------
+# R14 — PROV emission for pre_emphasis
+# ---------------------------------------------------------------------------
+
+
+def test_r14_prov_emits_yes_when_pre_emphasis_true():
+    from cdda2img.cdda2img import _add_release_provenance
+
+    disc = RBIDisc(album="A", artist="B")
+    disc.pre_emphasis = True
+    prov: dict[str, str] = {}
+    _add_release_provenance(prov, disc)
+    assert prov["pre_emphasis"] == "YES"
+
+
+def test_r14_prov_emits_no_when_pre_emphasis_false():
+    from cdda2img.cdda2img import _add_release_provenance
+
+    disc = RBIDisc(album="A", artist="B")
+    disc.pre_emphasis = False
+    prov: dict[str, str] = {}
+    _add_release_provenance(prov, disc)
+    assert prov["pre_emphasis"] == "NO"
+
+
+def test_r14_prov_omits_when_pre_emphasis_none():
+    """None = not captured; the PROV key is omitted entirely."""
+    from cdda2img.cdda2img import _add_release_provenance
+
+    disc = RBIDisc(album="A", artist="B")  # pre_emphasis defaults to None
+    prov: dict[str, str] = {}
+    _add_release_provenance(prov, disc)
+    assert "pre_emphasis" not in prov
+
+
+# ---------------------------------------------------------------------------
+# R6 — pre-menu AcoustID corroboration (guard only)
+# ---------------------------------------------------------------------------
+
+
+def test_r6_no_op_when_acoustid_unavailable(tmp_path):
+    """When AcoustID is not available, the helper is a no-op (no PROV key)."""
+    from cdda2img.cdda2img import _r6_acoustid_corroborate
+
+    disc = _disc_with_tracks([(1, 75, "T1", None)])
+    pcm = tmp_path / "disc.pcm"
+    pcm.write_bytes(bytes(75 * 2352))
+    prov: dict[str, str] = {}
+    with patch("cdda2img.acoustid_lookup.is_available", return_value=False):
+        result = _r6_acoustid_corroborate(disc, pcm, prov, ui=None)
+    assert result is disc
+    assert "acoustid_corroborates" not in prov
+
+
+def test_r6_yes_when_acoustid_agrees_with_prepop(tmp_path):
+    """AcoustID best hit's mb_release_id matches disc.mb_release_id → YES."""
+    from cdda2img.cdda2img import _r6_acoustid_corroborate
+    from cdda2img.lookup_result import DiscMeta
+
+    disc = _disc_with_tracks([(1, 75, "T1", None)])
+    disc.mb_release_id = "rid-match"
+    pcm = tmp_path / "disc.pcm"
+    pcm.write_bytes(bytes(75 * 2352))
+    prov: dict[str, str] = {}
+    with (
+        patch("cdda2img.acoustid_lookup.is_available", return_value=True),
+        patch(
+            "cdda2img.acoustid_lookup.fingerprint_and_lookup",
+            return_value=[DiscMeta(mb_release_id="rid-match")],
+        ),
+    ):
+        _r6_acoustid_corroborate(disc, pcm, prov, ui=None)
+    assert prov.get("acoustid_corroborates") == "YES"
+
+
+def test_r6_no_when_acoustid_disagrees_with_prepop(tmp_path):
+    """AcoustID best hit disagrees with disc.mb_release_id → NO."""
+    from cdda2img.cdda2img import _r6_acoustid_corroborate
+    from cdda2img.lookup_result import DiscMeta
+
+    disc = _disc_with_tracks([(1, 75, "T1", None)])
+    disc.mb_release_id = "rid-prepop"
+    pcm = tmp_path / "disc.pcm"
+    pcm.write_bytes(bytes(75 * 2352))
+    prov: dict[str, str] = {}
+    with (
+        patch("cdda2img.acoustid_lookup.is_available", return_value=True),
+        patch(
+            "cdda2img.acoustid_lookup.fingerprint_and_lookup",
+            return_value=[DiscMeta(mb_release_id="rid-different")],
+        ),
+    ):
+        _r6_acoustid_corroborate(disc, pcm, prov, ui=None)
+    assert prov.get("acoustid_corroborates") == "NO"
+
+
+# ---------------------------------------------------------------------------
+# R9 — Inter-service CDDB↔MB disagreement detection
+# ---------------------------------------------------------------------------
+
+
+def test_r9_no_disagreement_when_titles_match():
+    """Identical titles → no disagreement key in PROV."""
+    from cdda2img.cdda2img import _emit_r9_disagreement
+
+    prov: dict[str, str] = {}
+    _emit_r9_disagreement(prov, "Eliminator", "ZZ Top", "Eliminator", "ZZ Top")
+    assert "disagreement_cddb_mb" not in prov
+
+
+def test_r9_no_disagreement_when_only_suffix_differs():
+    """'Eliminator' vs 'Eliminator (Remastered)' → no disagreement (allow-list)."""
+    from cdda2img.cdda2img import _emit_r9_disagreement
+
+    prov: dict[str, str] = {}
+    _emit_r9_disagreement(
+        prov, "Eliminator", "ZZ Top", "Eliminator (Remastered)", "ZZ Top"
+    )
+    assert "disagreement_cddb_mb" not in prov
+
+
+def test_r9_disagreement_on_album_only():
+    """Different albums but same artist → 'album'."""
+    from cdda2img.cdda2img import _emit_r9_disagreement
+
+    prov: dict[str, str] = {}
+    _emit_r9_disagreement(prov, "Different Album", "ZZ Top", "Eliminator", "ZZ Top")
+    assert prov.get("disagreement_cddb_mb") == "album"
+
+
+def test_r9_disagreement_on_both():
+    """Both album and artist differ → 'album,artist'."""
+    from cdda2img.cdda2img import _emit_r9_disagreement
+
+    prov: dict[str, str] = {}
+    _emit_r9_disagreement(prov, "Album A", "Artist X", "Album B", "Artist Y")
+    assert prov.get("disagreement_cddb_mb") == "album,artist"
+
+
+def test_r9_skips_when_pre_mb_artist_is_unknown_sentinel():
+    """'Unknown Artist' is the raw default, not a CDDB answer → don't compare."""
+    from cdda2img.cdda2img import _emit_r9_disagreement
+
+    prov: dict[str, str] = {}
+    _emit_r9_disagreement(prov, None, "Unknown Artist", "Album", "Real Artist")
+    assert "disagreement_cddb_mb" not in prov
+
+
+def test_r9_normalises_nfc_and_casefold():
+    """Unicode + case-only differences are not disagreement."""
+    from cdda2img.cdda2img import _emit_r9_disagreement
+
+    prov: dict[str, str] = {}
+    _emit_r9_disagreement(prov, "Eliminator", "ZZ TOP", "eliminator", "zz top")
+    assert "disagreement_cddb_mb" not in prov
+
+
+# ---------------------------------------------------------------------------
+# R11 — Discogs master-release corroboration
+# ---------------------------------------------------------------------------
+
+
+def test_r11_corroborated_when_years_agree():
+    """Discogs master year matches MB original year → corroborated."""
+    from cdda2img.cdda2img import _r11_corroborate_with_discogs_master
+
+    disc = RBIDisc(album="A", artist="B")
+    disc.original_release_found = True
+    disc.original_release_year = 1983
+    disc.discogs_release_id = 42
+    prov: dict[str, str] = {}
+    with patch("cdda2img.discogs_lookup.lookup_master_year", return_value=1983):
+        _r11_corroborate_with_discogs_master(disc, prov)
+    assert prov.get("original_release_corroborated") == "discogs,mb"
+    assert disc.original_release_year == 1983
+
+
+def test_r11_disagreement_when_years_differ_prefer_earlier():
+    """Discogs master year < MB → emit disagreement + prefer Discogs's earlier year."""
+    from cdda2img.cdda2img import _r11_corroborate_with_discogs_master
+
+    disc = RBIDisc(album="A", artist="B")
+    disc.original_release_found = True
+    disc.original_release_year = 1985
+    disc.discogs_release_id = 42
+    prov: dict[str, str] = {}
+    with patch("cdda2img.discogs_lookup.lookup_master_year", return_value=1983):
+        _r11_corroborate_with_discogs_master(disc, prov)
+    assert prov.get("original_release_disagreement") == "discogs:1983|mb:1985"
+    assert disc.original_release_year == 1983  # earlier wins
+
+
+def test_r11_disagreement_keeps_mb_when_mb_is_earlier():
+    """MB year < Discogs master → still flag disagreement but keep MB's earlier year."""
+    from cdda2img.cdda2img import _r11_corroborate_with_discogs_master
+
+    disc = RBIDisc(album="A", artist="B")
+    disc.original_release_found = True
+    disc.original_release_year = 1983
+    disc.discogs_release_id = 42
+    prov: dict[str, str] = {}
+    with patch("cdda2img.discogs_lookup.lookup_master_year", return_value=1985):
+        _r11_corroborate_with_discogs_master(disc, prov)
+    assert prov.get("original_release_disagreement") == "discogs:1985|mb:1983"
+    assert disc.original_release_year == 1983  # MB still earlier — unchanged
+
+
+def test_r11_no_op_when_mb_did_not_find_original():
+    """No corroboration when populate_original_release didn't produce a year."""
+    from cdda2img.cdda2img import _r11_corroborate_with_discogs_master
+
+    disc = RBIDisc(album="A", artist="B")
+    disc.original_release_found = False
+    disc.discogs_release_id = 42
+    prov: dict[str, str] = {}
+    with patch("cdda2img.discogs_lookup.lookup_master_year", return_value=1983):
+        _r11_corroborate_with_discogs_master(disc, prov)
+    assert "original_release_corroborated" not in prov
+    assert "original_release_disagreement" not in prov
+
+
+def test_r11_no_op_when_no_discogs_release_id():
+    """No corroboration when disc has no Discogs release ID."""
+    from cdda2img.cdda2img import _r11_corroborate_with_discogs_master
+
+    disc = RBIDisc(album="A", artist="B")
+    disc.original_release_found = True
+    disc.original_release_year = 1983
+    disc.discogs_release_id = None
+    prov: dict[str, str] = {}
+    _r11_corroborate_with_discogs_master(disc, prov)
+    assert "original_release_corroborated" not in prov
+
+
+def test_r11_silent_on_discogs_lookup_failure():
+    """lookup_master_year returns None → no PROV key, disc.year unchanged."""
+    from cdda2img.cdda2img import _r11_corroborate_with_discogs_master
+
+    disc = RBIDisc(album="A", artist="B")
+    disc.original_release_found = True
+    disc.original_release_year = 1983
+    disc.discogs_release_id = 42
+    prov: dict[str, str] = {}
+    with patch("cdda2img.discogs_lookup.lookup_master_year", return_value=None):
+        _r11_corroborate_with_discogs_master(disc, prov)
+    assert "original_release_corroborated" not in prov
+    assert disc.original_release_year == 1983
+
+
+# ---------------------------------------------------------------------------
+# R12 — lookup_status mapping
+# ---------------------------------------------------------------------------
+
+
+def test_r12_status_disabled_when_not_attempted():
+    from cdda2img.cdda2img import _r12_status
+
+    assert _r12_status(attempted=False, has_data=False, errored=False) == "disabled"
+    # When not attempted, has_data / errored don't matter:
+    assert _r12_status(attempted=False, has_data=True, errored=True) == "disabled"
+
+
+def test_r12_status_down_on_error():
+    from cdda2img.cdda2img import _r12_status
+
+    assert _r12_status(attempted=True, has_data=False, errored=True) == "down"
+
+
+def test_r12_status_empty_on_no_data():
+    from cdda2img.cdda2img import _r12_status
+
+    assert _r12_status(attempted=True, has_data=False, errored=False) == "empty"
+
+
+def test_r12_status_ok_on_data():
+    from cdda2img.cdda2img import _r12_status
+
+    assert _r12_status(attempted=True, has_data=True, errored=False) == "OK"

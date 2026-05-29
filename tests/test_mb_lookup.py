@@ -239,11 +239,15 @@ def test_merge_fills_track_isrc():
 
 
 def test_merge_preserves_existing_isrc():
+    """Existing disc ISRC wins over meta when both are structurally valid (R13)."""
     meta = _make_meta_disc()
     disc = _make_disc(tracks=[(1, 0, 10000), (2, 10000, 9000)])
-    disc.tracks[0].isrc = "EXISTING0001"
+    # Real-shape ISO 3901 ISRC: country (2 alpha) + registrant (3 alphanumeric)
+    # + 7 digits. The pre-R13 fixture "EXISTING0001" was malformed and is now
+    # correctly dropped at the merge site — replaced here with a valid form.
+    disc.tracks[0].isrc = "USXX10100001"
     result = _merge_into_disc(meta, disc)
-    assert result.tracks[0].isrc == "EXISTING0001"
+    assert result.tracks[0].isrc == "USXX10100001"
 
 
 # ---------------------------------------------------------------------------
@@ -506,6 +510,7 @@ def test_prepopulate_single_match_fills_fields():
     assert r.disc.album == "Test Album"  # existing album preserved
     assert r.barcode_hints == []  # match had no catalog
     assert r.match_count == 1
+    assert r.isrc_disambiguated is False  # N=1 never sets the flag
 
 
 def test_prepopulate_multiple_matches_no_change():
@@ -513,9 +518,10 @@ def test_prepopulate_multiple_matches_no_change():
     matches = [DiscMeta(album="A"), DiscMeta(album="B")]
     with patch("cdda2img.mb_lookup.lookup_disc_id", return_value=matches):
         r = prepopulate_from_mb(disc, verbose=False)
-    assert r.disc.album == "Test Album"  # unchanged
+    assert r.disc.album == "Test Album"  # unchanged: no ISRCs → no disambiguation
     assert r.barcode_hints == []
     assert r.match_count == 2
+    assert r.isrc_disambiguated is False
 
 
 def test_prepopulate_no_matches_no_change():
@@ -525,19 +531,341 @@ def test_prepopulate_no_matches_no_change():
     assert r.disc is disc  # same object, not a copy
     assert r.barcode_hints == []
     assert r.match_count == 0
+    assert r.isrc_disambiguated is False
 
 
 def test_prepopulate_returns_barcode_hints_from_all_matches():
-    """Hints are drawn from every match, even when len(matches) > 1 skips the merge."""
+    """Hints are drawn from every match, even when len(matches) > 1 skips the merge.
+
+    R16: hints carry their source MB release MBID alongside the barcode.
+    Releases that lack an MBID get an empty-string tag (defensive).
+    Duplicate (mbid, barcode) pairs are dropped; same barcode under
+    different MBIDs is preserved as two separate entries.
+    """
     disc = _make_disc(tracks=[(1, 0, 18000)])
     matches = [
-        DiscMeta(album="A", catalog="0075992377423"),
-        DiscMeta(album="B", catalog="0075992377423"),  # duplicate dropped
-        DiscMeta(album="C", catalog="4012345678901"),
-        DiscMeta(album="D"),  # no catalog
+        DiscMeta(album="A", mb_release_id="rid-A", catalog="0075992377423"),
+        # Duplicate (rid-A, 0075992377423) — dropped
+        DiscMeta(album="A2", mb_release_id="rid-A", catalog="0075992377423"),
+        # Same barcode, different MBID — kept
+        DiscMeta(album="B", mb_release_id="rid-B", catalog="0075992377423"),
+        DiscMeta(album="C", mb_release_id="rid-C", catalog="4012345678901"),
+        DiscMeta(album="D"),  # no catalog → dropped
     ]
     with patch("cdda2img.mb_lookup.lookup_disc_id", return_value=matches):
         r = prepopulate_from_mb(disc, verbose=False)
-    assert r.disc.album == "Test Album"  # multi-match → no merge
-    assert sorted(r.barcode_hints) == ["0075992377423", "4012345678901"]
-    assert r.match_count == 4
+    assert r.disc.album == "Test Album"  # multi-match → no merge (no ISRCs to score)
+    assert sorted(r.barcode_hints) == [
+        ("rid-A", "0075992377423"),
+        ("rid-B", "0075992377423"),
+        ("rid-C", "4012345678901"),
+    ]
+    assert r.match_count == 5
+    assert r.isrc_disambiguated is False
+
+
+# ---------------------------------------------------------------------------
+# R1 — ISRC-based multi-match disambiguation
+# ---------------------------------------------------------------------------
+
+
+def _disc_with_isrcs(isrcs_by_track: dict[int, str]) -> RBIDisc:
+    """Build a disc with a few tracks, each optionally carrying an ISRC."""
+    entries = [
+        RBITocEntry(
+            track_number=n,
+            title=f"Track {n}",
+            performer="Artist",
+            start_frame=(n - 1) * 10000,
+            duration_frames=10000,
+            isrc=isrcs_by_track.get(n),
+        )
+        for n in (1, 2, 3, 4)
+    ]
+    return RBIDisc(album="Disc Album", artist="Disc Artist", tracks=entries)
+
+
+def test_score_candidate_by_isrcs_counts_per_track_agreements():
+    """Same track number on both sides + same ISRC = 1 point each."""
+    from cdda2img.mb_lookup import _score_candidate_by_isrcs
+
+    disc = _disc_with_isrcs({
+        1: "AAA0000000001",
+        2: "AAA0000000002",
+        3: "AAA0000000003",
+    })
+    meta = DiscMeta(
+        tracks=[
+            TrackMeta(number=1, isrc="AAA0000000001"),
+            TrackMeta(number=2, isrc="AAA0000000002"),
+            TrackMeta(number=3, isrc="DIFFERENT_ISRC"),
+        ]
+    )
+    assert _score_candidate_by_isrcs(meta, disc) == 2
+
+
+def test_score_candidate_by_isrcs_zero_when_disc_has_no_isrcs():
+    """No ISRCs on the disc means no evidence; cannot score."""
+    from cdda2img.mb_lookup import _score_candidate_by_isrcs
+
+    disc = _disc_with_isrcs({})  # all tracks isrc=None
+    meta = DiscMeta(
+        tracks=[TrackMeta(number=1, isrc="AAA0000000001")],
+    )
+    assert _score_candidate_by_isrcs(meta, disc) == 0
+
+
+def test_score_candidate_by_isrcs_position_mismatch_does_not_score():
+    """Same ISRC string on a different track number does NOT score.
+
+    Defends against compilations where two unrelated releases share a few
+    ISRC strings on different track positions.
+    """
+    from cdda2img.mb_lookup import _score_candidate_by_isrcs
+
+    disc = _disc_with_isrcs({1: "AAA0000000001"})
+    meta = DiscMeta(
+        tracks=[TrackMeta(number=2, isrc="AAA0000000001")],  # same ISRC, wrong track
+    )
+    assert _score_candidate_by_isrcs(meta, disc) == 0
+
+
+def test_prepopulate_multiple_matches_isrc_disambiguates_winner():
+    """N>1 with a strict ISRC-score winner above the floor → auto-merge."""
+    disc = _disc_with_isrcs({
+        1: "AAA0000000001",
+        2: "AAA0000000002",
+        3: "AAA0000000003",
+    })
+    winner = DiscMeta(
+        album="Winner",
+        artist="Found",
+        mb_release_id="rid-win",
+        catalog="0075992377423",
+        tracks=[
+            TrackMeta(number=1, isrc="AAA0000000001"),
+            TrackMeta(number=2, isrc="AAA0000000002"),
+            TrackMeta(number=3, isrc="AAA0000000003"),
+        ],
+    )
+    loser = DiscMeta(
+        album="Loser",
+        artist="Other",
+        mb_release_id="rid-lose",
+        catalog="4012345678901",
+        tracks=[TrackMeta(number=1, isrc="DIFFERENT_ISRC")],
+    )
+    with patch("cdda2img.mb_lookup.lookup_disc_id", return_value=[loser, winner]):
+        r = prepopulate_from_mb(disc, verbose=False)
+    # _merge_into_disc preserves existing non-blank disc fields, so verify the
+    # winner via fields the input disc did not already supply.
+    assert r.disc.album == "Disc Album"
+    assert r.disc.catalog == "0075992377423"  # winner's catalog filled in
+    assert r.disc.mb_release_id == "rid-win"  # winner's MBID filled in
+    assert r.match_count == 2
+    assert r.isrc_disambiguated is True
+
+
+def test_prepopulate_multiple_matches_isrc_tie_no_merge():
+    """Two candidates tied at the top score → preserve no-auto-merge fallback."""
+    disc = _disc_with_isrcs({
+        1: "AAA0000000001",
+        2: "AAA0000000002",
+        3: "AAA0000000003",
+    })
+    a = DiscMeta(
+        album="A",
+        artist="X",
+        mb_release_id="rid-a",
+        tracks=[
+            TrackMeta(number=1, isrc="AAA0000000001"),
+            TrackMeta(number=2, isrc="AAA0000000002"),
+        ],
+    )
+    b = DiscMeta(
+        album="B",
+        artist="Y",
+        mb_release_id="rid-b",
+        tracks=[
+            TrackMeta(number=1, isrc="AAA0000000001"),
+            TrackMeta(number=2, isrc="AAA0000000002"),
+        ],
+    )
+    with patch("cdda2img.mb_lookup.lookup_disc_id", return_value=[a, b]):
+        r = prepopulate_from_mb(disc, verbose=False)
+    assert r.disc.album == "Disc Album"
+    assert r.disc.artist == "Disc Artist"  # unchanged: tie means no merge
+    assert r.match_count == 2
+    assert r.isrc_disambiguated is False
+
+
+def test_prepopulate_multiple_matches_score_below_floor_no_merge():
+    """Top score == 1 (below ``_MIN_ISRC_AGREE=2``) → preserve no-auto-merge."""
+    disc = _disc_with_isrcs({1: "AAA0000000001"})
+    a = DiscMeta(
+        album="A",
+        artist="X",
+        mb_release_id="rid-a",
+        tracks=[TrackMeta(number=1, isrc="AAA0000000001")],  # score = 1
+    )
+    b = DiscMeta(
+        album="B",
+        artist="Y",
+        mb_release_id="rid-b",
+        tracks=[TrackMeta(number=1, isrc="DIFFERENT_ISRC")],  # score = 0
+    )
+    with patch("cdda2img.mb_lookup.lookup_disc_id", return_value=[a, b]):
+        r = prepopulate_from_mb(disc, verbose=False)
+    assert r.disc.album == "Disc Album"
+    assert r.disc.artist == "Disc Artist"
+    assert r.match_count == 2
+    assert r.isrc_disambiguated is False
+
+
+# ---------------------------------------------------------------------------
+# R16 — barcode hints round-trip through _collect_barcode_candidates
+# ---------------------------------------------------------------------------
+
+
+def test_collect_barcode_candidates_accepts_r16_tuple_form():
+    """The R16 (mbid, barcode) tuple form flows through to the candidate list.
+
+    Confirms the tuple-form barcode_hints produced by prepopulate_from_mb
+    is correctly unpacked by _collect_barcode_candidates downstream.
+    """
+    from cdda2img.cdda2img import _collect_barcode_candidates
+
+    disc = _make_disc(tracks=[(1, 0, 18000)])
+    disc.catalog = None
+    hints = [
+        ("rid-A", "0075992377423"),
+        ("rid-B", "0081227991159"),
+        ("rid-C", "0075992377423"),  # duplicate barcode under different MBID — dropped
+    ]
+    candidates = _collect_barcode_candidates(disc, hints)
+    assert candidates == ["0075992377423", "0081227991159"]
+
+
+# ---------------------------------------------------------------------------
+# R4 — ISRC tally fallback for zero-disc-ID-match case
+# ---------------------------------------------------------------------------
+
+
+def _disc_with_track_isrcs(isrcs: list[str]) -> RBIDisc:
+    entries = [
+        RBITocEntry(
+            track_number=i + 1,
+            title=f"T{i + 1}",
+            performer="Artist",
+            start_frame=i * 10000,
+            duration_frames=10000,
+            isrc=isrc,
+        )
+        for i, isrc in enumerate(isrcs)
+    ]
+    return RBIDisc(album="Test Album", artist="Test Artist", tracks=entries)
+
+
+def test_r4_isrc_tally_no_isrcs_returns_none():
+    """Below the ISRC-bearing-tracks floor → no tally."""
+    from cdda2img.mb_lookup import _resolve_via_isrc_tally
+
+    disc = _disc_with_track_isrcs([])
+    assert _resolve_via_isrc_tally(disc) is None
+
+
+def test_r4_isrc_tally_below_floor_returns_none():
+    """3 ISRC-bearing tracks but tally fails to reach floor → None."""
+    from cdda2img.mb_lookup import _resolve_via_isrc_tally
+
+    disc = _disc_with_track_isrcs(["USAA10100001", "USAA10100002", "USAA10100003"])
+    # Each ISRC returns a DIFFERENT release; nothing converges.
+    side_effect_map = {
+        "USAA10100001": [DiscMeta(mb_release_id="rid-1")],
+        "USAA10100002": [DiscMeta(mb_release_id="rid-2")],
+        "USAA10100003": [DiscMeta(mb_release_id="rid-3")],
+    }
+    with patch(
+        "cdda2img.mb_lookup.lookup_isrc",
+        side_effect=lambda isrc: side_effect_map.get(isrc, []),
+    ):
+        assert _resolve_via_isrc_tally(disc) is None
+
+
+def test_r4_isrc_tally_converges_above_floor():
+    """When ≥ ceil(N/2) ISRCs converge on the same release → that release wins."""
+    from cdda2img.mb_lookup import _resolve_via_isrc_tally
+
+    disc = _disc_with_track_isrcs([
+        "USAA10100001",
+        "USAA10100002",
+        "USAA10100003",
+        "USAA10100004",
+    ])
+    # 3/4 ISRCs point to rid-w; 1 to rid-other.
+    winner = DiscMeta(album="Album", mb_release_id="rid-w")
+    other = DiscMeta(album="Other", mb_release_id="rid-other")
+    isrc_map = {
+        "USAA10100001": [winner],
+        "USAA10100002": [winner],
+        "USAA10100003": [other],
+        "USAA10100004": [winner],
+    }
+    with patch(
+        "cdda2img.mb_lookup.lookup_isrc",
+        side_effect=lambda isrc: isrc_map.get(isrc, []),
+    ):
+        result = _resolve_via_isrc_tally(disc)
+
+    assert result is not None
+    assert result.mb_release_id == "rid-w"
+
+
+def test_r4_isrc_tally_tie_returns_none():
+    """Two releases tied at the top tally → no auto-merge."""
+    from cdda2img.mb_lookup import _resolve_via_isrc_tally
+
+    disc = _disc_with_track_isrcs([
+        "USAA10100001",
+        "USAA10100002",
+        "USAA10100003",
+        "USAA10100004",
+    ])
+    a = DiscMeta(album="A", mb_release_id="rid-a")
+    b = DiscMeta(album="B", mb_release_id="rid-b")
+    isrc_map = {
+        "USAA10100001": [a],
+        "USAA10100002": [b],
+        "USAA10100003": [a],
+        "USAA10100004": [b],
+    }
+    with patch(
+        "cdda2img.mb_lookup.lookup_isrc",
+        side_effect=lambda isrc: isrc_map.get(isrc, []),
+    ):
+        result = _resolve_via_isrc_tally(disc)
+    assert result is None
+
+
+def test_prepopulate_zero_matches_triggers_r4_tally():
+    """When lookup_disc_id returns 0 but R4 tally finds a winner → merge."""
+    disc = _disc_with_track_isrcs(["USAA10100001", "USAA10100002", "USAA10100003"])
+    disc.artist = "Unknown Artist"  # so the merge can fill it
+    winner = DiscMeta(
+        album="Found Album",
+        artist="Found Artist",
+        mb_release_id="rid-w",
+        catalog="0075992377423",
+    )
+    with (
+        patch("cdda2img.mb_lookup.lookup_disc_id", return_value=[]),
+        patch(
+            "cdda2img.mb_lookup.lookup_isrc",
+            side_effect=lambda isrc: [winner] if isrc.startswith("US") else [],
+        ),
+    ):
+        r = prepopulate_from_mb(disc, verbose=False)
+    assert r.disc.artist == "Found Artist"
+    assert r.disc.mb_release_id == "rid-w"
+    assert r.match_count == 0  # disc-ID returned nothing
+    assert r.isrc_disambiguated is False  # R4 path doesn't set this

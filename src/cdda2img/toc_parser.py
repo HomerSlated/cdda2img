@@ -32,6 +32,10 @@ class ParsedDisc:
     catalog: str | None = None  # MCN / EAN-13; None if absent or all-zeros
     disc_id: str | None = None  # PTI 0x86 catalogue/label reference; None if absent
     tracks: list[ParsedTrack] = field(default_factory=list)
+    # R14: True if any track block contains PRE_EMPHASIS (CONTROL bit 0).
+    # NO PRE_EMPHASIS or absence → False. None is reserved for
+    # non-cdrdao parsers that don't propagate this signal.
+    pre_emphasis: bool | None = None
 
 
 _CATALOG_RE = re.compile(r'CATALOG\s+"([^"]+)"')
@@ -45,6 +49,10 @@ _FILE_TS_RE = re.compile(
 _START_RE = re.compile(r"^\s*START\s+(\d{2}:\d{2}:\d{2})", re.MULTILINE)
 _TRACK_MARKER_RE = re.compile(r"^//\s*Track\s+(\d+)", re.MULTILINE)
 _TITLE_UNICODE_RE = re.compile(r"^//\s*TRACK_TITLE_UNICODE:\s*(.+)$", re.MULTILINE)
+# R14: matches a bare "PRE_EMPHASIS" line. The "NO PRE_EMPHASIS" form is
+# treated as the negation — handled separately so we don't false-match.
+_PRE_EMPH_RE = re.compile(r"^\s*PRE_EMPHASIS\s*$", re.MULTILINE)
+_NO_PRE_EMPH_RE = re.compile(r"^\s*NO\s+PRE_EMPHASIS\s*$", re.MULTILINE)
 
 _ALL_ZEROS_MCN = "0000000000000"
 
@@ -73,9 +81,16 @@ def parse_toc(toc_bytes: bytes) -> ParsedDisc:
     disc_id = _first_or_none(_DISC_ID_RE, disc_section)
 
     tracks = []
+    any_pre_emph = False
     for i, marker in enumerate(markers):
         block_end = markers[i + 1].start() if i + 1 < len(markers) else len(text)
         block = text[marker.start() : block_end]
+        # R14: track-level PRE_EMPHASIS aggregated to disc level. The
+        # presence of "NO PRE_EMPHASIS" must not false-match because of
+        # the trailing "PRE_EMPHASIS" — match against the cleaned block.
+        cleaned = _NO_PRE_EMPH_RE.sub("", block)
+        if _PRE_EMPH_RE.search(cleaned):
+            any_pre_emph = True
 
         file_m = _FILE_TS_RE.search(block)
         if not file_m:
@@ -115,4 +130,5 @@ def parse_toc(toc_bytes: bytes) -> ParsedDisc:
         catalog=catalog,
         disc_id=disc_id,
         tracks=tracks,
+        pre_emphasis=any_pre_emph if tracks else None,
     )

@@ -91,6 +91,7 @@ def parsed_to_rbi_disc(parsed: ParsedDisc) -> RBIDisc:
         artist=parsed.performer,
         catalog=parsed.catalog,
         disc_id=parsed.disc_id,
+        pre_emphasis=parsed.pre_emphasis,
     )
     for pt in parsed.tracks:
         disc.tracks.append(

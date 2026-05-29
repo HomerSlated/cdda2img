@@ -45,32 +45,3 @@ class DiscMeta:
         "unknown"  # "cdtext" | "embedded" | "musicbrainz" | "discogs" | "manual"
     )
     tracks: list[TrackMeta] = field(default_factory=list)
-
-
-def merge_disc_meta(base: DiscMeta, update: DiscMeta) -> DiscMeta:
-    """Return a new DiscMeta with None fields in *base* filled from *update*.
-
-    Existing non-None values in *base* are never overwritten.
-    Track lists use *base* if non-empty, otherwise *update*.
-    """
-    scalar_fields = (
-        "album",
-        "artist",
-        "catalog",
-        "mb_disc_id",
-        "mb_release_id",
-        "mb_release_group_id",
-        "discogs_release_id",
-        "release_date",
-        "original_release_date",
-        "country",
-        "label",
-        "catalog_number",
-        "disc_number",
-        "disc_total",
-        "set_title",
-    )
-    kwargs: dict = {f: getattr(base, f) or getattr(update, f) for f in scalar_fields}
-    kwargs["source"] = base.source
-    kwargs["tracks"] = base.tracks if base.tracks else update.tracks
-    return DiscMeta(**kwargs)

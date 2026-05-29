@@ -50,6 +50,12 @@ uv run python -m cdda2img extract <file.rbi> --tracks --raw  # both
 uv run python -m cdda2img list <file.rbi>
 uv run python -m cdda2img test <file.rbi>
 
+# Offline mode (R10): disable every remote metadata lookup
+# (CDDB / MB / Discogs / AcoustID / AccurateRip). Composes with R7's
+# cache to reproduce a previously-seen disc's metadata without network.
+uv run python -m cdda2img --no-network-services rip
+uv run python -m cdda2img --no-network-services import disc.toc
+
 # Run tests
 uv run pytest tests/
 
@@ -140,8 +146,8 @@ Four source types, each producing s16le PCM, then all call `_finalize_import()`:
 4. `track_extract.py` — slices PCM per track, wraps in WAV, encodes to FLAC via PyAV with Vorbis comment metadata; writes CUE sheet; optionally applies −18 LUFS normalisation
 
 ### Key modules
-- **`rbi_format.py`** — RBI v4.0 constants (`VERSION_MAJOR = 4`, `VERSION_MINOR = 0`), `HEADER_STRUCT` (40-byte fixed header), `DIR_ENTRY_STRUCT` (54-byte directory entry), block type IDs (`BLOCK_TYPE_TOC`/`PROV`/`RGDB`/`ARIP`/`RLOG`/`PCM`), `RBIHeader` / `RBIDirEntry` / `RBIDisc` / `RBITocEntry` / `RBIReplayGain` dataclasses, `frames_from_timestamp()`, `timestamp_from_frames()`
-- **`cdda2img.py`** — CLI entry point; `create_image()`, `import_image()`, `rip_image()`, `extract_image()` top-level functions
+- **`rbi_format.py`** — RBI v4.0 constants (`VERSION_MAJOR = 4`, `VERSION_MINOR = 0`), `HEADER_STRUCT` (40-byte fixed header), `DIR_ENTRY_STRUCT` (54-byte directory entry), block type IDs (`BLOCK_TYPE_TOC`/`PROV`/`RGDB`/`ARIP`/`RLOG`/`PCM`), `RBIHeader` / `RBIDirEntry` / `RBIDisc` / `RBITocEntry` / `RBIReplayGain` dataclasses, `frames_from_timestamp()`, `timestamp_from_frames()`. `RBIDisc` carries `pre_emphasis: bool | None` (R14 aggregate disc-level flag — None means not captured) and `discogs_release_id: int | None`.
+- **`cdda2img.py`** — CLI entry point; `create_image()`, `import_image()`, `rip_image()`, `extract_image()` top-level functions. PROV-side helpers: `_r6_acoustid_corroborate` (R6 pre-menu fingerprint, tracks 1 and ceil(N/2)), `_emit_r9_disagreement` (NFC + casefold + reissue-suffix allow-list strip), `_r11_corroborate_with_discogs_master` (prefer-the-earlier on disagreement), `_r12_status` (`OK`/`empty`/`down`/`disabled` mapping).
 - **`container.py`** — `build_container()`, `read_header()`, `extract_data()`, `wav_to_raw_pcm()`
 - **`input_selector.py`** — four batching strategies: `fcfs`, `aatc`, `best` (OR-Tools CP-SAT global bin-packing), `meta` (groups by embedded disc-number tag)
 - **`cdrdao_ripper.py`** — cdrdao read-cd rip (primary); parses TOC via toc_parser + cdrdao_reader; returns `RipInfo`
@@ -150,16 +156,18 @@ Four source types, each producing s16le PCM, then all call `_finalize_import()`:
 - **`cdrdao_reader.py`** — cdrdao TOC+BIN import; s16be → s16le conversion
 - **`ddp_reader.py`** — DDP 2.0 (GEAR Pro Mastering Edition) import
 - **`toc.py`** — `generate_toc()`, `sanitize_title()`, `build_toc_entries()`
-- **`toc_parser.py`** — parses cdrdao TOC text into `ParsedDisc` / `ParsedTrack`
-- **`mb_lookup.py`** — MusicBrainz disc ID + release lookup
+- **`mb_lookup.py`** — MusicBrainz disc ID + release lookup. `MBPrepopResult` carries `barcode_hints: list[tuple[str, str]]` (R16: `(mbid, barcode)` per match); `_score_candidate_by_isrcs` + `_disambiguate_by_isrcs` resolve multi-match (R1) with `_MIN_ISRC_AGREE=2` floor and strict-uniqueness tie semantics; `_resolve_via_isrc_tally` is the zero-disc-ID-match fallback (R4: ≥ ceil(N/2) ISRC convergence required). MB rate limit pinned at 1 req/s via `set_rate_limit` in `_setup_useragent` (R15).
 - **`acoustid_lookup.py`** — AcoustID / Chromaprint per-track fingerprint lookup
-- **`discogs_lookup.py`** — Discogs label, catalogue number, country lookup
+- **`discogs_lookup.py`** — Discogs label, catalogue number, country lookup. `normalize_barcode` enforces the GS1 §1.3.1 check digit (R13); `lookup_master_year(release_id)` walks `release.master.main_release.year` for R11 corroboration.
 - **`lookup_result.py`** — `DiscMeta` / `TrackMeta` shared result dataclasses
+- **`validators.py`** — shared ISRC ISO-3901 regex + GS1 §1.3.1 GTIN-13 check-digit validators (R13). `validate_isrc` is the ISRC chokepoint (silent-drop + WARNING log on malformed input); `is_valid_gtin13` is wrapped by `discogs_lookup.normalize_barcode`.
+- **`lookup_cache.py`** — SQLite cache for MB disc-ID lookups (R7). Co-located with `drive_offsets.db` under XDG data home but in a separate `lookup_cache.db` file (cache TTL eviction cannot damage the AccurateRip drive catalogue). 30-day TTL; failure-tolerant — any sqlite error degrades silently to a live query.
 - **`metadata.py`** — `derive_album_info()` from file tags via mutagen
 - **`metadata_menu.py`** — interactive metadata confirmation menu
 - **`replaygain.py`** — EBU R128 analysis via pyebur128; `analyse()`, `pack_rg_block()`
-- **`config.py`** — `Config` dataclass (`cddb_server`, `contact_email`, `database_backups`, `database_backup_frequency`, `catalogue_backups`, `catalogue_backup_frequency`, `drives`, `catalogue_path`, `enable_catalogue`, `default_device`, `silence_threshold`, `capacity`, `preview`, `tui`, `low_dr_threshold`) + `DriveConfig` (per-drive `name`/`read_offset`/optional `write_offset`); `load_config()`, `save_drive()`, `save_drive_read_offset()`, `save_drive_write_offset()`, `_rewrite_config_drives()`; `[[drives]]` TOML array-of-tables round-trip; XDG path via `config_path()`
-- **`original_release.py`** — MusicBrainz release-group based lookup of the earliest known release of the same logical album. `find_original_release(disc)` returns `(found, title, year)`; `populate_original_release(disc)` assigns the result onto `RBIDisc` and skips when the user has already set the field manually via the metadata menu. Derivative secondary types (Compilation, Live, Remix, DJ-mix, Demo, etc.) are rejected — they're not "originals" in the sense the field captures
+- **`config.py`** — `Config` dataclass (`cddb_server`, `contact_email`, `database_backups`, `database_backup_frequency`, `catalogue_backups`, `catalogue_backup_frequency`, `drives`, `catalogue_path`, `enable_catalogue`, `default_device`, `silence_threshold`, `capacity`, `preview`, `tui`, `low_dr_threshold`, `no_network_services`) + `DriveConfig` (per-drive `name`/`read_offset`/optional `write_offset`); `load_config()`, `save_drive()`, `save_drive_read_offset()`, `save_drive_write_offset()`, `_rewrite_config_drives()`; `[[drives]]` TOML array-of-tables round-trip; XDG path via `config_path()`. Also provides `is_no_network_active()` + `set_no_network_override()` — the shared R10 offline-mode chokepoint every lookup module reads.
+- **`original_release.py`** — MusicBrainz release-group based lookup of the earliest known release of the same logical album. `find_original_release(disc)` returns `(found, title, year)`; `populate_original_release(disc)` assigns the result onto `RBIDisc` and skips when the user has already set the field manually via the metadata menu. Derivative secondary types (Compilation, Live, Remix, DJ-mix, Demo, etc.) are rejected — they're not "originals" in the sense the field captures. R3 verifier `_verify_release_matches_disc` gates both paths via conjunctive track-count + sum-of-durations (±2 s) + ISRC overlap + aggregate title fuzzy ≥ 80; each gate skips on missing evidence so empty-tracklist meta passes vacuously. R14 caps fuzzy candidates at year ≤ 1986 when `disc.pre_emphasis is True`.
+- **`toc_parser.py`** — parses cdrdao TOC text into `ParsedDisc` / `ParsedTrack`. `ParsedDisc.pre_emphasis` aggregates per-track `PRE_EMPHASIS` flags (R14: `NO PRE_EMPHASIS` is treated as the negation, handled separately to avoid false-match).
 - **`db.py`** — SQLite management for `drive_offsets.db`; `open_drive_offsets_db()`, `ensure_backup()`, `parse_frequency()`; WAL + foreign_keys; schema: `ar_drives`, `fetch_log`, `fetch_state`
 - **`drive_info.py`** — sysfs drive name probe (`probe_drive_name`); AccurateRip `driveoffsets.htm` catalog (`ensure_drive_offsets` with 30-day cooldown, `find_drive_offset`); `_normalize_ar_name` handles `"VENDOR  - MODEL"` and `"- MODEL"` formats via two-pattern regex
 - **`transcode.py`** — PyAV audio transcoding to Red Book PCM WAV
@@ -178,7 +186,7 @@ Variable-length blocks (TOC and PCM are mandatory; the rest are optional and sig
 | Block | Contents |
 |-------|----------|
 | TOC | cdrdao-format text TOC; per-track pre-gap, ISRC, CATALOG (MCN), provenance comments |
-| PROV | Provenance key=value text: creator, mode, source, ripper, drive |
+| PROV | Provenance key=value text: creator, mode, source, ripper, drive; lookup-status / disagreement / corroboration surfaces (R9/R11/R12); `arip_transport` + `arip_dbar_sha256` (R2); `pre_emphasis` (R14); `multi_match_isrc_disambiguated` (R1); `acoustid_corroborates` (R6); `discogs_release_id` |
 | RGDB | 17 + 12×N bytes: per-track and album EBU R128 gain, peak, and LRA (float32) |
 | ARIP | 13 + 15×N bytes: per-track AccurateRip v1/v2 CRCs, confidence, status, disc IDs |
 | RLOG | Structured rip log: drive, engine, offsets, per-track AR results; SHA-256 self-seal |
@@ -202,6 +210,13 @@ Full specification: `docs/reference/rbi_spec.md`.
 - **Subprocess**: `disc_reader.py`, `cdrdao_ripper.py`, and `track_preview.py` spawn `cd-paranoia` and `cdrdao`; `audition.py` and `track_preview.py` spawn `ffplay`; intentional subprocess calls carry `# noqa: S603, S607` (see LINT-008, LINT-012, LINT-013, LINT-017)
 - **Version** lives in `pyproject.toml` only; `container.py` and `cdda2img.py` read it via `importlib.metadata`
 - **spec-before-code**: update `docs/reference/rbi_spec.md` before changing the container format
+- **AccurateRip transport (R2)**: HTTPS is preferred; HTTP fallback only on `URLError` / `OSError`. A 404 over HTTPS is a legitimate negative ("disc not in DB") and does *not* fall back to HTTP. Responses are capped at `_AR_DBAR_MAX = 1 MB`. Per-block `(id1, id2, cddb_id)` header verification drops mismatching blocks at WARNING level — protects against a poisoned plaintext response splicing unrelated discs' blocks. `verify_rip` returns `ARVerifyResult(tracks, transport, dbar_sha256)`.
+- **MCN / ISRC validation (R13)**: MCN check digit (GS1 §1.3.1 Modulo-10) is enforced inside `discogs_lookup.normalize_barcode`; invalid inputs return None + log WARNING (silent-drop pattern). ISRCs from MB pass through `validators.validate_isrc` at ingress (`_parse_release`) and again at the merge sites (`_merge_into_disc`, `_overwrite_disc`); malformed values are dropped, not propagated.
+- **Original-release narrowing (R3)**: prefer no-answer over wrong-answer. A track-count mismatch against the disc's own MB release is positive evidence of upstream RG misidentification and falls through to fuzzy. Network failure during the verify is not evidence of mismatch — the answer stands. `_MIN_ISRC_AGREE=2` floor and strict-uniqueness tie semantics for the R1 disambiguator.
+- **MB rate limit (R15)**: pinned to 1 req/s in `_setup_useragent`. Don't silently inherit a future library default change.
+- **R7 cache (MB disc-ID, 30-day TTL)**: empty results are cached too — a disc-ID that returns 0 matches today will almost certainly return 0 again tomorrow. Cache lives in `lookup_cache.db` (separate from `drive_offsets.db`); failure-tolerant.
+- **R10 offline mode**: `--no-network-services` CLI flag (and `Config.no_network_services`) short-circuits CDDB, MB, Discogs, AcoustID, and AccurateRip lookups. Combined with R7's cache, a re-run reproduces a prior rip's metadata without network access.
+- **Deferred work (post-this-pass)**: R7's three additional cache tables (`isrc_lookups`, `discogs_barcode`, `cddb_lookups`) and R8 parallel pre-menu MB+CDDB are tracked in `docs/reference/NEXT.md`. R8 in particular requires moving CDDB into `_finalize_import` + threading + merge-without-overwrite logic.
 
 ## Reference Material
 

@@ -179,7 +179,12 @@ def query_cddb(
 
     Returns an empty list on network error, no match, or unexpected response.
     *server* should be "host:port"; defaults to cddb.retrobridge.org:888.
+    Returns [] when offline mode is active (R10).
     """
+    from cdda2img.config import is_no_network_active
+
+    if is_no_network_active():
+        return []
     host, port = _resolve_server(server)
     disc_id = compute_cddb_disc_id(track_lsns, disc_last_lsn)
     n = len(track_lsns)

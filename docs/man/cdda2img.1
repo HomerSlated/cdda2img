@@ -40,6 +40,9 @@ cdda2img \- create and extract RBI audio CD archive images
 .I FILE.rbi
 .br
 .B "cdda2img \-\-version"
+.br
+.B "cdda2img \-\-no\-network\-services"
+.RI < subcommand >
 .\"
 .SH DESCRIPTION
 .B cdda2img
@@ -406,6 +409,21 @@ re-ripping and unloading.
 The cdemu daemon must be running and the
 .B vhba
 kernel module must be loaded.
+.\"
+.SH GLOBAL OPTIONS
+.TP
+.B \-\-no\-network\-services
+Disable every remote metadata lookup
+.RI ( CDDB ", " MusicBrainz ", " Discogs ", " AcoustID ", " AccurateRip )
+for this invocation.
+Combined with the SQLite lookup cache, a re-run of a previously-seen disc
+can reproduce its metadata without network access.
+Equivalent to setting
+.B no_network_services = true
+in the TOML configuration.
+.TP
+.B \-\-version
+Print the cdda2img version and exit.
 .\"
 .SH ENVIRONMENT
 .TP

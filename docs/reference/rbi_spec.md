@@ -340,6 +340,18 @@ The PROV block stores provenance and extended metadata that has no natural home 
 | `mb_release_id`            | MusicBrainz release UUID, e.g. `9d8f7a02-3851-4c49-9dc4-b08e7cb0ad7c` |
 | `mb_release_group_id`      | MusicBrainz release-group UUID (used to re-run the original-release lookup from an existing RBI without redoing the disc-ID query) |
 | `discogs_release_id`       | Discogs release ID (integer as decimal string) |
+| `multi_match_isrc_disambiguated` | `YES`. Present when MB disc-ID returned >1 match and the in-memory ISRC tally (R1) picked a strictly-winning candidate. Absent when N=1 (no disambiguation needed) or when N>1 and the tally was a tie / sub-threshold. |
+| `arip_transport`           | `https` \| `http`. Emitted whenever at least one AccurateRip fetch attempt reached the server (any 2xx/4xx). `http` indicates the HTTPS attempt failed and the fetcher fell back to plaintext — readers SHOULD treat the confidence values with reduced trust. |
+| `arip_dbar_sha256`         | 64 lowercase hex chars. SHA-256 of the raw dBAR response body (pre-parse). Emitted only when a body was actually received. Lets later re-fetches detect AR-side changes or mirror tampering without re-running verification. |
+| `acoustid_corroborates`    | `YES` \| `NO`. Emitted only when the pre-menu AcoustID helper (R6) ran (i.e. `acoustid_lookup.is_available()` was true and at least one per-track fingerprint produced a chained MB recording). `YES` = AcoustID's consistent-across-tracks winner agrees with the disc's existing MB release MBID; `NO` = disagrees. |
+| `pre_emphasis`             | `YES` \| `NO`. Aggregate disc-level pre-emphasis flag. `YES` if any track has CONTROL bit 0 set, `NO` otherwise. Absent when not captured by the source parser (today only the cdrdao TOC path populates it). |
+| `disagreement_cddb_mb`     | Comma-separated list of fields where CDDB and MB returned different answers, after NFC + casefold + reissue-suffix allow-list normalisation. Possible values: `album`, `artist`, or `album,artist`. Absent when both agree, when one side is blank, or when the pre-MB artist was the literal `Unknown Artist` default. |
+| `original_release_corroborated` | `discogs,mb`. Emitted when both the Discogs master `main_release.year` and the MB RG `first-release-date` were resolvable and agreed on the same 4-digit year. |
+| `original_release_disagreement` | `discogs:YYYY\|mb:YYYY`. Emitted when both years resolved and disagreed. The disc's stored `original_release_year` reflects the *earlier* of the two. |
+| `lookup_status_cddb`       | `OK` \| `empty` \| `down` \| `disabled`. `OK` = response had data; `empty` = service reached but returned nothing; `down` = network or parse error; `disabled` = service not attempted (R10 offline mode). |
+| `lookup_status_mb`         | As `lookup_status_cddb`, for MusicBrainz disc-ID. |
+| `lookup_status_discogs`    | As `lookup_status_cddb`, for Discogs. `disabled` covers both R10 offline mode and the absence of a `DISCOGS_TOKEN`. |
+| `lookup_status_acoustid`   | As `lookup_status_cddb`, for AcoustID. `disabled` covers R10 offline mode, the absence of an `ACOUSTID_API_KEY`, and missing pyacoustid / libchromaprint. |
 
 All keys are optional. A v4.0 writer **SHOULD** emit at minimum `creator` and `created`. A reader **MUST NOT** fail on a missing key.
 
@@ -351,6 +363,21 @@ The pair `low_dynamic_range` and `original_release_found` replaces the v3-era `r
 
 - `low_dynamic_range` is a *measurement* — we computed the album LRA and compared it to a user-set threshold. A value of `YES` does not imply "loudness war remaster"; it states only that the source is heavily compressed, which can be an artistic choice on an original release (cf. ZZ Top *Eliminator*, 1983).
 - `original_release_found` is a *lookup result* — when present and `YES`, MB's release-group endpoint identified at least one strictly earlier release of the same logical album. Absent means the lookup did not produce a usable answer, not that this disc is the original.
+- `original_release_corroborated` / `original_release_disagreement` are the sub-goal-3 disagreement surfaces. When *both* are absent and `original_release_found=YES`, only one source (MB RG primary or title-fuzz fallback) was usable — treat with v4.0's existing confidence semantics.
+
+#### 6.3.3 Lookup status and conflict surfaces
+
+The §6.3.1 keys split into two semantic groups:
+
+- **Identifier keys** (`mb_release_id`, `mb_release_group_id`, `discogs_release_id`, `release_date`, `low_dynamic_range`, `original_release_*`, …): each names a single, factual fact about the disc.
+- **Observation keys** (`lookup_status_*`, `disagreement_*`, `*_corroborated`, `*_disagreement`, `acoustid_corroborates`, `multi_match_isrc_disambiguated`, `arip_transport`, `arip_dbar_sha256`): each records *what we asked and what the answer was*.
+
+For observation keys, **presence implies the question was asked**. This lets a verifier distinguish "blank-because-no-data" from "blank-because-service-offline". A blank `mb_release_id` paired with `lookup_status_mb=down` is "we asked MB and the network was down"; the same blank paired with `lookup_status_mb=empty` is "we asked MB and MB had nothing".
+
+Two value-grammar notes for parsers:
+
+- `original_release_disagreement` uses a compound value with a pipe separator and `source:YYYY` segments — the only PROV value that requires parsing beyond plain string. Format: `discogs:YYYY|mb:YYYY`.
+- `disagreement_cddb_mb` is a comma list of field names; consumers should split on `,` and treat the result as a set.
 
 ---
 

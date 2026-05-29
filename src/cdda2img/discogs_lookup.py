@@ -21,8 +21,50 @@ _USER_AGENT = f"cdda2img/{importlib.metadata.version('cdda2img')} +https://githu
 
 
 def is_available() -> bool:
-    """Return True if DISCOGS_TOKEN is set in the environment."""
+    """Return True if DISCOGS_TOKEN is set in the environment.
+
+    R10: returns False unconditionally when ``Config.no_network_services``
+    is True (offline mode).
+    """
+    from cdda2img.config import is_no_network_active
+
+    if is_no_network_active():
+        return False
     return bool(os.environ.get("DISCOGS_TOKEN"))
+
+
+def lookup_master_year(release_id: int) -> int | None:
+    """R11: return the year of the Discogs master's main_release for *release_id*.
+
+    Walks ``release.master.main_release.year`` via the discogs_client API.
+    Returns None when:
+      * Discogs is unavailable (no token).
+      * The release has no associated master (e.g. one-off release).
+      * The master has no main_release (rare).
+      * Any API call raises.
+
+    One extra Discogs API call beyond the original release fetch.
+    """
+    client = _get_client()
+    if client is None:
+        return None
+    try:
+        release = client.release(release_id)
+        master = release.master
+        if master is None:
+            return None
+        main_release = master.main_release
+        if main_release is None:
+            return None
+        # main_release is a Release object; fetch its year via the same
+        # discogs_client property accessor used elsewhere.
+        year_raw = main_release.fetch("year")
+        if not year_raw:
+            return None
+        return int(year_raw)
+    except Exception as exc:
+        log.debug("Discogs master year lookup failed for %s: %s", release_id, exc)
+        return None
 
 
 def normalize_barcode(raw: str | None) -> str | None:
@@ -30,14 +72,23 @@ def normalize_barcode(raw: str | None) -> str | None:
 
     Strips non-digit characters; pads a 12-digit UPC-A with a leading '0'
     (GS1 §1.3.1 Table 1-9: GTIN-12 → GTIN-13). Rejects anything that isn't
-    exactly 13 digits after stripping and padding.
+    exactly 13 digits after stripping and padding. R13: also rejects
+    13-digit candidates whose GS1 §1.3.1 check digit is wrong (catches
+    typos / digit transpositions in manual overrides or upstream data).
     """
+    from cdda2img.validators import is_valid_gtin13
+
     if not raw:
         return None
     digits = re.sub(r"\D", "", raw)
     if len(digits) == 12:
         digits = "0" + digits
-    return digits if len(digits) == 13 else None
+    if len(digits) != 13:
+        return None
+    if not is_valid_gtin13(digits):
+        log.warning("Rejecting barcode with invalid check digit: %r", raw)
+        return None
+    return digits
 
 
 def _get_client():
