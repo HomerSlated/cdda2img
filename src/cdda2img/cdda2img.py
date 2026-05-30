@@ -213,6 +213,13 @@ def parse_args() -> argparse.Namespace:
         metavar="N",
         help="Disc capacity in minutes (default: from config, 80)",
     )
+    c.add_argument(
+        "--tui",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Use terminal UI for the metadata menu (default: from config, true; "
+        "--no-tui renders plainly without clearing the screen)",
+    )
 
     x = sub.add_parser("extract", help="Extract blocks from an RBI image")
     x.add_argument("rbi_file", type=Path, help="RBI file to extract")
@@ -323,6 +330,13 @@ def parse_args() -> argparse.Namespace:
         "--info",
         action="store_true",
         help="Dry-run: parse and display image metadata without importing",
+    )
+    i_cmd.add_argument(
+        "--tui",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Use terminal UI for the metadata menu (default: from config, true; "
+        "--no-tui renders plainly without clearing the screen)",
     )
 
     d_cmd = sub.add_parser("catalogue", help="Browse disc catalogue")
@@ -477,6 +491,7 @@ def create_image(
     silence_threshold: int = 55,
     capacity: int = MAX_RUNTIME_MINUTES,
     low_dr_threshold: float = 5.0,
+    tui: bool = True,
 ) -> None:
     files = sorted(
         p for p in input_dir.iterdir() if p.is_file() and not p.name.startswith(".")
@@ -538,7 +553,7 @@ def create_image(
 
             from cdda2img.metadata_menu import run_metadata_menu
 
-            disc = run_metadata_menu(disc, source_wavs=source_wavs)
+            disc = run_metadata_menu(disc, source_wavs=source_wavs, tui=tui)
 
             raw_titles = [re.sub(r"^\d{1,2}[-. ]+", "", p.stem) for p in batch]
 
@@ -697,6 +712,7 @@ def import_image(
     loudness: str = "rg",
     output: Path | None = None,
     low_dr_threshold: float = 5.0,
+    tui: bool = True,
 ) -> None:
     import sys
 
@@ -790,6 +806,7 @@ def import_image(
             output,
             ui=ui,
             low_dr_threshold=low_dr_threshold,
+            tui=tui,
         )
     finally:
         if ui is not None:
@@ -1195,6 +1212,7 @@ def _finalize_import(
     cddb_disc_last_lsn: int | None = None,
     cddb_server: str | None = None,
     ar_summary: str | None = None,
+    tui: bool = True,
 ) -> None:
     """Shared post-rip/import pipeline: MB lookup → metadata menu → TOC → RG → container.
 
@@ -1317,7 +1335,7 @@ def _finalize_import(
     # ar_summary kwarg drives the AR_PAUSE state (rip pipeline only).
     if ui is not None:
         ui.pause()
-    disc = run_metadata_menu(disc, source_pcm=pcm_file, ar_summary=ar_summary)
+    disc = run_metadata_menu(disc, source_pcm=pcm_file, ar_summary=ar_summary, tui=tui)
     if ui is not None:
         ui.resume()
 
@@ -1741,6 +1759,7 @@ def rip_image(  # noqa: C901
             cddb_disc_last_lsn=info.disc_last_lsn,
             cddb_server=cfg.cddb_server,
             ar_summary=ar_summary,
+            tui=tui,
         )
     finally:
         _stop_preview(track_preview)
@@ -1917,6 +1936,7 @@ def _dispatch(args: argparse.Namespace) -> None:
             ),
             capacity=args.capacity if args.capacity is not None else cfg.capacity,
             low_dr_threshold=cfg.low_dr_threshold,
+            tui=args.tui if args.tui is not None else cfg.tui,
         )
     elif args.cmd == "rip":
         from cdda2img.config import load_config
@@ -1942,6 +1962,7 @@ def _dispatch(args: argparse.Namespace) -> None:
                 loudness=args.loudness,
                 output=args.output,
                 low_dr_threshold=cfg.low_dr_threshold,
+                tui=args.tui if args.tui is not None else cfg.tui,
             )
     elif args.cmd == "extract":
         extract_image(

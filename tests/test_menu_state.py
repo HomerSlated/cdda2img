@@ -252,3 +252,33 @@ def test_format_ar_report_empty_returns_empty_string() -> None:
     from cdda2img.accuraterip import format_ar_report
 
     assert format_ar_report([]) == ""
+
+
+# ---------------------------------------------------------------------------
+# --no-tui: screen-clear gating
+# ---------------------------------------------------------------------------
+
+
+def test_no_tui_skips_screen_clear() -> None:
+    """tui=False (--no-tui): the menu renders without clearing the screen, so
+    earlier pipeline output stays in the terminal scrollback."""
+    ctl = MenuController(_disc(), tui=False)
+    with (
+        patch("cdda2img.menu_state.sys.stdin.isatty", return_value=True),
+        patch("cdda2img.menu_state._clear_screen") as clear,
+        patch("cdda2img.metadata_menu._prompt", return_value="a"),
+    ):
+        ctl.run()
+    clear.assert_not_called()
+
+
+def test_tui_clears_screen_by_default() -> None:
+    """tui=True (default): each frame clears + redraws (fixed-position UX)."""
+    ctl = MenuController(_disc(), tui=True)
+    with (
+        patch("cdda2img.menu_state.sys.stdin.isatty", return_value=True),
+        patch("cdda2img.menu_state._clear_screen") as clear,
+        patch("cdda2img.metadata_menu._prompt", return_value="a"),
+    ):
+        ctl.run()
+    clear.assert_called()

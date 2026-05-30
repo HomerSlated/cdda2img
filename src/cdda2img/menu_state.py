@@ -82,12 +82,18 @@ class MenuController:
         source_pcm: Path | None = None,
         source_wavs: list[Path] | None = None,
         ar_summary: str | None = None,
+        tui: bool = True,
     ) -> None:
         self.disc: RBIDisc = disc
         self._original_disc: RBIDisc = copy.deepcopy(disc)  # undo savepoint
         self.source_pcm = source_pcm
         self.source_wavs = source_wavs
         self.ar_summary = ar_summary
+        # When False (--no-tui), the menu renders by appending to the
+        # terminal scrollback instead of clearing+redrawing each frame, so
+        # earlier pipeline output (MB match line, etc.) stays capturable.
+        # The menu is still interactive — only the screen-clear is dropped.
+        self.tui = tui
         self.mb_rg_id: str | None = None
         # The seed search fields are anchored to the disc state at the
         # time the menu started, not the live disc.album/artist. That way
@@ -108,7 +114,8 @@ class MenuController:
         if not sys.stdin.isatty():
             return self.disc
         while self.state is not MenuState.DONE:
-            _clear_screen()
+            if self.tui:
+                _clear_screen()
             self._render()
             self._transition()
         return self.disc

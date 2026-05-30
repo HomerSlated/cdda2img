@@ -951,6 +951,7 @@ def run_metadata_menu(
     source_pcm: Path | None = None,
     source_wavs: list[Path] | None = None,
     ar_summary: str | None = None,
+    tui: bool = True,
 ) -> RBIDisc:
     """Display current metadata and run the interactive enrichment/confirmation menu.
 
@@ -976,4 +977,5 @@ def run_metadata_menu(
         source_pcm=source_pcm,
         source_wavs=source_wavs,
         ar_summary=ar_summary,
+        tui=tui,
     ).run()
