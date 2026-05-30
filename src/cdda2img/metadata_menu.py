@@ -25,6 +25,8 @@ from cdda2img.rbi_format import (
     PCM_SAMPLE_RATE,
     RBIDisc,
     RBITocEntry,
+    format_original,
+    year_of,
 )
 
 _W = 78  # display width
@@ -86,20 +88,22 @@ def _prompt_search_fields(artist: str, title: str) -> tuple[str, str]:
 
 
 def _print_disc_summary(disc: RBIDisc) -> None:
-    print(f"  Album:   {disc.album or '(none)'}")
+    # "Album:" carries THIS release's year; "Original:" (immediately below)
+    # answers whether this disc is the original. Labels are padded to the
+    # width of "Original:" so the values align.
+    y = year_of(disc.release_date)
+    album_year = y if y is not None else "unknown"
+    print(f"  {'Album:':<9} {disc.album or '(none)'} ({album_year})")
     if disc.set_title:
-        print(f"  Set:     {disc.set_title}")
-    print(f"  Artist:  {disc.artist or '(none)'}")
-    print(f"  MCN:     {disc.catalog or '(none)'}")
+        print(f"  {'Set:':<9} {disc.set_title}")
+    print(f"  {format_original(disc)}")
+    print(f"  {'Artist:':<9} {disc.artist or '(none)'}")
+    print(f"  {'MCN:':<9} {disc.catalog or '(none)'}")
     if disc.disc_total > 1 or disc.disc_number != 1:
-        print(f"  Disc:    {disc.disc_number} of {disc.disc_total}")
-    print(f"  Tracks:  {len(disc.tracks)}")
-    if disc.original_release_found and disc.original_release_title:
-        year = f" ({disc.original_release_year})" if disc.original_release_year else ""
-        print(f"  Original: {disc.original_release_title}{year}")
+        print(f"  {'Disc:':<9} {disc.disc_number} of {disc.disc_total}")
+    print(f"  {'Tracks:':<9} {len(disc.tracks)}")
     if disc.low_dynamic_range is not None:
-        flag = "YES" if disc.low_dynamic_range else "NO"
-        print(f"  Low DR:  {flag}")
+        print(f"  {'Low DR:':<9} {'YES' if disc.low_dynamic_range else 'NO'}")
     if disc.tracks:
         print()
         print(f"  {'#':>2}  {'Title':<40}  {'ISRC'}")

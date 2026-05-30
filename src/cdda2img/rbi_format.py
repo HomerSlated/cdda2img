@@ -334,3 +334,43 @@ def frames_from_timestamp(ts: str) -> int:
     """Parse a MM:SS:FF timestamp string to an absolute CD frame count."""
     mm, ss, ff = (int(x) for x in ts.split(":"))
     return mm * CD_FRAMES_PER_SECOND * 60 + ss * CD_FRAMES_PER_SECOND + ff
+
+
+def year_of(date_str: str | None) -> int | None:
+    """Return the 4-digit year from a YYYY / YYYY-MM / YYYY-MM-DD string, or None."""
+    if not date_str:
+        return None
+    try:
+        return int(str(date_str)[:4])
+    except (ValueError, IndexError):
+        return None
+
+
+def format_original(disc: RBIDisc) -> str:
+    """Render the canonical one-line original-release provenance string.
+
+    Format::
+
+        Original: <Yes|No|Unknown>, <this release|original title|unknown release> \
+(<year>|unknown year)
+
+    Field 1 answers "is THIS disc the original release?" and is **gated by the
+    disc's own year**: without it we cannot claim anything predates this disc,
+    so the answer is Unknown and the earlier-release fields are unknown too (we
+    never emit a paradoxical "Unknown, Title (year)"). Comparison is at **year**
+    granularity — a 1983 pressing is the original even when the release-group's
+    first-release date is 1983-03-23. The earlier-release title/year are shown
+    only in the "No" case; "Yes" shows "this release" + the disc's own year.
+
+    The same string is used at every surface (menu, RBI PROV, catalogue, log)
+    so the representation is identical everywhere.
+    """
+    disc_year = year_of(disc.release_date)
+    if disc_year is None or not disc.original_release_found:
+        return "Original: Unknown, unknown release (unknown year)"
+    if disc_year == disc.original_release_year:
+        return f"Original: Yes, this release ({disc_year})"
+    title = disc.original_release_title or "unknown release"
+    oyear = disc.original_release_year
+    year_disp = oyear if oyear is not None else "unknown year"
+    return f"Original: No, {title} ({year_disp})"
