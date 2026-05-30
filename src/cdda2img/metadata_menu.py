@@ -280,17 +280,23 @@ def _mb_select_and_apply(
     """Present MB results, confirm, and apply chosen meta to disc."""
     from cdda2img.mb_lookup import _merge_into_disc, _overwrite_disc, lookup_release
 
-    selected = _select_from_results(results, "MusicBrainz Results")
+    # MB search returns results unordered; present them earliest-first so the
+    # original pressing leads (matches the Find-Original-Release flow).
+    results_sorted = sorted(results, key=lambda m: m.release_date or "9999")
+    selected = _select_from_results(results_sorted, "MusicBrainz Results")
     if selected is None:
         return disc, mb_rg_id
-    mode = _confirm_apply(selected, disc)
-    if not mode:
-        return disc, mb_rg_id
+    # Search hits are stubs (no track listing / ISRCs). Fetch the full release
+    # BEFORE previewing, so the diff reflects exactly what will be applied —
+    # otherwise the preview hides the ISRCs that the apply then fills.
     if selected.mb_release_id and not selected.tracks:
         print("  Fetching full track listing from MusicBrainz...")
         full = lookup_release(selected.mb_release_id, disc_number=disc.disc_number)
         if full and (full.album or full.tracks):
             selected = full
+    mode = _confirm_apply(selected, disc)
+    if not mode:
+        return disc, mb_rg_id
     disc = (
         _merge_into_disc(selected, disc)
         if mode == "update"

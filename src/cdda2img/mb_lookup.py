@@ -766,19 +766,19 @@ def _plurality_release_group(matches: list[DiscMeta]) -> str | None:
 
 
 def _disambiguate_by_mcn(matches: list[DiscMeta], disc: RBIDisc) -> DiscMeta | None:
-    """Pick the match whose barcode equals the disc's Q-channel MCN.
+    """Pick the match whose barcode UNIQUELY equals the disc's Q-channel MCN.
 
     The MCN read from the disc subchannel is the strongest pressing-level
-    signal available, and it is resolved before the MB lookup runs. Candidate
-    ``catalog`` fields are already normalised EAN-13 (``normalize_barcode`` in
+    signal available, resolved before the MB lookup runs. Candidate ``catalog``
+    fields are already normalised EAN-13 (``normalize_barcode`` in
     ``_parse_release``), so we normalise the disc MCN the same way and compare.
 
-    A barcode is per-product, so when several candidates share the matching
-    barcode they are the same release (same album + year) catalogued more than
-    once (e.g. country variants); we return the most-complete one
-    deterministically. The year — the only field ``is_original`` needs — is
-    identical across them regardless. Returns None when the disc has no MCN or
-    no candidate barcode matches.
+    A *unique* barcode hit identifies that exact release — safe to merge in
+    full. When the MCN matches **several** candidates (a barcode shared across
+    country variants, e.g. DE + XE), the specific pressing is genuinely
+    undetermined; we return None so the caller falls back to agreed-facts-only
+    population rather than fabricate one pressing's date / release id. Returns
+    None when the disc has no MCN or no candidate barcode matches.
     """
     from cdda2img.barcode import normalize_barcode
 
@@ -786,10 +786,7 @@ def _disambiguate_by_mcn(matches: list[DiscMeta], disc: RBIDisc) -> DiscMeta | N
     if not mcn:
         return None
     hits = [m for m in matches if m.catalog and m.catalog == mcn]
-    if not hits:
-        return None
-    hits.sort(key=lambda m: (-len(m.release_date or ""), m.mb_release_id or ""))
-    return hits[0]
+    return hits[0] if len(hits) == 1 else None
 
 
 def _resolve_multimatch(
@@ -814,22 +811,45 @@ def _resolve_multimatch(
     return None, ""
 
 
-def _adopt_plurality_release_group(disc: RBIDisc, matches: list[DiscMeta]) -> None:
-    """Set ``disc.mb_release_group_id`` (in place) from a multi-match plurality.
+def _build_agreed_facts_meta(matches: list[DiscMeta], rg_id: str) -> DiscMeta:
+    """Synthesise a DiscMeta of ONLY the facts every candidate in *rg_id* agrees on.
 
-    No-op when the RG is already set or no strict plurality exists. Lets the
-    original-release lookup resolve from a multi-match that R1 could not
-    disambiguate to a single pressing. Safe: ``_find_original_release_via_rg``
-    re-validates the RG (derivative + R3 gates) and falls through to fuzzy if
-    the guess is wrong.
+    Used when an MB disc-ID multi-match cannot be resolved to a single pressing
+    (no ISRC winner, no unique MCN hit). Rather than fabricate a specific
+    pressing's details, we populate the unambiguous, album-level facts shared
+    by every candidate in the plurality release-group:
+
+      * ``mb_release_group_id`` — always (lets original-release resolve);
+      * ``release_date`` — a 4-digit **year** only when every dated candidate
+        agrees on it (the disc's own year, e.g. four 1983 pressings ⇒ "1983");
+      * per-track ``isrc`` — only where every candidate listing that track
+        agrees on a single value.
+
+    Deliberately left None: country, catalogue number, exact date, and
+    ``mb_release_id`` — genuinely undetermined across the multi-match, so we do
+    not guess them. ``_merge_into_disc`` fills blanks only, so this never
+    overwrites a value the disc already carries.
     """
-    if disc.mb_release_group_id is not None:
-        return
-    rg = _plurality_release_group(matches)
-    if rg is None:
-        return
-    disc.mb_release_group_id = rg
-    log.debug("Adopted plurality release-group %s from %d MB matches", rg, len(matches))
+    group = [m for m in matches if m.mb_release_group_id == rg_id]
+    years = {m.release_date[:4] for m in group if m.release_date}
+    agreed_year = years.pop() if len(years) == 1 else None
+
+    isrc_by_track: dict[int, set[str]] = {}
+    for m in group:
+        for t in m.tracks:
+            if t.number is not None and t.isrc:
+                isrc_by_track.setdefault(t.number, set()).add(t.isrc)
+    tracks = [
+        TrackMeta(number=n, isrc=next(iter(s)))
+        for n, s in sorted(isrc_by_track.items())
+        if len(s) == 1
+    ]
+    return DiscMeta(
+        mb_release_group_id=rg_id,
+        release_date=agreed_year,
+        tracks=tracks,
+        source="musicbrainz",
+    )
 
 
 class MBPrepopResult(NamedTuple):
@@ -927,10 +947,27 @@ def prepopulate_from_mb(disc: RBIDisc, *, verbose: bool = True) -> MBPrepopResul
                 mb_candidate_artist=winner.artist,
                 meta=winner,
             )
-        log.debug("MB disc ID returned %d matches; no pressing pick", len(matches))
-        # No pressing could be resolved; adopt the plurality release-group so the
-        # original-release lookup can still resolve the album's first release.
-        _adopt_plurality_release_group(disc, matches)
+        # No single pressing could be resolved. Rather than guess one, merge
+        # only the facts every candidate in the plurality release-group agrees
+        # on — year, shared per-track ISRCs, and the release-group itself (so
+        # original-release can still resolve). Returned as ``meta`` so the
+        # parallel pre-menu path (_finalize_import) re-applies it onto the
+        # CDDB-merged disc exactly like a single-match meta.
+        rg = _plurality_release_group(matches)
+        if rg is not None:
+            agreed = _build_agreed_facts_meta(matches, rg)
+            disc = _merge_into_disc(agreed, disc)
+            log.debug(
+                "MB multi-match (%d): merged agreed facts (year=%s, %d ISRCs, rg=%s)",
+                len(matches),
+                agreed.release_date,
+                len(agreed.tracks),
+                rg,
+            )
+            return MBPrepopResult(
+                disc, hints, len(matches), isrc_disambiguated=False, meta=agreed
+            )
+        log.debug("MB disc ID returned %d matches; no plurality RG", len(matches))
         return MBPrepopResult(disc, hints, len(matches), isrc_disambiguated=False)
     meta = matches[0]
     updated = _merge_into_disc(meta, disc)

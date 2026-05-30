@@ -647,7 +647,9 @@ def test_disambiguate_by_mcn_matches_barcode():
     assert w is not None and w.mb_release_id == "r1"
 
 
-def test_disambiguate_by_mcn_same_barcode_picks_most_complete_date():
+def test_disambiguate_by_mcn_shared_barcode_returns_none():
+    """A barcode shared by two pressings (DE + XE) is not uniquely identifying,
+    so we return None rather than fabricate one pressing's date / release id."""
     disc = _make_disc(tracks=[(1, 0, 18000)])
     disc.catalog = _ELIMINATOR_MCN
     matches = [
@@ -661,9 +663,7 @@ def test_disambiguate_by_mcn_same_barcode_picks_most_complete_date():
             mb_release_id="de",
         ),
     ]
-    # Both 1983 (year-safe); the fuller date wins deterministically.
-    w = _disambiguate_by_mcn(matches, disc)
-    assert w is not None and w.mb_release_id == "de"
+    assert _disambiguate_by_mcn(matches, disc) is None
 
 
 def test_disambiguate_by_mcn_no_match_or_no_mcn_returns_none():
@@ -676,22 +676,46 @@ def test_disambiguate_by_mcn_no_match_or_no_mcn_returns_none():
     assert _disambiguate_by_mcn(matches, disc) is None
 
 
-def test_prepopulate_multimatch_mcn_picks_pressing_year():
-    """Blank ISRCs but the disc's MCN matches the 1983 pressing → resolve it,
-    so the disc's own release year becomes known (feeds is_original)."""
+def test_prepopulate_multimatch_unique_mcn_picks_pressing():
+    """A disc MCN that matches exactly ONE candidate barcode pins that pressing,
+    so the full pressing (exact date + release id) is merged."""
     disc = _make_disc(tracks=[(1, 0, 18000)])
     disc.catalog = _ELIMINATOR_MCN
     matches = [
-        DiscMeta(album="Eliminator", mb_release_id="us", mb_release_group_id="rg-e"),
         DiscMeta(
-            album="Eliminator",
+            album="E", mb_release_id="us", mb_release_group_id="rg-e"
+        ),  # no barcode
+        DiscMeta(
+            album="E",
+            catalog=_ELIMINATOR_MCN,
+            release_date="1983-11-18",
+            mb_release_id="de",
+            mb_release_group_id="rg-e",
+        ),
+    ]
+    with patch("cdda2img.mb_lookup.lookup_disc_id", return_value=matches):
+        r = prepopulate_from_mb(disc, verbose=False)
+    assert r.disc.release_date == "1983-11-18"  # unique barcode → exact pressing
+    assert r.disc.mb_release_id == "de"
+    assert r.isrc_disambiguated is False
+
+
+def test_prepopulate_multimatch_shared_barcode_agreed_facts_only():
+    """A barcode shared by two pressings is not uniquely identifying. Fill only
+    the agreed year + release-group; leave exact date / release id blank."""
+    disc = _make_disc(tracks=[(1, 0, 18000)])
+    disc.catalog = _ELIMINATOR_MCN
+    matches = [
+        DiscMeta(album="E", mb_release_id="us", mb_release_group_id="rg-e"),
+        DiscMeta(
+            album="E",
             catalog=_ELIMINATOR_MCN,
             release_date="1983-11-18",
             mb_release_id="de",
             mb_release_group_id="rg-e",
         ),
         DiscMeta(
-            album="Eliminator",
+            album="E",
             catalog=_ELIMINATOR_MCN,
             release_date="1983",
             mb_release_id="xe",
@@ -700,9 +724,52 @@ def test_prepopulate_multimatch_mcn_picks_pressing_year():
     ]
     with patch("cdda2img.mb_lookup.lookup_disc_id", return_value=matches):
         r = prepopulate_from_mb(disc, verbose=False)
-    assert r.disc.release_date == "1983-11-18"  # pressing resolved → year known
-    assert r.isrc_disambiguated is False  # resolved via MCN, not ISRC
-    assert r.meta is not None and r.meta.mb_release_id == "de"
+    assert r.disc.release_date == "1983"  # agreed YEAR only, not "1983-11-18"
+    assert r.disc.mb_release_group_id == "rg-e"
+    assert r.disc.mb_release_id is None  # specific pressing left undetermined
+    assert r.isrc_disambiguated is False
+
+
+def test_prepopulate_multimatch_agreed_facts_fills_year_and_shared_isrcs():
+    """The Eliminator case: no disc MCN, no ISRC winner, but all candidates in
+    the plurality release-group agree on the year and per-track ISRCs → fill
+    those, leave the pressing (date / release id) blank."""
+    disc = _make_disc(tracks=[(1, 0, 18000), (2, 18000, 20000)])
+    # No disc.catalog (this pressing has no Q-channel MCN).
+    shared_tracks = [
+        TrackMeta(number=1, isrc="USRHD0709703"),
+        TrackMeta(number=2, isrc="USWB10301935"),
+    ]
+    matches = [
+        DiscMeta(
+            album="E",
+            release_date="1983-03-23",
+            mb_release_id="us",
+            mb_release_group_id="rg-e",
+            tracks=shared_tracks,
+        ),
+        DiscMeta(
+            album="E",
+            release_date="1983-11-18",
+            mb_release_id="de",
+            mb_release_group_id="rg-e",
+            tracks=shared_tracks,
+        ),
+        DiscMeta(
+            album="comp",
+            release_date="2008",
+            mb_release_id="cmp",
+            mb_release_group_id="rg-comp",
+            tracks=shared_tracks,
+        ),
+    ]
+    with patch("cdda2img.mb_lookup.lookup_disc_id", return_value=matches):
+        r = prepopulate_from_mb(disc, verbose=False)
+    assert r.disc.release_date == "1983"  # both Eliminator pressings agree
+    assert r.disc.mb_release_group_id == "rg-e"
+    assert r.disc.mb_release_id is None  # no pressing fabricated
+    assert r.disc.tracks[0].isrc == "USRHD0709703"  # shared ISRCs filled
+    assert r.disc.tracks[1].isrc == "USWB10301935"
 
 
 # ---------------------------------------------------------------------------
