@@ -765,6 +765,55 @@ def _plurality_release_group(matches: list[DiscMeta]) -> str | None:
     return ranked[0][0]
 
 
+def _disambiguate_by_mcn(matches: list[DiscMeta], disc: RBIDisc) -> DiscMeta | None:
+    """Pick the match whose barcode equals the disc's Q-channel MCN.
+
+    The MCN read from the disc subchannel is the strongest pressing-level
+    signal available, and it is resolved before the MB lookup runs. Candidate
+    ``catalog`` fields are already normalised EAN-13 (``normalize_barcode`` in
+    ``_parse_release``), so we normalise the disc MCN the same way and compare.
+
+    A barcode is per-product, so when several candidates share the matching
+    barcode they are the same release (same album + year) catalogued more than
+    once (e.g. country variants); we return the most-complete one
+    deterministically. The year — the only field ``is_original`` needs — is
+    identical across them regardless. Returns None when the disc has no MCN or
+    no candidate barcode matches.
+    """
+    from cdda2img.barcode import normalize_barcode
+
+    mcn = normalize_barcode(disc.catalog)
+    if not mcn:
+        return None
+    hits = [m for m in matches if m.catalog and m.catalog == mcn]
+    if not hits:
+        return None
+    hits.sort(key=lambda m: (-len(m.release_date or ""), m.mb_release_id or ""))
+    return hits[0]
+
+
+def _resolve_multimatch(
+    matches: list[DiscMeta], disc: RBIDisc
+) -> tuple[DiscMeta | None, str]:
+    """Resolve an MB disc-ID multi-match to one pressing using all pre-MB signals.
+
+    Priority order (strongest deterministic signal last-resort-free first):
+      1. ``isrc`` — per-track ISRC agreement (R1).
+      2. ``mcn``  — the disc's Q-channel MCN against candidate barcodes.
+
+    Returns ``(winner, method)`` with method ``"isrc"`` / ``"mcn"`` / ``""``
+    (no resolution). Pressing-level callers can then ``_merge_into_disc`` the
+    winner so ``release_date`` (hence the disc's own year) becomes known.
+    """
+    winner = _disambiguate_by_isrcs(matches, disc)
+    if winner is not None:
+        return winner, "isrc"
+    winner = _disambiguate_by_mcn(matches, disc)
+    if winner is not None:
+        return winner, "mcn"
+    return None, ""
+
+
 def _adopt_plurality_release_group(disc: RBIDisc, matches: list[DiscMeta]) -> None:
     """Set ``disc.mb_release_group_id`` (in place) from a multi-match plurality.
 
@@ -859,27 +908,28 @@ def prepopulate_from_mb(disc: RBIDisc, *, verbose: bool = True) -> MBPrepopResul
             )
         return MBPrepopResult(disc, hints, 0, isrc_disambiguated=False)
     if len(matches) > 1:
-        winner = _disambiguate_by_isrcs(matches, disc)
+        winner, method = _resolve_multimatch(matches, disc)
         if winner is not None:
             updated = _merge_into_disc(winner, disc)
             if verbose:
                 date_str = f"  ({winner.release_date})" if winner.release_date else ""
+                via = "ISRC disambiguation" if method == "isrc" else "MCN/barcode match"
                 print(
                     f'  MusicBrainz: matched "{winner.album}" by {winner.artist}'
-                    f"{date_str} (via ISRC disambiguation)"
+                    f"{date_str} (via {via})"
                 )
             return MBPrepopResult(
                 updated,
                 hints,
                 len(matches),
-                isrc_disambiguated=True,
+                isrc_disambiguated=(method == "isrc"),
                 mb_candidate_album=winner.album,
                 mb_candidate_artist=winner.artist,
                 meta=winner,
             )
-        log.debug("MB disc ID returned %d matches; skipping auto-fill", len(matches))
-        # Pressing stays ambiguous, but a multi-match almost always agrees on one
-        # release-group; adopt it so original-release can resolve pre-menu.
+        log.debug("MB disc ID returned %d matches; no pressing pick", len(matches))
+        # No pressing could be resolved; adopt the plurality release-group so the
+        # original-release lookup can still resolve the album's first release.
         _adopt_plurality_release_group(disc, matches)
         return MBPrepopResult(disc, hints, len(matches), isrc_disambiguated=False)
     meta = matches[0]

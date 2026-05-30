@@ -16,7 +16,10 @@ catalogue string into the pipeline:
      wrong (catches typos and digit transpositions).
 
 Steps 1-3 are silent — the input could be plain garbage. Step 4 logs
-at WARNING level because the input *looks* structured but is data-wrong.
+at DEBUG level: the input *looks* structured but is data-wrong, yet this
+is routine when scanning third-party metadata (e.g. an MB release with a
+typo'd barcode) and must not surface during normal rip operations. Use
+``-v`` to see it.
 """
 
 from __future__ import annotations
@@ -45,6 +48,6 @@ def normalize_barcode(raw: str | None) -> str | None:
     if len(digits) != 13:
         return None
     if not is_valid_gtin13(digits):
-        log.warning("Rejecting barcode with invalid check digit: %r", raw)
+        log.debug("Rejecting barcode with invalid check digit: %r", raw)
         return None
     return digits

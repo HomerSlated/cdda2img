@@ -16,6 +16,7 @@ from cdda2img.lookup_result import (
     TrackMeta,
 )
 from cdda2img.mb_lookup import (
+    _disambiguate_by_mcn,
     _merge_into_disc,
     _overwrite_disc,
     _parse_release,
@@ -626,6 +627,82 @@ def test_prepopulate_multimatch_rg_tie_leaves_group_unset():
     with patch("cdda2img.mb_lookup.lookup_disc_id", return_value=matches):
         r = prepopulate_from_mb(disc, verbose=False)
     assert r.disc.mb_release_group_id is None
+
+
+# ---------------------------------------------------------------------------
+# MCN/barcode multi-match disambiguation
+# ---------------------------------------------------------------------------
+
+_ELIMINATOR_MCN = "0075992377423"  # ZZ Top - Eliminator, EU 1983 (valid GTIN-13)
+
+
+def test_disambiguate_by_mcn_matches_barcode():
+    disc = _make_disc(tracks=[(1, 0, 18000)])
+    disc.catalog = _ELIMINATOR_MCN
+    matches = [
+        DiscMeta(album="Other", catalog="4012345678901", mb_release_id="r0"),
+        DiscMeta(album="Eliminator", catalog=_ELIMINATOR_MCN, mb_release_id="r1"),
+    ]
+    w = _disambiguate_by_mcn(matches, disc)
+    assert w is not None and w.mb_release_id == "r1"
+
+
+def test_disambiguate_by_mcn_same_barcode_picks_most_complete_date():
+    disc = _make_disc(tracks=[(1, 0, 18000)])
+    disc.catalog = _ELIMINATOR_MCN
+    matches = [
+        DiscMeta(
+            album="E", catalog=_ELIMINATOR_MCN, release_date="1983", mb_release_id="xe"
+        ),
+        DiscMeta(
+            album="E",
+            catalog=_ELIMINATOR_MCN,
+            release_date="1983-11-18",
+            mb_release_id="de",
+        ),
+    ]
+    # Both 1983 (year-safe); the fuller date wins deterministically.
+    w = _disambiguate_by_mcn(matches, disc)
+    assert w is not None and w.mb_release_id == "de"
+
+
+def test_disambiguate_by_mcn_no_match_or_no_mcn_returns_none():
+    disc = _make_disc(tracks=[(1, 0, 18000)])
+    matches = [DiscMeta(album="E", catalog=_ELIMINATOR_MCN, mb_release_id="r1")]
+    # No MCN on the disc → None.
+    assert _disambiguate_by_mcn(matches, disc) is None
+    # MCN present but matches no candidate barcode → None.
+    disc.catalog = "5099747023521"  # valid GTIN-13, not among candidates
+    assert _disambiguate_by_mcn(matches, disc) is None
+
+
+def test_prepopulate_multimatch_mcn_picks_pressing_year():
+    """Blank ISRCs but the disc's MCN matches the 1983 pressing → resolve it,
+    so the disc's own release year becomes known (feeds is_original)."""
+    disc = _make_disc(tracks=[(1, 0, 18000)])
+    disc.catalog = _ELIMINATOR_MCN
+    matches = [
+        DiscMeta(album="Eliminator", mb_release_id="us", mb_release_group_id="rg-e"),
+        DiscMeta(
+            album="Eliminator",
+            catalog=_ELIMINATOR_MCN,
+            release_date="1983-11-18",
+            mb_release_id="de",
+            mb_release_group_id="rg-e",
+        ),
+        DiscMeta(
+            album="Eliminator",
+            catalog=_ELIMINATOR_MCN,
+            release_date="1983",
+            mb_release_id="xe",
+            mb_release_group_id="rg-e",
+        ),
+    ]
+    with patch("cdda2img.mb_lookup.lookup_disc_id", return_value=matches):
+        r = prepopulate_from_mb(disc, verbose=False)
+    assert r.disc.release_date == "1983-11-18"  # pressing resolved → year known
+    assert r.isrc_disambiguated is False  # resolved via MCN, not ISRC
+    assert r.meta is not None and r.meta.mb_release_id == "de"
 
 
 # ---------------------------------------------------------------------------
