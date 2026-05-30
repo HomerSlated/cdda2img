@@ -24,6 +24,7 @@ import base64
 import hashlib
 import importlib.metadata
 import logging
+from collections import Counter
 from typing import NamedTuple
 
 import musicbrainzngs  # type: ignore[import-untyped]
@@ -741,6 +742,47 @@ def _disambiguate_by_isrcs(matches: list[DiscMeta], disc: RBIDisc) -> DiscMeta |
     return top_meta
 
 
+def _plurality_release_group(matches: list[DiscMeta]) -> str | None:
+    """Return the release-group shared by a strict plurality of *matches*.
+
+    When the pressing-level disambiguator (R1) cannot pick a single release
+    from a multi-match, the matches still usually agree on one release-group
+    (the album itself). Adopting that RG lets the original-release lookup
+    resolve the album's first release pre-menu without committing to any one
+    pressing's metadata.
+
+    Returns None when no release-group holds a unique maximum count (a tie is
+    treated as "no evidence — prefer no answer") or when no match carries an
+    RG id. Derivative groups (Compilation, Live, …) need no special handling
+    here: ``_find_original_release_via_rg`` re-validates and rejects them.
+    """
+    counts = Counter(m.mb_release_group_id for m in matches if m.mb_release_group_id)
+    if not counts:
+        return None
+    ranked = counts.most_common()
+    if len(ranked) > 1 and ranked[0][1] == ranked[1][1]:
+        return None
+    return ranked[0][0]
+
+
+def _adopt_plurality_release_group(disc: RBIDisc, matches: list[DiscMeta]) -> None:
+    """Set ``disc.mb_release_group_id`` (in place) from a multi-match plurality.
+
+    No-op when the RG is already set or no strict plurality exists. Lets the
+    original-release lookup resolve from a multi-match that R1 could not
+    disambiguate to a single pressing. Safe: ``_find_original_release_via_rg``
+    re-validates the RG (derivative + R3 gates) and falls through to fuzzy if
+    the guess is wrong.
+    """
+    if disc.mb_release_group_id is not None:
+        return
+    rg = _plurality_release_group(matches)
+    if rg is None:
+        return
+    disc.mb_release_group_id = rg
+    log.debug("Adopted plurality release-group %s from %d MB matches", rg, len(matches))
+
+
 class MBPrepopResult(NamedTuple):
     """Aggregate of a MusicBrainz disc-ID prepop run, including diagnostic counts."""
 
@@ -836,6 +878,9 @@ def prepopulate_from_mb(disc: RBIDisc, *, verbose: bool = True) -> MBPrepopResul
                 meta=winner,
             )
         log.debug("MB disc ID returned %d matches; skipping auto-fill", len(matches))
+        # Pressing stays ambiguous, but a multi-match almost always agrees on one
+        # release-group; adopt it so original-release can resolve pre-menu.
+        _adopt_plurality_release_group(disc, matches)
         return MBPrepopResult(disc, hints, len(matches), isrc_disambiguated=False)
     meta = matches[0]
     updated = _merge_into_disc(meta, disc)

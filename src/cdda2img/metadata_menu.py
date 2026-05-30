@@ -141,7 +141,7 @@ def _print_meta_summary(meta: DiscMeta) -> None:
     else:
         label_str = "(none)"
     print(f"  Label:         {label_str}")
-    print(f"  UPC:           {meta.catalog or '(none)'}")
+    print(f"  MCN:           {meta.catalog or '(none)'}")
     _print_meta_tracks(meta)
 
 

@@ -20,6 +20,7 @@ from cdda2img.mb_lookup import (
     _overwrite_disc,
     _parse_release,
     _parse_year,
+    _plurality_release_group,
     compute_disc_id,
     disc_id_from_rbi,
     lookup_disc_id,
@@ -562,6 +563,69 @@ def test_prepopulate_returns_barcode_hints_from_all_matches():
     ]
     assert r.match_count == 5
     assert r.isrc_disambiguated is False
+
+
+# ---------------------------------------------------------------------------
+# Release-group adoption from an un-disambiguated multi-match
+# ---------------------------------------------------------------------------
+
+
+def test_plurality_release_group_picks_strict_winner():
+    matches = [
+        DiscMeta(album="A", mb_release_group_id="rg-elim"),
+        DiscMeta(album="A", mb_release_group_id="rg-elim"),
+        DiscMeta(album="A", mb_release_group_id="rg-elim"),
+        DiscMeta(album="2-in-1", mb_release_group_id="rg-comp"),
+    ]
+    assert _plurality_release_group(matches) == "rg-elim"
+
+
+def test_plurality_release_group_tie_returns_none():
+    matches = [
+        DiscMeta(album="A", mb_release_group_id="rg-x"),
+        DiscMeta(album="B", mb_release_group_id="rg-y"),
+    ]
+    assert _plurality_release_group(matches) is None
+
+
+def test_plurality_release_group_no_rg_returns_none():
+    assert _plurality_release_group([DiscMeta(album="A"), DiscMeta(album="B")]) is None
+
+
+def test_prepopulate_multimatch_adopts_plurality_release_group():
+    """A multi-match the ISRC disambiguator can't break still yields the album's
+    release-group (plurality), so original-release can resolve pre-menu.
+
+    Mirrors ZZ Top *Eliminator*: four pressings share one RG, a 2-in-1 comp is a
+    fifth RG, and blank ISRCs leave the pressing un-disambiguated.
+    """
+    disc = _make_disc(tracks=[(1, 0, 18000)])
+    assert disc.mb_release_group_id is None
+    matches = [
+        DiscMeta(album="Eliminator", mb_release_id="r1", mb_release_group_id="rg-elim"),
+        DiscMeta(album="Eliminator", mb_release_id="r2", mb_release_group_id="rg-elim"),
+        DiscMeta(album="Eliminator", mb_release_id="r3", mb_release_group_id="rg-elim"),
+        DiscMeta(album="Eliminator", mb_release_id="r4", mb_release_group_id="rg-elim"),
+        DiscMeta(album="2 in 1", mb_release_id="r5", mb_release_group_id="rg-comp"),
+    ]
+    with patch("cdda2img.mb_lookup.lookup_disc_id", return_value=matches):
+        r = prepopulate_from_mb(disc, verbose=False)
+    # Pressing-level fields stay from the disc (no merge); only the RG is adopted.
+    assert r.disc.album == "Test Album"
+    assert r.disc.mb_release_group_id == "rg-elim"
+    assert r.match_count == 5
+    assert r.isrc_disambiguated is False
+
+
+def test_prepopulate_multimatch_rg_tie_leaves_group_unset():
+    disc = _make_disc(tracks=[(1, 0, 18000)])
+    matches = [
+        DiscMeta(album="X", mb_release_group_id="rg-x"),
+        DiscMeta(album="Y", mb_release_group_id="rg-y"),
+    ]
+    with patch("cdda2img.mb_lookup.lookup_disc_id", return_value=matches):
+        r = prepopulate_from_mb(disc, verbose=False)
+    assert r.disc.mb_release_group_id is None
 
 
 # ---------------------------------------------------------------------------
