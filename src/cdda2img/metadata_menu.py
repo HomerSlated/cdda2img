@@ -209,6 +209,25 @@ def _select_from_results(
 # ---------------------------------------------------------------------------
 
 
+# Typographic punctuation MB uses that differs cosmetically from the ASCII the
+# TOC stores. Keyed by codepoint ordinal (avoids ambiguous-character string
+# literals) and folded before diffing, so a smart-quote-only difference (ASCII
+# apostrophe vs U+2019) is not reported as a field that would change.
+_TYPO_FOLD: dict[int, str] = {
+    0x2019: "'",  # right single quotation mark
+    0x2018: "'",  # left single quotation mark
+    0x201C: '"',  # left double quotation mark
+    0x201D: '"',  # right double quotation mark
+    0x2013: "-",  # en dash
+    0x2014: "-",  # em dash
+    0x2026: "...",  # horizontal ellipsis
+}
+
+
+def _typo_fold(s: str | None) -> str:
+    return (s or "").translate(_TYPO_FOLD)
+
+
 def _show_diff(meta: DiscMeta, disc: RBIDisc) -> None:
     """Print which fields would change when applying *meta* to *disc*."""
     _unknown = "Unknown Artist"
@@ -217,7 +236,7 @@ def _show_diff(meta: DiscMeta, disc: RBIDisc) -> None:
     def _cmp(label: str, old: str | None, new: str | None) -> None:
         if new and (not old or old == _unknown) and new != old:
             changes.append(f"  + {label:<28}  (none)  →  {new}")
-        elif old and new and old != new:
+        elif old and new and _typo_fold(old) != _typo_fold(new):
             changes.append(f"  ~ {label:<28}  {_trunc(old, 20)}  →  {_trunc(new, 20)}")
 
     _cmp("Album", disc.album, meta.album)

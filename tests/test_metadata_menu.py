@@ -109,6 +109,19 @@ def test_show_diff_existing_isrc_not_shown(capsys):
     assert "NEWISRC0001" not in out
 
 
+def test_show_diff_ignores_typographic_apostrophe(capsys):
+    """A title differing only by an ASCII apostrophe vs U+2019 is not flagged."""
+    disc = _disc(tracks=1)
+    disc.tracks[0].title = "Gimme All Your Lovin'"
+    # U+2019 (right single quote) built via chr() to avoid an ambiguous literal.
+    meta = _meta(
+        tracks=[TrackMeta(number=1, title="Gimme All Your Lovin" + chr(0x2019))]
+    )
+    _show_diff(meta, disc)
+    out = capsys.readouterr().out
+    assert "no fields would change" in out
+
+
 # ---------------------------------------------------------------------------
 # run_metadata_menu — non-TTY path
 # ---------------------------------------------------------------------------
