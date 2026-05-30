@@ -216,7 +216,10 @@ Full specification: `docs/reference/rbi_spec.md`.
 - **MB rate limit (R15)**: pinned to 1 req/s in `_setup_useragent`. Don't silently inherit a future library default change.
 - **R7 cache (MB disc-ID, 30-day TTL)**: empty results are cached too — a disc-ID that returns 0 matches today will almost certainly return 0 again tomorrow. Cache lives in `lookup_cache.db` (separate from `drive_offsets.db`); failure-tolerant.
 - **R10 offline mode**: `--no-network-services` CLI flag (and `Config.no_network_services`) short-circuits CDDB, MB, Discogs, AcoustID, and AccurateRip lookups. Combined with R7's cache, a re-run reproduces a prior rip's metadata without network access.
-- **Deferred work (post-this-pass)**: R7's three additional cache tables (`isrc_lookups`, `discogs_barcode`, `cddb_lookups`) and R8 parallel pre-menu MB+CDDB are tracked in `docs/reference/NEXT.md`. R8 in particular requires moving CDDB into `_finalize_import` + threading + merge-without-overwrite logic.
+- **Deferred work**: tracked in `docs/reference/TODO.md` under the `## Open`
+  section at the top of the file. R7's three additional cache tables and
+  R8 parallel pre-menu MB+CDDB landed in the metadata-pipeline pass and are
+  recorded in the DONE log below it.
 
 ## Reference Material
 

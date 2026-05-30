@@ -1,5 +1,42 @@
 # TODO
 
+## Open
+
+- **AccurateRip v2 display in `format_ar_report`** — `verify_rip` already
+  computes, fetches, and matches AR v2 CRCs, and `pack_arip_block` persists
+  both `conf_v1` and `conf_v2` to the ARIP block (where `format_arip_text`
+  renders them as `057+113/db`). The live AR_PAUSE panel, however, picks v1
+  whenever both match (the elif chain in `format_ar_report`), so the user
+  never sees the higher-confidence v2 number on a successful rip. Proposed
+  change: emit a single combined line, e.g.
+  `Track 1: v1=76e30f97 [57] v2=ad4a33e8 [113] OK`. Mismatch path stays as
+  it is. Defer; low priority.
+- **`cdda2img.barcode` → general `validation` module** — `barcode.py` is the
+  single-function module carved out of `discogs_lookup.py`. If more EAN/UPC
+  helpers accumulate, fold `normalize_barcode` into a broader validation
+  module alongside the ISRC and GTIN-13 helpers in `validators.py`. No
+  action required while it stays a one-function file.
+- **Metadata-menu state-machine sub-menus** — the top-level state machine
+  + AR_PAUSE landed (`menu_state.py`); the EDIT, FETCH, and ORIGINAL_RELEASE
+  sub-menus still use the legacy nested-loop helpers in `metadata_menu.py`.
+  Port each to a per-substate renderer under `MenuState` so the whole menu
+  shares one transition model.
+- **Suppress the duplicate AR report print in `rip_image`** — once AR_PAUSE
+  is the canonical display surface, the standalone `print_ar_report` call
+  in `rip_image` writes to stdout and is immediately wiped by AR_PAUSE's
+  screen-clear. Cheap to keep for now (batch / non-TTY mode still needs
+  the stdout copy); the refactor should route both paths through one
+  helper, ideally gated on `sys.stdout.isatty()` or an explicit "batch"
+  flag.
+- **Research `private/code/beets`** — analyse its metadata workflow
+  (resolver chain, plugin model, ID-tagger, MB/AcoustID integration) and
+  compare to cdda2img. Specifically check whether beets has a better
+  approach to the multi-source merge problem that R1/R8/R9 address, and
+  whether its conflict-resolution UI is worth porting. Write findings to
+  `private/research/incoming/beets-comparison.md`.
+
+---
+
 ## ✅ DONE — Release intelligence refactor: low_dynamic_range + original_release (2026-05-25)
 
 449 tests; ruff + ty clean. Catalogue schema bumped to v2 (drop and re-scan; userbase is zero).
