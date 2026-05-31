@@ -254,6 +254,81 @@ def test_format_ar_report_empty_returns_empty_string() -> None:
     assert format_ar_report([]) == ""
 
 
+def test_format_ar_report_shows_both_v1_and_v2_confidence() -> None:
+    # Regression: the old `if v1 … elif v2` chain hid v2's (usually higher)
+    # confidence whenever both matched — the normal success case. Both must show.
+    from cdda2img.accuraterip import ARTrackResult, format_ar_report
+
+    results = [
+        ARTrackResult(
+            track=1,
+            v1_crc="76e30f97",
+            v2_crc="ad4a33e8",
+            confidence_v1=57,
+            confidence_v2=113,
+            max_confidence=146,
+        )
+    ]
+    text = format_ar_report(results)
+    assert "v1=76e30f97 [57]" in text
+    assert "v2=ad4a33e8 [113]" in text
+    assert "OK" in text
+
+
+def test_format_ar_report_min_confidence_uses_best_per_track() -> None:
+    # Footer floor-of-trust = the weakest track's *stronger* variant (max of
+    # v1/v2 per track, then min across tracks) — not v1-first as before.
+    from cdda2img.accuraterip import ARTrackResult, format_ar_report
+
+    results = [
+        ARTrackResult(
+            track=1,
+            v1_crc="aaaaaaaa",
+            v2_crc="bbbbbbbb",
+            confidence_v1=57,
+            confidence_v2=113,
+            max_confidence=146,
+        ),
+        ARTrackResult(
+            track=2,
+            v1_crc="cccccccc",
+            v2_crc="dddddddd",
+            confidence_v1=44,
+            confidence_v2=90,
+            max_confidence=146,
+        ),
+    ]
+    text = format_ar_report(results)
+    assert "2/2 tracks verified (min confidence 90)" in text
+
+
+def test_format_ar_report_partial_mismatch_row_and_footer() -> None:
+    from cdda2img.accuraterip import ARTrackResult, format_ar_report
+
+    results = [
+        ARTrackResult(
+            track=1,
+            v1_crc="aaaaaaaa",
+            v2_crc="bbbbbbbb",
+            confidence_v1=57,
+            confidence_v2=113,
+            max_confidence=146,
+        ),
+        ARTrackResult(
+            track=2,
+            v1_crc="cccccccc",
+            v2_crc="dddddddd",
+            confidence_v1=None,
+            confidence_v2=None,
+            max_confidence=146,
+        ),
+    ]
+    text = format_ar_report(results)
+    assert "[113]" in text  # the matched track still shows v2 confidence
+    assert "MISMATCH (max 146)" in text
+    assert "1/2 tracks verified (1 mismatch)" in text
+
+
 # ---------------------------------------------------------------------------
 # --no-tui: screen-clear gating
 # ---------------------------------------------------------------------------

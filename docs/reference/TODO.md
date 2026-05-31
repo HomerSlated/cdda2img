@@ -2,15 +2,104 @@
 
 ## Open
 
-- **AccurateRip v2 display in `format_ar_report`** — `verify_rip` already
-  computes, fetches, and matches AR v2 CRCs, and `pack_arip_block` persists
-  both `conf_v1` and `conf_v2` to the ARIP block (where `format_arip_text`
-  renders them as `057+113/db`). The live AR_PAUSE panel, however, picks v1
-  whenever both match (the elif chain in `format_ar_report`), so the user
-  never sees the higher-confidence v2 number on a successful rip. Proposed
-  change: emit a single combined line, e.g.
-  `Track 1: v1=76e30f97 [57] v2=ad4a33e8 [113] OK`. Mismatch path stays as
-  it is. Defer; low priority.
+### ⭐ Priority #1 — Agent-audit remediation (2026-05-31)
+
+Single plan covering **every** issue raised by the four background agents run on
+2026-05-31 (bug-hunter, optimisation-advisor, guardian-security, flow-doc), across
+security / correctness / performance / clarity. Sources:
+- Guardian (signed): `private/guardian/guardian_report_20260531_135806.md`
+- bug-hunter: `private/bugs/2026-05-31_092554_mb-lookup-original-release.md`
+- optimiser: `private/optimiser/2026-05-31T09-26-29_mb-lookup-original-release.md`
+- flow-doc: `docs/flow/{mb-lookup,original-release}.md`
+
+Organised into independently-committable **units**; every `- [ ]` is a resume
+checkpoint (run `make check` + tests + py3.10 at each). Do units in order
+**S → C → P → Q** (security first; the correctness fixes sit directly on last night's
+`mb_release_id` invariant work). Commit per unit so the plan survives interruption.
+
+**Unit S — Security (HIGH; do first)**
+- [ ] **S1** · `toc.py:128` — wrap `track.title` in `sanitize_title()` (GRD-…-01). It is the
+      *only* title-class field written to the cdrdao TOC unsanitised (album/artist/performer
+      already are). Regression test: a title with `"` + newline cannot inject TOC directives.
+- [ ] **S2a** · Spec-first (spec-before-code): define a PROV value-escaping scheme in
+      `docs/reference/rbi_spec.md` §6.3 — escape `\n`/`\r` (and decide `=` handling) in values.
+- [ ] **S2b** · Implement symmetric escape in `build_prov_block` (`container.py:135`) + unescape
+      in `_parse_provenance` (GRD-…-02). Regression test: a newline-bearing
+      `original_release_title` round-trips without forging a standalone `mb_release_id=` line.
+- [ ] **S3** · (LOW) `toc.py:121` ISRC written raw — already mitigated by `validate_isrc`;
+      confirm + add a defensive test, or fold into S1.
+
+**Unit C — Correctness**
+- [ ] **C1** · F-001 — `_merge_into_disc` / `_overwrite_disc` (`mb_lookup.py`) rebuild `RBIDisc`
+      by hand and drop `pre_emphasis` (+ `discogs_release_id` in overwrite) → the R14 ≤1986 cap
+      is dead after any merge. Use `dataclasses.replace`. Test: merged disc retains `pre_emphasis`.
+- [ ] **C2** · F-002 — `_resolve_via_isrc_tally` sets a *recording-level* `mb_release_id` (the
+      proven sibling of last night's AcoustID fix). `replace(winner, mb_release_id=None)`; keep
+      the RG. Test: the zero-disc-ID-match path leaves `mb_release_id` None.
+- [ ] **C3** · F-003 — add `"discids"` to the `get_releases_by_discid` includes so
+      `_find_disc_medium` matches on multi-disc releases (else mediums flatten + track numbers
+      collide across discs). Multi-disc fixture test.
+- [ ] **C4** · (LOW) F-007 — guard `compute_disc_id` against >99 tracks / negative offsets. Test.
+
+**Unit P — Performance**
+- [ ] **P1** · Thread `mb_result.meta` (already parsed by `prepopulate_from_mb`) into
+      `original_release` so `_verify_rg_path_for_disc` + `_fetch_release_group` stop re-fetching
+      the same release/RG → **3 MB round-trips/disc → 2**. Precondition (already safe): the
+      re-fetch only fires when `mb_release_id` is set = a real disc-ID match = in-hand meta valid.
+      Verify the R3 four-gate verify still passes against the passed-in meta.
+- [ ] **P2** · Remove dead helpers `_best_fuzzy_match` and the tuple-returning
+      `_gather_artist_catalogue_via_mb` (reachable only from tests + `tools/demo_title_fuzz.py`);
+      update those call sites.
+- [ ] **P3** · (optional / may defer) Extend the R7 cache to by-release-id / by-RG-id lookups.
+
+**Unit Q — Clarity (mostly comments/decisions; fold into the touching unit where possible)**
+- [ ] **Q1** · F-005 — resolve the dead `_R3_PER_TRACK_TOLERANCE_MS`: wire the intended per-track
+      gate, or delete the constant. (Decide alongside the C-unit.)
+- [ ] **Q2** · Document (code comment) why the agreed-facts multi-match path's track-count gate is
+      intentionally unreachable — the RG is plurality-corroborated and the year is a group-level
+      fact; only the pressing is left undetermined (by design).
+- [ ] **Q3** · ISRC-before-barcode ordering in the multi-match resolver: add a deliberate-decision
+      comment (strict-unique ISRC winner makes it safe), or reorder to try the pressing-level
+      barcode first.
+
+### ⭐ Priority #2 — Disc-test findings (2026-05-31, investigate tomorrow)
+
+Surfaced by a real-disc rip (Green Day — *American Idiot*, original 2004 commercial
+pressing). Both are the "a null/blank/odd value blamed on 'no record' is actually a bad
+calculation" pattern — now hit 3× (R3 duration field, AcoustID pressing, and these).
+
+- [ ] **P2-A** · **AccurateRip v2 confidence always None — suspected calc bug.** Every track
+      showed v1 matched at high confidence (127 / 128) but **v2 = `[ — ]`** (no match). v2 is
+      just a different checksum of the same audio, so a v1 match at conf 127 should almost
+      always have a corresponding v2 block. All-tracks-None on v2 is not credible as a genuine
+      DB miss. The new dual-confidence display (DONE 2026-05-31) is what exposed it — keep the
+      display; investigate the data path. Suspects, in order: `accuraterip.py:_ar_checksums`
+      v2 formula `v2 = (csum_lo + csum_hi) & 0xFFFFFFFF`; `_parse_dbar` per-track v2_crc read
+      (struct offset `<BLL` = conf, v1, v2); the v2 match loop in `verify_rip`. Cross-check
+      against ARver's reference v2 algorithm. Evidence: `rips/IN/American Idiot…rbi`.
+- [ ] **P2-B** · **MB multi-match ignores the disc MCN/barcode → wrong release chosen.** The
+      disc (MCN **093624877721**, the 2004 original — confirmed on the physical media, a
+      commercial pressing not a CD-R) was identified as *"American Idiot: The Ultimate American
+      Idiot" (2015)* — a reissue whose barcode is **093624922315**, which does NOT match the
+      disc MCN. The disc MCN should filter/down-rank MB multi-match candidates: a release whose
+      barcode disagrees with the disc MCN should be excluded. R16 already captures
+      `barcode_hints: [(mbid, barcode)]` in `MBPrepopResult` but they are evidently not used as
+      a disambiguation filter. Add MCN-vs-barcode filtering/ranking to the R1 multi-match
+      resolver (relates to Plan A **Q3** / **C** unit).
+      - **Hard-case caveat to document:** publishers reuse one MCN across reissues, and a
+        reissue can share the master's TOC → identical MB disc-id **and** identical MCN, which
+        barcode filtering cannot split. HERE the barcodes differ, so barcode filtering solves
+        this case; only the genuinely-ambiguous (same TOC + same MCN) case needs a fallback (or
+        stays user-confirmed in the menu).
+      - **Reference — Whipper resolved it correctly:**
+        - MB disc id `RwRrGdS9dYHZI8aVdRN1LDYBYps-`
+        - release group `de9bf827-a9b0-348b-a7c9-556c03c3fb07`; release-track
+          `9a700326-8d3d-3f47-ab3d-40eb626b4656`
+        - recorded date 2004-09-20; the correct release is GB / Reprise Records, barcode-less
+          here (the `Preview changes` page already proposed `American Idiot` / 2004-08-10 / GB).
+
+---
+
 - **`cdda2img.barcode` → general `validation` module** — `barcode.py` is the
   single-function module carved out of `discogs_lookup.py`. If more EAN/UPC
   helpers accumulate, fold `normalize_barcode` into a broader validation
@@ -36,6 +125,17 @@
   `private/research/incoming/beets-comparison.md`.
 
 ---
+
+## ✅ DONE — AccurateRip v2 dual-confidence display (2026-05-31)
+
+`format_ar_report` (`accuraterip.py`) used an `if confidence_v1 … elif confidence_v2`
+chain, so when both CRC variants matched (the normal success case) the v2 branch was
+unreachable and only v1's — usually lower — confidence was shown. Now each track renders
+both: `Track  1: v1=76e30f97 [57]   v2=ad4a33e8 [113]  OK`, with `[ — ]` for a variant
+that had no DB match and `MISMATCH (max N)` when neither matched. The footer's
+"min confidence" switched from v1-first to the weakest track's *stronger* variant
+(`max(v1, v2)` per track). Display-only; the persisted ARIP block is unchanged. Tests
+in `tests/test_menu_state.py`.
 
 ## ✅ DONE — Release intelligence refactor: low_dynamic_range + original_release (2026-05-25)
 
@@ -794,7 +894,7 @@ optimisation.
 
 ## Tests (deferred — code verified working in practice)
 
-- [ ] `input_selector.py` — tests for all four strategies (`fcfs`, `aatc`, `bech`, `ball`)
+- [ ] `input_selector.py` — tests for all four strategies (`fcfs`, `aatc`, `best`, `meta`)
 - [ ] `silence.py` — output shorter than input, has correct pad duration
 - [x] Container roundtrip — write RBI, read back, verify checksums and track list
 - [ ] Foreign format sample bank — acquire authoritative images in each supported format
@@ -875,7 +975,7 @@ trivial project format (implement if a sample surfaces); Harddisk is not optical
 
 ### CLI change needed
 
-`c` command gains format auto-detection from file extension, plus an explicit
+The `import` command gains format auto-detection from file extension, plus an explicit
 `--input-format` option when auto-detection is ambiguous.
 
 ---
@@ -916,14 +1016,14 @@ jitter correction and retry on damaged media. Existing Python tools (pycdio, whi
 are not used; our own wrappers give maximum control and port cleanly to Rust.
 
 **Writing**: `cdrdao` subprocess in the Python prototype — `.toc` + `.s16le` from
-`x --raw` map directly to `cdrdao write`. For the Rust reimplementation: `libburn`
+`extract --raw` map directly to `cdrdao write`. For the Rust reimplementation: `libburn`
 (libburnia project), a proper C library with public headers and pkg-config support,
 bound via `bindgen`. Both Python and Rust therefore share the same two underlying C
 libraries: `libcdio-paranoia` (reading) and `libburn` (writing).
 
 - [x] Test Plextor PX-716A on arrival: subchannel P–W ✅, lead-in ✅, C2 ⏳ (needs
   scratched disc), lead-out ⏳ (needs different test approach); see `private/DRIVES.md`
-- [x] New `r` subcommand: `cdda2img r /dev/sr0` — rip disc to RBI via cdrdao;
+- [x] New `rip` subcommand: `cdda2img rip --device /dev/sr0` — rip disc to RBI via cdrdao;
   cdrdao BIN (s16be) byte-swapped to s16le; AccurateRip verified post-rip; ARIP and
   RLOG blocks written to container.
 - [x] Implement AccurateRip v1/v2 checksum computation (own code, no third-party) — `accuraterip.py`
@@ -931,7 +1031,7 @@ libraries: `libcdio-paranoia` (reading) and `libburn` (writing).
   fallback on mismatch by design (AccurateRip CRC is a safety net, not a pass/fail gate)
 - [ ] Write thin ctypes/cffi wrapper around `libcdio-paranoia` for paranoia fallback
 - [ ] Parse subchannel Q data for MCN and CD-TEXT (see `private/libmirage/mirage/cdtext-coder.c`)
-- [x] New `w` subcommand: burn RBI to physical disc via `cdrdao write`; applies write
+- [x] New `burn` subcommand: burn RBI to physical disc via `cdrdao write`; applies write
   offset correction; reads `write_offset` from `[[drives]]` config; `--speed`, `--write-offset`,
   `--yes` options.
 - [ ] `drive` subcommand: unified drive management (read offset from AR catalog + write
@@ -960,7 +1060,12 @@ not provide one. Include in the TOC `CATALOG` field when available.
 
 ---
 
-## Metadata Strategy (deferred)
+## Metadata Strategy
+
+The multi-source lookup chain below has shipped (CDDB, MusicBrainz, AcoustID,
+Discogs, interactive confirmation menu — the R1–R16 metadata work). The
+MusicBrainz track-length silence-trim guard subsection further down remains
+open.
 
 Goal: derive accurate track metadata from all available sources. Apply the following
 sources in order of preference; merge where possible rather than replacing.
@@ -973,10 +1078,12 @@ sources in order of preference; merge where possible rather than replacing.
 4. **Heuristic** — infer from directory and file names (e.g. `01 - Track Title.flac`)
 5. **Interactive prompt** — fall back to asking the user (existing `derive_album_info` flow)
 
-- [ ] Add `python-musicbrainzngs` (or `musicbrainz`) and `pyacoustid` to dependencies
-- [ ] Implement `metadata.py` lookup chain; return a confidence-ranked result set
-- [ ] Present conflicts to the user when sources disagree above a threshold
-- [ ] Store resolved metadata in RBI TOC; preserve original source tag in `comment` field
+- [x] Add `musicbrainzngs`, `pyacoustid`, and `discogs-client` to dependencies
+- [x] Implement the lookup chain (`cddb.py`, `mb_lookup.py`, `acoustid_lookup.py`,
+  `discogs_lookup.py`); results surfaced through the interactive metadata menu
+- [x] Present conflicts to the user when sources disagree (R9 disagreement surface +
+  `metadata_menu.py` confirmation menu)
+- [x] Store resolved metadata in the RBI TOC and PROV blocks
 
 ### MusicBrainz track-length verification (silence trim guard)
 
@@ -1161,7 +1268,14 @@ Replace with `sounddevice` if Windows support becomes a requirement.
 
 ---
 
-## TUI (deferred — implement after CLI is feature-complete)
+## TUI (superseded — design notes below predate the shipped TUI)
+
+The fixed-layout / Textual / VU-meter design sketched below has been superseded
+by the TUI that actually shipped: live progress rendering is wired into the
+`rip` and `import` pipelines (`--tui` / `--no-tui`), with `create` and the
+metadata-menu rendering still being brought onto the same surface. The
+remaining open items are tracked in the active Open section, not here. The
+notes are retained for historical context.
 
 Goal: a fixed-layout terminal UI (audio console view) wrapping the full CLI feature
 set. Suggested library: **Textual** (async-native, rich widget set, good VU meter
@@ -1254,16 +1368,21 @@ No cdda2img implementation required; document the delegation point when relevant
 Maintain a local collection of CDDA reference material in `private/`.
 
 Current holdings:
-- `private/IEC_60908-1999.pdf` — Red Book standard (IEC 60908:1999, second edition)
-- `private/libmirage/` — image format parser source (MDS, CCD, NRG, TOC, CUE, CD-TEXT coder)
-- `private/spoons-audio-guide-cd-ripping.txt` — dBpoweramp Spoon's Audio Guide: drive
-  features, copy protection, secure ripping practice
-- `private/ABHOOD.md` — A Brief History of Optical Discs; comprehensive research notes
-  including §5.4: CD Drive Technical Requirements for Accurate Dumping (Redump criteria)
-- `private/NONSPEC.md` — Lead-in and lead-out: spec content, write offsets, copy-protection
-  attacks, pre-mastering edge cases
-- `private/OFE.md` — The Orange Forum Embargo: Orange Book paywalling and its implications
-  for open-source tools
+- `private/research/IEC_60908-1999.pdf` — Red Book standard (IEC 60908:1999, second
+  edition; licensed, not redistributable)
+- `private/code/libmirage/` — image format parser source (MDS, CCD, NRG, TOC, CUE,
+  CD-TEXT coder)
+- `docs/research/spoons-audio-guide-cd-ripping.txt` — dBpoweramp Spoon's Audio Guide:
+  drive features, copy protection, secure ripping practice
+- `docs/research/ABHOOD.md` — A Brief History of Optical Discs; comprehensive research
+  notes including §5.4: CD Drive Technical Requirements for Accurate Dumping (Redump criteria)
+- `docs/research/NONSPEC.md` — Lead-in and lead-out: spec content, write offsets,
+  copy-protection attacks, pre-mastering edge cases
+- `docs/research/OFE.md` — The Orange Forum Embargo: Orange Book paywalling and its
+  implications for open-source tools
+- `docs/research/OFFSETS.md` — drive read/write offsets: sign conventions, measurement,
+  combined offset, PX-716A facts (+30/−30/0)
+- `private/drives/DRIVES.md` — drive list, profiles, and measured offset data
 
 To add:
 - [x] AccurateRip protocol documentation — algorithm derived from ARver `_audio.c`; disc ID
@@ -1277,15 +1396,18 @@ To add:
 
 ---
 
-## Configuration (deferred — low priority)
+## ✅ DONE — Configuration
 
 All user-tunable settings read from a TOML config file at
 `${XDG_CONFIG_HOME:-$HOME/.config}/cdda2img/cdda2img.toml`.
 CLI flags override config values. Config file is created on first run with
 documented defaults if absent.
 
-- [x] Create `config.py` — `Config` dataclass (`drive_offset`, `cddb_server`); `load_config()`;
-  `_prompt_create_config()` for first-run; XDG path via `config_path()`
+- [x] Create `config.py` — `Config` dataclass (`cddb_server`, `contact_email`,
+  `silence_threshold`, `capacity`, `preview`, `tui`, etc.) plus per-drive `DriveConfig`
+  in a `[[drives]]` array-of-tables (each carries `name`/`read_offset`/optional
+  `write_offset`); `load_config()`; `_prompt_create_config()` for first-run; XDG path via
+  `config_path()`. (Drive offsets live in `[[drives]]`, not a global `drive_offset` field.)
 - [x] `silence = 55` — silence detection threshold in -dBFS; replaces the
   hardcoded `-55dB` literal in `silence.py:build_filter_graph`. `--silence N`
   flag on the `create` subcommand for one-off override; clamped to 1–90 with
@@ -1322,27 +1444,38 @@ original_mcn, remaster_status, mb_release_id).
 
 ### Release intelligence (remaster detection)
 
-For each album created, query MusicBrainz (and optionally Discogs) to determine
-whether the ripped version is a remaster and surface the original release date.
-Output printed at create time and stored in the catalogue and RBI metadata:
+For each album created, query MusicBrainz (and optionally Discogs) to surface the
+earliest known release of the same logical album and an objective low-dynamic-range
+flag. The metadata menu prints a disc summary in this form:
 
 ```
-This Release:     2017
-This MCN/EAN:     1234567890123
-Remaster:         Confirmed
-Original Release: 1983
-Original MCN/EAN: 9876543210123
+  Album:    Eliminator (1983)
+  Original: Yes, this release (1983)
+  Artist:   ZZ Top
+  MCN:      (none)
+  Tracks:   11
+  Low DR:   YES
 ```
 
-Remaster classification: **Confirmed** if the album title contains "remaster" or
-"remastered" (case-insensitive); **Possible** if the release year is later than
-the original and no keyword match; **None** otherwise.
+When the disc is *not* the original release the line reads
+`Original: No, <earliest title> (<year>)`; when the disc's own year is unknown or
+no earlier release is found it reads `Original: Unknown, unknown release (unknown
+year)`.
+
+The original `remaster` enum (Confirmed/Possible/None, keyword + year heuristic) was
+**killed** — see the 2026-05-25 DONE entry near the top of this file. It conflated
+"is this a re-mastering?" with "does this sound compressed?" and answered neither
+factually. It is replaced by two orthogonal, objective facts: `original_release_*`
+(MusicBrainz release-group earliest release; R3-gated) and `low_dynamic_range`
+(EBU R128 album LRA below `Config.low_dr_threshold`).
 
 This lets the user know they may need to source an earlier pressing for proper
 archival quality (avoiding loudness-war mastering applied to many remasters).
 
-- [ ] Implement release intelligence lookup in MusicBrainz (primary) / Discogs (fallback)
-- [ ] Embed result in RBI metadata and catalogue `release_meta` table
+- [x] Implement release intelligence lookup in MusicBrainz (`original_release.py`;
+  Discogs corroborates the master year via R11)
+- [x] Embed result in RBI metadata (PROV `original_release_*`, `low_dynamic_range`)
+  and the catalogue
 
 ---
 
@@ -1376,25 +1509,21 @@ Proposed CLI: `cdda2img create <dir> --check-quality {warn,error,none}` (default
 
 ---
 
-## Input Batching — "tags" strategy (deferred — low priority)
+## ✅ DONE — Input Batching — tag-based strategy (shipped as `meta`)
 
-A fifth batching strategy for `input_selector.py`: `tags`. Uses embedded disc/track
-metadata to recreate the original disc structure exactly, rather than optimising
-for capacity.
+The fourth batching strategy for `input_selector.py` shipped as `meta` (not `tags`).
+It uses embedded disc-number metadata to recreate the original disc structure rather
+than optimising for capacity.
 
-**Primary pass**: group tracks by `DISCNUMBER` tag (Vorbis) / `TPOS` frame (ID3);
-order within each group by `TRACKNUMBER` / `TRCK`. This reproduces the original
-per-disc track selection.
+`batch_meta()` groups tracks by their embedded disc-number tag (`DISCNUMBER` /
+`TPOS`, via `_read_disc_number`), emits one batch per disc number in sorted order, and
+appends any untagged tracks as a final group. The strategy is capacity-agnostic — the
+planned per-disc overflow-pool handling (spill excess tracks into extra discs packed
+by `best`) was **not** implemented; `meta` trusts the source disc layout verbatim.
 
-**Overflow handling**: if a disc group exceeds the configured capacity, keep as many
-tracks as fit (in original order), place the remainder into an overflow pool. After
-all primary discs are created, pack the overflow pool into additional disc images
-using `ball`. Tracks in overflow images retain their original `DISCNUMBER` metadata
-so the user can reconstruct the source ordering when larger-capacity media is available.
-
-- [ ] Implement `tags` strategy in `input_selector.py`
-- [ ] Expose `tags` in CLI and TUI strategy selectors
-- [ ] Document overflow behaviour in help text and `--help` output
+- [x] Implement the tag-based strategy in `input_selector.py` (`batch_meta`, exposed
+  as the `meta` choice on `--strategy`)
+- [x] Expose `meta` in the CLI strategy selector (`--strategy {fcfs,aatc,best,meta}`)
 
 ---
 

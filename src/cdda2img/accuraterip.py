@@ -411,19 +411,29 @@ def format_ar_report(results: list[ARTrackResult], read_offset: int = 0) -> str:
             f"  Add a [[drives]] entry in ~/.config/cdda2img/cdda2img.toml"
         )
 
+    def _conf(c: int | None) -> str:
+        # Bracketed confidence; "[ — ]" when this CRC variant had no DB match.
+        return f"[{c}]" if c is not None else "[ — ]"
+
     lines: list[str] = ["AccurateRip:"]
     for r in results:
-        if r.confidence_v1 is not None:
-            status = f"OK  [conf {r.confidence_v1}/{r.max_confidence}]"
-        elif r.confidence_v2 is not None:
-            status = f"OK v2  [conf {r.confidence_v2}/{r.max_confidence}]"
+        # A track verifies if EITHER variant matched; show both confidences so
+        # the (usually higher) v2 count is no longer hidden behind v1.
+        if r.confidence_v1 is not None or r.confidence_v2 is not None:
+            status = "OK"
         else:
-            status = f"MISMATCH  [max conf {r.max_confidence}]"
-        lines.append(f"  Track {r.track:2d}: v1={r.v1_crc}  {status}")
+            status = f"MISMATCH (max {r.max_confidence})"
+        lines.append(
+            f"  Track {r.track:2d}: "
+            f"v1={r.v1_crc} {_conf(r.confidence_v1):<7}"
+            f"v2={r.v2_crc} {_conf(r.confidence_v2):<7}{status}"
+        )
 
     if n_ok == n:
-        confs = [r.confidence_v1 or r.confidence_v2 or 0 for r in results]
-        lines.append(f"  {n}/{n} tracks verified (min confidence {min(confs)})")
+        # Per-track "best" = the stronger of the two variants; report the weakest
+        # track's best as the floor of trust.
+        best = [max(r.confidence_v1 or 0, r.confidence_v2 or 0) for r in results]
+        lines.append(f"  {n}/{n} tracks verified (min confidence {min(best)})")
     else:
         lines.append(f"  {n_ok}/{n} tracks verified ({n - n_ok} mismatch)")
     return "\n".join(lines)
