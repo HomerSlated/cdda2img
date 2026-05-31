@@ -239,7 +239,16 @@ def _parse_release(
         for track in medium.get("track-list") or []:
             recording = track.get("recording") or {}
             isrc_list = recording.get("isrc-list") or []
-            length = recording.get("length")
+            # Per-medium track length (TOC-derived) — NOT recording.length.
+            # track.length is set from the TOC of the disc used to add this
+            # release, so for a disc-ID-matched release it agrees with the
+            # physical TOC to within rounding/pregap; recording.length is a
+            # shared canonical value that can come from a different pressing
+            # and is off by seconds (R3 sum-of-durations false-reject source).
+            # No fallback to recording.length: a missing track.length leaves
+            # duration_ms=None so the R3 gate skips on no-evidence rather than
+            # comparing against the wrong quantity.
+            length = track.get("length")
             # R13: structure-check each ISRC at MB ingress; malformed entries
             # are dropped (with a WARNING log) rather than propagated through
             # the rest of the pipeline.

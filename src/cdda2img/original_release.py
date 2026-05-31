@@ -108,7 +108,7 @@ def _verify_release_matches_disc(meta: DiscMeta, disc: RBIDisc) -> bool:
 
     # Gate 1: track count. Only fires when both sides have tracks.
     if disc.tracks and meta.tracks and len(disc.tracks) != len(meta.tracks):
-        log.warning(
+        log.debug(
             "R3 reject (track count): disc has %d tracks, meta has %d (%s)",
             len(disc.tracks),
             len(meta.tracks),
@@ -124,7 +124,7 @@ def _verify_release_matches_disc(meta: DiscMeta, disc: RBIDisc) -> bool:
     if disc_sum_ms > 0 and meta_sum_ms > 0:
         diff = abs(disc_sum_ms - meta_sum_ms)
         if diff > _R3_SUM_DURATION_TOLERANCE_MS:
-            log.warning(
+            log.debug(
                 "R3 reject (sum durations): disc %.1fs, meta %.1fs (%s)",
                 disc_sum_ms / 1000,
                 meta_sum_ms / 1000,
@@ -140,7 +140,7 @@ def _verify_release_matches_disc(meta: DiscMeta, disc: RBIDisc) -> bool:
     if disc_isrc_count >= 2 and meta_isrc_count >= 2:
         score = _score_candidate_by_isrcs(meta, disc)
         if score == 0:
-            log.warning(
+            log.debug(
                 "R3 reject (ISRC overlap): %d / %d disc ISRCs scored zero "
                 "against meta (%s)",
                 disc_isrc_count,
@@ -153,7 +153,7 @@ def _verify_release_matches_disc(meta: DiscMeta, disc: RBIDisc) -> bool:
     # side has no titles for ≥2 tracks (need at least some overlap to score).
     title_score = _aggregate_title_fuzz_score(meta, disc)
     if title_score is not None and title_score < _R3_TITLE_FUZZ_CUTOFF:
-        log.warning(
+        log.debug(
             "R3 reject (title fuzz): aggregate score %d < %d (%s)",
             title_score,
             _R3_TITLE_FUZZ_CUTOFF,
@@ -263,7 +263,7 @@ def _find_original_release_via_rg(
     # identification is almost certainly wrong (RG describes a digital-only
     # reissue that wouldn't carry pre-emphasis).
     if disc.pre_emphasis is True and year > _R14_PRE_EMPH_YEAR_CAP:
-        log.warning(
+        log.debug(
             "R14 reject RG: disc has PRE_EMPHASIS but RG year %d > %d (%s)",
             year,
             _R14_PRE_EMPH_YEAR_CAP,

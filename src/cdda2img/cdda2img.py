@@ -6,6 +6,7 @@ import logging
 import re
 import textwrap
 from collections.abc import Callable
+from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -1185,13 +1186,25 @@ def _r6_acoustid_corroborate(  # noqa: C901
         )
         return disc
 
-    # Prepop missed; merge AcoustID's consistent winner.
+    # Prepop missed; merge AcoustID's consistent winner — but album-level only.
     if top_rid is not None:
         merged_meta = next(
             (h for hits in per_track_hits for h in hits if h.mb_release_id == top_rid),
             None,
         )
         if merged_meta is not None:
+            # AcoustID fingerprints identify *recordings*, which are shared
+            # across every pressing in a release-group. So a fingerprint can
+            # corroborate the album (mb_release_group_id) but can NEVER identify
+            # the specific pressing (mb_release_id). Writing a fingerprint-guessed
+            # pressing both fabricates a pressing the disc-ID never confirmed
+            # (truthfulness rule) and violates _verify_rg_path_for_disc's
+            # precondition that disc.mb_release_id is the disc-ID-matched release
+            # — which made the R3 original-release verify reject the correct RG
+            # (ZZ Top Eliminator: agreed-facts set the right RG, then AcoustID
+            # overwrote mb_release_id with 20f8ccf4 — an in-RG but non-disc-ID
+            # pressing whose rounded track lengths summed 20s short).
+            merged_meta = replace(merged_meta, mb_release_id=None)
             disc = _merge_into_disc(merged_meta, disc)
             provenance["acoustid_corroborates"] = "YES"
     return disc

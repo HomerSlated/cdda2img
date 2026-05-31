@@ -895,6 +895,46 @@ def test_r6_no_when_acoustid_disagrees_with_prepop(tmp_path):
     assert prov.get("acoustid_corroborates") == "NO"
 
 
+def test_r6_merge_never_sets_pressing_mb_release_id(tmp_path):
+    """AcoustID must corroborate the album but NEVER claim a pressing.
+
+    Fingerprints identify *recordings*, which are shared across every pressing
+    in a release-group — so AcoustID can confirm ``mb_release_group_id`` but can
+    never identify ``mb_release_id``. Agreed-facts (a multi-match disc-ID result)
+    deliberately leaves ``mb_release_id=None`` while setting the RG; before this
+    fix, R6 overwrote it with a fingerprint-chosen in-RG release, which both
+    fabricated a pressing the disc-ID never confirmed and broke the R3
+    original-release verify's precondition (ZZ Top *Eliminator*: AcoustID picked
+    ``20f8ccf4``, an in-RG pressing with rounded track lengths 20 s short of the
+    disc, and the verify then rejected the correct RG).
+    """
+    from cdda2img.cdda2img import _r6_acoustid_corroborate
+    from cdda2img.lookup_result import DiscMeta
+
+    disc = _disc_with_tracks([(1, 75, "T1", None)])
+    disc.mb_release_id = None  # agreed-facts leaves the pressing undetermined
+    disc.mb_release_group_id = "rg-from-disc-id"  # but the album IS identified
+    pcm = tmp_path / "disc.pcm"
+    pcm.write_bytes(bytes(75 * 2352))
+    prov: dict[str, str] = {}
+    acoustid_hit = DiscMeta(
+        mb_release_id="rid-acoustid-guess",  # an in-RG pressing AcoustID guessed
+        mb_release_group_id="rg-from-disc-id",
+    )
+    with (
+        patch("cdda2img.acoustid_lookup.is_available", return_value=True),
+        patch(
+            "cdda2img.acoustid_lookup.fingerprint_and_lookup",
+            return_value=[acoustid_hit],
+        ),
+    ):
+        result = _r6_acoustid_corroborate(disc, pcm, prov, ui=None)
+    # The invariant: album corroborated, pressing never claimed.
+    assert result.mb_release_id is None
+    assert result.mb_release_group_id == "rg-from-disc-id"
+    assert prov.get("acoustid_corroborates") == "YES"
+
+
 # ---------------------------------------------------------------------------
 # R9 — Inter-service CDDB↔MB disagreement detection
 # ---------------------------------------------------------------------------

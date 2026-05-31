@@ -417,6 +417,52 @@ def test_parse_release_no_disc_id_flattens_all_mediums():
     assert len(meta.tracks) == 2
 
 
+def test_parse_release_duration_uses_track_length_not_recording_length():
+    """duration_ms must come from per-medium track.length (TOC-derived), not
+    recording.length (shared canonical value).
+
+    For a disc-ID-matched release, track.length agrees with the physical TOC
+    to within rounding (it was set from that TOC); recording.length can be off
+    by seconds and was the source of the R3 sum-of-durations false-reject
+    (ZZ Top *Eliminator*: 11 tracks, sum(track.length)=2721.0s matched the disc
+    at 2720.2s, but sum(recording.length)=2710.8s tripped the ±2s gate). When
+    no track-level length exists, duration_ms stays None (no fallback to
+    recording.length) so the R3 gate skips on no-evidence rather than comparing
+    against the wrong quantity.
+    """
+    release = {
+        "id": "mock-uuid",
+        "title": "Eliminator",
+        "date": "1983",
+        "medium-count": 1,
+        "artist-credit": [{"artist": {"name": "ZZ Top"}, "joinphrase": ""}],
+        "release-group": {"id": "rg", "first-release-date": "1983"},
+        "medium-list": [
+            {
+                "position": "1",
+                "track-list": [
+                    {
+                        "number": "1",
+                        "length": "248000",  # TOC-derived — the right field
+                        "recording": {
+                            "title": "Sharp Dressed Man",
+                            "length": "243000",  # canonical — must NOT be used
+                        },
+                    },
+                    {
+                        "number": "2",
+                        # no track-level length → duration_ms is None, no fallback
+                        "recording": {"title": "Legs", "length": "260000"},
+                    },
+                ],
+            }
+        ],
+    }
+    meta = _parse_release(release)
+    assert meta.tracks[0].duration_ms == 248000  # track.length, not 243000
+    assert meta.tracks[1].duration_ms is None  # no fallback to recording.length
+
+
 def test_lookup_disc_id_populates_disc_position():
     """lookup_disc_id passes the computed disc_id to _parse_release."""
     disc = _make_disc(tracks=[(1, 0, 18000)])
