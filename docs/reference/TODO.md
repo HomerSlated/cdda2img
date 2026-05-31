@@ -18,9 +18,21 @@ checkpoint (run `make check` + tests + py3.10 at each). Do units in order
 `mb_release_id` invariant work). Commit per unit so the plan survives interruption.
 
 **Unit S — Security (HIGH; do first)**
-- [ ] **S1** · `toc.py:128` — wrap `track.title` in `sanitize_title()` (GRD-…-01). It is the
-      *only* title-class field written to the cdrdao TOC unsanitised (album/artist/performer
-      already are). Regression test: a title with `"` + newline cannot inject TOC directives.
+- [ ] **S1** · `toc.py:128` — make the track-title TITLE line injection-safe (GRD-…-01).
+      **NOT a one-liner** — investigated 2026-05-31, the naive "wrap in `sanitize_title()`" is
+      wrong twice:
+      1. `sanitize_title` (toc.py:24) converts `"`→`'` but does NOT strip ASCII control chars,
+         so `\n`/`\r` survive and still break out of the `TITLE "…"` line. album/artist/performer
+         already use `sanitize_title` and therefore share this latent newline gap.
+      2. `sanitize_title` strips ALL non-ASCII, which would REGRESS the `TRACK_TITLE_UNICODE`
+         feature (toc.py:115-119): when `raw_title == track.title` no recovery comment is emitted,
+         so sanitizing the TITLE line there would silently lose a Unicode title.
+      Correct design: (a) add control-char stripping (`[\x00-\x1f\x7f]`) to the sanitization path
+      so the newline class is closed for album/artist/performer too; (b) give the track-title
+      TITLE line an injection-safe-BUT-Unicode-preserving transform (`"`→`'` + strip control
+      chars, KEEP non-ASCII) — likely a new `escape_toc_string()` helper, with `sanitize_title`
+      delegating to it for the control-char + quote handling. Regression test: a title with `"`
+      + newline cannot inject TOC directives, AND a non-ASCII title is preserved (not stripped).
 - [ ] **S2a** · Spec-first (spec-before-code): define a PROV value-escaping scheme in
       `docs/reference/rbi_spec.md` §6.3 — escape `\n`/`\r` (and decide `=` handling) in values.
 - [ ] **S2b** · Implement symmetric escape in `build_prov_block` (`container.py:135`) + unescape
