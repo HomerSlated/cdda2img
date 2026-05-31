@@ -14,7 +14,11 @@ from unittest.mock import patch
 
 import pytest
 
-from cdda2img.menu_state import MenuController, MenuState
+from cdda2img.menu_state import (
+    LegacyDelegateScreen,
+    MenuController,
+    MenuState,
+)
 from cdda2img.rbi_format import RBIDisc, RBITocEntry
 
 
@@ -117,12 +121,10 @@ def test_ar_pause_transitions_to_main_on_keypress() -> None:
 def test_main_choice_transitions_to_expected_state(
     key: str, expected_next: MenuState
 ) -> None:
-    """One input event from MAIN flips state to the right target."""
+    """One input event from MAIN drives the stack to the right target screen."""
     ctl = MenuController(_disc())
-    with (
-        patch("cdda2img.metadata_menu._prompt", return_value=key),
-    ):
-        ctl._transition()
+    with patch("cdda2img.metadata_menu._prompt", return_value=key):
+        ctl._apply(ctl.stack[-1].handle_input(ctl))
     assert ctl.state is expected_next
 
 
@@ -132,7 +134,7 @@ def test_main_undo_resets_disc_and_clears_mb_rg_id() -> None:
     ctl.disc.album = "Edited"
     ctl.mb_rg_id = "some-rg-id"
     with patch("cdda2img.metadata_menu._prompt", return_value="u"):
-        ctl._transition()
+        ctl._apply(ctl.stack[-1].handle_input(ctl))
     assert ctl.disc.album == "Album"  # restored from savepoint
     assert ctl.mb_rg_id is None
     assert "Reset" in ctl.banner
@@ -141,7 +143,7 @@ def test_main_undo_resets_disc_and_clears_mb_rg_id() -> None:
 def test_main_clear_metadata_resets_fields() -> None:
     ctl = MenuController(_disc(album="Filled", artist="Also Filled"))
     with patch("cdda2img.metadata_menu._prompt", return_value="c"):
-        ctl._transition()
+        ctl._apply(ctl.stack[-1].handle_input(ctl))
     # _clear_disc blanks album/artist/MCN — verify a representative field.
     assert ctl.disc.album == ""
     assert "cleared" in ctl.banner.lower()
@@ -150,7 +152,7 @@ def test_main_clear_metadata_resets_fields() -> None:
 def test_main_unknown_command_sets_banner_and_stays() -> None:
     ctl = MenuController(_disc())
     with patch("cdda2img.metadata_menu._prompt", return_value="zzz"):
-        ctl._transition()
+        ctl._apply(ctl.stack[-1].handle_input(ctl))
     assert ctl.state is MenuState.MAIN
     assert "Unknown" in ctl.banner
 
@@ -158,8 +160,7 @@ def test_main_unknown_command_sets_banner_and_stays() -> None:
 def test_banner_clears_on_next_render() -> None:
     ctl = MenuController(_disc())
     ctl.banner = "stale"
-    with patch("cdda2img.menu_state._clear_screen"):
-        ctl._render()
+    ctl.stack[-1].render(ctl)
     assert ctl.banner == ""
 
 
@@ -169,25 +170,25 @@ def test_banner_clears_on_next_render() -> None:
 
 
 def test_edit_state_returns_to_main() -> None:
-    """After _edit_menu returns, state goes back to MAIN."""
+    """The EDIT delegate screen runs _edit_menu, then pops back to MAIN."""
     ctl = MenuController(_disc())
-    ctl.state = MenuState.EDIT
+    ctl.stack.append(LegacyDelegateScreen(MenuState.EDIT))
     fake_edited = _disc(album="Edited via _edit_menu")
     with patch("cdda2img.metadata_menu._edit_menu", return_value=fake_edited):
-        ctl._transition()
+        ctl._apply(ctl.stack[-1].handle_input(ctl))
     assert ctl.state is MenuState.MAIN
     assert ctl.disc.album == "Edited via _edit_menu"
 
 
 def test_fetch_state_returns_to_main_and_threads_rg_id() -> None:
     ctl = MenuController(_disc())
-    ctl.state = MenuState.FETCH
+    ctl.stack.append(LegacyDelegateScreen(MenuState.FETCH))
     fake_edited = _disc(album="Fetched")
     with patch(
         "cdda2img.metadata_menu._fetch_menu",
         return_value=(fake_edited, "new-rg-id"),
     ):
-        ctl._transition()
+        ctl._apply(ctl.stack[-1].handle_input(ctl))
     assert ctl.state is MenuState.MAIN
     assert ctl.disc.album == "Fetched"
     assert ctl.mb_rg_id == "new-rg-id"
@@ -195,13 +196,13 @@ def test_fetch_state_returns_to_main_and_threads_rg_id() -> None:
 
 def test_original_release_state_returns_to_main_and_threads_rg_id() -> None:
     ctl = MenuController(_disc())
-    ctl.state = MenuState.ORIGINAL_RELEASE
+    ctl.stack.append(LegacyDelegateScreen(MenuState.ORIGINAL_RELEASE))
     fake_edited = _disc(album="With Original Release")
     with patch(
         "cdda2img.metadata_menu._original_release_menu",
         return_value=(fake_edited, "rg-x"),
     ):
-        ctl._transition()
+        ctl._apply(ctl.stack[-1].handle_input(ctl))
     assert ctl.state is MenuState.MAIN
     assert ctl.mb_rg_id == "rg-x"
 

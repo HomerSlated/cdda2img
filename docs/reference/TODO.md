@@ -105,11 +105,22 @@ calculation" pattern — now hit 3× (R3 duration field, AcoustID pressing, and 
   helpers accumulate, fold `normalize_barcode` into a broader validation
   module alongside the ISRC and GTIN-13 helpers in `validators.py`. No
   action required while it stays a one-function file.
-- **Metadata-menu state-machine sub-menus** — the top-level state machine
-  + AR_PAUSE landed (`menu_state.py`); the EDIT, FETCH, and ORIGINAL_RELEASE
-  sub-menus still use the legacy nested-loop helpers in `metadata_menu.py`.
-  Port each to a per-substate renderer under `MenuState` so the whole menu
-  shares one transition model.
+- **Metadata-menu screen-stack port** (full scope chosen 2026-05-31) — replace the
+  flat `MenuState` enum + blocking-delegate sub-menus with a **screen stack** on
+  `MenuController`: each page is a `Screen` (pure `render` + one-step `handle_input`
+  returning a `Push`/`Pop`/`Done`/`Stay` nav intent the controller applies); the stack
+  carries per-screen context (e.g. which track, which search results). Migration
+  checkpoints (each behaviour-preserving + committable):
+  - [x] **1** · Scaffold — `Screen`/`Nav`, `controller.stack` + `done`, `run/_step/_apply`;
+        port MAIN + AR_PAUSE; EDIT/FETCH/ORIGINAL_RELEASE bridged by `LegacyDelegateScreen`.
+        Tests rewritten to drive the stack. (commit, 2026-05-31)
+  - [ ] **2** · EDIT → `EditScreen` + `EditTrackScreen` + `EditDiscPositionScreen`.
+  - [ ] **3** · FETCH → Fetch + MBSearch/**MBResults** + Discogs + Acoustid. Audit the
+        three helpers for render/IO/logic entanglement FIRST: `render` must be a pure
+        repaint; network I/O stays in `handle_input`; "enter query" vs "pick result" split
+        into two stack frames.
+  - [ ] **4** · ORIGINAL_RELEASE → `OriginalReleaseScreen`.
+  - [ ] **5** · Delete the dead legacy helpers; collapse/retire the `MenuState` enum.
 - **Suppress the duplicate AR report print in `rip_image`** — once AR_PAUSE
   is the canonical display surface, the standalone `print_ar_report` call
   in `rip_image` writes to stdout and is immediately wiped by AR_PAUSE's
