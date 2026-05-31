@@ -334,7 +334,7 @@ The PROV block stores provenance and extended metadata that has no natural home 
 | `drive_write_offset`   | Write offset for this drive (informational), e.g. `-30` |
 | `low_dynamic_range`        | `YES` \| `NO`. Derived from EBU R128 album LRA against the user's configured threshold (default 5.0 LU). Absent when no loudness analysis was performed (`--loudness none`) |
 | `original_release_found`   | `YES` when MB release-group lookup (primary) or title-fuzz fallback yielded a usable answer. Absent / unwritten = lookup found nothing — *not* a guarantee that no earlier release exists |
-| `original_release_title`   | Title of the earliest known release of the same logical album. Present only when `original_release_found = YES`. When this matches the disc's own album and `original_release_year` matches the disc's release year, the display renders "This release ($year)"; otherwise "Original: $title ($year)" |
+| `original_release_title`   | Title of the earliest known release of the same logical album. Present only when `original_release_found = YES`. Surfaced via the canonical rendering described in §6.3.2 |
 | `original_release_year`    | Year of that earliest release as a 4-digit integer string; present only when `original_release_found = YES` |
 | `release_date`             | Release date of this specific release (YYYY, YYYY-MM, or YYYY-MM-DD) |
 | `mb_release_id`            | MusicBrainz release UUID, e.g. `9d8f7a02-3851-4c49-9dc4-b08e7cb0ad7c` |
@@ -364,6 +364,26 @@ The pair `low_dynamic_range` and `original_release_found` replaces the v3-era `r
 - `low_dynamic_range` is a *measurement* — we computed the album LRA and compared it to a user-set threshold. A value of `YES` does not imply "loudness war remaster"; it states only that the source is heavily compressed, which can be an artistic choice on an original release (cf. ZZ Top *Eliminator*, 1983).
 - `original_release_found` is a *lookup result* — when present and `YES`, MB's release-group endpoint identified at least one strictly earlier release of the same logical album. Absent means the lookup did not produce a usable answer, not that this disc is the original.
 - `original_release_corroborated` / `original_release_disagreement` are the sub-goal-3 disagreement surfaces. When *both* are absent and `original_release_found=YES`, only one source (MB RG primary or title-fuzz fallback) was usable — treat with v4.0's existing confidence semantics.
+
+**Canonical rendering.** Every surface that displays the original-release fields (the
+interactive metadata menu, the `list`/`--info` dump, and the catalogue browser) renders a
+single identical string produced by one core function (`rbi_format.format_original_fields`):
+
+```
+Original: <Yes|No|Unknown>, <this release|<earlier title>|unknown release> (<year>|unknown year)
+```
+
+- Field 1 answers "is THIS disc the original release?" and is **gated by the disc's own
+  year** (parsed from `release_date`). Without a disc year nothing can be claimed to predate
+  it, so the answer is `Unknown` and the earlier-release fields collapse to `unknown` too —
+  a paradoxical "Unknown, <title> (<year>)" is never emitted.
+- Comparison is at **year granularity**: a 1983 pressing is the original even when the
+  release-group's first-release date is `1983-03-23`. A same-year pressing renders
+  `Yes, this release (<year>)` regardless of any title mismatch (e.g. a reissue suffix).
+- The `list` view has no separate album line, so when `original_release_found` is absent
+  but `release_date` is present it falls back to a bare `Released:  <date>` — the only place
+  a `list` dump surfaces the disc's own release date. The menu and catalogue show that year
+  elsewhere and emit nothing extra in that case.
 
 #### 6.3.3 Lookup status and conflict surfaces
 

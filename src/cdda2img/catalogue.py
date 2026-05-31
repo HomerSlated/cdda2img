@@ -62,10 +62,10 @@ CREATE TABLE IF NOT EXISTS catalogue (
     --   original_release_*:       MB release-group lookup result (the
     --                             auto-detected trio + user override).
     --                             original_release_found is the boolean
-    --                             gate; the trio is shown as either
-    --                             "This release (year)" when title+year
-    --                             match the disc itself, or "Original:
-    --                             title (year)" when they differ.
+    --                             gate; the trio is rendered via the shared
+    --                             rbi_format.format_original_fields core
+    --                             ("Original: Yes/No/Unknown, …") — see
+    --                             docs/reference/rbi_spec.md §6.3.2.
     low_dynamic_range          INTEGER,
     original_release_found     INTEGER NOT NULL DEFAULT 0,
     original_release_title     TEXT,

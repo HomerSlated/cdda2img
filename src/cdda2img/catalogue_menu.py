@@ -8,6 +8,8 @@ import re
 import sys
 from pathlib import Path
 
+from cdda2img.rbi_format import format_original_fields
+
 # ---------------------------------------------------------------------------
 # Terminal helpers (same conventions as metadata_menu.py)
 # ---------------------------------------------------------------------------
@@ -331,20 +333,16 @@ def _show_record(conn: object, catalogue_id: int) -> None:  # noqa: C901
     if low_dynamic_range is not None:
         print(f"  Low DR:        {'YES' if low_dynamic_range else 'NO'}")
     if original_release_found:
-        year_disp = f" ({original_release_year})" if original_release_year else ""
-        same_title = (original_release_title or "").strip().lower() == (
-            album or ""
-        ).strip().lower()
-        # Year column may be None when MB returned only an RG date; treat
-        # absence as "matches" so we render "This release" rather than
-        # spuriously claiming a separate original.
-        same_year = (year is None) or (
-            original_release_year is not None and year == original_release_year
+        # Canonical original-release line via the shared core — year granularity,
+        # byte-identical to the metadata menu and the RBI `list` view. The disc's
+        # own year is already shown in the header above, so nothing is printed
+        # when no original release was found.
+        print(
+            "  "
+            + format_original_fields(
+                year, True, original_release_title, original_release_year
+            )
         )
-        if same_title and same_year:
-            print(f"  Released:      This release{year_disp}")
-        else:
-            print(f"  Original:      {original_release_title or ''}{year_disp}")
     if mode and mode != "?":
         print(f"  Mode:          {mode}")
     if source:

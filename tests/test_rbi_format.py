@@ -8,7 +8,12 @@ can't drift silently.
 
 from __future__ import annotations
 
-from cdda2img.rbi_format import RBIDisc, format_original, year_of
+from cdda2img.rbi_format import (
+    RBIDisc,
+    format_original,
+    format_original_fields,
+    year_of,
+)
 
 
 def _disc(**kw) -> RBIDisc:
@@ -88,3 +93,50 @@ def test_format_original_year_granularity():
         original_release_year=1983,
     )
     assert format_original(disc) == "Original: Yes, this release (1983)"
+
+
+# ---------------------------------------------------------------------------
+# format_original_fields — the shared core (RBI list + catalogue route here)
+# ---------------------------------------------------------------------------
+
+
+def test_format_original_fields_golden_strings():
+    # Same four states as format_original, pinned at the field level so the
+    # core can't drift independently of the RBIDisc adapter.
+    assert (
+        format_original_fields(2024, True, None, 2024)
+        == "Original: Yes, this release (2024)"
+    )
+    assert (
+        format_original_fields(2008, True, "Thriller", 1982)
+        == "Original: No, Thriller (1982)"
+    )
+    assert (
+        format_original_fields(2008, True, None, None)
+        == "Original: No, unknown release (unknown year)"
+    )
+    assert (
+        format_original_fields(None, True, "Thriller", 1982)
+        == "Original: Unknown, unknown release (unknown year)"
+    )
+    assert (
+        format_original_fields(1983, False, None, None)
+        == "Original: Unknown, unknown release (unknown year)"
+    )
+
+
+def test_format_original_delegates_to_core():
+    # The RBIDisc adapter must produce byte-identical output to the core fed the
+    # same extracted values — this is what guarantees "identical everywhere".
+    disc = _disc(
+        release_date="2008-06-01",
+        original_release_found=True,
+        original_release_title="Thriller",
+        original_release_year=1982,
+    )
+    assert format_original(disc) == format_original_fields(
+        year_of(disc.release_date),
+        disc.original_release_found,
+        disc.original_release_title,
+        disc.original_release_year,
+    )

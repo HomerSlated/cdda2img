@@ -466,3 +466,95 @@ def test_register_rbi_explicit_path_bypasses_enable_flag(tmp_path, built_rbi):
         assert count == 1
     finally:
         conn.close()
+
+
+# ---------------------------------------------------------------------------
+# _show_record — catalogue detail original-release rendering (PROV refactor A)
+# ---------------------------------------------------------------------------
+
+
+def _insert_catalogue_row(conn, **overrides):
+    """Insert a minimal catalogue row, returning its id. Fills NOT NULL columns."""
+    cols = {
+        "album": "Eliminator",
+        "artist": "ZZ Top",
+        "year": None,
+        "track_count": 11,
+        "file_basename": "Eliminator.rbi",
+        "file_path": "/x/Eliminator.rbi",
+        "file_size": 1,
+        "registered_at": "2026-05-31T00:00:00+00:00",
+        "created_by": "cdda2img",
+        "mode": "rip",
+        "original_release_found": 0,
+        "original_release_title": None,
+        "original_release_year": None,
+    }
+    cols.update(overrides)
+    # Static SQL + named placeholders (no dynamic column interpolation).
+    cur = conn.execute(
+        "INSERT INTO catalogue "
+        "(album, artist, year, track_count, file_basename, file_path, file_size, "
+        "registered_at, created_by, mode, original_release_found, "
+        "original_release_title, original_release_year) "
+        "VALUES (:album, :artist, :year, :track_count, :file_basename, :file_path, "
+        ":file_size, :registered_at, :created_by, :mode, :original_release_found, "
+        ":original_release_title, :original_release_year)",
+        cols,
+    )
+    return cur.lastrowid
+
+
+def test_show_record_original_yes_this_release(tmp_path, capsys):
+    from cdda2img.catalogue_menu import _show_record
+
+    conn = open_catalogue_db(tmp_path / "c.db")
+    try:
+        rid = _insert_catalogue_row(
+            conn,
+            year=1983,
+            original_release_found=1,
+            original_release_title="Eliminator",
+            original_release_year=1983,
+        )
+        with patch("cdda2img.catalogue_menu._prompt", return_value=""):
+            _show_record(conn, rid)
+    finally:
+        conn.close()
+    assert "Original: Yes, this release (1983)" in capsys.readouterr().out
+
+
+def test_show_record_original_no_names_earlier(tmp_path, capsys):
+    from cdda2img.catalogue_menu import _show_record
+
+    conn = open_catalogue_db(tmp_path / "c.db")
+    try:
+        rid = _insert_catalogue_row(
+            conn,
+            album="Thriller 25",
+            year=2008,
+            original_release_found=1,
+            original_release_title="Thriller",
+            original_release_year=1982,
+        )
+        with patch("cdda2img.catalogue_menu._prompt", return_value=""):
+            _show_record(conn, rid)
+    finally:
+        conn.close()
+    assert "Original: No, Thriller (1982)" in capsys.readouterr().out
+
+
+def test_show_record_not_found_emits_no_original_line(tmp_path, capsys):
+    from cdda2img.catalogue_menu import _show_record
+
+    conn = open_catalogue_db(tmp_path / "c.db")
+    try:
+        rid = _insert_catalogue_row(conn, year=1983, original_release_found=0)
+        with patch("cdda2img.catalogue_menu._prompt", return_value=""):
+            _show_record(conn, rid)
+    finally:
+        conn.close()
+    # Header carries the disc year; no original-release line when not found.
+    out = capsys.readouterr().out
+    assert "Original:" not in out
+    assert "(1983)" in out

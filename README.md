@@ -192,6 +192,34 @@ make check   # lint, format, and type-check (matches CI exactly)
 uv run pytest tests/
 ```
 
+## Security verification
+
+Source files that have passed an internal security audit are accompanied by a
+GPG **detached signature** — an armored `<file>.sig` sitting next to the file it
+signs. These signatures are committed and pushed, so anyone with a clone can
+confirm a given file is byte-for-byte what was audited and signed.
+
+Signatures may appear beside files in `src/cdda2img/`, `tests/`,
+`tests/fixtures/`, `tools/`, and `tools/wayback/`. The signing public key is
+committed at `docs/guardian_public.asc`.
+
+```bash
+# One-time: import the signing public key into your keyring
+gpg --import docs/guardian_public.asc
+
+# Verify a signed file (exit status 0 = good signature)
+gpg --verify src/cdda2img/cdemu.py.sig src/cdda2img/cdemu.py
+```
+
+A missing or failing signature is not necessarily alarming: a `.sig` is removed
+whenever its file changes (the file must be re-audited and re-signed), so an
+unsigned file simply means "not currently covered by a signature." A signature
+that *fails* on an unchanged file, however, means the file or the signature was
+tampered with — investigate before trusting it.
+
+Full timestamped audit reports are kept locally under `private/guardian/` and
+are **not** distributed; only the per-file signatures and the public key are.
+
 ## License
 
 GPLv3 or later

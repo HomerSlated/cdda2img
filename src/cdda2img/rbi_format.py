@@ -346,8 +346,13 @@ def year_of(date_str: str | None) -> int | None:
         return None
 
 
-def format_original(disc: RBIDisc) -> str:
-    """Render the canonical one-line original-release provenance string.
+def format_original_fields(
+    disc_year: int | None,
+    found: bool,
+    title: str | None,
+    orig_year: int | None,
+) -> str:
+    """Render the canonical one-line original-release string from raw fields.
 
     Format::
 
@@ -355,22 +360,38 @@ def format_original(disc: RBIDisc) -> str:
 (<year>|unknown year)
 
     Field 1 answers "is THIS disc the original release?" and is **gated by the
-    disc's own year**: without it we cannot claim anything predates this disc,
-    so the answer is Unknown and the earlier-release fields are unknown too (we
-    never emit a paradoxical "Unknown, Title (year)"). Comparison is at **year**
-    granularity — a 1983 pressing is the original even when the release-group's
-    first-release date is 1983-03-23. The earlier-release title/year are shown
-    only in the "No" case; "Yes" shows "this release" + the disc's own year.
+    disc's own year** (``disc_year``): without it we cannot claim anything
+    predates this disc, so the answer is Unknown and the earlier-release fields
+    are unknown too (we never emit a paradoxical "Unknown, Title (year)").
+    Comparison is at **year** granularity — a 1983 pressing is the original even
+    when the release-group's first-release date is 1983-03-23. The earlier-release
+    title/year are shown only in the "No" case; "Yes" shows "this release" + the
+    disc's own year.
 
-    The same string is used at every surface (menu, RBI PROV, catalogue, log)
-    so the representation is identical everywhere.
+    This is the shared core behind every surface. Callers holding an ``RBIDisc``
+    use :func:`format_original`; callers holding a provenance dict (RBI ``list``)
+    or a catalogue DB row pass their already-extracted values here directly. The
+    same string is emitted everywhere so the representation is identical.
     """
-    disc_year = year_of(disc.release_date)
-    if disc_year is None or not disc.original_release_found:
+    if disc_year is None or not found:
         return "Original: Unknown, unknown release (unknown year)"
-    if disc_year == disc.original_release_year:
+    if disc_year == orig_year:
         return f"Original: Yes, this release ({disc_year})"
-    title = disc.original_release_title or "unknown release"
-    oyear = disc.original_release_year
-    year_disp = oyear if oyear is not None else "unknown year"
-    return f"Original: No, {title} ({year_disp})"
+    disp_title = title or "unknown release"
+    year_disp = orig_year if orig_year is not None else "unknown year"
+    return f"Original: No, {disp_title} ({year_disp})"
+
+
+def format_original(disc: RBIDisc) -> str:
+    """Render the canonical original-release line for an ``RBIDisc``.
+
+    Thin adapter over :func:`format_original_fields` — extracts the disc's own
+    release year from ``release_date`` (the one thing the field-level core cannot
+    derive) and forwards the original-release trio.
+    """
+    return format_original_fields(
+        year_of(disc.release_date),
+        disc.original_release_found,
+        disc.original_release_title,
+        disc.original_release_year,
+    )

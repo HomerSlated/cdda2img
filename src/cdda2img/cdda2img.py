@@ -34,6 +34,7 @@ from cdda2img.rbi_format import (
     CD_FRAMES_PER_SECOND,
     FLAG_MASTER_MODE,
     RBIDisc,
+    format_original,
 )
 from cdda2img.silence import trim_silence_cd_da
 from cdda2img.toc import (
@@ -1341,6 +1342,9 @@ def _finalize_import(
 
     _ui_status(ui, "Identifying original release…")
     populate_original_release(disc)
+    # Trace the canonical result (DEBUG: the menu summary already shows it; keep
+    # the normal UI clean). Same string as the menu/list/catalogue surfaces.
+    log.debug("%s", format_original(disc))
     # R11: corroborate with Discogs master if both sources are present.
     _r11_corroborate_with_discogs_master(disc, provenance)
 

@@ -16,6 +16,7 @@ import pytest
 from cdda2img.concat import concat_wav
 from cdda2img.container import (
     ExtractOptions,
+    _release_intelligence_line,
     build_container,
     extract_data,
     read_header,
@@ -484,3 +485,67 @@ def test_verify_container_bad_magic_returns_false_no_crash(tmp_path):
     rbi.write_bytes(raw)
     result = verify_container(rbi)
     assert result is False
+
+
+# ---------------------------------------------------------------------------
+# _release_intelligence_line — RBI `list` original-release surface
+# ---------------------------------------------------------------------------
+
+
+def test_release_intelligence_found_routes_through_core():
+    # Found + disc year == original year → canonical "Yes, this release" string,
+    # byte-identical to the menu/catalogue (year granularity).
+    prov = {
+        "original_release_found": "YES",
+        "original_release_title": "Eliminator",
+        "original_release_year": "1983",
+        "release_date": "1983-11-18",
+    }
+    assert _release_intelligence_line(prov) == "Original: Yes, this release (1983)"
+
+
+def test_release_intelligence_found_no_names_earlier_release():
+    prov = {
+        "original_release_found": "YES",
+        "original_release_title": "Thriller",
+        "original_release_year": "1982",
+        "release_date": "2008",
+    }
+    assert _release_intelligence_line(prov) == "Original: No, Thriller (1982)"
+
+
+def test_release_intelligence_same_year_different_title_is_yes():
+    # Deliberate unification: at year granularity a same-year pressing is the
+    # original regardless of a title mismatch (old code rendered "Original: X").
+    prov = {
+        "original_release_found": "YES",
+        "original_release_title": "Eliminator (2008 Remaster)",
+        "original_release_year": "1983",
+        "release_date": "1983",
+    }
+    assert _release_intelligence_line(prov) == "Original: Yes, this release (1983)"
+
+
+def test_release_intelligence_date_fallback_preserved():
+    # No original-release info but a release_date is present → the list view is
+    # the ONLY surface that shows the disc's own date (no Album line here).
+    assert _release_intelligence_line({"release_date": "1983-11-18"}) == (
+        "Released:  1983-11-18"
+    )
+
+
+def test_release_intelligence_none_when_no_data():
+    assert _release_intelligence_line({}) is None
+
+
+def test_release_intelligence_found_but_no_disc_year_is_unknown():
+    # Found=YES but no parseable disc year → cannot claim precedence → Unknown,
+    # and it does NOT fall through to the date branch (there is no date).
+    prov = {
+        "original_release_found": "YES",
+        "original_release_title": "Thriller",
+        "original_release_year": "1982",
+    }
+    assert _release_intelligence_line(prov) == (
+        "Original: Unknown, unknown release (unknown year)"
+    )
