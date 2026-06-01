@@ -98,6 +98,18 @@ calculation" pattern — now hit 3× (R3 duration field, AcoustID pressing, and 
       `barcode_hints: [(mbid, barcode)]` in `MBPrepopResult` but they are evidently not used as
       a disambiguation filter. Add MCN-vs-barcode filtering/ranking to the R1 multi-match
       resolver (relates to Plan A **Q3** / **C** unit).
+      - **Update 2026-06-01 (investigated with `tools/trace_album_live.py`) — the root cause is
+        NOT what this title says.** The displayed wrong title comes from **CDDB**, not MB:
+        CD-Text is blank → CDDB (retrobridge) fills first with its single mislabeled entry
+        "American Idiot: The Ultimate American Idiot", and **non-blank-wins precedence** locks it
+        in. MB actually returned an **11-way multi-match and chose NO winner**
+        (`mb_candidate_album=None`) — it did not "pick the reissue", it contributed no album at
+        all. So two distinct defects: **(i)** precedence — a weak, un-disambiguatable source
+        (CDDB) outranks MB (→ Priority #3); **(ii)** the MB fallback `_build_agreed_facts_meta`
+        averages over the whole plurality release-group (which *includes* reissue [6], same RG),
+        so the album collapses to None. The barcode/MCN filter is still right but must run over
+        the **MCN-matched subset** (the candidates with barcode 0093624877721), not the whole RG.
+        Even fixed, MB cannot override the displayed title until precedence (Priority #3) changes.
       - **Hard-case caveat to document:** publishers reuse one MCN across reissues, and a
         reissue can share the master's TOC → identical MB disc-id **and** identical MCN, which
         barcode filtering cannot split. HERE the barcodes differ, so barcode filtering solves
@@ -109,6 +121,47 @@ calculation" pattern — now hit 3× (R3 duration field, AcoustID pressing, and 
           `9a700326-8d3d-3f47-ab3d-40eb626b4656`
         - recorded date 2004-09-20; the correct release is GB / Reprise Records, barcode-less
           here (the `Preview changes` page already proposed `American Idiot` / 2004-08-10 / GB).
+
+### ⭐ Priority #3 — CDDB → gnudb + lookup-precedence rework (2026-06-01)
+
+Decided after the P2-B investigation (above) and a provenance deep-dive. Diagnostic tools
+committed `233fa2b` (`tools/trace_album.py` static model + `tools/trace_album_live.py` live).
+
+**Framing — concede the ceiling first.** No automatically-readable identifier uniquely fixes
+a CD-DA *release*: MCN is reused across reissues (and not even consistent within a release
+group), the TOC/disc-id is reused across pressings, CD-Text is optional and often absent
+(this disc had none), and **AccurateRip is keyed solely by the TOC disc-id — it has no
+release axis at all** (verified: original + reissue share one `dBAR-013-001ab0ed-…` record,
+69 offset groups pooled with no per-release field). The only release-unique marks (IFPI
+mastering/mould SID codes, matrix/runout, printed catalogue #) are **etched in the mirror
+band — visual-only, not in any data path a drive exposes.** Everything readable identifies
+*content* (mastering / recording / TOC layout), which maps many-to-one onto releases. So the
+honest ceiling is **"best automatic guess + user refinement"** — which is essentially the
+current model. This work is a *quality* refinement of the guess, not a capability leap; do
+not chase certainty the medium cannot provide.
+
+**Changes (do in this order — sequencing matters):**
+- [ ] **#3-a** · **Fix MB first** so it stops punting on multi-match: `_build_agreed_facts_meta`
+      over the **MCN-matched subset**, not the whole RG (= P2-B(ii) / Plan A C-unit). Verify
+      live with `trace_album_live.py` that the disc then resolves to the original "American
+      Idiot". This is the prerequisite — it's what lets us safely demote/drop CDDB without
+      regressing track-title pre-fill.
+- [ ] **#3-b** · **Rework "who wins and why"** (lookup precedence). Today CDDB runs first and
+      wins on per-field non-blank — so a weak, un-disambiguatable source overrides the richer,
+      MCN/ISRC-disambiguatable one. Make **MB authoritative when it has a disc-id (+ MCN)
+      match**; demote CDDB to a fallback consulted only when MB yields nothing. (The deeper bug
+      is the ordering, independent of CDDB's fate.)
+- [ ] **#3-c** · **Replace retrobridge with gnudb** as the default `cddb_server`
+      (`config.py:92`, `:185`; `conf/cdda2img.toml.example`). retrobridge *is* a MusicBrainz
+      bridge (confirmed on its homepage) → strictly redundant with our own MB lookup and lossy
+      (CDDBP can't carry MCN/ISRC, so it collapses MB's multi-match blind — and picked the
+      reissue, a 1-in-16 minority in gnudb's own data). gnudb is independent legacy FreeDB data.
+      **NB — do not majority-vote gnudb:** plurality = popularity = sampling bias of who-bought-
+      what, *not* provenance (gnudb's 13× "American Idiot" vs 1× reissue does not prove this
+      disc is the original). gnudb is a fallback title source only, never an authority.
+- [ ] **#3-d** · (minor hardening) `query_cddb` has no retry on a cold-connect TCP flake →
+      silently returns `[]`, indistinguishable from a legitimate "disc not in DB". Add a small
+      retry / distinguish transport-error from empty-result (distrust-silent-nulls again).
 
 ---
 
