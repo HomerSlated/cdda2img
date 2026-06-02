@@ -52,7 +52,7 @@ This is an active prototype. A Rust reimplementation is planned once the design 
 
   Pass `--info` for a dry-run that prints image metadata without importing
 - **Automatic metadata lookup** — disc is identified before the interactive menu fires:
-  1. *CDDB* — TCP query (default: retrobridge.org:888); pre-populates album, artist, year,
+  1. *CDDB* — TCP query (default: gnudb.gnudb.org:8880); pre-populates album, artist, year,
      and track titles from the disc TOC fingerprint
   2. *MusicBrainz disc ID* — SHA-1 TOC fingerprint lookup; single matches are auto-applied;
      multiple are presented for selection; barcode hints from MB feed Discogs lookup

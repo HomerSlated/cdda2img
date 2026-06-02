@@ -151,14 +151,15 @@ not chase certainty the medium cannot provide.
       MCN/ISRC-disambiguatable one. Make **MB authoritative when it has a disc-id (+ MCN)
       match**; demote CDDB to a fallback consulted only when MB yields nothing. (The deeper bug
       is the ordering, independent of CDDB's fate.)
-- [ ] **#3-c** · **Replace retrobridge with gnudb** as the default `cddb_server`
-      (`config.py:92`, `:185`; `conf/cdda2img.toml.example`). retrobridge *is* a MusicBrainz
-      bridge (confirmed on its homepage) → strictly redundant with our own MB lookup and lossy
-      (CDDBP can't carry MCN/ISRC, so it collapses MB's multi-match blind — and picked the
-      reissue, a 1-in-16 minority in gnudb's own data). gnudb is independent legacy FreeDB data.
-      **NB — do not majority-vote gnudb:** plurality = popularity = sampling bias of who-bought-
-      what, *not* provenance (gnudb's 13× "American Idiot" vs 1× reissue does not prove this
-      disc is the original). gnudb is a fallback title source only, never an authority.
+- [x] **#3-c** · **Replaced retrobridge with gnudb** (`gnudb.gnudb.org:8880`) as the default
+      `cddb_server` (`config.py`, `cddb.py` `_DEFAULT_SERVER`/`_DEFAULT_PORT`, conf example,
+      docs/man, README). Live-probed (200 CDDBP OK). retrobridge *is* a MusicBrainz bridge
+      (confirmed on its homepage) → strictly redundant with our own MB lookup and lossy.
+      gnudb is independent legacy FreeDB data. **NB — do not majority-vote gnudb:** plurality =
+      popularity, *not* provenance; gnudb is a fallback title source only, never an authority.
+      Surfaced a latent bug (now fixed): freedb `TTITLE` uses "Artist / Title"; `_parse_xmcd`
+      now splits it (first " / " only, medley-safe). Also added Type/Tracks columns to the MB
+      results menu (interim — CD singles shown, not filtered) + `tools/disc_scan.py`.
 - [ ] **#3-d** · (minor hardening) `query_cddb` has no retry on a cold-connect TCP flake →
       silently returns `[]`, indistinguishable from a legitimate "disc not in DB". Add a small
       retry / distinguish transport-error from empty-result (distrust-silent-nulls again).

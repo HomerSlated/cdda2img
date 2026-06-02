@@ -285,6 +285,16 @@ def _parse_release(
         country=release.get("country") or None,
         label=label or None,
         catalog_number=catalog_number or None,
+        primary_type=rg.get("primary-type") or rg.get("type") or None,
+        track_count=(
+            len(tracks)
+            if tracks
+            else (
+                int(release["medium-track-count"])
+                if release.get("medium-track-count")
+                else None
+            )
+        ),
         disc_number=disc_number,
         disc_total=disc_total,
         set_title=set_title,

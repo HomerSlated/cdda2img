@@ -475,19 +475,19 @@ cat > ~/.config/cdda2img/cdda2img.toml << 'EOF'
 # cdda2img configuration
 
 # CDDB server for disc metadata lookup (host:port).
-# cddb_server = "cddb.retrobridge.org:888"
+# cddb_server = "gnudb.gnudb.org:8880"
 EOF
 .fi
 .RE
 .SS Configuration keys
 .TP
-.BI "cddb_server = " \(dqcddb.retrobridge.org:888\(dq
+.BI "cddb_server = " \(dqgnudb.gnudb.org:8880\(dq
 CDDB server used for automatic disc identification during
 .BR "cdda2img rip" .
 Format is
 .IR host : port .
 Default:
-.BR cddb.retrobridge.org:888 .
+.BR gnudb.gnudb.org:8880 .
 .TP
 .BI "database_backups = " 3
 Number of rotating backups to keep for the drive offsets SQLite database.

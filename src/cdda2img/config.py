@@ -89,7 +89,7 @@ class DriveConfig:
 class Config:
     """Validated cdda2img configuration with typed fields and defaults."""
 
-    cddb_server: str = "cddb.retrobridge.org:888"
+    cddb_server: str = "gnudb.gnudb.org:8880"
     contact_email: str = ""
     database_backups: int = 3
     database_backup_frequency: str = "4w"
@@ -182,7 +182,7 @@ def load_config() -> Config:
     """Load and return the user configuration from the TOML file."""
     data = _load_raw()
 
-    cddb_server = str(data.get("cddb_server", "cddb.retrobridge.org:888"))
+    cddb_server = str(data.get("cddb_server", "gnudb.gnudb.org:8880"))
     contact_email = str(data.get("contact_email", ""))
 
     raw_backups = data.get("database_backups", 3)

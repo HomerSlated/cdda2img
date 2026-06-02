@@ -5,7 +5,7 @@ in-track pre-gap, producing an off-by-1 disc-ID and 404s at AccurateRip.
 
 from __future__ import annotations
 
-from cdda2img.cddb import compute_cddb_disc_id
+from cdda2img.cddb import _parse_xmcd, compute_cddb_disc_id
 
 # Sheryl Crow — Sheryl Crow (1996), 14 tracks. Whipper and EAC both compute
 # CDDB id e00e160e for this disc; AccurateRip serves a 1529-byte dBAR at the
@@ -30,6 +30,33 @@ _SHERYL_CROW_LSNS = [
     255455,
 ]
 _SHERYL_CROW_LAST_LSN = 270474
+
+
+def test_parse_xmcd_splits_freedb_artist_title_ttitle() -> None:
+    """gnudb/freedb store TTITLE as "Artist / Title"; the artist prefix must be
+    stripped from the track title (regression: gnudb swap surfaced this)."""
+    lines = [
+        "DTITLE=Green Day / American Idiot",
+        "TTITLE0=Green Day / American Idiot",
+        "TTITLE2=Boulevard of Broken Dreams",
+    ]
+    meta = _parse_xmcd(lines, 3)
+    assert meta.tracks[0].title == "American Idiot"
+    assert meta.tracks[0].performer == "Green Day"
+    # No " / " -> the whole value is the title, performer unset.
+    assert meta.tracks[2].title == "Boulevard of Broken Dreams"
+    assert meta.tracks[2].performer is None
+    # Missing TTITLE1 -> blank title, no crash.
+    assert meta.tracks[1].title is None
+
+
+def test_parse_xmcd_preserves_medley_slash_in_title() -> None:
+    """Split on the FIRST " / " only, so a medley title containing " / " keeps
+    its internal separators in the title part, not just the leading artist."""
+    lines = ["TTITLE0=Green Day / Jesus of Suburbia / City of the Damned"]
+    meta = _parse_xmcd(lines, 1)
+    assert meta.tracks[0].performer == "Green Day"
+    assert meta.tracks[0].title == "Jesus of Suburbia / City of the Damned"
 
 
 def test_compute_cddb_disc_id_matches_whipper_for_sheryl_crow() -> None:

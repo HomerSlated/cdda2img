@@ -22,8 +22,8 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
-_DEFAULT_SERVER = "cddb.retrobridge.org"
-_DEFAULT_PORT = 888
+_DEFAULT_SERVER = "gnudb.gnudb.org"
+_DEFAULT_PORT = 8880
 _TIMEOUT = 10  # seconds per socket operation
 _CLIENT_NAME = "cdda2img"
 
@@ -134,8 +134,22 @@ def _parse_xmcd(lines: list[str], n_tracks: int) -> DiscMeta:
 
     tracks: list[TrackMeta] = []
     for i in range(n_tracks):
-        title = fields.get(f"TTITLE{i}", "").strip()
-        tracks.append(TrackMeta(number=i + 1, title=title or None))
+        raw = fields.get(f"TTITLE{i}", "").strip()
+        # freedb TTITLE may carry a per-track artist as "Artist / Title" (gnudb
+        # uses this even for single-artist discs, where retrobridge/MB did not).
+        # Split on the FIRST " / " only, so a medley title that itself contains
+        # " / " survives intact in the title part; no separator -> all title.
+        performer, sep, title = raw.partition(" / ")
+        if sep:
+            tracks.append(
+                TrackMeta(
+                    number=i + 1,
+                    title=title.strip() or None,
+                    performer=performer.strip() or None,
+                )
+            )
+        else:
+            tracks.append(TrackMeta(number=i + 1, title=raw or None))
 
     return DiscMeta(
         album=album.strip() or None,
@@ -183,7 +197,7 @@ def query_cddb(
     """Query a CDDB server and return matching DiscMeta objects.
 
     Returns an empty list on network error, no match, or unexpected response.
-    *server* should be "host:port"; defaults to cddb.retrobridge.org:888.
+    *server* should be "host:port"; defaults to gnudb.gnudb.org:8880.
     Returns [] when offline mode is active (R10).
 
     R7: results cached in ``cddb_lookups`` keyed by the CDDB disc-ID with

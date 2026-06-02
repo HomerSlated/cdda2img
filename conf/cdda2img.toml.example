@@ -3,8 +3,8 @@
 # (default: ~/.config/cdda2img/cdda2img.toml)
 
 # CDDB server for disc metadata lookup (host:port).
-# Default: cddb.retrobridge.org:888
-# cddb_server = "cddb.retrobridge.org:888"
+# Default: gnudb.gnudb.org:8880
+# cddb_server = "gnudb.gnudb.org:8880"
 
 # Contact email for MusicBrainz API User-Agent (required by MusicBrainz terms of service).
 # Without this, MusicBrainz lookups may be rate-limited or blocked.

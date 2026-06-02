@@ -34,6 +34,8 @@ class DiscMeta:
     country: str | None = None
     label: str | None = None
     catalog_number: str | None = None  # label catalogue number (e.g. "XYZ-001")
+    primary_type: str | None = None  # MB release-group primary type: Album/Single/EP
+    track_count: int | None = None  # tracks on the matched medium (search-stub hint)
     disc_number: int | None = (
         None  # 1-based position in a multi-disc set; None = unknown
     )

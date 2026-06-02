@@ -170,17 +170,25 @@ def _select_from_results(
 
         _header(f"{title}  [{page + 1}/{total_pages}]  ({total} results)")
         print(
-            f"  {'#':>3}  {'Artist':<22}  {'Album':<28}  {'Year':<4}  {'Cty':<3}  Label"
+            f"  {'#':>3}  {'Type':<6}  {'Trk':>3}  {'Artist':<18}  {'Album':<24}"
+            f"  {'Year':<4}  {'Cty':<3}  Label"
         )
-        print(f"  {'─' * 3}  {'─' * 22}  {'─' * 28}  {'─' * 4}  {'─' * 3}  {'─' * 16}")
+        print(
+            f"  {'─' * 3}  {'─' * 6}  {'─' * 3}  {'─' * 18}  {'─' * 24}"
+            f"  {'─' * 4}  {'─' * 3}  {'─' * 14}"
+        )
         for i, m in enumerate(page_items, start=start + 1):
             album_col = m.album or (
                 m.tracks[0].title if m.tracks and m.tracks[0].title else None
             )
+            # Type/Tracks surface album-vs-single so the right release is pickable
+            # (CD singles are valid candidates — shown, not filtered).
+            type_col = _trunc(m.primary_type, 6) or "?"
+            trk_col = str(m.track_count) if m.track_count is not None else "?"
             print(
-                f"  {i:>3}  {_trunc(m.artist, 22):<22}  {_trunc(album_col, 28):<28}"
-                f"  {(m.release_date or '')[:4]:<4}  {(m.country or '')[:3]:<3}"
-                f"  {_trunc(m.label, 16)}"
+                f"  {i:>3}  {type_col:<6}  {trk_col:>3}  {_trunc(m.artist, 18):<18}"
+                f"  {_trunc(album_col, 24):<24}  {(m.release_date or '')[:4]:<4}"
+                f"  {(m.country or '')[:3]:<3}  {_trunc(m.label, 14)}"
             )
         print()
         nav = []
