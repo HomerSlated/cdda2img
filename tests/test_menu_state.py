@@ -15,6 +15,9 @@ from unittest.mock import patch
 import pytest
 
 from cdda2img.menu_state import (
+    EditDiscPositionScreen,
+    EditScreen,
+    EditTrackScreen,
     LegacyDelegateScreen,
     MenuController,
     MenuState,
@@ -37,6 +40,36 @@ def _disc(album: str = "Album", artist: str = "Artist") -> RBIDisc:
             )
         ],
     )
+
+
+def _multitrack_disc(n: int = 3) -> RBIDisc:
+    """RBIDisc with *n* tracks numbered 1..n, for track-edit fixtures."""
+    return RBIDisc(
+        album="Album",
+        artist="Artist",
+        tracks=[
+            RBITocEntry(
+                track_number=i,
+                title=f"Track {i}",
+                performer="Artist",
+                start_frame=(i - 1) * 18000,
+                duration_frames=18000,
+            )
+            for i in range(1, n + 1)
+        ],
+    )
+
+
+def _step_with(ctl: MenuController, *inputs: str) -> None:
+    """Drive one handle_input step on the top screen, patching _prompt.
+
+    Each positional value answers one ``_prompt`` call in order (a screen step
+    may prompt once for the choice and again inside ``_prompt_edit``, or twice
+    for the two fields EditDiscPositionScreen reads). A single-element list is
+    just as valid as a multi-element one for ``side_effect``.
+    """
+    with patch("cdda2img.metadata_menu._prompt", side_effect=list(inputs)):
+        ctl._apply(ctl.stack[-1].handle_input(ctl))
 
 
 # ---------------------------------------------------------------------------
@@ -169,15 +202,12 @@ def test_banner_clears_on_next_render() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_edit_state_returns_to_main() -> None:
-    """The EDIT delegate screen runs _edit_menu, then pops back to MAIN."""
+def test_edit_back_returns_to_main() -> None:
+    """EditScreen 'b' pops back to MAIN."""
     ctl = MenuController(_disc())
-    ctl.stack.append(LegacyDelegateScreen(MenuState.EDIT))
-    fake_edited = _disc(album="Edited via _edit_menu")
-    with patch("cdda2img.metadata_menu._edit_menu", return_value=fake_edited):
-        ctl._apply(ctl.stack[-1].handle_input(ctl))
+    ctl.stack.append(EditScreen())
+    _step_with(ctl, "b")
     assert ctl.state is MenuState.MAIN
-    assert ctl.disc.album == "Edited via _edit_menu"
 
 
 def test_fetch_state_returns_to_main_and_threads_rg_id() -> None:
@@ -205,6 +235,229 @@ def test_original_release_state_returns_to_main_and_threads_rg_id() -> None:
         ctl._apply(ctl.stack[-1].handle_input(ctl))
     assert ctl.state is MenuState.MAIN
     assert ctl.mb_rg_id == "rg-x"
+
+
+# ---------------------------------------------------------------------------
+# EditScreen (native) — album / artist / dispatch
+# ---------------------------------------------------------------------------
+
+
+def test_main_e_pushes_native_edit_screen() -> None:
+    """'e' at MAIN descends into the native EditScreen (state EDIT)."""
+    ctl = MenuController(_disc())
+    _step_with(ctl, "e")
+    assert ctl.state is MenuState.EDIT
+    assert isinstance(ctl.stack[-1], EditScreen)
+
+
+def test_edit_album_edits_in_place_and_stays() -> None:
+    ctl = MenuController(_disc(album="Old"))
+    ctl.stack.append(EditScreen())
+    _step_with(ctl, "a", "New Album")  # 'a', then the _prompt_edit value
+    assert ctl.disc.album == "New Album"
+    assert ctl.state is MenuState.EDIT  # stays on the edit screen
+
+
+def test_edit_artist_edits_in_place_and_stays() -> None:
+    ctl = MenuController(_disc(artist="Old Artist"))
+    ctl.stack.append(EditScreen())
+    _step_with(ctl, "r", "New Artist")
+    assert ctl.disc.artist == "New Artist"
+    assert ctl.state is MenuState.EDIT
+
+
+def test_edit_blank_keeps_current_value() -> None:
+    """_prompt_edit returns the current value on blank input (quirk preserved)."""
+    ctl = MenuController(_disc(album="Keep Me"))
+    ctl.stack.append(EditScreen())
+    _step_with(ctl, "a", "")
+    assert ctl.disc.album == "Keep Me"
+
+
+def test_edit_d_pushes_disc_position_screen() -> None:
+    ctl = MenuController(_disc())
+    ctl.stack.append(EditScreen())
+    _step_with(ctl, "d")
+    assert ctl.state is MenuState.EDIT_DISC_POSITION
+    assert isinstance(ctl.stack[-1], EditDiscPositionScreen)
+
+
+def test_edit_track_command_pushes_track_screen() -> None:
+    ctl = MenuController(_multitrack_disc(3))
+    ctl.stack.append(EditScreen())
+    _step_with(ctl, "t 2")
+    assert ctl.state is MenuState.EDIT_TRACK
+    top = ctl.stack[-1]
+    assert isinstance(top, EditTrackScreen)
+    assert top.track_number == 2
+
+
+def test_edit_track_not_found_sets_banner_and_stays() -> None:
+    ctl = MenuController(_multitrack_disc(2))
+    ctl.stack.append(EditScreen())
+    _step_with(ctl, "t 99")
+    assert ctl.state is MenuState.EDIT
+    assert "not found" in ctl.banner
+
+
+def test_edit_track_non_numeric_sets_banner_and_stays() -> None:
+    """'t x' is the ValueError path: 'Invalid track number.', distinct message."""
+    ctl = MenuController(_multitrack_disc(2))
+    ctl.stack.append(EditScreen())
+    _step_with(ctl, "t x")
+    assert ctl.state is MenuState.EDIT
+    assert "Invalid track number" in ctl.banner
+
+
+def test_edit_no_space_track_token_is_unknown_command() -> None:
+    """'t3' (no space) does not match startswith('t '); unknown command."""
+    ctl = MenuController(_multitrack_disc(3))
+    ctl.stack.append(EditScreen())
+    _step_with(ctl, "t3")
+    assert ctl.state is MenuState.EDIT
+    assert "Unknown" in ctl.banner
+
+
+def test_edit_unknown_command_sets_banner_and_stays() -> None:
+    ctl = MenuController(_disc())
+    ctl.stack.append(EditScreen())
+    _step_with(ctl, "zzz")
+    assert ctl.state is MenuState.EDIT
+    assert "Unknown" in ctl.banner
+
+
+# ---------------------------------------------------------------------------
+# EditTrackScreen (native) — title / performer / ISRC
+# ---------------------------------------------------------------------------
+
+
+def test_edit_track_title_and_performer() -> None:
+    ctl = MenuController(_multitrack_disc(2))
+    ctl.stack.append(EditTrackScreen(1))
+    _step_with(ctl, "t", "New Title")
+    assert ctl.disc.tracks[0].title == "New Title"
+    _step_with(ctl, "p", "New Performer")
+    assert ctl.disc.tracks[0].performer == "New Performer"
+    assert ctl.state is MenuState.EDIT_TRACK
+
+
+def test_edit_track_isrc_is_uppercased() -> None:
+    ctl = MenuController(_multitrack_disc(1))
+    ctl.stack.append(EditTrackScreen(1))
+    _step_with(ctl, "i", "gbaye0601498")
+    assert ctl.disc.tracks[0].isrc == "GBAYE0601498"
+
+
+def test_edit_track_isrc_blank_does_not_clear_existing() -> None:
+    """Preserved quirk: _prompt_edit keeps the current value on blank input, so
+    a non-empty ISRC cannot be cleared from this screen despite the label."""
+    ctl = MenuController(_multitrack_disc(1))
+    ctl.disc.tracks[0].isrc = "GBAYE0601498"
+    ctl.stack.append(EditTrackScreen(1))
+    _step_with(ctl, "i", "")
+    assert ctl.disc.tracks[0].isrc == "GBAYE0601498"
+
+
+def test_edit_track_back_pops() -> None:
+    ctl = MenuController(_multitrack_disc(2))
+    ctl.stack.append(EditScreen())
+    ctl.stack.append(EditTrackScreen(1))
+    _step_with(ctl, "b")
+    assert ctl.state is MenuState.EDIT
+
+
+def test_edit_track_vanished_pops() -> None:
+    """If the carried track number no longer resolves, the screen pops."""
+    ctl = MenuController(_multitrack_disc(2))
+    ctl.stack.append(EditScreen())
+    ctl.stack.append(EditTrackScreen(2))
+    del ctl.disc.tracks[1]  # remove track 2
+    _step_with(ctl, "t")  # any input
+    assert ctl.state is MenuState.EDIT
+
+
+# ---------------------------------------------------------------------------
+# EditDiscPositionScreen (native) — validation loop as Stay
+# ---------------------------------------------------------------------------
+
+
+def test_disc_position_valid_sets_and_pops() -> None:
+    ctl = MenuController(_disc())
+    ctl.stack.append(EditScreen())
+    ctl.stack.append(EditDiscPositionScreen())
+    _step_with(ctl, "1", "2")  # disc 1 of 2
+    assert ctl.disc.disc_number == 1
+    assert ctl.disc.disc_total == 2
+    assert ctl.state is MenuState.EDIT  # popped back
+    assert "Set: disc 1 of 2" in ctl.banner
+
+
+def test_disc_position_invalid_sets_banner_and_stays() -> None:
+    """number > total is invalid: banner + Stay (the legacy re-prompt loop)."""
+    ctl = MenuController(_disc())
+    ctl.stack.append(EditScreen())
+    ctl.stack.append(EditDiscPositionScreen())
+    _step_with(ctl, "3", "2")  # disc 3 of 2 — invalid
+    assert ctl.state is MenuState.EDIT_DISC_POSITION  # stayed
+    assert "Invalid" in ctl.banner
+
+
+def test_disc_position_blank_keeps_current() -> None:
+    """Blank / non-digit input keeps the current value (then validates/pops)."""
+    ctl = MenuController(_disc())
+    ctl.disc.disc_number = 2
+    ctl.disc.disc_total = 5
+    ctl.stack.append(EditScreen())
+    ctl.stack.append(EditDiscPositionScreen())
+    _step_with(ctl, "", "")  # keep both
+    assert ctl.disc.disc_number == 2
+    assert ctl.disc.disc_total == 5
+    assert ctl.state is MenuState.EDIT  # current pair is valid → popped
+
+
+# ---------------------------------------------------------------------------
+# Native edit screens — render (content + banner-clear)
+# ---------------------------------------------------------------------------
+
+
+def test_edit_screen_render_shows_content_and_clears_banner(capsys) -> None:
+    ctl = MenuController(_disc())
+    ctl.banner = "transient"
+    EditScreen().render(ctl)
+    out = capsys.readouterr().out
+    assert "Edit Metadata" in out
+    assert "transient" in out  # banner shown this frame
+    assert ctl.banner == ""  # ...then cleared
+
+
+def test_edit_track_screen_render_shows_track_and_clears_banner(capsys) -> None:
+    ctl = MenuController(_multitrack_disc(2))
+    ctl.banner = "transient"
+    EditTrackScreen(1).render(ctl)
+    out = capsys.readouterr().out
+    assert "Edit Track 1" in out
+    assert "Title:" in out  # the track-present branch ran
+    assert ctl.banner == ""
+
+
+def test_edit_track_screen_render_tolerates_vanished_track(capsys) -> None:
+    """The `track is not None` render guard: a vanished track still renders."""
+    ctl = MenuController(_multitrack_disc(2))
+    EditTrackScreen(99).render(ctl)  # no such track
+    out = capsys.readouterr().out
+    assert "Edit Track 99" in out
+    assert "Title:" not in out  # the field block was skipped, no crash
+
+
+def test_disc_position_screen_render_shows_current_and_clears_banner(capsys) -> None:
+    ctl = MenuController(_disc())
+    ctl.disc.disc_number = 1
+    ctl.disc.disc_total = 2
+    ctl.banner = "transient"
+    EditDiscPositionScreen().render(ctl)
+    out = capsys.readouterr().out
+    assert "Current: disc 1 of 2" in out
+    assert ctl.banner == ""
 
 
 # ---------------------------------------------------------------------------

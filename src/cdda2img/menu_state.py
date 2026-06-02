@@ -18,10 +18,11 @@ and unit-testable in isolation.
 live in ``handle_input``. ``--no-tui`` drops the screen-clear only (output
 appends to scrollback and stays capturable); the menu is still interactive.
 
-EDIT / FETCH / ORIGINAL_RELEASE are presently bridged by
+EDIT is a native screen stack (:class:`EditScreen` → :class:`EditTrackScreen` /
+:class:`EditDiscPositionScreen`). FETCH / ORIGINAL_RELEASE are still bridged by
 :class:`LegacyDelegateScreen`, which calls the existing procedural helpers in
-``metadata_menu``. Migrating each to native screens (so nested result/track
-pages also participate in the stack) is the remaining work — see TODO.
+``metadata_menu``. Migrating those to native screens (so nested result pages
+also participate in the stack) is the remaining work — see TODO.
 
 stdin-not-a-tty → ``run()`` returns the disc unchanged; the loop never runs.
 """
@@ -55,6 +56,8 @@ class MenuState(Enum):
     AR_PAUSE = auto()
     MAIN = auto()
     EDIT = auto()
+    EDIT_TRACK = auto()
+    EDIT_DISC_POSITION = auto()
     FETCH = auto()
     ORIGINAL_RELEASE = auto()
     DONE = auto()
@@ -147,7 +150,7 @@ class MainScreen(Screen):
         if choice == "f":
             return Push(LegacyDelegateScreen(MenuState.FETCH))
         if choice == "e":
-            return Push(LegacyDelegateScreen(MenuState.EDIT))
+            return Push(EditScreen())
         if choice == "r":
             return Push(LegacyDelegateScreen(MenuState.ORIGINAL_RELEASE))
         if choice == "u":
@@ -190,14 +193,175 @@ class ARPauseScreen(Screen):
         return Pop()
 
 
+class EditScreen(Screen):
+    """Edit-metadata sub-menu: album, artist, disc position, per-track edits.
+
+    Native port of the legacy ``metadata_menu._edit_menu`` loop. Album and
+    artist are edited inline (one ``_prompt_edit`` → ``Stay``); disc position
+    and per-track edits descend into their own screens via ``Push``. The legacy
+    loop's "re-render after each action" is the controller's ``Stay`` re-render.
+    """
+
+    state = MenuState.EDIT
+
+    def render(self, ctl: MenuController) -> None:
+        from cdda2img.metadata_menu import _header, _print_disc_summary
+
+        _header("Edit Metadata")
+        _print_disc_summary(ctl.disc)
+        print()
+        if ctl.banner:
+            print(f"  ! {ctl.banner}")
+            print()
+            ctl.banner = ""
+        print("  [a]   Edit album title")
+        print("  [r]   Edit artist")
+        print("  [d]   Edit disc number / total")
+        print("  [t N] Edit track N  (e.g.  t 3)")
+        print("  [b]   Back")
+
+    def handle_input(self, ctl: MenuController) -> Nav:
+        from cdda2img.metadata_menu import _prompt, _prompt_edit
+
+        choice = _prompt("  > ").strip().lower()
+        if choice == "b":
+            return Pop()
+        if choice == "a":
+            ctl.disc.album = _prompt_edit("Album title", ctl.disc.album or "")
+            return Stay()
+        if choice == "r":
+            ctl.disc.artist = _prompt_edit("Artist", ctl.disc.artist or "")
+            return Stay()
+        if choice == "d":
+            return Push(EditDiscPositionScreen())
+        if choice.startswith("t "):
+            try:
+                num = int(choice[2:].strip())
+            except ValueError:
+                ctl.banner = "Invalid track number."
+                return Stay()
+            track = next((t for t in ctl.disc.tracks if t.track_number == num), None)
+            if track is None:
+                ctl.banner = f"Track {num} not found."
+                return Stay()
+            return Push(EditTrackScreen(num))
+        ctl.banner = "Unknown command."
+        return Stay()
+
+
+class EditTrackScreen(Screen):
+    """Per-track edit page: title, performer, ISRC. Carries the track number.
+
+    Native port of ``metadata_menu._edit_track``. The track is re-resolved from
+    ``ctl.disc.tracks`` each step (tracks don't reorder mid-edit, so this is the
+    same object the legacy helper held). If the track has vanished, pops back.
+    """
+
+    state = MenuState.EDIT_TRACK
+
+    def __init__(self, track_number: int) -> None:
+        self.track_number = track_number
+
+    def _resolve(self, ctl: MenuController):  # -> RBITocEntry | None
+        return next(
+            (t for t in ctl.disc.tracks if t.track_number == self.track_number),
+            None,
+        )
+
+    def render(self, ctl: MenuController) -> None:
+        from cdda2img.metadata_menu import _header
+
+        track = self._resolve(ctl)
+        _header(f"Edit Track {self.track_number}")
+        if track is not None:
+            print(f"  Title:     {track.title}")
+            print(f"  Performer: {track.performer}")
+            print(f"  ISRC:      {track.isrc or '(none)'}")
+        print()
+        if ctl.banner:
+            print(f"  ! {ctl.banner}")
+            print()
+            ctl.banner = ""
+        print("  [t]  Edit title")
+        print("  [p]  Edit performer")
+        print("  [i]  Edit ISRC")
+        print("  [b]  Back")
+
+    def handle_input(self, ctl: MenuController) -> Nav:
+        from cdda2img.metadata_menu import _prompt, _prompt_edit
+
+        track = self._resolve(ctl)
+        if track is None:
+            return Pop()
+        choice = _prompt("  > ").strip().lower()
+        if choice == "b":
+            return Pop()
+        if choice == "t":
+            track.title = _prompt_edit("Title", track.title)
+            return Stay()
+        if choice == "p":
+            track.performer = _prompt_edit("Performer", track.performer)
+            return Stay()
+        if choice == "i":
+            # Behaviour-preserving quirk: _prompt_edit returns the current value
+            # on blank input, so a non-empty ISRC cannot be cleared here despite
+            # the label. Fixing that is a separate, deliberate change (see TODO).
+            raw = _prompt_edit("ISRC (12 chars, blank to clear)", track.isrc or "")
+            raw = raw.upper()
+            track.isrc = raw if raw else None
+            return Stay()
+        ctl.banner = "Unknown command."
+        return Stay()
+
+
+class EditDiscPositionScreen(Screen):
+    """Edit disc number / total, with a validation loop expressed as ``Stay``.
+
+    Native port of ``metadata_menu._edit_disc_position``. Both fields are read
+    in one ``handle_input`` step; invalid input (number/total < 1 or
+    number > total) sets a banner and stays (the legacy ``while True`` re-prompt);
+    a valid pair is applied and we pop back to :class:`EditScreen`.
+    """
+
+    state = MenuState.EDIT_DISC_POSITION
+
+    def render(self, ctl: MenuController) -> None:
+        from cdda2img.metadata_menu import _header
+
+        _header("Edit Disc Position")
+        print(f"  Current: disc {ctl.disc.disc_number} of {ctl.disc.disc_total}")
+        print()
+        if ctl.banner:
+            print(f"  ! {ctl.banner}")
+            print()
+            ctl.banner = ""
+
+    def handle_input(self, ctl: MenuController) -> Nav:
+        from cdda2img.metadata_menu import _prompt
+
+        disc = ctl.disc
+        raw_num = _prompt(f"  Disc number [{disc.disc_number}]: ").strip()
+        num = int(raw_num) if raw_num.isdigit() else disc.disc_number
+        raw_total = _prompt(f"  Total discs [{disc.disc_total}]: ").strip()
+        total = int(raw_total) if raw_total.isdigit() else disc.disc_total
+        if num < 1 or total < 1 or num > total:
+            ctl.banner = f"Invalid: disc {num} of {total} — number must be 1..total."
+            return Stay()
+        disc.disc_number = num
+        disc.disc_total = total
+        ctl.banner = f"Set: disc {num} of {total}."
+        return Pop()
+
+
 class LegacyDelegateScreen(Screen):
     """Checkpoint-1 bridge for the not-yet-migrated sub-menus.
 
-    Until EDIT / FETCH / ORIGINAL_RELEASE are ported to native screens, this
-    calls the existing procedural helper in ``metadata_menu`` — which runs its
-    own render+input loop and returns when the user backs out. ``render`` is a
-    no-op (the helper draws itself); the work happens once in ``handle_input``,
-    after which we pop back to the parent. Behaviour-preserving.
+    Until FETCH / ORIGINAL_RELEASE are ported to native screens, this calls the
+    existing procedural helper in ``metadata_menu`` — which runs its own
+    render+input loop and returns when the user backs out. ``render`` is a no-op
+    (the helper draws itself); the work happens once in ``handle_input``, after
+    which we pop back to the parent. Behaviour-preserving. EDIT is now a native
+    screen (:class:`EditScreen`) and no longer routed through here.
     """
 
     def __init__(self, state: MenuState) -> None:
@@ -209,14 +373,11 @@ class LegacyDelegateScreen(Screen):
 
     def handle_input(self, ctl: MenuController) -> Nav:
         from cdda2img.metadata_menu import (
-            _edit_menu,
             _fetch_menu,
             _original_release_menu,
         )
 
-        if self.state is MenuState.EDIT:
-            ctl.disc = _edit_menu(ctl.disc)
-        elif self.state is MenuState.FETCH:
+        if self.state is MenuState.FETCH:
             ctl.disc, ctl.mb_rg_id = _fetch_menu(
                 ctl.disc,
                 ctl.mb_rg_id,

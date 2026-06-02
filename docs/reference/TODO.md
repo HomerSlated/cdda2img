@@ -179,13 +179,26 @@ not chase certainty the medium cannot provide.
   - [x] **1** · Scaffold — `Screen`/`Nav`, `controller.stack` + `done`, `run/_step/_apply`;
         port MAIN + AR_PAUSE; EDIT/FETCH/ORIGINAL_RELEASE bridged by `LegacyDelegateScreen`.
         Tests rewritten to drive the stack. (commit, 2026-05-31)
-  - [ ] **2** · EDIT → `EditScreen` + `EditTrackScreen` + `EditDiscPositionScreen`.
+  - [x] **2** · EDIT → `EditScreen` + `EditTrackScreen` + `EditDiscPositionScreen`
+        (native screens; MAIN now pushes `EditScreen`, EDIT no longer routed through
+        `LegacyDelegateScreen`). Disc-position validation loop expressed as `Stay`;
+        per-track screen carries `track_number` and re-resolves each step. +18 tests.
+        (commit, 2026-06-02)
   - [ ] **3** · FETCH → Fetch + MBSearch/**MBResults** + Discogs + Acoustid. Audit the
         three helpers for render/IO/logic entanglement FIRST: `render` must be a pure
         repaint; network I/O stays in `handle_input`; "enter query" vs "pick result" split
         into two stack frames.
   - [ ] **4** · ORIGINAL_RELEASE → `OriginalReleaseScreen`.
-  - [ ] **5** · Delete the dead legacy helpers; collapse/retire the `MenuState` enum.
+  - [ ] **5** · Delete the dead legacy helpers (`_edit_menu`, `_edit_track`,
+        `_edit_disc_position` — now unreferenced after cp2); collapse/retire the
+        `MenuState` enum.
+- **Track ISRC cannot be cleared from the edit menu** (latent bug, preserved
+  through the cp2 port for behaviour-fidelity): `EditTrackScreen` [i] uses
+  `_prompt_edit("ISRC …", track.isrc or "")`, and `_prompt_edit` returns the
+  *current* value on blank input — so a non-empty ISRC can never be cleared
+  despite the "blank to clear" label. Fix is to read the prompt directly for
+  the ISRC field (blank → `None`) rather than via `_prompt_edit`. Deliberate
+  change, not to be folded into a refactor; needs its own test.
 - **Suppress the duplicate AR report print in `rip_image`** — once AR_PAUSE
   is the canonical display surface, the standalone `print_ar_report` call
   in `rip_image` writes to stdout and is immediately wiped by AR_PAUSE's
