@@ -45,14 +45,19 @@ Usage (from project root):
     uv run python tools/disc_scan.py --device /dev/sr0
     uv run python tools/disc_scan.py --toc /path/to/disc.toc   # reuse a capture
     uv run python tools/disc_scan.py --device /dev/sr0 --db rips/disc_scan.db
-    uv run python tools/disc_scan.py --deep /path/to/dump.subcode  # raw Q-channel
+    uv run python tools/disc_scan.py --deep /path/to/dump.subcode  # pre-captured
     uv run python tools/disc_scan.py --toc disc.toc --deep dump.subcode  # both
+    # Full auto pipeline: cdrdao TOC + redumper subchannel rip to a tempdir,
+    # scan, update db, print, then discard the rip (needs redumper; ~minutes):
+    REDUMPER=path/to/redumper uv run python tools/disc_scan.py --device /dev/sr0 --deep
 """
 
 from __future__ import annotations
 
 import argparse
+import os
 import re
+import shutil
 import sqlite3
 import subprocess
 import sys
@@ -215,6 +220,82 @@ def obtain_toc(device: str | None, toc_path: Path | None) -> bytes:
 # ---------------------------------------------------------------------------
 
 
+# Sentinel: ``--deep`` given with no path means "rip the disc now" (needs --device).
+_DEEP_AUTO = "@redumper-auto"
+
+# Fixed redumper output prefix. Using an explicit name on BOTH `dump` and
+# `dump::extra` means the second command augments the first's files without
+# having to parse redumper's auto-generated ``dump_<ts>_<drive>`` prefix.
+_REDUMPER_IMAGE_NAME = "scan"
+
+
+def resolve_redumper(explicit: str | None) -> str | None:
+    """Locate the redumper binary: --redumper, then $REDUMPER, then PATH.
+
+    The binary is a separate, often locally-built tool — never hardcode a path
+    into this tracked script.
+    """
+    return explicit or os.environ.get("REDUMPER") or shutil.which("redumper")
+
+
+def redumper_dump_argv(redumper: str, image_path: str, device: str | None) -> list[str]:
+    """argv for the primary subchannel dump (writes ``<name>.subcode``/.fulltoc)."""
+    argv = [
+        redumper,
+        "dump",
+        f"--image-path={image_path}",
+        f"--image-name={_REDUMPER_IMAGE_NAME}",
+        "--retries=5",
+    ]
+    if device:
+        argv.append(f"--drive={device}")
+    return argv
+
+
+def redumper_extra_argv(
+    redumper: str, image_path: str, device: str | None
+) -> list[str]:
+    """argv for the lead-in/lead-out pass that augments the dump (Plextor only)."""
+    argv = [
+        redumper,
+        "dump::extra",
+        f"--image-path={image_path}",
+        f"--image-name={_REDUMPER_IMAGE_NAME}",
+    ]
+    if device:
+        argv.append(f"--drive={device}")
+    return argv
+
+
+def run_redumper(redumper: str, image_path: str, device: str | None) -> Path:
+    """Rip the subchannel into *image_path*; return the ``.subcode`` path.
+
+    Runs ``dump`` (mandatory) then ``dump::extra`` (best-effort — the lead-in
+    capture only works on Plextor drives; its failure leaves the program-area
+    Q intact). redumper's progress is streamed to the terminal. Raises
+    SystemExit if the dump fails or produces no subcode.
+    """
+    dump_cmd = redumper_dump_argv(redumper, image_path, device)
+    print(f"Ripping subchannel (this takes several minutes):\n  {' '.join(dump_cmd)}")
+    if subprocess.run(dump_cmd).returncode != 0:  # noqa: S603
+        msg = "redumper dump failed"
+        raise SystemExit(msg)
+
+    extra_cmd = redumper_extra_argv(redumper, image_path, device)
+    print(f"Capturing lead-in (best-effort):\n  {' '.join(extra_cmd)}")
+    if subprocess.run(extra_cmd).returncode != 0:  # noqa: S603
+        print(
+            "  lead-in capture unavailable on this drive; program-area Q only",
+            file=sys.stderr,
+        )
+
+    subcode = Path(image_path) / f"{_REDUMPER_IMAGE_NAME}.subcode"
+    if not subcode.exists():
+        msg = f"redumper produced no subcode at {subcode}"
+        raise SystemExit(msg)
+    return subcode
+
+
 def deep_scan(subcode_path: Path) -> tuple[SubcodeScan, int | None]:
     """Decode a redumper ``.subcode``; lead-out from a sibling ``.fulltoc``.
 
@@ -341,18 +422,33 @@ def _print_stats(conn: sqlite3.Connection) -> None:
         print(f"  {typ:<14}  {loc:<24}  {count:>6}")
 
 
-def main(argv: list[str] | None = None) -> int:
+def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--device", default=None, help="optical device, e.g. /dev/sr0")
     p.add_argument("--toc", type=Path, default=None, help="reuse a captured .toc")
     p.add_argument(
         "--deep",
-        type=Path,
+        nargs="?",
+        const=_DEEP_AUTO,
         default=None,
-        help="redumper .subcode for raw Q-channel provenance (sibling .fulltoc "
-        "supplies the lead-out); composes with --toc/--device or runs standalone",
+        metavar="SUBCODE",
+        help="raw Q-channel provenance. With a path: use a pre-captured redumper "
+        ".subcode (sibling .fulltoc supplies the lead-out). With NO path (and "
+        "--device): rip the disc via redumper into a tempdir, scan, then discard "
+        "the rip. Composes with --toc/--device or runs standalone.",
+    )
+    p.add_argument(
+        "--redumper",
+        default=None,
+        help="path to the redumper binary for --deep auto-rip "
+        "(default: $REDUMPER, then PATH)",
     )
     p.add_argument("--db", type=Path, default=_DEFAULT_DB, help="sqlite db path")
+    return p
+
+
+def main(argv: list[str] | None = None) -> int:
+    p = _build_parser()
     args = p.parse_args(argv)
 
     if args.device is None and args.toc is None and args.deep is None:
@@ -377,14 +473,31 @@ def main(argv: list[str] | None = None) -> int:
         )
 
     if args.deep is not None:
-        scan, leadout = deep_scan(args.deep)
+        if args.deep == _DEEP_AUTO:
+            if args.device is None:
+                p.error("--deep with no path requires --device (to rip the disc)")
+            redumper = resolve_redumper(args.redumper)
+            if redumper is None:
+                msg = (
+                    "redumper not found — pass --redumper PATH, set $REDUMPER, "
+                    "or add redumper to PATH"
+                )
+                raise SystemExit(msg)
+            deep_stem = "auto"
+            # deep_scan reads the bytes immediately, so the multi-hundred-MB
+            # redumper byproducts (.scram/.state) are gone by the time we print.
+            with tempfile.TemporaryDirectory(prefix="disc_scan_deep_") as tmp:
+                scan, leadout = deep_scan(run_redumper(redumper, tmp, args.device))
+        else:
+            deep_stem = Path(args.deep).stem
+            scan, leadout = deep_scan(Path(args.deep))
         points += deep_points(scan)
         if disc_key is None:  # deep-only run: key on the MCN, else the file stem
             mcn = next(
                 (d.value for d in scan.data if d.type == "MCN" and d.value), None
             )
-            disc_key = f"mcn:{mcn}" if mcn else f"deep:{args.deep.stem}"
-            label = f"(deep-only {args.deep.stem})"
+            disc_key = f"mcn:{mcn}" if mcn else f"deep:{deep_stem}"
+            label = f"(deep-only {deep_stem})"
 
     if disc_key is None:  # unreachable: the arg check above guarantees a source
         msg = "no disc identity resolved"
