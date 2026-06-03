@@ -1157,3 +1157,28 @@ def test_p1_verify_meta_mismatch_falls_back_to_live_fetch() -> None:
         result = _verify_rg_path_for_disc(disc, verify_meta=other)
     m.assert_called_once()
     assert result is True
+
+
+def test_p1_populate_threads_verify_meta_end_to_end() -> None:
+    """P1 plumbing: populate_original_release threads verify_meta all the way to
+    the RG verify, so a disc-ID-matched disc makes no lookup_release round-trip.
+
+    Guards the 3->2 MB-call claim against a future hop dropping the argument
+    (which the live-fetch fallback would otherwise hide)."""
+    disc = _disc_with_tracks([(1, 1000, "Song", None)], release_id="rel-1")
+    verify_meta = _meta_with_tracks([(1, None, "Song", None)], mb_release_id="rel-1")
+    with (
+        patch(
+            "cdda2img.original_release._fetch_release_group",
+            return_value={
+                "title": "Album",
+                "first-release-date": "1983",
+                "secondary-type-list": [],
+            },
+        ),
+        patch("cdda2img.mb_lookup.lookup_release") as m,
+    ):
+        populate_original_release(disc, verify_meta=verify_meta)
+    m.assert_not_called()
+    assert disc.original_release_found is True
+    assert disc.original_release_year == 1983
