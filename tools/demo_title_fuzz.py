@@ -104,9 +104,15 @@ def _mock_candidates(album: str, artist: str) -> list[tuple[str, int]]:
 
 
 def _live_candidates(album: str, artist: str) -> list[tuple[str, int]]:
-    from cdda2img.original_release import _gather_artist_catalogue_via_mb
+    from cdda2img.original_release import (
+        _gather_artist_catalogue_metas_via_mb,
+        _parse_year,
+    )
 
-    return _gather_artist_catalogue_via_mb(artist, album)
+    metas = _gather_artist_catalogue_metas_via_mb(artist, album)
+    return [
+        (m.album, _parse_year(m.original_release_date) or 0) for m in metas if m.album
+    ]
 
 
 def trace(album: str, artist: str, live: bool) -> None:  # noqa: C901

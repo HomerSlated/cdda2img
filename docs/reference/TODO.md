@@ -54,23 +54,23 @@ checkpoint (run `make check` + tests + py3.10 at each). Do units in order
 - [x] **C4** · (LOW) F-007 — guard `compute_disc_id` against >99 tracks / negative offsets. Test.
 
 **Unit P — Performance**
-- [ ] **P1** · Thread `mb_result.meta` (already parsed by `prepopulate_from_mb`) into
+- [x] **P1** · Thread `mb_result.meta` (already parsed by `prepopulate_from_mb`) into
       `original_release` so `_verify_rg_path_for_disc` + `_fetch_release_group` stop re-fetching
       the same release/RG → **3 MB round-trips/disc → 2**. Precondition (already safe): the
       re-fetch only fires when `mb_release_id` is set = a real disc-ID match = in-hand meta valid.
       Verify the R3 four-gate verify still passes against the passed-in meta.
-- [ ] **P2** · Remove dead helpers `_best_fuzzy_match` and the tuple-returning
+- [x] **P2** · Remove dead helpers `_best_fuzzy_match` and the tuple-returning
       `_gather_artist_catalogue_via_mb` (reachable only from tests + `tools/demo_title_fuzz.py`);
       update those call sites.
 - [ ] **P3** · (optional / may defer) Extend the R7 cache to by-release-id / by-RG-id lookups.
 
 **Unit Q — Clarity (mostly comments/decisions; fold into the touching unit where possible)**
-- [ ] **Q1** · F-005 — resolve the dead `_R3_PER_TRACK_TOLERANCE_MS`: wire the intended per-track
+- [x] **Q1** · F-005 — resolve the dead `_R3_PER_TRACK_TOLERANCE_MS`: wire the intended per-track
       gate, or delete the constant. (Decide alongside the C-unit.)
-- [ ] **Q2** · Document (code comment) why the agreed-facts multi-match path's track-count gate is
+- [x] **Q2** · Document (code comment) why the agreed-facts multi-match path's track-count gate is
       intentionally unreachable — the RG is plurality-corroborated and the year is a group-level
       fact; only the pressing is left undetermined (by design).
-- [ ] **Q3** · ISRC-before-barcode ordering in the multi-match resolver: add a deliberate-decision
+- [x] **Q3** · ISRC-before-barcode ordering in the multi-match resolver: add a deliberate-decision
       comment (strict-unique ISRC winner makes it safe), or reorder to try the pressing-level
       barcode first.
 

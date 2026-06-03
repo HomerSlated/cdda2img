@@ -1341,7 +1341,9 @@ def _finalize_import(
     from cdda2img.original_release import populate_original_release
 
     _ui_status(ui, "Identifying original release…")
-    populate_original_release(disc)
+    # P1: thread the disc-ID prepop meta so the RG verify reuses it instead of
+    # re-fetching the disc's own MB release (saves one round-trip at 1 req/s).
+    populate_original_release(disc, verify_meta=mb_result.meta)
     # Trace the canonical result (DEBUG: the menu summary already shows it; keep
     # the normal UI clean). Same string as the menu/list/catalogue surfaces.
     log.debug("%s", format_original(disc))

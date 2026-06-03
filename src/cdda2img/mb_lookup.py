@@ -852,6 +852,15 @@ def _resolve_multimatch(
     Returns ``(winner, method)`` with method ``"isrc"`` / ``"mcn"`` / ``""``
     (no resolution). Pressing-level callers can then ``_merge_into_disc`` the
     winner so ``release_date`` (hence the disc's own year) becomes known.
+
+    Deliberate ordering (Q3): ISRC is tried *before* the MCN/barcode even though
+    the barcode is the more obviously "pressing-level" id. ``_disambiguate_by_isrcs``
+    only returns a candidate that is the *strict, unique* high scorer at
+    >= _MIN_ISRC_AGREE agreeing per-track ISRCs — recording-identity evidence
+    that cannot tie. A barcode, by contrast, is routinely *shared* across country
+    variants (DE + XE + …), so ``_disambiguate_by_mcn`` returns None on a
+    multi-hit; trying it first would not resolve those and would add no safety.
+    The strict-uniqueness of the ISRC winner is what makes ISRC-first safe.
     """
     winner = _disambiguate_by_isrcs(matches, disc)
     if winner is not None:
@@ -880,6 +889,16 @@ def _build_agreed_facts_meta(matches: list[DiscMeta], rg_id: str) -> DiscMeta:
     ``mb_release_id`` — genuinely undetermined across the multi-match, so we do
     not guess them. ``_merge_into_disc`` fills blanks only, so this never
     overwrites a value the disc already carries.
+
+    Q2 — why the R3 track-count gate is unreachable here (by design): because
+    ``mb_release_id`` is None, ``original_release._verify_rg_path_for_disc``
+    returns True without fetching, so the R3 tracklist verify (track-count /
+    sum-duration / ISRC / title gates) never runs for this path. That is
+    correct, not a gap: the RG itself is plurality-corroborated
+    (``_plurality_release_group``) and the year is a group-level fact every
+    dated candidate agreed on — only the specific *pressing* is undetermined, and
+    there is no single release to verify a tracklist against. Verifying against
+    an arbitrarily-chosen pressing would be the bug, not the absence of it.
     """
     group = [m for m in matches if m.mb_release_group_id == rg_id]
     years = {m.release_date[:4] for m in group if m.release_date}

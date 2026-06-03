@@ -10,10 +10,10 @@ from unittest.mock import patch
 
 from cdda2img.lookup_result import DiscMeta, TrackMeta
 from cdda2img.original_release import (
-    _best_fuzzy_match,
     _deny_match,
     _normalise_title,
     _parse_year,
+    _qualified_fuzzy_candidates,
     find_original_release,
     find_original_release_fuzzy,
     populate_original_release,
@@ -323,41 +323,49 @@ def test_deny_clean_pair_passes():
     assert _deny_match("Eliminator (Remastered)", "Eliminator") is None
 
 
+# These exercise the live fuzzy scorer _qualified_fuzzy_candidates (it returns
+# every qualifying DiscMeta, sorted earliest-year-then-score). Migrated from the
+# removed _best_fuzzy_match duplicate (Unit P2).
+
+
+def _fuzz_metas(specs: list[tuple[str, int]]) -> list[DiscMeta]:
+    return [
+        DiscMeta(album=title, original_release_date=str(year)) for title, year in specs
+    ]
+
+
 def test_fuzzy_matches_remaster_to_original():
-    hit = _best_fuzzy_match(
+    hits = _qualified_fuzzy_candidates(
         "Eliminator (2008 Remaster)",
-        [("Eliminator", 1983), ("Eliminator (2008 Remaster)", 2008)],
+        _fuzz_metas([("Eliminator", 1983), ("Eliminator (2008 Remaster)", 2008)]),
     )
-    assert hit is not None
-    title, year, _ = hit
-    assert title == "Eliminator"
-    assert year == 1983
+    assert hits  # at least one qualifies
+    assert hits[0].album == "Eliminator"  # earliest year wins
+    assert _parse_year(hits[0].original_release_date) == 1983
 
 
 def test_fuzzy_rejects_sequel_via_denylist():
     # "Led Zeppelin" should NOT match "Led Zeppelin II" even though token
     # overlap is high — deny-list catches it.
-    hit = _best_fuzzy_match(
-        "Led Zeppelin", [("Led Zeppelin II", 1969), ("Led Zeppelin", 1969)]
+    hits = _qualified_fuzzy_candidates(
+        "Led Zeppelin", _fuzz_metas([("Led Zeppelin II", 1969), ("Led Zeppelin", 1969)])
     )
-    assert hit is not None
-    assert hit[0] == "Led Zeppelin"
+    assert [h.album for h in hits] == ["Led Zeppelin"]
 
 
 def test_fuzzy_returns_none_below_cutoff():
-    hit = _best_fuzzy_match(
-        "OK Computer", [("OK Human", 2019), ("Burn The Witch", 2016)]
+    hits = _qualified_fuzzy_candidates(
+        "OK Computer", _fuzz_metas([("OK Human", 2019), ("Burn The Witch", 2016)])
     )
-    assert hit is None
+    assert hits == []
 
 
 def test_fuzzy_prefers_earliest_year():
-    hit = _best_fuzzy_match(
-        "Album",
-        [("Album", 2009), ("Album", 1985), ("Album", 1995)],
+    hits = _qualified_fuzzy_candidates(
+        "Album", _fuzz_metas([("Album", 2009), ("Album", 1985), ("Album", 1995)])
     )
-    assert hit is not None
-    assert hit[1] == 1985
+    assert hits
+    assert _parse_year(hits[0].original_release_date) == 1985
 
 
 def test_find_original_release_uses_fuzzy_when_no_rg():
@@ -1117,3 +1125,35 @@ def test_r12_status_ok_on_data():
     from cdda2img.cdda2img import _r12_status
 
     assert _r12_status(attempted=True, has_data=True, errored=False) == "OK"
+
+
+# ---------------------------------------------------------------------------
+# P1 — thread prepop meta into the RG verify (no redundant lookup_release)
+# ---------------------------------------------------------------------------
+
+
+def test_p1_verify_meta_skips_lookup_release() -> None:
+    """P1: a verify_meta matching disc.mb_release_id is used directly — the RG
+    verify makes no lookup_release round-trip."""
+    from cdda2img.original_release import _verify_rg_path_for_disc
+
+    disc = _disc_with_tracks([(1, 1000, "Song", None)], release_id="rel-1")
+    meta = _meta_with_tracks([(1, None, "Song", None)], mb_release_id="rel-1")
+    with patch("cdda2img.mb_lookup.lookup_release") as m:
+        result = _verify_rg_path_for_disc(disc, verify_meta=meta)
+    m.assert_not_called()
+    assert result is True
+
+
+def test_p1_verify_meta_mismatch_falls_back_to_live_fetch() -> None:
+    """P1 safety: a verify_meta for a DIFFERENT release is ignored; the disc's
+    own release is fetched live so correctness never depends on threading."""
+    from cdda2img.original_release import _verify_rg_path_for_disc
+
+    disc = _disc_with_tracks([(1, 1000, "Song", None)], release_id="rel-1")
+    other = _meta_with_tracks([(1, None, "Song", None)], mb_release_id="rel-OTHER")
+    live = _meta_with_tracks([(1, None, "Song", None)], mb_release_id="rel-1")
+    with patch("cdda2img.mb_lookup.lookup_release", return_value=live) as m:
+        result = _verify_rg_path_for_disc(disc, verify_meta=other)
+    m.assert_called_once()
+    assert result is True
