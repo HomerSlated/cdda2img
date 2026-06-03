@@ -216,6 +216,29 @@ not chase certainty the medium cannot provide.
 
 ---
 
+## ✅ DONE — disc_scan `--deep`: raw subchannel Q-channel provenance (2026-06-03)
+
+Groundwork for the "disc is gospel" authority model (Priority #3): true lead-in
+vs program-area provenance for MCN/ISRC, which the cdrdao `.toc` cannot give
+(it collapses subchannel region). New pure module `src/cdda2img/subchannel.py`
+decodes the Q-channel out of a redumper `.subcode` (Q = bit 6 of each subcode
+byte; CRC-16/GSM; ADR 1=position/TOC, 2=MCN, 3=ISRC), anchors the file's base
+LBA from program position frames (lead-in ADR=1 carries the TOC, not a
+position — excluded), and attributes each MCN/ISRC to lead-in or a program
+track with LBA spans. ISRC value-decode included (6-bit owner code + BCD
+digits). Lead-out from the sibling `.fulltoc` (point 0xA2). Wired as
+`tools/disc_scan.py --deep <subcode>` (standalone or with `--toc`/`--device`);
+stable-location rows feed the cross-disc stats, a rich per-disc table shows
+frame counts + LBA spans. Validated non-circularly on a PX-716A *American
+Idiot* capture: MCN `0093624877721`, ISRCs `USRE104008xx` (RE1 = Reprise, the
+disc's actual label), base LBA −45150 at 100% anchor agreement, program-area
+invalid-Q 314 vs redumper's logged 315 (the +1 is a lead-out-overread sector
+redumper counts and we exclude — a range-boundary difference, not a defect).
+`src/cdda2img/subchannel.py` + `tests/test_subchannel.py` (12 tests, real
+hex fixtures since `rips/` is gitignored). 704 tests (3.14 + 3.10); make check
+clean. ISRC 6-bit packing + Q-error-counter semantics read from
+`private/code/redumper`.
+
 ## ✅ DONE — AccurateRip v2 dual-confidence display (2026-05-31)
 
 `format_ar_report` (`accuraterip.py`) used an `if confidence_v1 … elif confidence_v2`

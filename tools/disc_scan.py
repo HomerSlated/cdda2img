@@ -30,10 +30,12 @@ Locations distinguished from the cdrdao ``.toc``:
 "Location" is an *attribution*, not a raw observation: cdrdao's ``.toc``
 collapses subchannel provenance, so the ``CATALOG`` line cannot distinguish a
 lead-in Q-channel MCN from a program-area one — both surface as one CATALOG.
-The distinction this tool *can* observe is the CD-Text copy (UPC_EAN / CD-Text
-ISRC) versus the Q-channel original (CATALOG / track ISRC) — i.e. "is the MCN
-also duplicated in CD-Text?". True lead-in-vs-program Q granularity would need a
-full ``read-cd --read-subchan`` rip and is out of scope.
+The distinction this tool *can* observe from the ``.toc`` is the CD-Text copy
+(UPC_EAN / CD-Text ISRC) versus the Q-channel original (CATALOG / track ISRC) —
+i.e. "is the MCN also duplicated in CD-Text?". True lead-in-vs-program Q
+granularity is available via ``--deep``: pass a redumper ``.subcode`` capture
+and :mod:`cdda2img.subchannel` decodes the raw Q-channel directly, attributing
+each MCN/ISRC to the lead-in or a specific program track (see below).
 
 cdrdao writes an all-zeros value for an absent MCN/ISRC (e.g.
 ``CATALOG "0000000000000"``); such values are treated as ABSENT and not recorded,
@@ -43,6 +45,8 @@ Usage (from project root):
     uv run python tools/disc_scan.py --device /dev/sr0
     uv run python tools/disc_scan.py --toc /path/to/disc.toc   # reuse a capture
     uv run python tools/disc_scan.py --device /dev/sr0 --db rips/disc_scan.db
+    uv run python tools/disc_scan.py --deep /path/to/dump.subcode  # raw Q-channel
+    uv run python tools/disc_scan.py --toc disc.toc --deep dump.subcode  # both
 """
 
 from __future__ import annotations
@@ -60,6 +64,7 @@ from pathlib import Path
 from cdda2img.cddb import compute_cddb_disc_id
 from cdda2img.cdrdao_reader import parsed_to_rbi_disc
 from cdda2img.mb_lookup import disc_id_from_rbi
+from cdda2img.subchannel import SubcodeScan, parse_fulltoc_leadout, scan_subcode
 from cdda2img.toc_parser import parse_toc
 
 _DEFAULT_DB = Path("rips/disc_scan.db")
@@ -206,6 +211,61 @@ def obtain_toc(device: str | None, toc_path: Path | None) -> bytes:
 
 
 # ---------------------------------------------------------------------------
+# Raw subchannel (--deep): true lead-in vs program-area Q provenance
+# ---------------------------------------------------------------------------
+
+
+def deep_scan(subcode_path: Path) -> tuple[SubcodeScan, int | None]:
+    """Decode a redumper ``.subcode``; lead-out from a sibling ``.fulltoc``.
+
+    The lead-out LBA bounds the program-area invalid-Q count; region
+    attribution does not need it. Returns (scan, leadout_lba).
+    """
+    data = subcode_path.read_bytes()
+    fulltoc = subcode_path.with_suffix(".fulltoc")
+    leadout = parse_fulltoc_leadout(fulltoc.read_bytes()) if fulltoc.exists() else None
+    return scan_subcode(data, leadout_lba=leadout), leadout
+
+
+def deep_points(scan: SubcodeScan) -> list[DataPoint]:
+    """Canonical (stable-location) data points for the DB and cross-disc stats.
+
+    Locations are deliberately free of per-disc frame counts / LBA spans so the
+    stats table can aggregate "how many discs carry MCN in program-area Q". The
+    quantitative detail is shown separately by :func:`_print_deep`.
+    """
+    pts: list[DataPoint] = []
+    for d in scan.data:
+        if d.type == "MCN":
+            region = "lead-in" if d.region == "lead-in" else "program"
+            pts.append(DataPoint("MCN", None, d.value or "", f"Q Mode-2 ({region})"))
+        elif d.type == "ISRC":
+            tno = int(d.region.split()[-1]) if d.region.startswith("track") else None
+            value = d.value or "(undecoded)"
+            pts.append(DataPoint("ISRC", tno, value, "Q Mode-3 (program track)"))
+    return pts
+
+
+def _print_deep(scan: SubcodeScan, leadout: int | None) -> None:
+    """Rich per-disc view of the raw Q-channel provenance."""
+    print()
+    print("  Raw subchannel (Q) provenance — redumper .subcode")
+    base = "unanchored" if scan.base_lba is None else str(scan.base_lba)
+    summary = (
+        f"  base LBA {base} (anchor agreement {scan.base_agreement:.1%}); "
+        f"valid Q {scan.valid_q}, invalid Q {scan.invalid_q}"
+    )
+    if scan.program_invalid_q is not None:
+        summary += f" (program-area {scan.program_invalid_q}, lead-out {leadout})"
+    print(summary)
+    print(f"  {'Type':<5} {'Region':<10} {'Frames':>6}  {'Value':<14}  LBA span")
+    print(f"  {'─' * 5} {'─' * 10} {'─' * 6}  {'─' * 14}  {'─' * 20}")
+    for d in scan.data:
+        span = f"[{d.lba_min}..{d.lba_max}]" if d.lba_min is not None else "—"
+        print(f"  {d.type:<5} {d.region:<10} {d.count:>6}  {d.value or '':<14}  {span}")
+
+
+# ---------------------------------------------------------------------------
 # SQLite persistence
 # ---------------------------------------------------------------------------
 
@@ -285,23 +345,57 @@ def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--device", default=None, help="optical device, e.g. /dev/sr0")
     p.add_argument("--toc", type=Path, default=None, help="reuse a captured .toc")
+    p.add_argument(
+        "--deep",
+        type=Path,
+        default=None,
+        help="redumper .subcode for raw Q-channel provenance (sibling .fulltoc "
+        "supplies the lead-out); composes with --toc/--device or runs standalone",
+    )
     p.add_argument("--db", type=Path, default=_DEFAULT_DB, help="sqlite db path")
     args = p.parse_args(argv)
 
-    toc_bytes = obtain_toc(args.device, args.toc)
-    text = toc_bytes.decode("latin-1", "replace")
+    if args.device is None and args.toc is None and args.deep is None:
+        p.error("provide --toc/--device and/or --deep")
 
-    points = scan_toc_text(text)
-    derived, disc_key, cddb_id, n_tracks = _derived_points(toc_bytes)
-    points += derived
+    points: list[DataPoint] = []
+    disc_key: str | None = None
+    cddb_id = ""
+    n_tracks = 0
+    label = "(untitled)"
+    scan: SubcodeScan | None = None
+    leadout: int | None = None
 
-    label = next((p.raw_value for p in points if p.type == "Album title"), "(untitled)")
+    if args.device is not None or args.toc is not None:
+        toc_bytes = obtain_toc(args.device, args.toc)
+        text = toc_bytes.decode("latin-1", "replace")
+        points += scan_toc_text(text)
+        derived, disc_key, cddb_id, n_tracks = _derived_points(toc_bytes)
+        points += derived
+        label = next(
+            (pt.raw_value for pt in points if pt.type == "Album title"), "(untitled)"
+        )
 
+    if args.deep is not None:
+        scan, leadout = deep_scan(args.deep)
+        points += deep_points(scan)
+        if disc_key is None:  # deep-only run: key on the MCN, else the file stem
+            mcn = next(
+                (d.value for d in scan.data if d.type == "MCN" and d.value), None
+            )
+            disc_key = f"mcn:{mcn}" if mcn else f"deep:{args.deep.stem}"
+            label = f"(deep-only {args.deep.stem})"
+
+    if disc_key is None:  # unreachable: the arg check above guarantees a source
+        msg = "no disc identity resolved"
+        raise RuntimeError(msg)
     conn = _open_db(args.db)
     try:
         _store(conn, disc_key, cddb_id, n_tracks, label, points)
         print(f"\n  Disc: {label}   (disc key {disc_key})")
         _print_disc_table(points)
+        if scan is not None:
+            _print_deep(scan, leadout)
         _print_stats(conn)
     finally:
         conn.close()
