@@ -18,7 +18,7 @@ checkpoint (run `make check` + tests + py3.10 at each). Do units in order
 `mb_release_id` invariant work). Commit per unit so the plan survives interruption.
 
 **Unit S — Security (HIGH; do first)**
-- [ ] **S1** · `toc.py:128` — make the track-title TITLE line injection-safe (GRD-…-01).
+- [x] **S1** · `toc.py:128` — make the track-title TITLE line injection-safe (GRD-…-01).
       **NOT a one-liner** — investigated 2026-05-31, the naive "wrap in `sanitize_title()`" is
       wrong twice:
       1. `sanitize_title` (toc.py:24) converts `"`→`'` but does NOT strip ASCII control chars,
@@ -33,25 +33,25 @@ checkpoint (run `make check` + tests + py3.10 at each). Do units in order
       chars, KEEP non-ASCII) — likely a new `escape_toc_string()` helper, with `sanitize_title`
       delegating to it for the control-char + quote handling. Regression test: a title with `"`
       + newline cannot inject TOC directives, AND a non-ASCII title is preserved (not stripped).
-- [ ] **S2a** · Spec-first (spec-before-code): define a PROV value-escaping scheme in
+- [x] **S2a** · Spec-first (spec-before-code): define a PROV value-escaping scheme in
       `docs/reference/rbi_spec.md` §6.3 — escape `\n`/`\r` (and decide `=` handling) in values.
-- [ ] **S2b** · Implement symmetric escape in `build_prov_block` (`container.py:135`) + unescape
+- [x] **S2b** · Implement symmetric escape in `build_prov_block` (`container.py:135`) + unescape
       in `_parse_provenance` (GRD-…-02). Regression test: a newline-bearing
       `original_release_title` round-trips without forging a standalone `mb_release_id=` line.
-- [ ] **S3** · (LOW) `toc.py:121` ISRC written raw — already mitigated by `validate_isrc`;
+- [x] **S3** · (LOW) `toc.py:121` ISRC written raw — already mitigated by `validate_isrc`;
       confirm + add a defensive test, or fold into S1.
 
 **Unit C — Correctness**
-- [ ] **C1** · F-001 — `_merge_into_disc` / `_overwrite_disc` (`mb_lookup.py`) rebuild `RBIDisc`
+- [x] **C1** · F-001 — `_merge_into_disc` / `_overwrite_disc` (`mb_lookup.py`) rebuild `RBIDisc`
       by hand and drop `pre_emphasis` (+ `discogs_release_id` in overwrite) → the R14 ≤1986 cap
       is dead after any merge. Use `dataclasses.replace`. Test: merged disc retains `pre_emphasis`.
-- [ ] **C2** · F-002 — `_resolve_via_isrc_tally` sets a *recording-level* `mb_release_id` (the
+- [x] **C2** · F-002 — `_resolve_via_isrc_tally` sets a *recording-level* `mb_release_id` (the
       proven sibling of last night's AcoustID fix). `replace(winner, mb_release_id=None)`; keep
       the RG. Test: the zero-disc-ID-match path leaves `mb_release_id` None.
-- [ ] **C3** · F-003 — add `"discids"` to the `get_releases_by_discid` includes so
+- [x] **C3** · F-003 — add `"discids"` to the `get_releases_by_discid` includes so
       `_find_disc_medium` matches on multi-disc releases (else mediums flatten + track numbers
       collide across discs). Multi-disc fixture test.
-- [ ] **C4** · (LOW) F-007 — guard `compute_disc_id` against >99 tracks / negative offsets. Test.
+- [x] **C4** · (LOW) F-007 — guard `compute_disc_id` against >99 tracks / negative offsets. Test.
 
 **Unit P — Performance**
 - [ ] **P1** · Thread `mb_result.meta` (already parsed by `prepopulate_from_mb`) into

@@ -17,11 +17,13 @@ from cdda2img.lookup_result import (
 )
 from cdda2img.mb_lookup import (
     _disambiguate_by_mcn,
+    _find_disc_medium,
     _merge_into_disc,
     _overwrite_disc,
     _parse_release,
     _parse_year,
     _plurality_release_group,
+    _resolve_via_isrc_tally,
     compute_disc_id,
     disc_id_from_rbi,
     lookup_disc_id,
@@ -1072,7 +1074,9 @@ def test_r4_isrc_tally_converges_above_floor():
         result = _resolve_via_isrc_tally(disc)
 
     assert result is not None
-    assert result.mb_release_id == "rid-w"
+    assert result.album == "Album"  # the convergent winner was picked
+    # F-002: the recording-level release id is nulled (not disc-ID-verified).
+    assert result.mb_release_id is None
 
 
 def test_r4_isrc_tally_tie_returns_none():
@@ -1120,6 +1124,99 @@ def test_prepopulate_zero_matches_triggers_r4_tally():
     ):
         r = prepopulate_from_mb(disc, verbose=False)
     assert r.disc.artist == "Found Artist"
-    assert r.disc.mb_release_id == "rid-w"
+    # F-002: the R4 tally merges album/artist/RG but must NOT write a
+    # recording-level mb_release_id as authoritative release provenance.
+    assert r.disc.mb_release_id is None
     assert r.match_count == 0  # disc-ID returned nothing
     assert r.isrc_disambiguated is False  # R4 path doesn't set this
+
+
+# ---------------------------------------------------------------------------
+# Unit C — correctness fixes (agent audit, Priority #1)
+# ---------------------------------------------------------------------------
+
+
+def test_merge_preserves_pre_emphasis():
+    """C1/F-001: pre_emphasis (gates the R14 year cap) survives a merge."""
+    meta = _make_meta_disc()
+    disc = _make_disc(tracks=[(1, 0, 10000), (2, 10000, 9000)])
+    disc.pre_emphasis = True
+    result = _merge_into_disc(meta, disc)
+    assert result.pre_emphasis is True
+
+
+def test_overwrite_preserves_pre_emphasis_and_discogs():
+    """C1/F-001: overwrite previously dropped pre_emphasis AND discogs_release_id."""
+    meta = _make_meta_disc()
+    disc = _make_disc(tracks=[(1, 0, 10000), (2, 10000, 9000)])
+    disc.pre_emphasis = True
+    disc.discogs_release_id = 4567
+    result = _overwrite_disc(meta, disc)
+    assert result.pre_emphasis is True
+    assert result.discogs_release_id == 4567
+
+
+def test_resolve_via_isrc_tally_nulls_recording_level_release_id():
+    """C2/F-002: the ISRC-tally winner must not carry a recording-level release id."""
+    disc = _make_disc(tracks=[(1, 0, 10000), (2, 10000, 9000), (3, 19000, 8000)])
+    for i, t in enumerate(disc.tracks):
+        t.isrc = f"USXX101000{i + 1:02d}"
+    winner = DiscMeta(
+        album="A",
+        artist="B",
+        mb_release_id="recording-level-release-uuid",
+        mb_release_group_id="rg-uuid",
+    )
+    with patch("cdda2img.mb_lookup.lookup_isrc", return_value=[winner]):
+        result = _resolve_via_isrc_tally(disc)
+    assert result is not None
+    assert result.mb_release_id is None  # nulled — not disc-ID-verified
+    assert (
+        result.mb_release_group_id == "rg-uuid"
+    )  # RG kept for original-release lookup
+
+
+def test_find_disc_medium_selects_correct_medium():
+    """C3/F-003: with disc-list present, the matching medium is chosen, not flattened."""
+    medium_list = [
+        {"position": "1", "disc-list": [{"id": "disc-A"}], "track-list": []},
+        {"position": "2", "disc-list": [{"id": "disc-B"}], "track-list": []},
+    ]
+    assert _find_disc_medium(medium_list, "disc-B") is medium_list[1]
+    assert _find_disc_medium(medium_list, "disc-A") is medium_list[0]
+    assert _find_disc_medium(medium_list, "disc-Z") is None
+
+
+def test_lookup_disc_id_requests_discids_include():
+    """C3/F-003: lookup must ask MB for "discids" so disc-list is populated."""
+    disc = _make_disc(tracks=[(1, 0, 12345), (2, 12345, 6789)])
+    captured: dict = {}
+
+    def _fake(disc_id_str, includes):
+        captured["includes"] = includes
+        return {"disc": {"release-list": []}}
+
+    with (
+        patch("musicbrainzngs.get_releases_by_discid", side_effect=_fake),
+        patch("cdda2img.lookup_cache.get_cached_disc_id_lookup", return_value=None),
+        patch("cdda2img.lookup_cache.put_cached_disc_id_lookup"),
+    ):
+        lookup_disc_id(disc)
+    assert "discids" in captured["includes"]
+
+
+def test_compute_disc_id_rejects_too_many_offsets():
+    with pytest.raises(ValueError):
+        compute_disc_id(1, 99, [150] * 100, 300000)
+
+
+def test_compute_disc_id_rejects_negative_offset():
+    with pytest.raises(ValueError):
+        compute_disc_id(1, 2, [150, -5], 300000)
+
+
+def test_compute_disc_id_rejects_out_of_range_track_numbers():
+    with pytest.raises(ValueError):
+        compute_disc_id(0, 2, [150, 10000], 300000)
+    with pytest.raises(ValueError):
+        compute_disc_id(1, 100, [150, 10000], 300000)

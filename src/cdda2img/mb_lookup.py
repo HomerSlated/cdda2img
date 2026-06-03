@@ -25,6 +25,7 @@ import hashlib
 import importlib.metadata
 import logging
 from collections import Counter
+from dataclasses import replace
 from typing import NamedTuple
 
 import musicbrainzngs  # type: ignore[import-untyped]
@@ -81,7 +82,21 @@ def compute_disc_id(
     The hash input is an 804-char uppercase-hex ASCII string (NOT raw bytes) —
     see this module's docstring for the full spec. Verified against libdiscid
     output for ZZ Top *Eliminator* (EU 1983, MB pressing nRQLbh4...).
+
+    Raises ValueError on inputs the fixed-width hex format cannot represent
+    faithfully: track numbers outside 1..99, more than 99 offsets, or any
+    negative offset (a negative ``{:08X}`` emits a sign and breaks the 804-char
+    layout, silently producing a wrong — but plausible — disc ID; F-007).
     """
+    if not 1 <= first_track <= 99 or not 1 <= last_track <= 99:
+        msg = f"track numbers must be in 1..99, got {first_track}..{last_track}"
+        raise ValueError(msg)
+    if len(track_offsets) > 99:
+        msg = f"at most 99 track offsets supported, got {len(track_offsets)}"
+        raise ValueError(msg)
+    if lead_out_offset < 0 or any(o < 0 for o in track_offsets):
+        msg = "track and lead-out offsets must be non-negative"
+        raise ValueError(msg)
     parts = [f"{first_track:02X}", f"{last_track:02X}", f"{lead_out_offset:08X}"]
     for i in range(99):
         parts.append(f"{(track_offsets[i] if i < len(track_offsets) else 0):08X}")
@@ -341,7 +356,18 @@ def lookup_disc_id(disc: RBIDisc) -> list[DiscMeta]:
     try:
         result = musicbrainzngs.get_releases_by_discid(
             disc_id_str,
-            includes=["artists", "recordings", "release-groups", "labels", "isrcs"],
+            # F-003: "discids" populates each medium's disc-list so
+            # _find_disc_medium can pick the *correct* medium on a multi-disc
+            # release; without it the mediums flatten and track numbers collide
+            # across discs.
+            includes=[
+                "artists",
+                "recordings",
+                "release-groups",
+                "labels",
+                "isrcs",
+                "discids",
+            ],
         )
     except musicbrainzngs.ResponseError as exc:
         log.debug("MusicBrainz disc ID lookup failed: %s", exc)
@@ -576,7 +602,12 @@ def _merge_into_disc(meta: DiscMeta, disc: RBIDisc) -> RBIDisc:
         else:
             new_tracks.append(entry)
 
-    return RBIDisc(
+    # F-001: build with dataclasses.replace so disc-only fields (pre_emphasis —
+    # which gates the R14 ≤1986 cap — low_dynamic_range, original_release_*,
+    # disc_id) are carried over verbatim and can never be silently dropped when
+    # RBIDisc gains a field. Only the merged fields are named.
+    return replace(
+        disc,
         album=album,
         artist=artist,
         disc_number=(
@@ -586,16 +617,11 @@ def _merge_into_disc(meta: DiscMeta, disc: RBIDisc) -> RBIDisc:
             meta.disc_total if meta.disc_total is not None else disc.disc_total
         ),
         catalog=catalog,
-        disc_id=disc.disc_id,
         tracks=new_tracks,
         release_date=disc.release_date or meta.release_date or None,
         original_release_date=disc.original_release_date
         or meta.original_release_date
         or None,
-        low_dynamic_range=disc.low_dynamic_range,
-        original_release_found=disc.original_release_found,
-        original_release_title=disc.original_release_title,
-        original_release_year=disc.original_release_year,
         mb_release_id=disc.mb_release_id or meta.mb_release_id or None,
         mb_release_group_id=disc.mb_release_group_id
         or meta.mb_release_group_id
@@ -635,7 +661,12 @@ def _overwrite_disc(meta: DiscMeta, disc: RBIDisc) -> RBIDisc:
         else:
             new_tracks.append(entry)
 
-    return RBIDisc(
+    # F-001: dataclasses.replace preserves disc-only fields (pre_emphasis etc.).
+    # The original hand-built RBIDisc here dropped both pre_emphasis AND
+    # discogs_release_id; the latter is restored explicitly with overwrite's
+    # meta-first preference.
+    return replace(
+        disc,
         album=meta.album or disc.album,
         artist=meta.artist or disc.artist,
         disc_number=(
@@ -645,20 +676,16 @@ def _overwrite_disc(meta: DiscMeta, disc: RBIDisc) -> RBIDisc:
             meta.disc_total if meta.disc_total is not None else disc.disc_total
         ),
         catalog=meta.catalog or disc.catalog,
-        disc_id=disc.disc_id,
         tracks=new_tracks,
         release_date=meta.release_date or disc.release_date or None,
         original_release_date=meta.original_release_date
         or disc.original_release_date
         or None,
-        low_dynamic_range=disc.low_dynamic_range,
-        original_release_found=disc.original_release_found,
-        original_release_title=disc.original_release_title,
-        original_release_year=disc.original_release_year,
         mb_release_id=meta.mb_release_id or disc.mb_release_id or None,
         mb_release_group_id=meta.mb_release_group_id
         or disc.mb_release_group_id
         or None,
+        discogs_release_id=meta.discogs_release_id or disc.discogs_release_id,
         set_title=meta.set_title or disc.set_title,
     )
 
@@ -739,7 +766,12 @@ def _resolve_via_isrc_tally(disc: RBIDisc) -> DiscMeta | None:
     if len(ranked) > 1 and ranked[1][1] == top_count:
         log.debug("R4: tied top tally %d — no auto-merge", top_count)
         return None
-    return candidates[top_rid]
+    # F-002: the tally key (and thus candidate.mb_release_id) is a *recording*'s
+    # release, reached via ISRC — not a disc-ID-verified release for THIS disc.
+    # Null it so it is never written as authoritative release provenance (the
+    # same invariant as the AcoustID path); the release-group id, which the
+    # original-release lookup needs, is kept.
+    return replace(candidates[top_rid], mb_release_id=None)
 
 
 def _disambiguate_by_isrcs(matches: list[DiscMeta], disc: RBIDisc) -> DiscMeta | None:
