@@ -16,8 +16,10 @@ import pytest
 from cdda2img.concat import concat_wav
 from cdda2img.container import (
     ExtractOptions,
+    _parse_provenance,
     _release_intelligence_line,
     build_container,
+    build_prov_block,
     extract_data,
     read_header,
     verify_container,
@@ -317,6 +319,44 @@ def test_prov_block_present(built_containers):
     assert "created" in pairs
     assert pairs.get("mode") == "create"
     assert pairs.get("ripper") == "file"
+
+
+def _roundtrip_prov(data: dict[str, str]) -> dict[str, str]:
+    parsed = _parse_provenance(build_prov_block(data))
+    parsed.pop("creator", None)
+    parsed.pop("created", None)
+    return parsed
+
+
+def test_prov_value_with_special_chars_round_trips():
+    """Newline / CR / backslash / `=` survive a build→parse round-trip (§6.3.4)."""
+    data = {
+        "source": "line1\nline2\r\nwith=equals and \\ backslash",
+        "original_release_title": "Title\\",  # trailing backslash
+    }
+    assert _roundtrip_prov(data) == data
+
+
+def test_prov_newline_in_value_cannot_forge_record():
+    """GRD-2026-0531-02: an embedded newline must not inject a fake key=value."""
+    data = {"original_release_title": "Real\nmb_release_id=FORGED-VERIFIED"}
+    parsed = _roundtrip_prov(data)
+    # The payload stays in the value; no forged top-level key appears.
+    assert parsed == data
+    assert "mb_release_id" not in parsed
+
+
+def test_prov_unicode_line_separators_cannot_forge_record():
+    """split('\\n') (not splitlines) means U+2028/0B/85 can't split a record.
+
+    str.splitlines() would break on these; the parser must not, or an escaped
+    value carrying one would forge a pair.
+    """
+    for sep in ("\u2028", "\u2029", "\x0b", "\x0c", "\x85", "\x1c", "\x1d", "\x1e"):
+        data = {"source": f"a{sep}mb_release_id=FORGED"}
+        parsed = _roundtrip_prov(data)
+        assert parsed == data
+        assert "mb_release_id" not in parsed
 
 
 def test_prov_block_absent_when_not_passed(tmp_path_factory, wav_tracks):

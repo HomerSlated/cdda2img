@@ -121,18 +121,61 @@ class TempFiles:
 # ---------------------------------------------------------------------------
 
 
+def _escape_prov(s: str) -> str:
+    """Escape a PROV key/value so it cannot forge line structure (spec §6.3.4).
+
+    Backslash first so a literal backslash can't collide with an introduced
+    escape; then the only line terminator (U+000A) and CR. PROV is an integrity
+    surface — a raw newline in a free-text value would otherwise inject a fake
+    ``key=value`` provenance record (GRD-2026-0531-02).
+    """
+    return s.replace("\\", "\\\\").replace("\n", "\\n").replace("\r", "\\r")
+
+
+def _unescape_prov(s: str) -> str:
+    """Inverse of :func:`_escape_prov` (spec §6.3.4).
+
+    Scans left to right so ``\\\\`` is consumed as one literal backslash rather
+    than re-interpreted; an undefined ``\\x`` sequence (or a trailing backslash)
+    is preserved verbatim.
+    """
+    out: list[str] = []
+    i, n = 0, len(s)
+    while i < n:
+        if s[i] == "\\" and i + 1 < n:
+            nxt = s[i + 1]
+            if nxt == "\\":
+                out.append("\\")
+                i += 2
+                continue
+            if nxt == "n":
+                out.append("\n")
+                i += 2
+                continue
+            if nxt == "r":
+                out.append("\r")
+                i += 2
+                continue
+        out.append(s[i])
+        i += 1
+    return "".join(out)
+
+
 def build_prov_block(data: dict[str, str]) -> bytes:
     """Serialise a provenance dict as UTF-8 key=value text (one pair per line).
 
     Always prepends ``creator`` and ``created``; caller-supplied values override
-    if those keys are present in *data*.
+    if those keys are present in *data*. Keys and values are escaped per spec
+    §6.3.4 so a free-text value cannot forge additional provenance records.
     """
     merged: dict[str, str] = {
         "creator": f"cdda2img v{_TOOL_VERSION}",
         "created": datetime.datetime.now(datetime.timezone.utc).isoformat(),
     }
     merged.update(data)
-    return "\n".join(f"{k}={v}" for k, v in merged.items()).encode("utf-8")
+    return "\n".join(
+        f"{_escape_prov(str(k))}={_escape_prov(str(v))}" for k, v in merged.items()
+    ).encode("utf-8")
 
 
 # ---------------------------------------------------------------------------
@@ -733,21 +776,23 @@ def _fmt_duration(seconds: float) -> str:
 def _parse_provenance(prov_bytes: bytes) -> dict[str, str]:
     """Parse a PROV block into a key→value dict.
 
-    Splits on the first ``=`` only (values may contain ``=``). Skips blank
-    lines and lines starting with ``#``. Per spec §6.3, value whitespace is
-    significant and is not stripped.
+    Splits lines on U+000A only (per spec §6.3.4 — *not* ``str.splitlines()``,
+    which also breaks on U+000B/0C/85/2028/2029 and would let an escaped value
+    forge a record), partitions on the first ``=`` (values may contain ``=``),
+    then unescapes key and value. Skips blank lines and lines starting with
+    ``#``. Value whitespace is significant and is not stripped.
     """
     try:
         text = prov_bytes.decode("utf-8")
     except UnicodeDecodeError:
         return {}
     result: dict[str, str] = {}
-    for line in text.splitlines():
+    for line in text.split("\n"):
         if not line or line.startswith("#"):
             continue
         if "=" in line:
             key, _, value = line.partition("=")
-            result[key] = value
+            result[_unescape_prov(key)] = _unescape_prov(value)
     return result
 
 

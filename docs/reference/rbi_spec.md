@@ -318,7 +318,7 @@ The PCM block contains only sample data — no RIFF header or chunk structure. A
 
 ### 6.3 PROV Block (`b"PROV"`)
 
-The PROV block stores provenance and extended metadata that has no natural home in the standard cdrdao TOC format. It is UTF-8 encoded plain text: one `key=value` pair per line, terminated by `\n`. Lines beginning with `#` are comments and **MUST** be ignored by readers. A reader **MUST** ignore any key it does not recognise.
+The PROV block stores provenance and extended metadata that has no natural home in the standard cdrdao TOC format. It is UTF-8 encoded plain text: one `key=value` pair per line, terminated by `\n` (U+000A). Readers **MUST** split the block into lines on U+000A **only** — not on other Unicode line separators (U+000D, U+000B, U+000C, U+0085, U+2028, U+2029, …) — and **MUST** apply the value encoding of §6.3.4 before interpreting any pair. Lines beginning with `#` are comments and **MUST** be ignored by readers. A reader **MUST** ignore any key it does not recognise.
 
 #### 6.3.1 Key reference
 
@@ -355,7 +355,23 @@ The PROV block stores provenance and extended metadata that has no natural home 
 
 All keys are optional. A v4.0 writer **SHOULD** emit at minimum `creator` and `created`. A reader **MUST NOT** fail on a missing key.
 
-Values may contain any UTF-8 character except `\n`. Leading and trailing whitespace in values is significant and **MUST** be preserved.
+Leading and trailing whitespace in values is significant and **MUST** be preserved.
+
+#### 6.3.4 Value encoding (escaping)
+
+PROV is an integrity surface: a reader or auditor treats each `key=value` pair as an authentic provenance record. Free-text values (e.g. `source`, `original_release_title`) may originate from remote metadata and could otherwise contain a literal newline, which — written verbatim — would forge additional pairs (e.g. a fabricated `mb_release_id=`). To make pairs unforgeable, the line-structuring characters are backslash-escaped.
+
+On **write**, in both the key and the value, the writer **MUST** apply these substitutions in order:
+
+1. `\` (U+005C) → `\\`
+2. newline (U+000A) → `\n` (backslash, `n`)
+3. carriage return (U+000D) → `\r` (backslash, `r`)
+
+The `\`-first ordering makes the transform unambiguous (a literal backslash in the input cannot collide with an introduced escape).
+
+On **read**, after splitting on U+000A and partitioning each raw line on its first `=`, the reader **MUST** unescape the key and value by scanning left to right: `\\` → `\`, `\n` → U+000A, `\r` → U+000D. A backslash followed by any other character (or a trailing backslash) is preserved literally as the backslash plus that character. (Partitioning before unescaping is safe because no escape sequence produces a `=`.)
+
+Because the only line terminator is U+000A and U+000A is always escaped inside an encoded pair, no value can introduce a spurious line break: the escaping is complete with respect to the line grammar. `=` is **not** escaped — values may contain `=` (the split takes the first `=` only), and keys are drawn from the controlled set in §6.3.1 and never contain `=`.
 
 #### 6.3.2 Release intelligence
 
