@@ -1,5 +1,5 @@
 """
-toc.py — TOC generation and track duration utilities.
+toc.py - TOC generation and track duration utilities.
 """
 
 import json
@@ -16,22 +16,50 @@ _TITLE_REPLACEMENTS: dict[str, str] = {
     "\u201c": '"',  # left double quote
     "\u201d": '"',  # right double quote
     "\u2013": "-",  # en dash
-    "\u2014": "-",  # em dash
+    "—": "-",  # em dash
     "\u2026": "...",  # ellipsis
 }
+
+# Control characters (incl. newline/CR/tab and DEL) - these must never reach a
+# quoted TOC string: a newline breaks out of the string and lets the rest of the
+# value inject arbitrary cdrdao TOC directives.
+_CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f]")
+
+
+def escape_toc_string(text: str) -> str:
+    """Make *text* safe to embed inside a cdrdao TOC ``"..."`` string.
+
+    cdrdao's TOC lexer (verified against its ANTLR grammar) treats ``\\`` as an
+    escape introducer inside strings - ``\\"`` is a literal quote, ``\\NNN`` an
+    octal escape - so a value ending in a lone backslash would escape the closing
+    delimiter. This neutralises all three injection vectors:
+
+    1. strip control characters (newline/CR/tab/DEL) so the value cannot break
+       onto a new TOC line;
+    2. double every backslash so cdrdao reads it as a literal, never as an escape
+       (this also neutralises ``\\NNN`` octal and ``\\"`` sequences);
+    3. convert the ``"`` delimiter to ``'``.
+
+    Non-ASCII is preserved - callers needing ASCII-only output (see
+    :func:`sanitize_title`) strip it separately.
+    """
+    text = _CONTROL_CHARS.sub("", text)
+    text = text.replace("\\", "\\\\")
+    return text.replace('"', "'")
 
 
 def sanitize_title(text: str) -> str:
     """Sanitize a track or album title for embedding in the TOC.
 
-    The TOC format uses double-quote as a string delimiter, so any `"` that
-    remains after Unicode replacement is converted to `'` to keep the grammar valid.
+    Replaces common Unicode punctuation with ASCII, strips a leading track
+    number and any remaining non-ASCII, then applies :func:`escape_toc_string`
+    so the result is both ASCII-only (for CD-Text) and injection-safe.
     """
     for bad, good in _TITLE_REPLACEMENTS.items():
         text = text.replace(bad, good)
     text = re.sub(r"^\d{1,2}[-. ]+", "", text)
     text = re.sub(r"[^\x00-\x7F]+", "", text)
-    return text.replace('"', "'")
+    return escape_toc_string(text)
 
 
 def get_track_durations(wav_files: list[Path]) -> list[int]:
@@ -94,9 +122,7 @@ def generate_toc(
     if artist:
         disc_text_lines.append(f'    PERFORMER "{artist}"')
     if disc.disc_id:
-        disc_text_lines.append(
-            f'    DISC_ID "{disc.disc_id.replace(chr(34), chr(39))}"'
-        )
+        disc_text_lines.append(f'    DISC_ID "{escape_toc_string(disc.disc_id)}"')
 
     if disc_text_lines:
         lines += [
@@ -118,14 +144,20 @@ def generate_toc(
             else []
         )
 
-        isrc_lines = [f'ISRC "{track.isrc}"'] if track.isrc else []
+        # ISRC is validated upstream (validate_isrc -> [A-Z0-9]{12}); escape it
+        # anyway so a serialiser-boundary regression can't become an injection.
+        isrc_lines = [f'ISRC "{escape_toc_string(track.isrc)}"'] if track.isrc else []
         start_lines = (
             [f"START {track.pregap_timestamp}"] if track.pregap_frames > 0 else []
         )
 
         track_cdtext_lines = []
         if track.title:
-            track_cdtext_lines.append(f'    TITLE "{track.title}"')
+            # GRD-2026-0531-01: track.title is free-text from MB/CDDB and reaches
+            # cdrdao raw. Escape (preserving non-ASCII) so it cannot inject TOC
+            # directives; the exact Unicode title is still recoverable from the
+            # TRACK_TITLE_UNICODE comment above for FLAC extraction.
+            track_cdtext_lines.append(f'    TITLE "{escape_toc_string(track.title)}"')
         track_performer = sanitize_title(track.performer) or sanitize_title(disc.artist)
         if track_performer:
             track_cdtext_lines.append(f'    PERFORMER "{track_performer}"')

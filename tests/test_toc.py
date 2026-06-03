@@ -5,7 +5,7 @@ test_toc.py — Round-trip and canonical-format tests for generate_toc / parse_t
 from cdda2img.barcode import normalize_barcode
 from cdda2img.cdrdao_reader import parsed_to_rbi_disc
 from cdda2img.rbi_format import RBIDisc, RBITocEntry
-from cdda2img.toc import generate_toc, sanitize_title
+from cdda2img.toc import escape_toc_string, generate_toc, sanitize_title
 from cdda2img.toc_parser import parse_toc
 
 # ---------------------------------------------------------------------------
@@ -305,3 +305,82 @@ def test_normalize_barcode_none_input() -> None:
 
 def test_normalize_barcode_empty_string() -> None:
     assert normalize_barcode("") is None
+
+
+# ---------------------------------------------------------------------------
+# Injection safety (GRD-2026-0531-01 / -03) — escape_toc_string + TITLE/ISRC
+# ---------------------------------------------------------------------------
+
+
+def test_escape_toc_string_strips_control_chars() -> None:
+    """Newline/CR/tab/DEL are removed so a value can't break onto a new line."""
+    assert escape_toc_string("a\nb\rc\td\x7fe") == "abcde"
+
+
+def test_escape_toc_string_doubles_backslash() -> None:
+    """cdrdao treats \\ as an escape introducer; a lone trailing \\ would escape
+    the closing quote, so every backslash is doubled to a literal."""
+    assert escape_toc_string("foo\\") == "foo\\\\"
+    assert escape_toc_string('bar\\"baz') == "bar\\\\'baz"
+
+
+def test_escape_toc_string_quote_to_apostrophe() -> None:
+    assert escape_toc_string('a"b') == "a'b"
+
+
+def test_escape_toc_string_preserves_non_ascii() -> None:
+    """Unlike sanitize_title, escape_toc_string keeps non-ASCII (track titles)."""
+    assert escape_toc_string("Café déjà vu") == "Café déjà vu"
+
+
+def _disc_with_track_title(title: str) -> RBIDisc:
+    disc = RBIDisc(album="Album", artist="Artist")
+    disc.tracks = [
+        RBITocEntry(
+            track_number=1,
+            title=title,
+            performer="Artist",
+            start_frame=0,
+            duration_frames=_FRAMES_PER_MIN,
+        )
+    ]
+    return disc
+
+
+def test_track_title_newline_cannot_inject_toc_directive() -> None:
+    """A track title with a quote + newline must not forge a TOC directive."""
+    evil = 'Real Title"\n  PERFORMER "Hacker'
+    toc_text = generate_toc(_disc_with_track_title(evil)).decode("utf-8")
+    # The malicious payload must be confined to a single TITLE line — no forged
+    # PERFORMER carrying the injected value, and no stray double-quote anywhere.
+    assert '"Hacker' not in toc_text
+    assert 'PERFORMER "Hacker' not in toc_text
+    # The TITLE line itself stays a single, well-formed line.
+    title_lines = [ln for ln in toc_text.splitlines() if ln.strip().startswith("TITLE")]
+    assert any("Real Title'" in ln for ln in title_lines)
+    # Round-trips through the parser as an ordinary title.
+    parsed = parse_toc(generate_toc(_disc_with_track_title(evil)))
+    assert parsed.tracks[0].title is not None
+
+
+def test_track_title_trailing_backslash_cannot_escape_quote() -> None:
+    """A title ending in a backslash must not escape the TITLE closing quote."""
+    toc_text = generate_toc(_disc_with_track_title("Title\\")).decode("utf-8")
+    assert '    TITLE "Title\\\\"' in toc_text
+    # The next track-block directive is still on its own line, not swallowed.
+    parsed = parse_toc(generate_toc(_disc_with_track_title("Title\\")))
+    assert len(parsed.tracks) == 1
+
+
+def test_track_title_preserves_non_ascii_in_toc() -> None:
+    """Non-ASCII track titles survive into the TOC (FLAC fidelity)."""
+    toc_text = generate_toc(_disc_with_track_title("Café")).decode("utf-8")
+    assert 'TITLE "Café"' in toc_text
+
+
+def test_isrc_with_injection_payload_is_escaped() -> None:
+    """Defence-in-depth: even an unvalidated ISRC sink cannot inject."""
+    disc = _disc_with_track_title("T")
+    disc.tracks[0].isrc = 'X"\n  PERFORMER "Z'
+    toc_text = generate_toc(disc).decode("utf-8")
+    assert '"Z' not in toc_text
