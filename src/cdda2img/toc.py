@@ -109,10 +109,14 @@ def generate_toc(
 
     lines: list[str] = ["CD_DA\n"]
 
-    # Safety net: every populator should normalise, but if any source leaks a
-    # raw MCN/barcode through, drop the CATALOG line rather than emit an invalid
-    # 13-digit value that cdrdao will reject at burn time.
-    catalog_norm = normalize_barcode(disc.catalog)
+    # Safety net: drop the CATALOG line unless disc.catalog is a *burnable* MCN
+    # (13 numeric digits — exactly what cdrdao's Toc::catalog requires). The
+    # GS1 check digit is NOT enforced here: by burn time disc.catalog is the
+    # MCN the selection step already chose (a clean one when available; an
+    # invalid-check-digit gospel value only as last resort), and cdrdao burns
+    # any 13-digit numeric catalog. The check-digit ranking lives upstream in
+    # _collect_barcode_candidates, not here — so we never drop a gospel MCN.
+    catalog_norm = normalize_barcode(disc.catalog, require_check_digit=False)
     if catalog_norm:
         lines.append(f'CATALOG "{catalog_norm}"\n')
 

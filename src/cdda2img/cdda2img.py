@@ -821,28 +821,41 @@ def _collect_barcode_candidates(
     disc: RBIDisc,
     barcode_hints: list[tuple[str, str]] | None,
 ) -> list[str]:
-    """Build the de-duplicated 13-digit candidate list (disc.catalog first, then hints).
+    """Build the de-duplicated 13-digit candidate list, **check-digit-valid first**.
 
     Only the *normalised* form of disc.catalog enters the list. A non-normalising
     raw value (e.g. 11-digit printed barcode) is *not* skipped silently — the
     caller uses `_pick_canonical_mcn` to substring-match raw digits against this
     candidate list as a separate, deductive step. *barcode_hints* is the R16
     tuple form ``(mb_release_id, barcode)``; the MBID is unused here.
+
+    Check-digit ranking: a GS1-valid on-disc MCN leads (gospel + clean). MB
+    barcode hints are already check-digit-valid at ingest, so they join the
+    valid tier. An on-disc MCN that is burnable (13 numeric digits) but whose
+    check digit fails is kept as a *last-resort* fallback ranked below every
+    valid candidate — never dropped (the disc is gospel; a check-digit failure
+    is usually a Q-channel read error), but a clean alternative wins.
     """
     from cdda2img.barcode import normalize_barcode
 
-    candidates: list[str] = []
+    valid: list[str] = []  # check-digit-valid (preferred)
+    fallback: list[str] = []  # burnable but check-digit-invalid (last resort)
     seen: set[str] = set()
+
+    def _add(value: str | None, dest: list[str]) -> None:
+        if value and value not in seen:
+            dest.append(value)
+            seen.add(value)
+
     if disc.catalog:
         norm = normalize_barcode(disc.catalog)
         if norm:
-            candidates.append(norm)
-            seen.add(norm)
+            _add(norm, valid)
+        else:
+            _add(normalize_barcode(disc.catalog, require_check_digit=False), fallback)
     for _mbid, hint in barcode_hints or []:
-        if hint and hint not in seen:
-            candidates.append(hint)
-            seen.add(hint)
-    return candidates
+        _add(hint, valid)
+    return valid + fallback
 
 
 def _pick_canonical_mcn(disc: RBIDisc, candidates: list[str]) -> str | None:
@@ -854,8 +867,11 @@ def _pick_canonical_mcn(disc: RBIDisc, candidates: list[str]) -> str | None:
          the MCN — printed barcodes are GTIN-12 without check digit, a prefix
          of GTIN-12, which is a suffix of EAN-13. Substring bridges all three.
       2. **First candidate (best-guess fallback).** No substring match but
-         candidates exist → first one wins. Blank is worse than a guess the
-         user can correct via [c] in the menu.
+         candidates exist → first one wins. Since `_collect_barcode_candidates`
+         orders check-digit-valid candidates first, this prefers a clean MCN
+         and only falls back to a burnable invalid-check-digit on-disc MCN when
+         it is the sole candidate. Blank is worse than a guess the user can
+         correct via [c] in the menu.
       3. **None.** No candidates at all → nothing to work with.
     """
     import re

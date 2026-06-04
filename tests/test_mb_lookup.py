@@ -1002,6 +1002,42 @@ def test_collect_barcode_candidates_accepts_r16_tuple_form():
     assert candidates == ["0075992377423", "0081227991159"]
 
 
+def test_collect_barcode_candidates_valid_ondisc_mcn_leads():
+    """A check-digit-valid on-disc MCN ranks first (gospel + clean)."""
+    from cdda2img.cdda2img import _collect_barcode_candidates
+
+    disc = _make_disc(tracks=[(1, 0, 18000)])
+    disc.catalog = "0075992377423"  # valid GTIN-13
+    candidates = _collect_barcode_candidates(disc, [("rid-A", "0081227991159")])
+    assert candidates == ["0075992377423", "0081227991159"]
+
+
+def test_collect_barcode_candidates_invalid_ondisc_mcn_is_last_resort():
+    """An on-disc MCN with a bad check digit is kept but ranked BELOW valid hints.
+
+    It is burnable (13 numeric digits) so we never drop it, but a clean MB
+    barcode hint must win — a check-digit failure on the Q-channel MCN is
+    usually a read error.
+    """
+    from cdda2img.cdda2img import _collect_barcode_candidates
+
+    disc = _make_disc(tracks=[(1, 0, 18000)])
+    disc.catalog = "1234567890123"  # 13 digits, wrong check digit
+    candidates = _collect_barcode_candidates(disc, [("rid-A", "0081227991159")])
+    # Valid hint first; burnable-but-invalid on-disc MCN as last resort.
+    assert candidates == ["0081227991159", "1234567890123"]
+
+
+def test_collect_barcode_candidates_invalid_ondisc_mcn_kept_when_sole():
+    """With no other candidate, the burnable invalid-check-digit MCN is used."""
+    from cdda2img.cdda2img import _collect_barcode_candidates
+
+    disc = _make_disc(tracks=[(1, 0, 18000)])
+    disc.catalog = "1234567890123"  # 13 digits, wrong check digit
+    candidates = _collect_barcode_candidates(disc, [])
+    assert candidates == ["1234567890123"]
+
+
 # ---------------------------------------------------------------------------
 # R4 — ISRC tally fallback for zero-disc-ID-match case
 # ---------------------------------------------------------------------------

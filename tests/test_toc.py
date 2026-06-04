@@ -237,6 +237,27 @@ def test_toc_normalises_upc_to_gtin13() -> None:
     assert 'CATALOG "0075992377423"' in toc_text
 
 
+def test_toc_emits_burnable_invalid_check_digit_catalog() -> None:
+    """A 13-digit on-disc MCN with a bad GS1 check digit is still burned.
+
+    cdrdao only requires 13 numeric digits; the check digit is our integrity
+    preference, applied at selection (not the burn). A gospel MCN that reached
+    disc.catalog must not be dropped here — cdrdao would happily burn it.
+    """
+    disc = RBIDisc(album="X", artist="Y", catalog="1234567890123")  # bad check digit
+    disc.tracks = [
+        RBITocEntry(
+            track_number=1,
+            title="T",
+            performer="Y",
+            start_frame=0,
+            duration_frames=_FRAMES_PER_MIN,
+        )
+    ]
+    toc_text = generate_toc(disc).decode("utf-8")
+    assert 'CATALOG "1234567890123"' in toc_text
+
+
 # ---------------------------------------------------------------------------
 # PERFORMER fallback
 # ---------------------------------------------------------------------------
@@ -297,6 +318,30 @@ def test_normalize_barcode_rejects_short() -> None:
 
 def test_normalize_barcode_rejects_long() -> None:
     assert normalize_barcode("12345678901234") is None
+
+
+def test_normalize_barcode_rejects_bad_check_digit_by_default() -> None:
+    """Default (strict) rejects a 13-digit value with a wrong GS1 check digit."""
+    assert normalize_barcode("1234567890123") is None
+
+
+def test_normalize_barcode_require_check_digit_false_keeps_burnable() -> None:
+    """require_check_digit=False returns any 13-digit numeric value (cdrdao-burnable)."""
+    assert (
+        normalize_barcode("1234567890123", require_check_digit=False) == "1234567890123"
+    )
+
+
+def test_normalize_barcode_require_check_digit_false_still_needs_13_digits() -> None:
+    """The burnable form still enforces cdrdao's 13-digit rule (drops 11-digit)."""
+    assert normalize_barcode("12345678901", require_check_digit=False) is None
+
+
+def test_normalize_barcode_require_check_digit_false_pads_upc_a() -> None:
+    """UPC-A padding still applies in burnable mode (12 → 13)."""
+    assert (
+        normalize_barcode("075992377423", require_check_digit=False) == "0075992377423"
+    )
 
 
 def test_normalize_barcode_none_input() -> None:
