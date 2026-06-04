@@ -208,10 +208,20 @@ def _parse_dbar(
     """Parse AccurateRip dBAR binary into response blocks.
 
     Returns a list of responses; each response is a list of n_tracks dicts
-    with keys: conf (int), v1 (int), v2 (int).
+    with keys: conf (int), crc (int), crc450 (int).
 
     Binary layout: repeated blocks of (13-byte header + n_tracks x 9-byte entries).
-    Header: <BLLL (n_tracks, id1, id2, cddb_id). Entry: <BLL (conf, v1_crc, v2_crc).
+    Header: <BLLL (n_tracks, id1, id2, cddb_id). Entry: <BLL (conf, crc, crc450).
+
+    Per-track entry semantics (the subtle part): each track carries a SINGLE
+    AccurateRip checksum (``crc``) — not separate v1 and v2 fields. Whether
+    that value is a v1 or a v2 checksum depends on the ripper that submitted
+    the block: v1-era rippers wrote a v1 checksum, v2-era rippers a v2
+    checksum, into the same slot. Verification therefore computes both v1 and
+    v2 locally and tests each against ``crc`` (see verify_rip). The second
+    4-byte field (``crc450``) is the frame-450 sub-CRC used only for blind
+    offset detection — it is NOT the v2 checksum and must not be matched
+    against it.
 
     R2: when *expected_id1*, *expected_id2*, and *expected_cddb_id* are
     provided, each block's header is verified against them. Blocks with a
@@ -253,8 +263,8 @@ def _parse_dbar(
         pos += 13
         tracks: list[dict] = []
         for _ in range(n_tracks):
-            conf, v1, v2 = struct.unpack_from("<BLL", data, pos)
-            tracks.append({"conf": conf, "v1": v1, "v2": v2})
+            conf, crc, crc450 = struct.unpack_from("<BLL", data, pos)
+            tracks.append({"conf": conf, "crc": crc, "crc450": crc450})
             pos += 9
         responses.append(tracks)
     return responses
@@ -356,13 +366,19 @@ def verify_rip(
                     else entry["conf"]
                 )
                 total_conf += entry["conf"]
-                if entry["v1"] == v1:
+                # Each block stores ONE checksum per track (entry["crc"]); it is
+                # a v1 value in v1-era blocks and a v2 value in v2-era blocks.
+                # Test both locally-computed checksums against that single field
+                # and tally each variant's confidence from whichever blocks it
+                # matched. entry["crc450"] is the offset-detection sub-CRC and is
+                # deliberately not consulted here.
+                if entry["crc"] == v1:
                     conf_v1 = (
                         max(conf_v1, entry["conf"])
                         if conf_v1 is not None
                         else entry["conf"]
                     )
-                if entry["v2"] == v2:
+                if entry["crc"] == v2:
                     conf_v2 = (
                         max(conf_v2, entry["conf"])
                         if conf_v2 is not None

@@ -43,14 +43,14 @@ def _frames(*values: int) -> array.array:
 def _build_dbar(n_tracks: int, blocks: list[list[tuple[int, int, int]]]) -> bytes:
     """Serialise a dBAR binary from a list of blocks.
 
-    Each block is a list of n_tracks (conf, v1_crc, v2_crc) tuples.
+    Each block is a list of n_tracks (conf, crc, crc450) tuples.
     Header id1/id2/cddb_id are all zero — _parse_dbar ignores them.
     """
     data = b""
     for block in blocks:
         data += struct.pack("<BLLL", n_tracks, 0, 0, 0)
-        for conf, v1, v2 in block:
-            data += struct.pack("<BLL", conf, v1, v2)
+        for conf, crc, crc450 in block:
+            data += struct.pack("<BLL", conf, crc, crc450)
     return data
 
 
@@ -225,10 +225,10 @@ def test_parse_dbar_two_blocks_two_tracks() -> None:
     result = _parse_dbar(data, n_tracks=2)
 
     assert len(result) == 2
-    assert result[0][0] == {"conf": 10, "v1": 0xAAAAAAAA, "v2": 0xBBBBBBBB}
-    assert result[0][1] == {"conf": 5, "v1": 0xCCCCCCCC, "v2": 0xDDDDDDDD}
-    assert result[1][0] == {"conf": 3, "v1": 0xEEEEEEEE, "v2": 0xFFFFFFFF}
-    assert result[1][1] == {"conf": 7, "v1": 0x12345678, "v2": 0x9ABCDEF0}
+    assert result[0][0] == {"conf": 10, "crc": 0xAAAAAAAA, "crc450": 0xBBBBBBBB}
+    assert result[0][1] == {"conf": 5, "crc": 0xCCCCCCCC, "crc450": 0xDDDDDDDD}
+    assert result[1][0] == {"conf": 3, "crc": 0xEEEEEEEE, "crc450": 0xFFFFFFFF}
+    assert result[1][1] == {"conf": 7, "crc": 0x12345678, "crc450": 0x9ABCDEF0}
 
 
 def test_parse_dbar_truncated_block_is_ignored() -> None:
@@ -254,7 +254,7 @@ def test_parse_dbar_wrong_track_count_second_block_stops() -> None:
     block2 = struct.pack("<BLLL", 2, 0, 0, 0) + struct.pack("<BLL", 1, 0, 0) * 2
     result = _parse_dbar(block1 + block2, n_tracks=1)
     assert len(result) == 1
-    assert result[0][0] == {"conf": 9, "v1": 0xAA, "v2": 0xBB}
+    assert result[0][0] == {"conf": 9, "crc": 0xAA, "crc450": 0xBB}
 
 
 # ---------------------------------------------------------------------------
@@ -369,6 +369,54 @@ def test_verify_rip_last_track_zero_padding(tmp_path: Path) -> None:
         "last track should match the zero-padded CRC; "
         "if confidence_v1 is None, the buffer was clipped instead of padded"
     )
+
+
+def test_verify_rip_v2_match_comes_from_crc_field_not_crc450(tmp_path: Path) -> None:
+    """v2 confidence is tallied from the single stored CRC (field 1), not crc450.
+
+    The AccurateRip dBAR stores ONE checksum per track per block; it is a v1
+    value in v1-era blocks and a v2 value in v2-era blocks. Correct
+    verification compares BOTH locally-computed checksums against that field.
+    This test proves confidence_v1 and confidence_v2 are sourced from
+    *different* blocks via the *same* field, and that the second 4-byte field
+    (crc450) is never consulted — a regression that read crc450 as the v2
+    checksum would see the 0xDEAD... sentinel and report confidence_v2=None.
+    """
+    # 12 sectors (7056 frames). Single track => first==last, valid zone is
+    # multipliers [2940, 4116]. A max-value frame at a high multiplier forces a
+    # 32-bit overflow so csum_hi != 0 and v2 != v1 (the discriminating premise).
+    n_sectors = 12
+    sector_size = 2352
+    pcm = bytearray(n_sectors * sector_size)
+    struct.pack_into("<I", pcm, 4000 * 4, 0xFFFFFFFF)  # frame 4000 -> mult 4001
+    pcm_path = tmp_path / "disc.pcm"
+    pcm_path.write_bytes(bytes(pcm))
+
+    frames: array.array = array.array("I")
+    frames.frombytes(bytes(pcm))
+    v1, v2 = _ar_checksums(frames, track=1, total_tracks=1)
+    assert v1 != v2, "test setup: need a 32-bit overflow so v1 != v2"
+
+    id1_hex, id2_hex = _ar_disc_ids([0], n_sectors - 1)
+    id1, id2 = int(id1_hex, 16), int(id2_hex, 16)
+    crc450 = 0xDEADBEEF  # nonzero field-2 sentinel in every block
+
+    def _block(conf: int, field1: int) -> bytes:
+        return struct.pack("<BLLL", 1, id1, id2, 0) + struct.pack(
+            "<BLL", conf, field1, crc450
+        )
+
+    # v1-era block (conf 10), v2-era block (conf 20 > 10, mirroring real data
+    # where v2 confidence exceeds v1), and a non-matching block (conf 3).
+    dbar = _block(10, v1) + _block(20, v2) + _block(3, 0x11111111)
+
+    with patch("cdda2img.accuraterip._fetch_ar", return_value=(dbar, "https")):
+        result = verify_rip(pcm_path, track_lsns=[0], disc_last_lsn=n_sectors - 1)
+
+    r = result.tracks[0]
+    assert r.confidence_v1 == 10  # from the v1-era block's CRC field
+    assert r.confidence_v2 == 20  # from the v2-era block's CRC field (the fix)
+    assert r.max_confidence == 20  # highest single-block confidence overall
 
 
 # ---------------------------------------------------------------------------
@@ -691,7 +739,7 @@ def test_parse_dbar_rejects_mismatching_id1() -> None:
     )
     # The bad block is skipped; the good block is returned.
     assert len(result) == 1
-    assert result[0][0]["v1"] == 0x12345678
+    assert result[0][0]["crc"] == 0x12345678
     assert result[0][0]["conf"] == 5
 
 
@@ -717,7 +765,7 @@ def test_parse_dbar_legacy_call_unchanged() -> None:
     result = _parse_dbar(data, n_tracks=1)
     # IDs in _build_dbar are all zero; without verification this is still accepted.
     assert len(result) == 1
-    assert result[0][0]["v1"] == 0x11111111
+    assert result[0][0]["crc"] == 0x11111111
 
 
 # ---------------------------------------------------------------------------
