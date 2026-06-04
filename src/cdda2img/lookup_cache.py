@@ -23,6 +23,17 @@ Cache semantics:
   * **Empty results are cacheable.** An MB disc-ID that returns 0
     matches today will almost certainly return 0 again tomorrow;
     caching the empty list saves the network round-trip.
+  * **Payload versioning.** Each row's payload is wrapped with a format
+    version (``_PAYLOAD_VERSION``). A row whose version differs from the
+    running code's — including legacy *unversioned* rows written before
+    this mechanism existed — is treated as a miss and re-fetched. Bump
+    the version whenever the serialised ``DiscMeta`` shape *or the parse
+    semantics that produce it* change, so that a parser fix is never
+    silently defeated by stale cached output for up to the TTL. The bump
+    is global across all four tables; if a future change ever touches a
+    single parser only, prefer a per-table version here over a global
+    bump so the infinite-TTL ISRC cache (the one place a re-fetch is not
+    cheap) is not needlessly wiped.
 """
 
 from __future__ import annotations
@@ -48,6 +59,12 @@ _CACHE_TTL_SECONDS = 30 * 86400
 # recording for its lifetime). A None TTL is the in-band signal for
 # "never expires"; consumers must handle None explicitly.
 _ISRC_CACHE_TTL_SECONDS: int | None = None
+
+# Cache payload format version. Stored alongside the data in every row
+# (see the module docstring). Increment this on any change to the
+# serialised DiscMeta shape OR to the parse semantics feeding the cache —
+# a mismatch (including legacy unversioned rows) is treated as a miss.
+_PAYLOAD_VERSION = 1
 
 
 def cache_db_path() -> Path:
@@ -125,8 +142,13 @@ def _get_generic(
         if ttl_seconds is not None and time.time() - fetched_at > ttl_seconds:
             return None
         try:
-            data = json.loads(payload)
-            return [_deserialise_meta(d) for d in data]
+            parsed = json.loads(payload)
+            # Version gate: a non-dict payload is a legacy unversioned row
+            # (bare list); a dict with a different "v" was written by code
+            # with incompatible parse/serialise semantics. Either is a miss.
+            if not isinstance(parsed, dict) or parsed.get("v") != _PAYLOAD_VERSION:
+                return None
+            return [_deserialise_meta(d) for d in parsed["data"]]
         except (TypeError, ValueError, KeyError) as exc:
             log.warning(
                 "lookup_cache deserialise failed for %s/%s: %s", table, key, exc
@@ -144,7 +166,10 @@ def _put_generic(table: str, key_col: str, key: str, metas: list[DiscMeta]) -> N
         log.warning("lookup_cache open failed (write): %s", exc)
         return
     try:
-        payload = json.dumps([_serialise_meta(m) for m in metas])
+        payload = json.dumps({
+            "v": _PAYLOAD_VERSION,
+            "data": [_serialise_meta(m) for m in metas],
+        })
         conn.execute(
             f"INSERT OR REPLACE INTO {table} "  # noqa: S608
             f"({key_col}, fetched_at, payload) VALUES (?, ?, ?)",

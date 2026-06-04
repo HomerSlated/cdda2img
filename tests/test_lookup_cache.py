@@ -4,11 +4,15 @@ test_lookup_cache.py — R7 SQLite cache round-trip and TTL.
 
 from __future__ import annotations
 
+import json
+import time
 from unittest.mock import patch
 
 from cdda2img.lookup_cache import (
     _CACHE_TTL_SECONDS,
     _ISRC_CACHE_TTL_SECONDS,
+    _PAYLOAD_VERSION,
+    _open_cache_db,
     get_cached_cddb_lookup,
     get_cached_disc_id_lookup,
     get_cached_discogs_barcode,
@@ -190,3 +194,79 @@ def test_cddb_cache_caches_empty_too() -> None:
     """Empty CDDB hit is cacheable (no-match-today probably means no-match-tomorrow)."""
     put_cached_cddb_lookup("aabbcc02", [])
     assert get_cached_cddb_lookup("aabbcc02") == []
+
+
+# ---------------------------------------------------------------------------
+# Payload versioning — the stale-parse-survives-a-fix guard.
+# ---------------------------------------------------------------------------
+
+
+def _raw_insert(table: str, key_col: str, key: str, payload: str) -> None:
+    """Write a payload string directly, bypassing the versioned writer."""
+    conn = _open_cache_db()
+    try:
+        conn.execute(
+            f"INSERT OR REPLACE INTO {table} ({key_col}, fetched_at, payload) "  # noqa: S608
+            "VALUES (?, ?, ?)",
+            (key, int(time.time()), payload),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def test_payload_version_constant_is_one() -> None:
+    """Pin the current format version. Bumping is a deliberate act."""
+    assert _PAYLOAD_VERSION == 1
+
+
+def test_writes_are_versioned() -> None:
+    """The on-disk payload is the {"v": N, "data": [...]} wrapper, not a bare list."""
+    put_cached_disc_id_lookup("ver-1", [DiscMeta(album="X")])
+    conn = _open_cache_db()
+    try:
+        raw = conn.execute(
+            "SELECT payload FROM disc_id_lookups WHERE mb_disc_id = ?", ("ver-1",)
+        ).fetchone()[0]
+    finally:
+        conn.close()
+    parsed = json.loads(raw)
+    assert isinstance(parsed, dict)
+    assert parsed["v"] == _PAYLOAD_VERSION
+    assert isinstance(parsed["data"], list)
+
+
+def test_legacy_bare_list_payload_is_miss() -> None:
+    """A pre-versioning bare-list row (the poisoned-cache shape) reads as a miss.
+
+    This is the mechanism that auto-evicts entries written before a parser
+    fix: their unversioned payload no longer satisfies the version gate.
+    """
+    _raw_insert(
+        "cddb_lookups",
+        "cddb_disc_id",
+        "legacy-bare",
+        json.dumps([{"album": "Stale / Combined"}]),
+    )
+    assert get_cached_cddb_lookup("legacy-bare") is None
+
+
+def test_wrong_version_payload_is_miss() -> None:
+    """A versioned row from incompatible code (different v) reads as a miss."""
+    _raw_insert(
+        "disc_id_lookups",
+        "mb_disc_id",
+        "future-ver",
+        json.dumps({"v": _PAYLOAD_VERSION + 999, "data": [{"album": "X"}]}),
+    )
+    assert get_cached_disc_id_lookup("future-ver") is None
+
+
+def test_versioned_empty_is_a_hit_not_a_miss() -> None:
+    """A current-version empty payload is a HIT returning [] (not a re-fetch).
+
+    Distinguishes "cached: no matches" ([]) from "not versioned / not cached"
+    (None) — the empty-results-are-cacheable semantic must survive versioning.
+    """
+    put_cached_cddb_lookup("ver-empty", [])
+    assert get_cached_cddb_lookup("ver-empty") == []
