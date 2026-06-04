@@ -142,15 +142,15 @@ not chase certainty the medium cannot provide.
 
 **Changes (do in this order — sequencing matters):**
 - [ ] **#3-a** · **Fix MB first** so it stops punting on multi-match: `_build_agreed_facts_meta`
-      over the **MCN-matched subset**, not the whole RG (= P2-B(ii) / Plan A C-unit). Verify
-      live with `trace_album_live.py` that the disc then resolves to the original "American
-      Idiot". This is the prerequisite — it's what lets us safely demote/drop CDDB without
-      regressing track-title pre-fill.
-- [ ] **#3-b** · **Rework "who wins and why"** (lookup precedence). Today CDDB runs first and
-      wins on per-field non-blank — so a weak, un-disambiguatable source overrides the richer,
-      MCN/ISRC-disambiguatable one. Make **MB authoritative when it has a disc-id (+ MCN)
-      match**; demote CDDB to a fallback consulted only when MB yields nothing. (The deeper bug
-      is the ordering, independent of CDDB's fate.)
+      over the **MCN-matched subset**, not the whole RG. Expanded into a full whole-record
+      consistency gate — see the dedicated **#3-a plan** block below (decided 2026-06-04).
+- [x] **#3-b** · **Rework "who wins and why"** (lookup precedence) — DONE `cb4bcc7` (2026-06-04).
+      CDDB demoted to LOWEST precedence (CD-Text > MB > Discogs > AcoustID > CDDB) via
+      `_run_metadata_lookups`; CDDB query still parallel with MB but applied last as a zero-trust
+      gap-filler. Removed the old high-trust `prepopulate_from_cddb` applier. Also fixed the
+      original gnudb "Artist / Title" symptom (MB titles now win). The (a) MCN check-digit
+      ranking landed `32604e3` (valid-check-digit MCNs preferred, burnable invalid kept as last
+      resort, never dropped).
 - [x] **#3-c** · **Replaced retrobridge with gnudb** (`gnudb.gnudb.org:8880`) as the default
       `cddb_server` (`config.py`, `cddb.py` `_DEFAULT_SERVER`/`_DEFAULT_PORT`, conf example,
       docs/man, README). Live-probed (200 CDDBP OK). retrobridge *is* a MusicBrainz bridge
@@ -163,6 +163,58 @@ not chase certainty the medium cannot provide.
 - [ ] **#3-d** · (minor hardening) `query_cddb` has no retry on a cold-connect TCP flake →
       silently returns `[]`, indistinguishable from a legitimate "disc not in DB". Add a small
       retry / distinguish transport-error from empty-result (distrust-silent-nulls again).
+
+#### #3-a plan — whole-record consistency gate + fuzzy MCN (decided 2026-06-04; execute next session)
+
+**Principle (user, 2026-06-04).** MB — and *any* service — may supplement the disc only if it
+is consistent with **every non-blank on-disc objective identifier** (MCN, per-track ISRC; the
+TOC is already gated by the disc-ID lookup). A candidate that contradicts a non-blank identifier
+is the **wrong record**: reject it and check the next; iterate until the match list is exhausted;
+if none survive, **leave the fields blank** (let AcoustID, then the manual menu, fill). Blank on
+either side is allowed (no constraint). Free text (album/artist/track titles) is **corroborated,
+never gated** (R9 stays as-is — gating titles is the gnudb-era regression we escaped).
+
+**Decisions (user, 2026-06-04):**
+1. **Reject, don't degrade.** Any non-blank MCN mismatch **or even a single** non-blank per-track
+   ISRC mismatch ⇒ discard that whole candidate. (Supersedes the earlier "degrade to agreed-facts"
+   option for single matches.)
+2. **MCN comparison is fuzzy substring — everywhere in the codebase.** No metadata service
+   reliably stores the full 13-digit MCN (they hold GTIN-12 printed barcodes, drop the leading
+   zero / check digit, or store partial records). Exact MCN equality is therefore wrong at *every*
+   call site, not just the gate. ISRC comparison stays **exact** (fixed 12-char ISO-3901).
+3. **Fuzzy MCN match ⇒ fill the blanks** (fill-blank merge; disc-baked gospel — MCN/ISRC/CD-Text —
+   always wins; MB only fills what the disc left blank).
+
+**Units (each independently committable; `make check` + tests + py3.10 at each):**
+- [ ] **M (foundation) — shared fuzzy-MCN matcher.** Add `barcode.mcn_matches(a, b) -> bool`:
+      normalise both to digits (`require_check_digit=False`), return True iff the shorter digit-run
+      (length ≥ `_MIN_MCN_SUBSTRING_DIGITS`, reuse the existing `7`) is a substring of the longer.
+      Then **audit and convert every MCN equality comparison** to it:
+      - `mb_lookup._disambiguate_by_mcn` (`m.catalog == mcn`) → `mcn_matches`.
+      - `cdda2img._pick_canonical_mcn` substring step → refactor onto the shared helper.
+      - `discogs_lookup` barcode-result comparison → audit + convert.
+      - grep for any other `== mcn` / `catalog ==` / barcode equality.
+      Tests: 12-vs-13-digit, missing leading zero, missing check digit, partial service record,
+      and the false-positive guard (a <7-digit coincidence must NOT match).
+- [ ] **G — consistency gate (strict reject).** Add `mb_lookup._is_consistent(meta, disc) -> bool`:
+      MCN → if both non-blank and not `mcn_matches` ⇒ False; per-track ISRC (matched by track
+      number) → if both non-blank and unequal ⇒ False; else True. Apply as a **pre-filter** in
+      `prepopulate_from_mb`: `consistent = [m for m in matches if _is_consistent(m, disc)]`, then
+      run the existing resolution on `consistent` — 0 ⇒ return disc unchanged (blank; this also
+      closes the single-match no-cross-check gap at `mb_lookup.py:1042`); 1 ⇒ merge; >1 ⇒ existing
+      `_resolve_multimatch` → agreed-facts over the consistent set. Tests: single match with a
+      contradicting ISRC ⇒ blank; contradicting MCN ⇒ blank; consistent single ⇒ merged; mixed
+      multi ⇒ only consistent considered.
+- [ ] **A (#3-a proper) — agreed-facts over the consistent / MCN-matched subset.** Feed
+      `_build_agreed_facts_meta` the consistent set (= the MCN-matched subset when the disc has an
+      MCN), not the whole RG. Widen the extracted fields (album/artist/per-track titles where the
+      subset agrees) since the MCN proves identity. **Preserve the Q2 verify-skip rationale** in
+      that function (still valid — the subset is even more corroborated). Live-verify with
+      `tools/trace_album_live.py` that *American Idiot* resolves to the original.
+
+**Cascade note:** the gate makes MB return blank more often → AcoustID (last-resort autopopulate)
+and the manual menu fire more often. That is the intended "prefer no-answer over wrong-answer"
+behaviour, not a regression.
 
 ---
 
