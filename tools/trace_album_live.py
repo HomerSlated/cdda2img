@@ -12,10 +12,11 @@ the model predicts the same album the real pipeline produced.
 
 Why this proves something
 -------------------------
-The tool does NOT reimplement the merge logic — it calls
-``prepopulate_from_cddb`` / ``prepopulate_from_mb`` / ``_merge_into_disc``
-directly. So the "real" album it prints is, by construction, what the rip
-pipeline would put in ``RBIDisc.album``. The cross-check then asks a separate
+The tool does NOT reimplement the merge logic — it calls ``query_cddb`` /
+``prepopulate_from_mb`` / ``_merge_into_disc`` directly, in the pipeline's
+precedence order (MB first, CDDB last as a zero-trust gap-filler). So the
+"real" album it prints is, by construction, what the rip pipeline would put in
+``RBIDisc.album``. The cross-check then asks a separate
 question: does the condensed model in ``trace_album.py`` faithfully reproduce
 that, given only the *raw* candidate strings (CD-Text seed, CDDB ``matches[0]``,
 MB winner)? If the two disagree, the model is wrong and must be refined; if they
@@ -60,7 +61,7 @@ from pathlib import Path
 # runtime; ty searches only src/ + repo root, so the resolution is suppressed.
 from trace_album import resolve_seed_rip  # ty: ignore[unresolved-import]
 
-from cdda2img.cddb import compute_cddb_disc_id, prepopulate_from_cddb, query_cddb
+from cdda2img.cddb import compute_cddb_disc_id, query_cddb
 from cdda2img.cdrdao_reader import parsed_to_rbi_disc
 from cdda2img.mb_lookup import (
     _merge_into_disc,
@@ -169,11 +170,7 @@ def main(argv: list[str] | None = None) -> int:
     cddb_matches = query_cddb(track_lsns, disc_last_lsn, args.server)
     cddb_raw = cddb_matches[0].album if cddb_matches else None
     print(f"  CDDB matches          : {len(cddb_matches)}")
-    print(f"  CDDB matches[0].album : {cddb_raw!r}  (the raw candidate)")
-    cddb_disc = prepopulate_from_cddb(
-        copy.deepcopy(seed), track_lsns, disc_last_lsn, args.server, verbose=False
-    )
-    print(f"  album after CDDB merge: {cddb_disc.album!r}")
+    print(f"  CDDB matches[0].album : {cddb_raw!r}  (raw candidate; applied LAST)")
 
     # ----- STAGE 2: MusicBrainz (live) — mirrors mb_future ------------------
     _rule("═")
@@ -189,13 +186,16 @@ def main(argv: list[str] | None = None) -> int:
     print(f"  MB barcode_hints      : {mb_result.barcode_hints}")
     mb_raw = mb_result.mb_candidate_album
 
-    # ----- STAGE 3: serial merge exactly as _finalize_import (lines 1278-1280)
+    # ----- STAGE 3: precedence merge exactly as _run_metadata_lookups --------
+    # MB applied first (over the CD-Text seed); CDDB applied LAST as the
+    # lowest-precedence gap-filler. (Discogs/AcoustID sit between in the real
+    # pipeline but don't contest album.)
     _rule("═")
-    print("  STAGE 3 — serial merge (CDDB result, then MB meta re-applied)")
+    print("  STAGE 3 — precedence merge (MB first, CDDB last / lowest)")
     _rule()
-    disc = cddb_disc
-    if mb_result.meta is not None:
-        disc = _merge_into_disc(mb_result.meta, disc)
+    disc = mb_result.disc
+    if cddb_matches:
+        disc = _merge_into_disc(cddb_matches[0], disc)
     real_album = disc.album
     print(f"  REAL pipeline album   : {real_album!r}")
 

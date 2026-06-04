@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from cdda2img.mb_lookup import MBPrepopResult
     from cdda2img.rip_log import RipLogBuilder
     from cdda2img.terminal_ui import TerminalUI
     from cdda2img.track_preview import TrackPreview
@@ -1211,6 +1212,124 @@ def _r6_acoustid_corroborate(  # noqa: C901
     return disc
 
 
+def _run_metadata_lookups(
+    disc: RBIDisc,
+    pcm_file: Path,
+    provenance: dict[str, str],
+    *,
+    do_cddb: bool,
+    cddb_track_lsns: list[int] | None,
+    cddb_disc_last_lsn: int | None,
+    cddb_server: str | None,
+    cddb_verbose: bool,
+    mb_verbose: bool,
+    ui: TerminalUI | None,
+) -> tuple[RBIDisc, MBPrepopResult]:
+    """Run every remote metadata lookup and merge results into *disc* in
+    precedence order: disc-baked CD-Text > MusicBrainz > Discogs > AcoustID
+    > CDDB.
+
+    Every merge is fill-blank (an existing non-blank field wins), so applying
+    CDDB **last** makes it a zero-trust, last-resort gap-filler — every other
+    source overwrites it, and CDDB only supplies fields nothing richer did.
+    CDDB's flat freedb ``TTITLE`` ("Artist / Title" in one string) cannot
+    cleanly separate a track's title from its performer the way MB's distinct
+    title / artist-credit fields can, so it is no longer allowed to win a
+    contested field. The CDDB *query* still runs in parallel with the MB
+    lookup so a slow or failing gnudb never gates the rip.
+
+    Mutates *provenance* with the R9 disagreement surface and R12 per-service
+    status. Returns ``(merged_disc, mb_result)``.
+    """
+    from concurrent.futures import ThreadPoolExecutor
+
+    from cdda2img.cddb import query_cddb
+    from cdda2img.lookup_result import DiscMeta
+    from cdda2img.mb_lookup import _merge_into_disc, prepopulate_from_mb
+
+    original_album, original_artist = disc.album, disc.artist
+
+    # CDDB query runs concurrently with MB for latency; its result is applied
+    # last (lowest precedence). A flaky/slow gnudb must never gate the rip.
+    cddb_matches: list[DiscMeta] = []
+    if do_cddb:
+        with ThreadPoolExecutor(max_workers=2) as ex:
+            cddb_future = ex.submit(
+                query_cddb, cddb_track_lsns, cddb_disc_last_lsn, cddb_server
+            )
+            mb_future = ex.submit(prepopulate_from_mb, disc, verbose=mb_verbose)
+            try:
+                cddb_matches = cddb_future.result()
+            except Exception as exc:
+                log.warning("CDDB query failed; continuing without it: %s", exc)
+            mb_result = mb_future.result()
+    else:
+        mb_result = prepopulate_from_mb(disc, verbose=mb_verbose)
+
+    cddb_meta = cddb_matches[0] if cddb_matches else None
+    if cddb_meta is not None and cddb_verbose:
+        extra = f" ({len(cddb_matches)} matches)" if len(cddb_matches) > 1 else ""
+        by = f" by {cddb_meta.artist}" if cddb_meta.artist else ""
+        print(f'  CDDB: matched "{cddb_meta.album}"{by}{extra} (lowest priority)')
+
+    # MusicBrainz applied first, over the CD-Text baseline.
+    disc = mb_result.disc
+
+    # R9: CDDB↔MB (or raw↔MB) disagreement. Compare the non-MB view — CDDB's
+    # album/artist if present, else the disc's own embedded values — against
+    # the MB candidate, directly (not via disc state) so the result is
+    # independent of the merge order.
+    pre_mb_album = (cddb_meta.album if cddb_meta else None) or original_album
+    pre_mb_artist = (cddb_meta.artist if cddb_meta else None) or original_artist
+    if mb_result.isrc_disambiguated:
+        provenance["multi_match_isrc_disambiguated"] = "YES"
+    _emit_r9_disagreement(
+        provenance,
+        pre_mb_album,
+        pre_mb_artist,
+        mb_result.mb_candidate_album,
+        mb_result.mb_candidate_artist,
+    )
+    provenance["lookup_status_mb"] = _r12_status(
+        attempted=True, has_data=mb_result.match_count > 0, errored=False
+    )
+
+    # Discogs (catalogue / label / country).
+    from cdda2img import discogs_lookup as _discogs
+
+    discogs_attempted = _discogs.is_available()
+    pre_discogs_catalog = disc.catalog
+    disc = _prepopulate_from_discogs(disc, ui, barcode_hints=mb_result.barcode_hints)
+    provenance["lookup_status_discogs"] = _r12_status(
+        attempted=discogs_attempted,
+        has_data=bool(disc.catalog) and disc.catalog != pre_discogs_catalog,
+        errored=False,
+    )
+
+    # AcoustID per-track corroboration (tracks 1 and ceil(N/2)).
+    from cdda2img import acoustid_lookup as _acoustid
+
+    acoustid_attempted = _acoustid.is_available()
+    disc = _r6_acoustid_corroborate(disc, pcm_file, provenance, ui)
+    provenance["lookup_status_acoustid"] = _r12_status(
+        attempted=acoustid_attempted,
+        has_data="acoustid_corroborates" in provenance,
+        errored=False,
+    )
+
+    # CDDB applied LAST — zero-trust gap-filler. By now CD-Text, MB, Discogs
+    # and AcoustID have all had their turn, so this only fills fields none of
+    # them provided.
+    if do_cddb:
+        provenance["lookup_status_cddb"] = _r12_status(
+            attempted=True, has_data=cddb_meta is not None, errored=False
+        )
+    if cddb_meta is not None:
+        disc = _merge_into_disc(cddb_meta, disc)
+
+    return disc, mb_result
+
+
 def _finalize_import(
     disc: RBIDisc,
     pcm_file: Path,
@@ -1228,20 +1347,16 @@ def _finalize_import(
     ar_summary: str | None = None,
     tui: bool = True,
 ) -> None:
-    """Shared post-rip/import pipeline: MB lookup → metadata menu → TOC → RG → container.
+    """Shared post-rip/import pipeline: lookups → metadata menu → TOC → RG → container.
 
-    R8: when *cddb_track_lsns*, *cddb_disc_last_lsn*, and *cddb_server* are
-    provided (rip path only), CDDB and MB pre-pop run concurrently in a
-    2-worker ``ThreadPoolExecutor``. Merge order is CDDB-first → MB-second
-    with non-blank-wins semantics — identical to the pre-R8 serial path
-    when both services return data, with the bonus that a slow CDDB no
-    longer blocks MB latency. When CDDB params are None (import path)
-    only MB runs.
+    The remote-metadata lookups and their precedence merge are delegated to
+    ``_run_metadata_lookups`` (disc-baked CD-Text > MB > Discogs > AcoustID >
+    CDDB, CDDB last as a zero-trust gap-filler). When *cddb_track_lsns* /
+    *cddb_disc_last_lsn* are provided (rip path) the CDDB query runs in
+    parallel with MB; when None (import path) only MB runs.
     """
     import sys
 
-    from cdda2img.cddb import prepopulate_from_cddb
-    from cdda2img.mb_lookup import _merge_into_disc, prepopulate_from_mb
     from cdda2img.metadata_menu import run_metadata_menu
 
     diag = _Notes(ui)
@@ -1252,85 +1367,18 @@ def _finalize_import(
     _ui_status(
         ui, "Querying CDDB + MusicBrainz…" if do_cddb else "Querying MusicBrainz…"
     )
-    pre_cddb_album = disc.album
 
-    if do_cddb:
-        # R8: launch both prepops concurrently. Each operates on a copy of
-        # the original disc, so their results are independent and can be
-        # merged serially after both return.
-        from concurrent.futures import ThreadPoolExecutor
-
-        with ThreadPoolExecutor(max_workers=2) as ex:
-            cddb_future = ex.submit(
-                prepopulate_from_cddb,
-                disc,
-                cddb_track_lsns,
-                cddb_disc_last_lsn,
-                server=cddb_server,
-                verbose=cddb_verbose,
-            )
-            mb_future = ex.submit(prepopulate_from_mb, disc, verbose=mb_verbose)
-            cddb_disc = cddb_future.result()
-            mb_result = mb_future.result()
-
-        # Serial merge: CDDB first (already applied in cddb_disc), then re-apply
-        # MB's winning meta on top with non-blank-wins.
-        disc = cddb_disc
-        if mb_result.meta is not None:
-            disc = _merge_into_disc(mb_result.meta, disc)
-        # R12: CDDB status.
-        provenance["lookup_status_cddb"] = _r12_status(
-            attempted=True,
-            has_data=bool(disc.album) and disc.album != pre_cddb_album,
-            errored=False,
-        )
-    else:
-        # Import path: MB only, sequential.
-        mb_result = prepopulate_from_mb(disc, verbose=mb_verbose)
-        disc = mb_result.disc
-
-    # R9: snapshot the pre-MB album/artist (= post-CDDB or original)
-    # so we can detect CDDB↔MB disagreement when both ran.
-    pre_mb_album = pre_cddb_album if not do_cddb else cddb_disc.album
-    pre_mb_artist = (
-        disc.artist if not do_cddb else cddb_disc.artist  # post-CDDB pre-MB
-    )
-
-    if mb_result.isrc_disambiguated:
-        provenance["multi_match_isrc_disambiguated"] = "YES"
-    _emit_r9_disagreement(
+    disc, mb_result = _run_metadata_lookups(
+        disc,
+        pcm_file,
         provenance,
-        pre_mb_album,
-        pre_mb_artist,
-        mb_result.mb_candidate_album,
-        mb_result.mb_candidate_artist,
-    )
-    # R12: MB status follows match_count (0 = empty, ≥1 = OK; network
-    # errors inside lookup_disc_id yield 0 too — undistinguishable here).
-    provenance["lookup_status_mb"] = _r12_status(
-        attempted=True, has_data=mb_result.match_count > 0, errored=False
-    )
-    # R12: Discogs status — checked before the call.
-    from cdda2img import discogs_lookup as _discogs
-
-    discogs_attempted = _discogs.is_available()
-    pre_discogs_catalog = disc.catalog
-    disc = _prepopulate_from_discogs(disc, ui, barcode_hints=mb_result.barcode_hints)
-    provenance["lookup_status_discogs"] = _r12_status(
-        attempted=discogs_attempted,
-        has_data=bool(disc.catalog) and disc.catalog != pre_discogs_catalog,
-        errored=False,
-    )
-    # R6: pre-menu AcoustID auto-fingerprint. Gated on availability; never
-    # blocks the menu. Tracks 1 and ceil(N/2) are the canonical sample.
-    from cdda2img import acoustid_lookup as _acoustid
-
-    acoustid_attempted = _acoustid.is_available()
-    disc = _r6_acoustid_corroborate(disc, pcm_file, provenance, ui)
-    provenance["lookup_status_acoustid"] = _r12_status(
-        attempted=acoustid_attempted,
-        has_data="acoustid_corroborates" in provenance,
-        errored=False,
+        do_cddb=do_cddb,
+        cddb_track_lsns=cddb_track_lsns,
+        cddb_disc_last_lsn=cddb_disc_last_lsn,
+        cddb_server=cddb_server,
+        cddb_verbose=cddb_verbose,
+        mb_verbose=mb_verbose,
+        ui=ui,
     )
 
     # Identify the original release BEFORE the menu so the user sees

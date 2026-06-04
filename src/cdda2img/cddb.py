@@ -4,7 +4,11 @@ cddb.py — CDDB disc ID computation and TCP query.
 Public interface:
     compute_cddb_disc_id(track_lsns, disc_last_lsn) -> str
     query_cddb(track_lsns, disc_last_lsn, server=None) -> list[DiscMeta]
-    prepopulate_from_cddb(disc, track_lsns, disc_last_lsn, server=None) -> RBIDisc
+
+CDDB results are merged into the disc by the caller at LOWEST precedence
+(``cdda2img._run_metadata_lookups`` applies them last via ``_merge_into_disc``),
+because freedb's flat "Artist / Title" TTITLE cannot cleanly separate a track
+title from its performer. There is deliberately no high-trust apply helper here.
 """
 
 from __future__ import annotations
@@ -13,12 +17,8 @@ import contextlib
 import importlib.metadata
 import logging
 import socket
-from typing import TYPE_CHECKING
 
 from cdda2img.lookup_result import DiscMeta, TrackMeta
-
-if TYPE_CHECKING:
-    from cdda2img.rbi_format import RBIDisc, RBITocEntry
 
 log = logging.getLogger(__name__)
 
@@ -264,88 +264,3 @@ def query_cddb(
     except OSError as exc:
         log.warning("CDDB query failed (%s:%d): %s", host, port, exc)
         return []
-
-
-# ---------------------------------------------------------------------------
-# RBIDisc pre-population
-# ---------------------------------------------------------------------------
-
-
-def prepopulate_from_cddb(
-    disc: RBIDisc,
-    track_lsns: list[int],
-    disc_last_lsn: int,
-    server: str | None = None,
-    *,
-    verbose: bool = True,
-) -> RBIDisc:
-    """Query CDDB and fill missing fields in *disc* from the best match.
-
-    Auto-applies the first result (best match in server ordering).
-    On no match or network error, returns *disc* unchanged.
-    """
-    from cdda2img.rbi_format import RBIDisc as _RBIDisc
-    from cdda2img.rbi_format import RBITocEntry
-
-    matches = query_cddb(track_lsns, disc_last_lsn, server)
-    if not matches:
-        return disc
-
-    meta = matches[0]
-    if len(matches) > 1:
-        log.debug(
-            "CDDB: %d matches; using first (%s / %s)",
-            len(matches),
-            meta.artist,
-            meta.album,
-        )
-
-    album = disc.album if disc.album else (meta.album or disc.album)
-    artist = disc.artist if disc.artist else (meta.artist or disc.artist)
-    release_date = disc.release_date or meta.release_date or None
-
-    meta_by_num = {t.number: t for t in meta.tracks if t.number is not None}
-    new_tracks: list[RBITocEntry] = []
-    for entry in disc.tracks:
-        mt = meta_by_num.get(entry.track_number)
-        if not entry.title and mt and mt.title:
-            title: str = mt.title
-        else:
-            title = entry.title
-        new_tracks.append(
-            RBITocEntry(
-                track_number=entry.track_number,
-                title=title,
-                performer=entry.performer,
-                start_frame=entry.start_frame,
-                duration_frames=entry.duration_frames,
-                pregap_frames=entry.pregap_frames,
-                isrc=entry.isrc,
-            )
-        )
-
-    updated = _RBIDisc(
-        album=album,
-        artist=artist,
-        disc_number=disc.disc_number,
-        disc_total=disc.disc_total,
-        catalog=disc.catalog,
-        disc_id=disc.disc_id,
-        tracks=new_tracks,
-        release_date=release_date,
-        original_release_date=disc.original_release_date,
-        low_dynamic_range=disc.low_dynamic_range,
-        original_release_found=disc.original_release_found,
-        original_release_title=disc.original_release_title,
-        original_release_year=disc.original_release_year,
-        mb_release_id=disc.mb_release_id,
-        mb_release_group_id=disc.mb_release_group_id,
-    )
-
-    if verbose:
-        n_str = f" ({len(matches)} matches, using first)" if len(matches) > 1 else ""
-        artist_str = f" by {meta.artist}" if meta.artist else ""
-        year_str = f"  ({meta.release_date})" if meta.release_date else ""
-        print(f'  CDDB: matched "{meta.album}"{artist_str}{year_str}{n_str}')
-
-    return updated

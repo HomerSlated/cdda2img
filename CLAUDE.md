@@ -122,7 +122,7 @@ All source lives under `src/cdda2img/`. The pipeline is fully wired end-to-end.
 1. `cdda2img.py:_rip_with_fallback()` — tries `cdrdao_ripper.rip_cdrdao()` (primary); falls back to `disc_reader.rip_disc(paranoia="full")` on RuntimeError
    - `cdrdao_ripper.py:rip_cdrdao()` — runs `cdrdao read-cd`; parses TOC via `toc_parser.py`, builds disc via `cdrdao_reader.parsed_to_rbi_disc()`, byte-swaps s16be BIN via `cdrdao_reader.convert_cdrdao_bin()`; returns `RipInfo(disc, track_lsns, disc_last_lsn)`
    - `disc_reader.py:rip_disc()` — cd-paranoia fallback; queries disc via `-Q`, rips via subprocess; returns same `RipInfo`
-2. `cddb.py:prepopulate_from_cddb()` — TCP CDDB query using disc TOC fingerprint; pre-populates album/artist/track titles before the metadata menu
+2. CDDB query (`cddb.py:query_cddb()`, TCP, disc TOC fingerprint) runs inside `_finalize_import` via `_run_metadata_lookups`, in parallel with the MB lookup. CDDB is merged at **lowest precedence** (applied last; every other source overwrites it) — its flat "Artist / Title" TTITLE can't separate title from performer cleanly. There is no high-trust CDDB apply helper.
 3. Shared finalization: `_finalize_import()` (see below)
 
 ### Import pipeline (`import` subcommand)
@@ -152,7 +152,7 @@ Four source types, each producing s16le PCM, then all call `_finalize_import()`:
 - **`input_selector.py`** — four batching strategies: `fcfs`, `aatc`, `best` (OR-Tools CP-SAT global bin-packing), `meta` (groups by embedded disc-number tag)
 - **`cdrdao_ripper.py`** — cdrdao read-cd rip (primary); parses TOC via toc_parser + cdrdao_reader; returns `RipInfo`
 - **`disc_reader.py`** — cd-paranoia rip (fallback); subprocess-based; returns `RipInfo(disc, track_lsns, disc_last_lsn)`
-- **`cddb.py`** — CDDB disc ID computation, TCP query, `prepopulate_from_cddb()`
+- **`cddb.py`** — CDDB disc ID computation, TCP query (`query_cddb()`); results merged at lowest precedence by `cdda2img._run_metadata_lookups` (no high-trust apply helper)
 - **`cdrdao_reader.py`** — cdrdao TOC+BIN import; s16be → s16le conversion
 - **`ddp_reader.py`** — DDP 2.0 (GEAR Pro Mastering Edition) import
 - **`toc.py`** — `generate_toc()`, `sanitize_title()`, `build_toc_entries()`
