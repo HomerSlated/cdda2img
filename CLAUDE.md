@@ -470,12 +470,21 @@ drive-offset group in the AccurateRip database:
 
 ```
 Block header:  13 bytes  <BLLL  n_tracks, id1, id2, cddb_id
-Per-track:      9 bytes  <BLL   conf, v1_crc, v2_crc
+Per-track:      9 bytes  <BLL   conf, crc, crc450
                          × n_tracks
 ```
 
-`verify_rip` matches the computed CRCs against every block and records the highest
-matching confidence per track. A track not matched in any block gets `confidence=None`.
+Each track entry carries a **single** AccurateRip checksum (`crc`) — *not* separate v1
+and v2 fields. Whether that value is a v1 or a v2 checksum depends on the submitting
+ripper: v1-era rippers wrote a v1 checksum, v2-era rippers a v2 checksum, into the same
+slot. The second 4-byte field (`crc450`) is the frame-450 sub-CRC used only for blind
+offset detection — it is **not** the v2 checksum. `verify_rip` therefore computes both v1
+and v2 locally and tests **each against `crc`**, tallying each variant's confidence from
+whichever blocks matched; a v2-era block (often the highest-confidence one) is how v2
+confidence is earned. A track not matched in any block gets `confidence=None`.
+
+(History: matching the computed v2 against `crc450` instead of `crc` made `confidence_v2`
+perpetually `None` — fixed by reading the single `crc` field for both variants.)
 
 **Confidence interpretation**:
 
