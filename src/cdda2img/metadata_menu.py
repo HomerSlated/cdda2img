@@ -156,48 +156,65 @@ def _print_meta_summary(meta: DiscMeta) -> None:
 _PAGE = 10
 
 
+def _render_results_page(results: list[DiscMeta], page: int, title: str) -> None:
+    """Pure repaint of one page of a paginated DiscMeta result list.
+
+    Side-effect-free except for ``print``: no prompting, no state mutation. Shared
+    by the legacy blocking ``_select_from_results`` loop and the native
+    ``menu_state.ResultsScreen`` frame, so both render byte-identical pages.
+    """
+    total = len(results)
+    total_pages = max(1, (total + _PAGE - 1) // _PAGE)
+    start = page * _PAGE
+    page_items = results[start : start + _PAGE]
+
+    _header(f"{title}  [{page + 1}/{total_pages}]  ({total} results)")
+    print(
+        f"  {'#':>3}  {'Type':<6}  {'Trk':>3}  {'Artist':<18}  {'Album':<24}"
+        f"  {'Year':<4}  {'Cty':<3}  Label"
+    )
+    print(
+        f"  {'─' * 3}  {'─' * 6}  {'─' * 3}  {'─' * 18}  {'─' * 24}"
+        f"  {'─' * 4}  {'─' * 3}  {'─' * 14}"
+    )
+    for i, m in enumerate(page_items, start=start + 1):
+        album_col = m.album or (
+            m.tracks[0].title if m.tracks and m.tracks[0].title else None
+        )
+        # Type/Tracks surface album-vs-single so the right release is pickable
+        # (CD singles are valid candidates — shown, not filtered).
+        type_col = _trunc(m.primary_type, 6) or "?"
+        trk_col = str(m.track_count) if m.track_count is not None else "?"
+        print(
+            f"  {i:>3}  {type_col:<6}  {trk_col:>3}  {_trunc(m.artist, 18):<18}"
+            f"  {_trunc(album_col, 24):<24}  {(m.release_date or '')[:4]:<4}"
+            f"  {(m.country or '')[:3]:<3}  {_trunc(m.label, 14)}"
+        )
+    print()
+    nav = []
+    if page > 0:
+        nav.append("[p] prev")
+    if page < total_pages - 1:
+        nav.append("[n] next")
+    nav.append("[b] back without selecting")
+    print("  " + "  ".join(nav))
+
+
 def _select_from_results(
     results: list[DiscMeta], title: str = "Results"
 ) -> DiscMeta | None:
-    """Display a paginated list of DiscMeta; return user selection or None (back)."""
+    """Display a paginated list of DiscMeta; return user selection or None (back).
+
+    Legacy blocking loop, still used by the Discogs / AcoustID / original-release
+    flows pending their own screen-stack ports (cp3b / cp3c / cp4). The MB path
+    now uses the native ``ResultsScreen``; both share ``_render_results_page``.
+    """
     total = len(results)
     total_pages = max(1, (total + _PAGE - 1) // _PAGE)
     page = 0
 
     while True:
-        start = page * _PAGE
-        page_items = results[start : start + _PAGE]
-
-        _header(f"{title}  [{page + 1}/{total_pages}]  ({total} results)")
-        print(
-            f"  {'#':>3}  {'Type':<6}  {'Trk':>3}  {'Artist':<18}  {'Album':<24}"
-            f"  {'Year':<4}  {'Cty':<3}  Label"
-        )
-        print(
-            f"  {'─' * 3}  {'─' * 6}  {'─' * 3}  {'─' * 18}  {'─' * 24}"
-            f"  {'─' * 4}  {'─' * 3}  {'─' * 14}"
-        )
-        for i, m in enumerate(page_items, start=start + 1):
-            album_col = m.album or (
-                m.tracks[0].title if m.tracks and m.tracks[0].title else None
-            )
-            # Type/Tracks surface album-vs-single so the right release is pickable
-            # (CD singles are valid candidates — shown, not filtered).
-            type_col = _trunc(m.primary_type, 6) or "?"
-            trk_col = str(m.track_count) if m.track_count is not None else "?"
-            print(
-                f"  {i:>3}  {type_col:<6}  {trk_col:>3}  {_trunc(m.artist, 18):<18}"
-                f"  {_trunc(album_col, 24):<24}  {(m.release_date or '')[:4]:<4}"
-                f"  {(m.country or '')[:3]:<3}  {_trunc(m.label, 14)}"
-            )
-        print()
-        nav = []
-        if page > 0:
-            nav.append("[p] prev")
-        if page < total_pages - 1:
-            nav.append("[n] next")
-        nav.append("[b] back without selecting")
-        print("  " + "  ".join(nav))
+        _render_results_page(results, page, title)
 
         choice = _prompt(f"  Select 1-{total}: ").strip().lower()
         if choice == "n" and page < total_pages - 1:
@@ -299,97 +316,12 @@ def _confirm_apply(meta: DiscMeta, disc: RBIDisc) -> str | None:
 
 
 # ---------------------------------------------------------------------------
-# MusicBrainz search sub-menu
+# MusicBrainz search — native screen-stack port (cp3a) lives in menu_state.py
+# (MBSearchScreen + ResultsScreen). The legacy _mb_search_menu /
+# _mb_select_and_apply blocking loops were removed in cp3a; the apply tail (fetch
+# full release before preview, confirm, merge/overwrite, thread mb_rg_id) now
+# lives in ResultsScreen._apply_selected(source="mb").
 # ---------------------------------------------------------------------------
-
-
-def _mb_select_and_apply(
-    results: list,
-    disc: RBIDisc,
-    mb_rg_id: str | None,
-) -> tuple[RBIDisc, str | None]:
-    """Present MB results, confirm, and apply chosen meta to disc."""
-    from cdda2img.mb_lookup import _merge_into_disc, _overwrite_disc, lookup_release
-
-    # MB search returns results unordered; present them earliest-first so the
-    # original pressing leads (matches the Find-Original-Release flow).
-    results_sorted = sorted(results, key=lambda m: m.release_date or "9999")
-    selected = _select_from_results(results_sorted, "MusicBrainz Results")
-    if selected is None:
-        return disc, mb_rg_id
-    # Search hits are stubs (no track listing / ISRCs). Fetch the full release
-    # BEFORE previewing, so the diff reflects exactly what will be applied —
-    # otherwise the preview hides the ISRCs that the apply then fills.
-    if selected.mb_release_id and not selected.tracks:
-        print("  Fetching full track listing from MusicBrainz...")
-        full = lookup_release(selected.mb_release_id, disc_number=disc.disc_number)
-        if full and (full.album or full.tracks):
-            selected = full
-    mode = _confirm_apply(selected, disc)
-    if not mode:
-        return disc, mb_rg_id
-    disc = (
-        _merge_into_disc(selected, disc)
-        if mode == "update"
-        else _overwrite_disc(selected, disc)
-    )
-    mb_rg_id = selected.mb_release_group_id or mb_rg_id
-    print("  Applied.")
-    return disc, mb_rg_id
-
-
-def _mb_search_menu(
-    disc: RBIDisc,
-    mb_rg_id: str | None,
-    seed_artist: str = "",
-    seed_title: str = "",
-) -> tuple[RBIDisc, str | None]:
-    from cdda2img.mb_lookup import (
-        build_mb_search_query,
-        search_releases,
-        search_releases_by_barcode,
-    )
-
-    artist_q = disc.artist or seed_artist
-    title_q = disc.album or seed_title
-    while True:
-        _header("MusicBrainz Search")
-        print(f"  Artist: {artist_q or '(none)'}")
-        print(f"  Title:  {title_q or '(none)'}")
-        print()
-        print("  [s]  Search with current fields")
-        print("  [e]  Edit artist / title")
-        print("  [u]  Search by UPC/barcode")
-        print("  [b]  Back")
-        choice = _prompt("  > ").strip().lower()
-
-        if choice == "b":
-            return disc, mb_rg_id
-        elif choice == "e":
-            artist_q, title_q = _prompt_search_fields(artist_q, title_q)
-        elif choice == "u":
-            current = disc.catalog or ""
-            raw = _prompt(f"  UPC/barcode [{current}]: ").strip()
-            effective = raw or current
-            if not effective:
-                print("  No barcode to search.")
-                continue
-            print(f"\n  Searching MusicBrainz by barcode {effective!r} ...")
-            results = search_releases_by_barcode(effective)
-            if not results:
-                print("  No results found.")
-                continue
-            disc, mb_rg_id = _mb_select_and_apply(results, disc, mb_rg_id)
-        elif choice == "s":
-            query = build_mb_search_query(artist_q, title_q)
-            print(f"\n  Searching MusicBrainz for {query!r} ...")
-            results = search_releases(query)
-            if not results:
-                print("  No results found.")
-                continue
-            disc, mb_rg_id = _mb_select_and_apply(results, disc, mb_rg_id)
-        else:
-            print("  Unknown command.")
 
 
 # ---------------------------------------------------------------------------
@@ -691,38 +623,11 @@ def _acoustid_menu(
 
 
 # ---------------------------------------------------------------------------
-# Fetch sub-menu
+# Fetch sub-menu — native screen-stack port (cp3a): the blocking _fetch_menu
+# loop was replaced by menu_state.FetchScreen, which dispatches MusicBrainz to
+# the native MBSearchScreen and (pending cp3b/cp3c) Discogs/AcoustID to the
+# legacy _discogs_menu / _acoustid_menu blocking helpers below.
 # ---------------------------------------------------------------------------
-
-
-def _fetch_menu(
-    disc: RBIDisc,
-    mb_rg_id: str | None,
-    source_pcm: Path | None = None,
-    source_wavs: list[Path] | None = None,
-    seed_artist: str = "",
-    seed_title: str = "",
-) -> tuple[RBIDisc, str | None]:
-    while True:
-        _header("Fetch Metadata")
-        print("  [m]  MusicBrainz text search")
-        print("  [d]  Discogs search")
-        print("  [a]  AcoustID fingerprint")
-        print("  [b]  Back")
-        choice = _prompt("  > ").strip().lower()
-
-        if choice == "b":
-            return disc, mb_rg_id
-        elif choice == "m":
-            disc, mb_rg_id = _mb_search_menu(
-                disc, mb_rg_id, seed_artist=seed_artist, seed_title=seed_title
-            )
-        elif choice == "d":
-            disc = _discogs_menu(disc, seed_artist=seed_artist, seed_title=seed_title)
-        elif choice == "a":
-            disc = _acoustid_menu(disc, source_pcm=source_pcm, source_wavs=source_wavs)
-        else:
-            print("  Unknown command.")
 
 
 # ---------------------------------------------------------------------------

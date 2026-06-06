@@ -37,6 +37,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from cdda2img.lookup_result import DiscMeta
     from cdda2img.rbi_format import RBIDisc
 
 # ANSI screen-clear + cursor-home. Works on every terminal we care about
@@ -59,6 +60,8 @@ class MenuState(Enum):
     EDIT_TRACK = auto()
     EDIT_DISC_POSITION = auto()
     FETCH = auto()
+    MB_SEARCH = auto()
+    RESULTS = auto()
     ORIGINAL_RELEASE = auto()
     DONE = auto()
 
@@ -148,7 +151,7 @@ class MainScreen(Screen):
         if choice == "a":
             return Done()
         if choice == "f":
-            return Push(LegacyDelegateScreen(MenuState.FETCH))
+            return Push(FetchScreen())
         if choice == "e":
             return Push(EditScreen())
         if choice == "r":
@@ -353,15 +356,231 @@ class EditDiscPositionScreen(Screen):
         return Pop()
 
 
+class FetchScreen(Screen):
+    """Fetch-metadata sub-menu: MusicBrainz / Discogs / AcoustID.
+
+    Native port of the legacy ``metadata_menu._fetch_menu`` loop (cp3a).
+    MusicBrainz is fully ported — [m] pushes :class:`MBSearchScreen`. Discogs and
+    AcoustID still call the legacy blocking helpers (``_discogs_menu`` /
+    ``_acoustid_menu``) as a bounded leaf interaction in ``handle_input``, pending
+    their own screen ports (cp3b / cp3c).
+    """
+
+    state = MenuState.FETCH
+
+    def render(self, ctl: MenuController) -> None:
+        from cdda2img.metadata_menu import _header
+
+        _header("Fetch Metadata")
+        if ctl.banner:
+            print(f"  ! {ctl.banner}")
+            print()
+            ctl.banner = ""
+        print("  [m]  MusicBrainz text search")
+        print("  [d]  Discogs search")
+        print("  [a]  AcoustID fingerprint")
+        print("  [b]  Back")
+
+    def handle_input(self, ctl: MenuController) -> Nav:
+        from cdda2img.metadata_menu import _acoustid_menu, _discogs_menu, _prompt
+
+        choice = _prompt("  > ").strip().lower()
+        if choice == "b":
+            return Pop()
+        if choice == "m":
+            return Push(
+                MBSearchScreen(
+                    artist_q=ctl.disc.artist or ctl.seed_artist,
+                    title_q=ctl.disc.album or ctl.seed_title,
+                )
+            )
+        if choice == "d":
+            ctl.disc = _discogs_menu(
+                ctl.disc, seed_artist=ctl.seed_artist, seed_title=ctl.seed_title
+            )
+            return Stay()
+        if choice == "a":
+            ctl.disc = _acoustid_menu(
+                ctl.disc, source_pcm=ctl.source_pcm, source_wavs=ctl.source_wavs
+            )
+            return Stay()
+        ctl.banner = "Unknown command."
+        return Stay()
+
+
+class MBSearchScreen(Screen):
+    """MusicBrainz search — the "enter query" frame (cp3a).
+
+    Carries the artist/title query as instance state, seeded once at entry from
+    the disc / controller seed fields and mutated only by the [e] edit action — so
+    it does NOT drift to a post-apply ``disc.album`` (the query you searched with
+    stays put even after a result is applied to the disc underneath). Executing a
+    search pushes :class:`ResultsScreen` (the "pick result" frame); results are
+    sorted earliest-first so the original pressing leads, matching the legacy
+    ``_mb_select_and_apply`` order.
+    """
+
+    state = MenuState.MB_SEARCH
+
+    def __init__(self, artist_q: str = "", title_q: str = "") -> None:
+        self.artist_q = artist_q
+        self.title_q = title_q
+
+    def render(self, ctl: MenuController) -> None:
+        from cdda2img.metadata_menu import _header
+
+        _header("MusicBrainz Search")
+        print(f"  Artist: {self.artist_q or '(none)'}")
+        print(f"  Title:  {self.title_q or '(none)'}")
+        print()
+        if ctl.banner:
+            print(f"  ! {ctl.banner}")
+            print()
+            ctl.banner = ""
+        print("  [s]  Search with current fields")
+        print("  [e]  Edit artist / title")
+        print("  [u]  Search by UPC/barcode")
+        print("  [b]  Back")
+
+    def _mb_results(self, results: list[DiscMeta]) -> Push:
+        # Earliest-first so the original pressing leads (legacy parity).
+        results_sorted = sorted(results, key=lambda m: m.release_date or "9999")
+        return Push(ResultsScreen(results_sorted, "MusicBrainz Results", "mb"))
+
+    def handle_input(self, ctl: MenuController) -> Nav:
+        from cdda2img.mb_lookup import (
+            build_mb_search_query,
+            search_releases,
+            search_releases_by_barcode,
+        )
+        from cdda2img.metadata_menu import _prompt, _prompt_search_fields
+
+        choice = _prompt("  > ").strip().lower()
+        if choice == "b":
+            return Pop()
+        if choice == "e":
+            self.artist_q, self.title_q = _prompt_search_fields(
+                self.artist_q, self.title_q
+            )
+            return Stay()
+        if choice == "u":
+            current = ctl.disc.catalog or ""
+            raw = _prompt(f"  UPC/barcode [{current}]: ").strip()
+            effective = raw or current
+            if not effective:
+                ctl.banner = "No barcode to search."
+                return Stay()
+            print(f"\n  Searching MusicBrainz by barcode {effective!r} ...")
+            results = search_releases_by_barcode(effective)
+            if not results:
+                ctl.banner = "No results found."
+                return Stay()
+            return self._mb_results(results)
+        if choice == "s":
+            query = build_mb_search_query(self.artist_q, self.title_q)
+            print(f"\n  Searching MusicBrainz for {query!r} ...")
+            results = search_releases(query)
+            if not results:
+                ctl.banner = "No results found."
+                return Stay()
+            return self._mb_results(results)
+        ctl.banner = "Unknown command."
+        return Stay()
+
+
+class ResultsScreen(Screen):
+    """Paginated result picker — the "pick result" frame (cp3a).
+
+    A real render+one-keystroke frame: the page index is screen state, ``render``
+    is a pure repaint (shared ``metadata_menu._render_results_page``), and each
+    ``handle_input`` consumes one keystroke (n/p paginate; a number selects; b
+    backs out). Selecting a result runs the source-specific apply tail (fetch the
+    full release, confirm the diff, merge/overwrite) and pops back to the search
+    frame — the legacy "one select+apply, then return to search" flow. Persistent
+    feedback ("Applied.") is set as ``ctl.banner`` so it survives the screen-clear
+    on the frame we pop to (a plain print would be wiped in TUI mode).
+    """
+
+    state = MenuState.RESULTS
+
+    def __init__(self, results: list[DiscMeta], title: str, source: str) -> None:
+        self.results = results
+        self.title = title
+        self.source = source
+        self.page = 0
+
+    def render(self, ctl: MenuController) -> None:
+        from cdda2img.metadata_menu import _render_results_page
+
+        _render_results_page(self.results, self.page, self.title)
+        if ctl.banner:
+            print()
+            print(f"  ! {ctl.banner}")
+            ctl.banner = ""
+
+    def handle_input(self, ctl: MenuController) -> Nav:
+        from cdda2img.metadata_menu import _PAGE, _prompt
+
+        total = len(self.results)
+        total_pages = max(1, (total + _PAGE - 1) // _PAGE)
+        choice = _prompt(f"  Select 1-{total}: ").strip().lower()
+        if choice == "n":
+            if self.page < total_pages - 1:
+                self.page += 1
+            return Stay()
+        if choice == "p":
+            if self.page > 0:
+                self.page -= 1
+            return Stay()
+        if choice == "b":
+            return Pop()
+        try:
+            idx = int(choice) - 1
+        except ValueError:
+            ctl.banner = "Invalid selection."
+            return Stay()
+        if not 0 <= idx < total:
+            ctl.banner = "Invalid selection."
+            return Stay()
+        self._apply_selected(ctl, self.results[idx])
+        return Pop()
+
+    def _apply_selected(self, ctl: MenuController, selected: DiscMeta) -> None:
+        """Source-specific apply tail. cp3a implements MB; cp3b/cp3c extend."""
+        from cdda2img.mb_lookup import _merge_into_disc, _overwrite_disc, lookup_release
+        from cdda2img.metadata_menu import _confirm_apply
+
+        if self.source == "mb":
+            # Search hits are stubs (no track listing / ISRCs). Fetch the full
+            # release BEFORE previewing so the diff reflects what will be applied.
+            if selected.mb_release_id and not selected.tracks:
+                print("  Fetching full track listing from MusicBrainz...")
+                full = lookup_release(
+                    selected.mb_release_id, disc_number=ctl.disc.disc_number
+                )
+                if full and (full.album or full.tracks):
+                    selected = full
+            mode = _confirm_apply(selected, ctl.disc)
+            if not mode:
+                return
+            ctl.disc = (
+                _merge_into_disc(selected, ctl.disc)
+                if mode == "update"
+                else _overwrite_disc(selected, ctl.disc)
+            )
+            ctl.mb_rg_id = selected.mb_release_group_id or ctl.mb_rg_id
+            ctl.banner = "Applied."
+
+
 class LegacyDelegateScreen(Screen):
     """Checkpoint-1 bridge for the not-yet-migrated sub-menus.
 
-    Until FETCH / ORIGINAL_RELEASE are ported to native screens, this calls the
+    Until ORIGINAL_RELEASE is ported to a native screen (cp4), this calls the
     existing procedural helper in ``metadata_menu`` — which runs its own
     render+input loop and returns when the user backs out. ``render`` is a no-op
     (the helper draws itself); the work happens once in ``handle_input``, after
-    which we pop back to the parent. Behaviour-preserving. EDIT is now a native
-    screen (:class:`EditScreen`) and no longer routed through here.
+    which we pop back to the parent. Behaviour-preserving. EDIT (cp2) and FETCH
+    (cp3a) are now native screens and no longer routed through here.
     """
 
     def __init__(self, state: MenuState) -> None:
@@ -372,21 +591,9 @@ class LegacyDelegateScreen(Screen):
         return
 
     def handle_input(self, ctl: MenuController) -> Nav:
-        from cdda2img.metadata_menu import (
-            _fetch_menu,
-            _original_release_menu,
-        )
+        from cdda2img.metadata_menu import _original_release_menu
 
-        if self.state is MenuState.FETCH:
-            ctl.disc, ctl.mb_rg_id = _fetch_menu(
-                ctl.disc,
-                ctl.mb_rg_id,
-                source_pcm=ctl.source_pcm,
-                source_wavs=ctl.source_wavs,
-                seed_artist=ctl.seed_artist,
-                seed_title=ctl.seed_title,
-            )
-        elif self.state is MenuState.ORIGINAL_RELEASE:
+        if self.state is MenuState.ORIGINAL_RELEASE:
             ctl.disc, ctl.mb_rg_id = _original_release_menu(ctl.disc, ctl.mb_rg_id)
         return Pop()
 

@@ -269,10 +269,30 @@ behaviour, not a regression.
         `LegacyDelegateScreen`). Disc-position validation loop expressed as `Stay`;
         per-track screen carries `track_number` and re-resolves each step. +18 tests.
         (commit, 2026-06-02)
-  - [ ] **3** · FETCH → Fetch + MBSearch/**MBResults** + Discogs + Acoustid. Audit the
-        three helpers for render/IO/logic entanglement FIRST: `render` must be a pure
-        repaint; network I/O stays in `handle_input`; "enter query" vs "pick result" split
-        into two stack frames.
+  - **3** · FETCH → Fetch + MBSearch/**MBResults** + Discogs + Acoustid. Split into a/b/c
+        (advisor: a 600-line single commit is hard to bisect); each behaviour-preserving.
+        Frame-vs-helper rule applied: a *frame* (Screen) is navigable/paginated/persistent;
+        `_confirm_apply`/`_show_diff` stay blocking leaf helpers in `handle_input`. Persistent
+        feedback ("Applied.") → `ctl.banner` (a plain print is wiped by the next screen-clear
+        in TUI mode); transient IO prints ("Searching…") stay.
+    - [x] **3a** · MusicBrainz. DONE 2026-06-06. `FetchScreen` (replaces
+          `LegacyDelegateScreen(FETCH)`; delegates d/a to legacy `_discogs_menu`/`_acoustid_menu`
+          as interim blocking leaves) + `MBSearchScreen` ("enter query"; artist/title as instance
+          state seeded at entry, mutated only by [e], no drift to post-apply `disc.album`) +
+          `ResultsScreen` ("pick result"; page index = screen state; pure repaint via extracted
+          `metadata_menu._render_results_page`; source-discriminated apply tail). MB apply tail:
+          sort earliest-first before push, fetch-full-before-preview, merge/overwrite, thread
+          `mb_rg_id`. Removed legacy `_fetch_menu`/`_mb_search_menu`/`_mb_select_and_apply`;
+          `_select_from_results` kept (Discogs/AcoustID/original use it) refactored onto
+          `_render_results_page`. Migrated 2 tests + 13 new native tests. 810 pass.
+    - [ ] **3b** · Discogs → `DiscogsSearchScreen` + reuse `ResultsScreen(source="discogs")`
+          (no sort; `fetch_release` when `discogs_release_id and not tracks`; no `mb_rg_id`).
+          Then `_discogs_menu`/`_discogs_execute_search` removed; FetchScreen [d] pushes native.
+    - [ ] **3c** · AcoustID → track-picker screen + `ResultsScreen(source="acoustid")` (no sort;
+          tag single-track `number=None` before the results frame; fetch-full when
+          `len(tracks) < len(disc.tracks)`). Decide then whether `_acoustid_file_loop` is its own
+          screen or a blocking helper. Results frame pops back to the track-picker (which loops),
+          not to Fetch. Then `_acoustid_*` loops removed; FetchScreen [a] pushes native.
   - [ ] **4** · ORIGINAL_RELEASE → `OriginalReleaseScreen`.
   - [ ] **5** · Delete the dead legacy helpers (`_edit_menu`, `_edit_track`,
         `_edit_disc_position` — now unreferenced after cp2); collapse/retire the

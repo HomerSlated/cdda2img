@@ -14,13 +14,17 @@ from unittest.mock import patch
 
 import pytest
 
+from cdda2img.lookup_result import DiscMeta, TrackMeta
 from cdda2img.menu_state import (
     EditDiscPositionScreen,
     EditScreen,
     EditTrackScreen,
+    FetchScreen,
     LegacyDelegateScreen,
+    MBSearchScreen,
     MenuController,
     MenuState,
+    ResultsScreen,
 )
 from cdda2img.rbi_format import RBIDisc, RBITocEntry
 
@@ -210,18 +214,183 @@ def test_edit_back_returns_to_main() -> None:
     assert ctl.state is MenuState.MAIN
 
 
-def test_fetch_state_returns_to_main_and_threads_rg_id() -> None:
+def test_main_fetch_pushes_native_fetch_screen() -> None:
+    """MAIN [f] now pushes the native FetchScreen (cp3a), not a legacy delegate."""
     ctl = MenuController(_disc())
-    ctl.stack.append(LegacyDelegateScreen(MenuState.FETCH))
-    fake_edited = _disc(album="Fetched")
-    with patch(
-        "cdda2img.metadata_menu._fetch_menu",
-        return_value=(fake_edited, "new-rg-id"),
-    ):
+    with patch("cdda2img.metadata_menu._prompt", return_value="f"):
         ctl._apply(ctl.stack[-1].handle_input(ctl))
+    assert isinstance(ctl.stack[-1], FetchScreen)
+    assert ctl.state is MenuState.FETCH
+
+
+def test_fetch_screen_back_returns_to_main() -> None:
+    ctl = MenuController(_disc())
+    ctl.stack.append(FetchScreen())
+    _step_with(ctl, "b")
     assert ctl.state is MenuState.MAIN
-    assert ctl.disc.album == "Fetched"
-    assert ctl.mb_rg_id == "new-rg-id"
+
+
+def test_fetch_screen_m_pushes_mb_search_seeded_from_disc() -> None:
+    """[m] pushes MBSearchScreen, seeded from the disc's artist/title."""
+    ctl = MenuController(_disc(album="Seed Album", artist="Seed Artist"))
+    ctl.stack.append(FetchScreen())
+    _step_with(ctl, "m")
+    top = ctl.stack[-1]
+    assert isinstance(top, MBSearchScreen)
+    assert top.artist_q == "Seed Artist"
+    assert top.title_q == "Seed Album"
+
+
+def test_fetch_screen_d_delegates_to_legacy_discogs_and_stays() -> None:
+    """Discogs is still a blocking leaf helper (cp3b pending); FetchScreen stays."""
+    ctl = MenuController(_disc())
+    ctl.stack.append(FetchScreen())
+    edited = _disc(album="Via Discogs")
+    with patch("cdda2img.metadata_menu._discogs_menu", return_value=edited) as dg:
+        _step_with(ctl, "d")
+    dg.assert_called_once()
+    assert ctl.disc.album == "Via Discogs"
+    assert ctl.state is MenuState.FETCH  # stayed on FetchScreen
+
+
+def test_fetch_screen_a_delegates_to_legacy_acoustid_and_stays() -> None:
+    ctl = MenuController(_disc())
+    ctl.stack.append(FetchScreen())
+    edited = _disc(album="Via AcoustID")
+    with patch("cdda2img.metadata_menu._acoustid_menu", return_value=edited) as aid:
+        _step_with(ctl, "a")
+    aid.assert_called_once()
+    assert ctl.disc.album == "Via AcoustID"
+    assert ctl.state is MenuState.FETCH
+
+
+def test_mb_search_back_pops_to_fetch() -> None:
+    ctl = MenuController(_disc())
+    ctl.stack.append(FetchScreen())
+    ctl.stack.append(MBSearchScreen())
+    _step_with(ctl, "b")
+    assert ctl.state is MenuState.FETCH
+
+
+def test_mb_search_no_results_sets_banner_and_stays() -> None:
+    ctl = MenuController(_disc())
+    ctl.stack.append(MBSearchScreen(artist_q="A", title_q="T"))
+    with (
+        patch("cdda2img.mb_lookup.search_releases", return_value=[]),
+        patch("cdda2img.mb_lookup.build_mb_search_query", return_value="q"),
+    ):
+        _step_with(ctl, "s")
+    assert ctl.state is MenuState.MB_SEARCH
+    assert "No results" in ctl.banner
+
+
+def test_mb_search_query_does_not_drift_after_edit() -> None:
+    """The query is instance state seeded at entry; [e] mutates it, and it does
+    not silently track a later disc.album change (Trap #3)."""
+    ctl = MenuController(_disc(album="Orig", artist="OrigArt"))
+    screen = MBSearchScreen(artist_q="OrigArt", title_q="Orig")
+    ctl.stack.append(screen)
+    with patch(
+        "cdda2img.metadata_menu._prompt_search_fields",
+        return_value=("NewArt", "NewTitle"),
+    ):
+        _step_with(ctl, "e")
+    # disc changes underneath should not move the query.
+    ctl.disc.album = "Something Else"
+    assert (screen.artist_q, screen.title_q) == ("NewArt", "NewTitle")
+
+
+def test_mb_search_s_pushes_results_sorted_earliest_first() -> None:
+    """[s] pushes a ResultsScreen with results sorted earliest-release first —
+    the legacy _mb_select_and_apply presentation order."""
+    ctl = MenuController(_disc())
+    ctl.stack.append(MBSearchScreen(artist_q="A", title_q="T"))
+    stub84 = DiscMeta(album="E", release_date="1984", mb_release_id="r84")
+    stub83 = DiscMeta(album="E", release_date="1983-03-23", mb_release_id="r83")
+    with (
+        patch("cdda2img.mb_lookup.search_releases", return_value=[stub84, stub83]),
+        patch("cdda2img.mb_lookup.build_mb_search_query", return_value="q"),
+    ):
+        _step_with(ctl, "s")
+    top = ctl.stack[-1]
+    assert isinstance(top, ResultsScreen)
+    assert top.source == "mb"
+    assert [m.mb_release_id for m in top.results] == ["r83", "r84"]
+
+
+def test_results_pagination_and_back() -> None:
+    results = [DiscMeta(album=f"R{i}", mb_release_id=str(i)) for i in range(15)]
+    ctl = MenuController(_disc())
+    screen = ResultsScreen(results, "MusicBrainz Results", "mb")
+    ctl.stack.append(screen)
+    _step_with(ctl, "n")
+    assert screen.page == 1
+    _step_with(ctl, "p")
+    assert screen.page == 0
+    _step_with(ctl, "p")  # already at first page — clamps, no error
+    assert screen.page == 0
+    _step_with(ctl, "b")
+    assert ctl.state is MenuState.MAIN  # popped (MainScreen underneath)
+
+
+def test_results_invalid_selection_sets_banner_and_stays() -> None:
+    results = [DiscMeta(album="R0", mb_release_id="0")]
+    ctl = MenuController(_disc())
+    ctl.stack.append(ResultsScreen(results, "MusicBrainz Results", "mb"))
+    _step_with(ctl, "99")
+    assert ctl.state is MenuState.RESULTS
+    assert "Invalid" in ctl.banner
+
+
+def test_results_mb_select_fetches_full_before_preview_and_threads_rg() -> None:
+    """The migrated _mb_select_and_apply contract: on select, the full release
+    (with ISRCs) is fetched BEFORE the preview, applied, mb_rg_id threaded, and
+    the screen pops back to the search frame with an 'Applied.' banner."""
+    disc = _disc()  # track 1, blank ISRC
+    ctl = MenuController(disc)
+    ctl.stack.append(MBSearchScreen())  # the frame we pop back to
+    stub83 = DiscMeta(album="E", release_date="1983-03-23", mb_release_id="r83")
+    full83 = DiscMeta(
+        album="E",
+        release_date="1983-03-23",
+        mb_release_id="r83",
+        mb_release_group_id="rg-e",
+        tracks=[TrackMeta(number=1, isrc="USRHD0709703")],
+    )
+    ctl.stack.append(ResultsScreen([stub83], "MusicBrainz Results", "mb"))
+    captured: dict = {}
+
+    def fake_confirm(meta, _disc):
+        captured["preview_isrcs"] = [t.isrc for t in meta.tracks]
+        return "update"
+
+    with (
+        patch("cdda2img.metadata_menu._confirm_apply", side_effect=fake_confirm),
+        patch("cdda2img.mb_lookup.lookup_release", return_value=full83),
+    ):
+        _step_with(ctl, "1")  # select result 1
+
+    assert captured["preview_isrcs"] == ["USRHD0709703"]  # full meta reached preview
+    assert ctl.disc.tracks[0].isrc == "USRHD0709703"  # and was applied
+    assert ctl.mb_rg_id == "rg-e"  # release-group threaded
+    assert ctl.state is MenuState.MB_SEARCH  # popped back to search
+    assert ctl.banner == "Applied."
+
+
+def test_results_mb_select_cancel_applies_nothing() -> None:
+    disc = _disc()
+    ctl = MenuController(disc)
+    ctl.stack.append(MBSearchScreen())
+    stub = DiscMeta(album="E", mb_release_id="r", mb_release_group_id="rg")
+    ctl.stack.append(ResultsScreen([stub], "MusicBrainz Results", "mb"))
+    with (
+        patch("cdda2img.metadata_menu._confirm_apply", return_value=None),
+        patch("cdda2img.mb_lookup.lookup_release", return_value=stub),
+    ):
+        _step_with(ctl, "1")
+    assert ctl.mb_rg_id is None  # nothing applied
+    assert ctl.banner == ""  # no 'Applied.' banner on cancel
+    assert ctl.state is MenuState.MB_SEARCH  # still popped back
 
 
 def test_original_release_state_returns_to_main_and_threads_rg_id() -> None:

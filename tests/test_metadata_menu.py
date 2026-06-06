@@ -836,42 +836,8 @@ def test_pcm_extract_track_wav_returns_none_for_missing_track(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# _mb_select_and_apply — chronological order + full-fetch-before-preview
+# The MB Fetch-path contract (earliest-first order + full-fetch-before-preview +
+# rg threading) moved to the native screens in cp3a — see test_menu_state.py
+# ::test_results_mb_select_fetches_full_before_preview_and_threads_rg and
+# ::test_mb_search_s_pushes_results_sorted_earliest_first.
 # ---------------------------------------------------------------------------
-
-
-def test_mb_select_and_apply_sorts_and_fetches_full_before_preview():
-    """Both Fetch-path fixes: results are presented earliest-first, and the full
-    release (with ISRCs) is fetched BEFORE the preview, so the diff matches what
-    [u] actually applies."""
-    from cdda2img.metadata_menu import _mb_select_and_apply
-
-    disc = _disc(tracks=1)  # track 1, blank ISRC
-    stub84 = DiscMeta(album="E", release_date="1984", mb_release_id="r84")
-    stub83 = DiscMeta(album="E", release_date="1983-03-23", mb_release_id="r83")
-    full83 = DiscMeta(
-        album="E",
-        release_date="1983-03-23",
-        mb_release_id="r83",
-        tracks=[TrackMeta(number=1, isrc="USRHD0709703")],
-    )
-    captured: dict = {}
-
-    def fake_select(res, _title):
-        captured["order"] = [m.mb_release_id for m in res]
-        return res[0]  # earliest after sort
-
-    def fake_confirm(meta, _disc):
-        captured["preview_isrcs"] = [t.isrc for t in meta.tracks]
-        return "update"
-
-    with (
-        patch("cdda2img.metadata_menu._select_from_results", side_effect=fake_select),
-        patch("cdda2img.metadata_menu._confirm_apply", side_effect=fake_confirm),
-        patch("cdda2img.mb_lookup.lookup_release", return_value=full83),
-    ):
-        out, _ = _mb_select_and_apply([stub84, stub83], disc, None)
-
-    assert captured["order"][0] == "r83"  # earliest-first, not 1984
-    assert captured["preview_isrcs"] == ["USRHD0709703"]  # full meta reached preview
-    assert out.tracks[0].isrc == "USRHD0709703"  # and was applied
