@@ -38,6 +38,43 @@ import re
 
 log = logging.getLogger(__name__)
 
+# Below this many digits, a substring match is too likely to be a coincidence
+# (a short numeric run shared between two unrelated barcodes). Seven is the
+# same floor `_pick_canonical_mcn` has always used for its raw-digit match.
+_MIN_MCN_SUBSTRING_DIGITS = 7
+
+
+def mcn_matches(a: str | None, b: str | None) -> bool:
+    """Fuzzy MCN/barcode equality: shorter digit-run is a substring of the longer.
+
+    Exact 13-digit equality is the *wrong* test at every MCN comparison site: no
+    metadata service reliably stores the full 13-digit MCN. They hold the printed
+    GTIN-12 barcode (no leading zero, no check digit), a prefix of it, or a
+    partial record. A printed GTIN-12 is a prefix of the GTIN-12 that is itself a
+    suffix of the EAN-13, so a contiguous-substring test bridges all three forms.
+
+    Both sides are reduced to digits (non-digits stripped; no check-digit
+    requirement — a check-digit failure must not block a match, the on-disc MCN
+    is gospel even when its Q-channel read mangled the check digit). A match
+    requires the shorter run to be at least ``_MIN_MCN_SUBSTRING_DIGITS`` digits
+    and to appear contiguously in the longer. Blank on either side ⇒ False
+    (no evidence is not a match).
+
+    Deliberately permissive: two different EAN-13s from one label share a 7+
+    digit GS1 company prefix and will match here. That is acceptable — callers
+    use this to *reject* contradictions and to *rank*, never to assert identity
+    on its own, so a false-positive degrades to "no contradiction" / "no unique
+    winner", never to a wrong merge.
+    """
+    da = re.sub(r"\D", "", a) if a else ""
+    db = re.sub(r"\D", "", b) if b else ""
+    if not da or not db:
+        return False
+    short, long = (da, db) if len(da) <= len(db) else (db, da)
+    if len(short) < _MIN_MCN_SUBSTRING_DIGITS:
+        return False
+    return short in long
+
 
 def normalize_barcode(
     raw: str | None, *, require_check_digit: bool = True

@@ -48,9 +48,12 @@ checkpoint (run `make check` + tests + py3.10 at each). Do units in order
 - [x] **C2** · F-002 — `_resolve_via_isrc_tally` sets a *recording-level* `mb_release_id` (the
       proven sibling of last night's AcoustID fix). `replace(winner, mb_release_id=None)`; keep
       the RG. Test: the zero-disc-ID-match path leaves `mb_release_id` None.
-- [x] **C3** · F-003 — add `"discids"` to the `get_releases_by_discid` includes so
-      `_find_disc_medium` matches on multi-disc releases (else mediums flatten + track numbers
-      collide across discs). Multi-disc fixture test.
+- [~] **C3** · F-003 — ~~add `"discids"` to the `get_releases_by_discid` includes~~ **REVERTED
+      2026-06-06 (commit `e9866eb`)**. The `/discid` endpoint rejects the `discids` include with
+      HTTP 400, which was swallowed as "no match" → every disc-ID lookup silently failed → CDDB
+      fallback. The medium's disc-list is populated by `/discid` *anyway* (we query *by* disc id),
+      so `_find_disc_medium` still selects the right medium without the include. C3 was a
+      well-intentioned mistake; do not re-add `discids` to the by-discid call (whipper omits it too).
 - [x] **C4** · (LOW) F-007 — guard `compute_disc_id` against >99 tracks / negative offsets. Test.
 
 **Unit P — Performance**
@@ -80,7 +83,11 @@ Surfaced by a real-disc rip (Green Day — *American Idiot*, original 2004 comme
 pressing). Both are the "a null/blank/odd value blamed on 'no record' is actually a bad
 calculation" pattern — now hit 3× (R3 duration field, AcoustID pressing, and these).
 
-- [ ] **P2-A** · **AccurateRip v2 confidence always None — suspected calc bug.** Every track
+- [x] **P2-A** · **AccurateRip v2 confidence always None — FIXED `12f3ebc` (2026-05-31).** Root
+      cause was matching the computed v2 against the `crc450` field instead of the stored `crc`
+      field; the dBAR per-track format carries a single `crc` (v1 *or* v2 per submitter) plus a
+      `crc450` sub-CRC, not separate v1/v2 slots. This checkbox was stale; verified done
+      2026-06-06. (Original note retained below for history.) Every track
       showed v1 matched at high confidence (127 / 128) but **v2 = `[ — ]`** (no match). v2 is
       just a different checksum of the same audio, so a v1 match at conf 127 should almost
       always have a corresponding v2 block. All-tracks-None on v2 is not credible as a genuine
@@ -186,25 +193,23 @@ never gated** (R9 stays as-is — gating titles is the gnudb-era regression we e
    always wins; MB only fills what the disc left blank).
 
 **Units (each independently committable; `make check` + tests + py3.10 at each):**
-- [ ] **M (foundation) — shared fuzzy-MCN matcher.** Add `barcode.mcn_matches(a, b) -> bool`:
-      normalise both to digits (`require_check_digit=False`), return True iff the shorter digit-run
-      (length ≥ `_MIN_MCN_SUBSTRING_DIGITS`, reuse the existing `7`) is a substring of the longer.
-      Then **audit and convert every MCN equality comparison** to it:
-      - `mb_lookup._disambiguate_by_mcn` (`m.catalog == mcn`) → `mcn_matches`.
-      - `cdda2img._pick_canonical_mcn` substring step → refactor onto the shared helper.
-      - `discogs_lookup` barcode-result comparison → audit + convert.
-      - grep for any other `== mcn` / `catalog ==` / barcode equality.
-      Tests: 12-vs-13-digit, missing leading zero, missing check digit, partial service record,
-      and the false-positive guard (a <7-digit coincidence must NOT match).
-- [ ] **G — consistency gate (strict reject).** Add `mb_lookup._is_consistent(meta, disc) -> bool`:
-      MCN → if both non-blank and not `mcn_matches` ⇒ False; per-track ISRC (matched by track
-      number) → if both non-blank and unequal ⇒ False; else True. Apply as a **pre-filter** in
-      `prepopulate_from_mb`: `consistent = [m for m in matches if _is_consistent(m, disc)]`, then
-      run the existing resolution on `consistent` — 0 ⇒ return disc unchanged (blank; this also
-      closes the single-match no-cross-check gap at `mb_lookup.py:1042`); 1 ⇒ merge; >1 ⇒ existing
-      `_resolve_multimatch` → agreed-facts over the consistent set. Tests: single match with a
-      contradicting ISRC ⇒ blank; contradicting MCN ⇒ blank; consistent single ⇒ merged; mixed
-      multi ⇒ only consistent considered.
+- [x] **M (foundation) — shared fuzzy-MCN matcher. DONE 2026-06-06.** `barcode.mcn_matches(a, b)`
+      strips both to digits and returns True iff the shorter run (≥ `_MIN_MCN_SUBSTRING_DIGITS=7`)
+      is a substring of the longer. Converted `mb_lookup._disambiguate_by_mcn` and
+      `cdda2img._pick_canonical_mcn` onto it. Audit result: `discogs_lookup` has **no** MCN
+      equality comparison — it queries Discogs server-side by the MCN string — so nothing to
+      convert there. Tests in `tests/test_barcode.py` (incl. the American Idiot pair as the
+      false-positive guard) + `_is_consistent` tests.
+- [x] **G — consistency gate (strict reject). DONE 2026-06-06.** `mb_lookup._is_consistent(meta,
+      disc)`: fuzzy-MCN mismatch or exact per-track-ISRC mismatch ⇒ False; blank either side ⇒ no
+      contradiction. Pre-filter in `prepopulate_from_mb`. Distinguishes **raw-0** (disc-ID unknown
+      → R4 ISRC-tally fallback, itself now gated by `_is_consistent` per advisor) from
+      **filtered-to-0** (all candidates contradict → blank, NO tally). `MBPrepopResult` gained
+      `rejected_inconsistent` (surfaced in PROV as `mb_rejected_inconsistent`); `match_count` now
+      = *usable/consistent* matches. Note: this filtering already feeds the consistent subset into
+      `_build_agreed_facts_meta`, so it does most of Unit A's plumbing (Stage 4 is just the
+      field-widening). `prepopulate_from_mb` split into `_prepop_zero_match` + `_prepop_multimatch`
+      to stay under C901.
 - [ ] **A (#3-a proper) — agreed-facts over the consistent / MCN-matched subset.** Feed
       `_build_agreed_facts_meta` the consistent set (= the MCN-matched subset when the disc has an
       MCN), not the whole RG. Widen the extracted fields (album/artist/per-track titles where the

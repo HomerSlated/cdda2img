@@ -833,12 +833,12 @@ def _plurality_release_group(matches: list[DiscMeta]) -> str | None:
 
 
 def _disambiguate_by_mcn(matches: list[DiscMeta], disc: RBIDisc) -> DiscMeta | None:
-    """Pick the match whose barcode UNIQUELY equals the disc's Q-channel MCN.
+    """Pick the match whose barcode UNIQUELY matches the disc's Q-channel MCN.
 
     The MCN read from the disc subchannel is the strongest pressing-level
-    signal available, resolved before the MB lookup runs. Candidate ``catalog``
-    fields are already normalised EAN-13 (``normalize_barcode`` in
-    ``_parse_release``), so we normalise the disc MCN the same way and compare.
+    signal available, resolved before the MB lookup runs. Comparison is fuzzy
+    (``barcode.mcn_matches``): services store partial / check-digit-free
+    barcodes, so exact EAN-13 equality misses real matches (Unit M).
 
     A *unique* barcode hit identifies that exact release — safe to merge in
     full. When the MCN matches **several** candidates (a barcode shared across
@@ -846,14 +846,50 @@ def _disambiguate_by_mcn(matches: list[DiscMeta], disc: RBIDisc) -> DiscMeta | N
     undetermined; we return None so the caller falls back to agreed-facts-only
     population rather than fabricate one pressing's date / release id. Returns
     None when the disc has no MCN or no candidate barcode matches.
-    """
-    from cdda2img.barcode import normalize_barcode
 
-    mcn = normalize_barcode(disc.catalog)
-    if not mcn:
+    NB after the Unit-G consistency pre-filter (``prepopulate_from_mb``), every
+    surviving candidate already fuzzy-matches a non-blank disc MCN, so on a
+    multi-survivor this returns None by construction (all hit ⇒ not unique) and
+    resolution falls through to agreed-facts — exactly the intended behaviour.
+    """
+    from cdda2img.barcode import mcn_matches
+
+    if not disc.catalog:
         return None
-    hits = [m for m in matches if m.catalog and m.catalog == mcn]
+    hits = [m for m in matches if mcn_matches(disc.catalog, m.catalog)]
     return hits[0] if len(hits) == 1 else None
+
+
+def _is_consistent(meta: DiscMeta, disc: RBIDisc) -> bool:
+    """True unless *meta* contradicts a non-blank on-disc objective identifier.
+
+    The disc's Q-channel MCN and per-track ISRCs are gospel, loaded before MB is
+    consulted. A candidate that disagrees with one of them is the *wrong record*
+    (Unit G): reject it wholesale rather than merge a contradiction. Free text
+    (album/artist/titles) is never gated here — only the objective ids.
+
+      * MCN — both non-blank and not ``mcn_matches`` ⇒ inconsistent (fuzzy:
+        services store partial barcodes).
+      * per-track ISRC — matched by track number; both non-blank and unequal ⇒
+        inconsistent (exact: ISRC is a fixed 12-char ISO-3901 code).
+
+    Blank on either side is no evidence, never a contradiction. A candidate with
+    no overlapping non-blank ids passes vacuously (consistent until proven wrong).
+    """
+    from cdda2img.barcode import mcn_matches
+
+    if disc.catalog and meta.catalog and not mcn_matches(disc.catalog, meta.catalog):
+        return False
+    disc_isrcs = {t.track_number: t.isrc for t in disc.tracks if t.isrc}
+    if disc_isrcs:
+        meta_isrcs = {
+            t.number: t.isrc for t in meta.tracks if t.number is not None and t.isrc
+        }
+        for tn, isrc in disc_isrcs.items():
+            other = meta_isrcs.get(tn)
+            if other is not None and other != isrc:
+                return False
+    return True
 
 
 def _resolve_multimatch(
@@ -946,7 +982,13 @@ class MBPrepopResult(NamedTuple):
     # is acceptable for releases that lack one (defensive); R1 will simply not
     # match such entries. Order follows MB's match order.
     barcode_hints: list[tuple[str, str]]
-    match_count: int  # total MB matches returned (0 = disc-ID unknown to MB)
+    # Usable matches: MB matches that survived the Unit-G consistency filter
+    # (0 = disc-ID unknown to MB *or* every candidate contradicted a gospel
+    # on-disc id). See ``rejected_inconsistent`` to tell those two apart.
+    match_count: int
+    # Unit G: count of MB matches discarded for contradicting a non-blank
+    # on-disc MCN / per-track ISRC. Surfaced in PROV as ``mb_rejected_inconsistent``.
+    rejected_inconsistent: int = 0
     # R1: True iff len(matches) > 1 and ISRC scoring picked a strict winner
     # that was then auto-merged. Surfaces as PROV ``multi_match_isrc_disambiguated``.
     isrc_disambiguated: bool = False
@@ -961,6 +1003,93 @@ class MBPrepopResult(NamedTuple):
     # parallel pre-menu pipeline re-apply ``_merge_into_disc(meta, ...)``
     # on top of a CDDB-merged disc.
     meta: DiscMeta | None = None
+
+
+def _prepop_zero_match(
+    disc: RBIDisc, hints: list[tuple[str, str]], *, verbose: bool
+) -> MBPrepopResult:
+    """R4: disc-ID unknown to MB → ISRC-tally fallback, gated by consistency.
+
+    The tally winner's ISRC half agrees with the disc by construction, but a
+    contradicting on-disc MCN must still reject it (advisor #1).
+    """
+    winner = _resolve_via_isrc_tally(disc)
+    if winner is not None and _is_consistent(winner, disc):
+        updated = _merge_into_disc(winner, disc)
+        if verbose:
+            date_str = f"  ({winner.release_date})" if winner.release_date else ""
+            print(
+                f'  MusicBrainz: matched "{winner.album}" by {winner.artist}'
+                f"{date_str} (via ISRC tally)"
+            )
+        return MBPrepopResult(
+            updated,
+            hints,
+            0,
+            isrc_disambiguated=False,
+            mb_candidate_album=winner.album,
+            mb_candidate_artist=winner.artist,
+            meta=winner,
+        )
+    return MBPrepopResult(disc, hints, 0, isrc_disambiguated=False)
+
+
+def _prepop_multimatch(
+    matches: list[DiscMeta],
+    disc: RBIDisc,
+    hints: list[tuple[str, str]],
+    rejected: int,
+    *,
+    verbose: bool,
+) -> MBPrepopResult:
+    """Resolve a consistent MB disc-ID multi-match: ISRC/MCN winner, else
+    agreed-facts over the plurality release-group (no single pressing pinned)."""
+    winner, method = _resolve_multimatch(matches, disc)
+    if winner is not None:
+        updated = _merge_into_disc(winner, disc)
+        if verbose:
+            date_str = f"  ({winner.release_date})" if winner.release_date else ""
+            via = "ISRC disambiguation" if method == "isrc" else "MCN/barcode match"
+            print(
+                f'  MusicBrainz: matched "{winner.album}" by {winner.artist}'
+                f"{date_str} (via {via})"
+            )
+        return MBPrepopResult(
+            updated,
+            hints,
+            len(matches),
+            rejected_inconsistent=rejected,
+            isrc_disambiguated=(method == "isrc"),
+            mb_candidate_album=winner.album,
+            mb_candidate_artist=winner.artist,
+            meta=winner,
+        )
+    # No single pressing could be resolved. Rather than guess one, merge only the
+    # facts every candidate in the plurality release-group agrees on — year,
+    # shared per-track ISRCs, and the release-group itself (so original-release
+    # can still resolve). Returned as ``meta`` so the parallel pre-menu path
+    # (_finalize_import) re-applies it onto the CDDB-merged disc like a single.
+    rg = _plurality_release_group(matches)
+    if rg is not None:
+        agreed = _build_agreed_facts_meta(matches, rg)
+        disc = _merge_into_disc(agreed, disc)
+        log.debug(
+            "MB multi-match (%d): merged agreed facts (year=%s, %d ISRCs, rg=%s)",
+            len(matches),
+            agreed.release_date,
+            len(agreed.tracks),
+            rg,
+        )
+        return MBPrepopResult(
+            disc,
+            hints,
+            len(matches),
+            rejected_inconsistent=rejected,
+            isrc_disambiguated=False,
+            meta=agreed,
+        )
+    log.debug("MB disc ID returned %d matches; no plurality RG", len(matches))
+    return MBPrepopResult(disc, hints, len(matches), rejected_inconsistent=rejected)
 
 
 def prepopulate_from_mb(disc: RBIDisc, *, verbose: bool = True) -> MBPrepopResult:
@@ -983,78 +1112,41 @@ def prepopulate_from_mb(disc: RBIDisc, *, verbose: bool = True) -> MBPrepopResul
     the multi-match path was resolved by R1.
     """
     _setup_useragent()
-    matches = lookup_disc_id(disc)
+    raw_matches = lookup_disc_id(disc)
+    # Unit G: a candidate that contradicts a non-blank on-disc MCN / per-track
+    # ISRC is the wrong record — drop it before any resolution runs. The disc's
+    # objective ids are gospel; rejecting the whole record (rather than merging a
+    # contradiction) is the "prefer no-answer over wrong-answer" principle.
+    matches = [m for m in raw_matches if _is_consistent(m, disc)]
+    rejected = len(raw_matches) - len(matches)
+    if rejected:
+        log.debug(
+            "MB disc ID: dropped %d/%d match(es) inconsistent with on-disc MCN/ISRC",
+            rejected,
+            len(raw_matches),
+        )
     # R16: tag each hint with its source MBID. Preserve match order while
     # deduplicating exact (mbid, barcode) pairs — different releases with the
     # same barcode keep separate entries so future lookups can disambiguate.
+    # Hints come from the *consistent* set only: a rejected record's barcode
+    # contradicts the disc and must not seed the downstream canonical-MCN pick.
     hints: list[tuple[str, str]] = list(
         dict.fromkeys((m.mb_release_id or "", m.catalog) for m in matches if m.catalog)
     )
     if hints:
         log.debug("MB barcode hints from %d match(es): %s", len(matches), hints)
+    if not raw_matches:
+        return _prepop_zero_match(disc, hints, verbose=verbose)
     if not matches:
-        # R4: zero-disc-ID match → try ISRC tally as a fallback.
-        winner = _resolve_via_isrc_tally(disc)
-        if winner is not None:
-            updated = _merge_into_disc(winner, disc)
-            if verbose:
-                date_str = f"  ({winner.release_date})" if winner.release_date else ""
-                print(
-                    f'  MusicBrainz: matched "{winner.album}" by {winner.artist}'
-                    f"{date_str} (via ISRC tally)"
-                )
-            return MBPrepopResult(
-                updated,
-                hints,
-                0,
-                isrc_disambiguated=False,
-                mb_candidate_album=winner.album,
-                mb_candidate_artist=winner.artist,
-                meta=winner,
-            )
-        return MBPrepopResult(disc, hints, 0, isrc_disambiguated=False)
+        # MB knew the disc-ID but every candidate contradicts a gospel on-disc
+        # id → leave the fields blank for AcoustID / the manual menu to fill.
+        # (This also closes the old single-match no-cross-check gap.) We do NOT
+        # fall through to the R4 tally here: the disc-ID lookup already spoke.
+        return MBPrepopResult(
+            disc, hints, 0, rejected_inconsistent=rejected, isrc_disambiguated=False
+        )
     if len(matches) > 1:
-        winner, method = _resolve_multimatch(matches, disc)
-        if winner is not None:
-            updated = _merge_into_disc(winner, disc)
-            if verbose:
-                date_str = f"  ({winner.release_date})" if winner.release_date else ""
-                via = "ISRC disambiguation" if method == "isrc" else "MCN/barcode match"
-                print(
-                    f'  MusicBrainz: matched "{winner.album}" by {winner.artist}'
-                    f"{date_str} (via {via})"
-                )
-            return MBPrepopResult(
-                updated,
-                hints,
-                len(matches),
-                isrc_disambiguated=(method == "isrc"),
-                mb_candidate_album=winner.album,
-                mb_candidate_artist=winner.artist,
-                meta=winner,
-            )
-        # No single pressing could be resolved. Rather than guess one, merge
-        # only the facts every candidate in the plurality release-group agrees
-        # on — year, shared per-track ISRCs, and the release-group itself (so
-        # original-release can still resolve). Returned as ``meta`` so the
-        # parallel pre-menu path (_finalize_import) re-applies it onto the
-        # CDDB-merged disc exactly like a single-match meta.
-        rg = _plurality_release_group(matches)
-        if rg is not None:
-            agreed = _build_agreed_facts_meta(matches, rg)
-            disc = _merge_into_disc(agreed, disc)
-            log.debug(
-                "MB multi-match (%d): merged agreed facts (year=%s, %d ISRCs, rg=%s)",
-                len(matches),
-                agreed.release_date,
-                len(agreed.tracks),
-                rg,
-            )
-            return MBPrepopResult(
-                disc, hints, len(matches), isrc_disambiguated=False, meta=agreed
-            )
-        log.debug("MB disc ID returned %d matches; no plurality RG", len(matches))
-        return MBPrepopResult(disc, hints, len(matches), isrc_disambiguated=False)
+        return _prepop_multimatch(matches, disc, hints, rejected, verbose=verbose)
     meta = matches[0]
     updated = _merge_into_disc(meta, disc)
     if verbose:
@@ -1064,6 +1156,7 @@ def prepopulate_from_mb(disc: RBIDisc, *, verbose: bool = True) -> MBPrepopResul
         updated,
         hints,
         len(matches),
+        rejected_inconsistent=rejected,
         isrc_disambiguated=False,
         mb_candidate_album=meta.album,
         mb_candidate_artist=meta.artist,

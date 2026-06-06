@@ -875,15 +875,11 @@ def _pick_canonical_mcn(disc: RBIDisc, candidates: list[str]) -> str | None:
          correct via [c] in the menu.
       3. **None.** No candidates at all → nothing to work with.
     """
-    import re
+    from cdda2img.barcode import mcn_matches
 
-    _MIN_SUBSTRING_DIGITS = 7  # below this, false positives across hints
-
-    raw_digits = re.sub(r"\D", "", disc.catalog) if disc.catalog else ""
-    if len(raw_digits) >= _MIN_SUBSTRING_DIGITS:
-        for c in candidates:
-            if raw_digits in c:
-                return c
+    for c in candidates:
+        if mcn_matches(disc.catalog, c):
+            return c
     return candidates[0] if candidates else None
 
 
@@ -1300,6 +1296,10 @@ def _run_metadata_lookups(
     pre_mb_artist = (cddb_meta.artist if cddb_meta else None) or original_artist
     if mb_result.isrc_disambiguated:
         provenance["multi_match_isrc_disambiguated"] = "YES"
+    if mb_result.rejected_inconsistent:
+        # Unit G: record that N MB candidates were discarded for contradicting a
+        # gospel on-disc MCN/ISRC — preserves the *why* behind a blanked field.
+        provenance["mb_rejected_inconsistent"] = str(mb_result.rejected_inconsistent)
     _emit_r9_disagreement(
         provenance,
         pre_mb_album,
