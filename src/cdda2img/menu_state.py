@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import copy
 import sys
+import tempfile
 from dataclasses import dataclass
 from enum import Enum, auto
 from pathlib import Path
@@ -62,6 +63,7 @@ class MenuState(Enum):
     FETCH = auto()
     MB_SEARCH = auto()
     DISCOGS = auto()
+    ACOUSTID = auto()
     RESULTS = auto()
     ORIGINAL_RELEASE = auto()
     DONE = auto()
@@ -360,10 +362,9 @@ class EditDiscPositionScreen(Screen):
 class FetchScreen(Screen):
     """Fetch-metadata sub-menu: MusicBrainz / Discogs / AcoustID.
 
-    Native port of the legacy ``metadata_menu._fetch_menu`` loop. MusicBrainz
-    (cp3a) and Discogs (cp3b) are fully ported — [m]/[d] push native search
-    screens. AcoustID still calls the legacy blocking helper (``_acoustid_menu``)
-    as a bounded leaf interaction in ``handle_input``, pending its port (cp3c).
+    Native port of the legacy ``metadata_menu._fetch_menu`` loop (cp3a/b/c).
+    MusicBrainz, Discogs and AcoustID are all native screens now — [m]/[d]/[a]
+    push the corresponding search / track-picker screens.
     """
 
     state = MenuState.FETCH
@@ -381,8 +382,24 @@ class FetchScreen(Screen):
         print("  [a]  AcoustID fingerprint")
         print("  [b]  Back")
 
+    def _push_acoustid(self, ctl: MenuController) -> Nav:
+        from cdda2img import acoustid_lookup
+
+        if not acoustid_lookup.is_available():
+            ctl.banner = (
+                f"AcoustID not available: {acoustid_lookup.unavailability_reason()}"
+            )
+            return Stay()
+        # Same dispatch as the legacy _acoustid_menu: pre-transcoded WAVs (create
+        # pipeline) → on-demand PCM extraction (rip/import) → file-path entry.
+        if ctl.disc.tracks and ctl.source_wavs:
+            return Push(AcoustidScreen(source_wavs=ctl.source_wavs))
+        if ctl.disc.tracks and ctl.source_pcm and ctl.source_pcm.exists():
+            return Push(AcoustidScreen(source_pcm=ctl.source_pcm))
+        return Push(AcoustidFileScreen())
+
     def handle_input(self, ctl: MenuController) -> Nav:
-        from cdda2img.metadata_menu import _acoustid_menu, _prompt
+        from cdda2img.metadata_menu import _prompt
 
         choice = _prompt("  > ").strip().lower()
         if choice == "b":
@@ -402,10 +419,7 @@ class FetchScreen(Screen):
                 )
             )
         if choice == "a":
-            ctl.disc = _acoustid_menu(
-                ctl.disc, source_pcm=ctl.source_pcm, source_wavs=ctl.source_wavs
-            )
-            return Stay()
+            return self._push_acoustid(ctl)
         ctl.banner = "Unknown command."
         return Stay()
 
@@ -630,11 +644,13 @@ class ResultsScreen(Screen):
         return Pop()
 
     def _apply_selected(self, ctl: MenuController, selected: DiscMeta) -> None:
-        """Source-specific apply tail. cp3a implements MB; cp3b adds Discogs."""
+        """Source-specific apply tail (cp3a MB, cp3b Discogs, cp3c AcoustID)."""
         if self.source == "mb":
             self._apply_mb(ctl, selected)
         elif self.source == "discogs":
             self._apply_discogs(ctl, selected)
+        elif self.source == "acoustid":
+            self._apply_acoustid(ctl, selected)
 
     def _apply_mb(self, ctl: MenuController, selected: DiscMeta) -> None:
         from cdda2img.mb_lookup import _merge_into_disc, _overwrite_disc, lookup_release
@@ -683,6 +699,164 @@ class ResultsScreen(Screen):
             else _overwrite_disc(selected, ctl.disc)
         )
         ctl.banner = "Applied."
+
+    def _apply_acoustid(self, ctl: MenuController, selected: DiscMeta) -> None:
+        from cdda2img.mb_lookup import _merge_into_disc, _overwrite_disc, lookup_release
+        from cdda2img.metadata_menu import _confirm_apply
+
+        # AcoustID results are tagged with the track number before this frame
+        # (see _acoustid_fingerprint). Like Discogs, the legacy path confirmed
+        # BEFORE fetching the full release; fetch-full fires when the match is a
+        # partial single-track stub (fewer tracks than the disc). No rg threading.
+        mode = _confirm_apply(selected, ctl.disc)
+        if not mode:
+            return
+        if selected.mb_release_id and len(selected.tracks) < len(ctl.disc.tracks):
+            print("  Fetching full track listing from MusicBrainz...")
+            full = lookup_release(
+                selected.mb_release_id, disc_number=ctl.disc.disc_number
+            )
+            if full and (full.album or full.tracks):
+                selected = full
+        ctl.disc = (
+            _merge_into_disc(selected, ctl.disc)
+            if mode == "update"
+            else _overwrite_disc(selected, ctl.disc)
+        )
+        ctl.banner = "Applied."
+
+
+class AcoustidScreen(Screen):
+    """AcoustID per-track fingerprint picker (cp3c).
+
+    The "search" frame for AcoustID: renders the disc track list and, on a track
+    number, resolves a WAV (pre-transcoded ``source_wavs`` or on-demand PCM
+    extraction from ``source_pcm``), fingerprints it, and pushes a
+    :class:`ResultsScreen` (``source="acoustid"``). [f] descends to
+    :class:`AcoustidFileScreen`; [b] backs out. The results frame pops back here,
+    which re-renders the list — the legacy track-picker loop.
+
+    PCM mode lazily creates a ``TemporaryDirectory`` for extracted track WAVs and
+    caches them by track number for the screen's lifetime. The directory is
+    cleaned up by ``TemporaryDirectory``'s finalizer when the screen is popped and
+    garbage-collected (prompt under CPython refcounting).
+    """
+
+    state = MenuState.ACOUSTID
+
+    def __init__(
+        self,
+        *,
+        source_wavs: list[Path] | None = None,
+        source_pcm: Path | None = None,
+    ) -> None:
+        self.source_wavs = source_wavs
+        self.source_pcm = source_pcm
+        self._tmp: tempfile.TemporaryDirectory | None = None
+        self._wav_cache: dict[int, Path] = {}
+
+    def render(self, ctl: MenuController) -> None:
+        from cdda2img.metadata_menu import _render_acoustid_tracklist
+
+        _render_acoustid_tracklist(ctl.disc)
+        print()
+        if ctl.banner:
+            print(f"  ! {ctl.banner}")
+            print()
+            ctl.banner = ""
+        print("  Enter track number, [f] for file path, or [b] to return:")
+
+    def _resolve_wav(self, ctl: MenuController, track_num: int) -> Path | None:
+        """Resolve the WAV for *track_num*, setting a banner + returning None on
+        failure. WAVs mode indexes ``source_wavs``; PCM mode extracts + caches."""
+        from cdda2img.metadata_menu import _pcm_extract_track_wav
+
+        if self.source_wavs is not None:
+            idx = track_num - 1
+            if idx >= len(self.source_wavs):
+                ctl.banner = f"No WAV file for track {track_num}."
+                return None
+            wav_path = self.source_wavs[idx]
+            if not wav_path.exists():
+                ctl.banner = f"WAV file not found: {wav_path.name}"
+                return None
+            return wav_path
+        if self.source_pcm is None:  # neither source set — nothing to extract
+            return None
+        if track_num in self._wav_cache:
+            return self._wav_cache[track_num]
+        if self._tmp is None:
+            self._tmp = tempfile.TemporaryDirectory(prefix="cdda2img_aid_")
+        out_path = Path(self._tmp.name) / f"track{track_num:02d}.wav"
+        extracted = _pcm_extract_track_wav(
+            ctl.disc, self.source_pcm, track_num, out_path
+        )
+        if not extracted:
+            ctl.banner = f"Could not extract track {track_num}."
+            return None
+        self._wav_cache[track_num] = extracted
+        return extracted
+
+    def handle_input(self, ctl: MenuController) -> Nav:
+        from cdda2img.metadata_menu import _acoustid_fingerprint, _prompt
+
+        valid_nums = {t.track_number for t in ctl.disc.tracks}
+        choice = _prompt("  > ").strip().lower()
+        if choice == "b":
+            return Pop()
+        if choice == "f":
+            return Push(AcoustidFileScreen())
+        if not choice.isdigit() or int(choice) not in valid_nums:
+            ctl.banner = "Invalid selection."
+            return Stay()
+        track_num = int(choice)
+        wav_path = self._resolve_wav(ctl, track_num)
+        if wav_path is None:
+            return Stay()  # banner set by _resolve_wav
+        results = _acoustid_fingerprint(wav_path, track_number=track_num)
+        if not results:
+            ctl.banner = "No confident matches found (check fpcalc / ACOUSTID_API_KEY)."
+            return Stay()
+        return Push(ResultsScreen(results, "AcoustID Matches", "acoustid"))
+
+
+class AcoustidFileScreen(Screen):
+    """AcoustID fingerprint from an arbitrary audio file path (cp3c).
+
+    The file-path entry frame: prompts for a path (blank pops back) and an
+    optional track number, fingerprints, and pushes a :class:`ResultsScreen`.
+    Used both as the file-only mode (no PCM/WAVs available) and the [f] descent
+    from :class:`AcoustidScreen`.
+    """
+
+    state = MenuState.ACOUSTID
+
+    def render(self, ctl: MenuController) -> None:
+        from cdda2img.metadata_menu import _header
+
+        _header("AcoustID Fingerprint")
+        if ctl.banner:
+            print(f"  ! {ctl.banner}")
+            print()
+            ctl.banner = ""
+
+    def handle_input(self, ctl: MenuController) -> Nav:
+        from cdda2img.metadata_menu import _acoustid_fingerprint, _prompt
+
+        path_str = _prompt("  Audio file path (or Enter to return): ").strip()
+        if not path_str:
+            return Pop()
+        wav_path = Path(path_str)
+        if not wav_path.exists():
+            ctl.banner = f"File not found: {path_str}"
+            return Stay()
+        num_str = _prompt("  Track number (or Enter to skip): ").strip()
+        track_num = int(num_str) if num_str.isdigit() else None
+        results = _acoustid_fingerprint(wav_path, track_number=track_num)
+        if not results:
+            ctl.banner = "No confident matches found (check fpcalc / ACOUSTID_API_KEY)."
+            return Stay()
+        return Push(ResultsScreen(results, "AcoustID Matches", "acoustid"))
 
 
 class LegacyDelegateScreen(Screen):

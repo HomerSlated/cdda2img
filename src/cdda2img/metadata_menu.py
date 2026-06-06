@@ -13,7 +13,6 @@ Menu structure:
 
 from __future__ import annotations
 
-import tempfile
 import wave
 from pathlib import Path
 
@@ -367,174 +366,54 @@ def _pcm_extract_track_wav(
     return out_path
 
 
-def _acoustid_run_one(
-    disc: RBIDisc, wav_path: Path, *, track_number: int | None = None
-) -> RBIDisc:
-    """Fingerprint *wav_path* via AcoustID, show results, apply if confirmed.
+def _acoustid_fingerprint(
+    wav_path: Path, *, track_number: int | None = None
+) -> list[DiscMeta]:
+    """Fingerprint *wav_path* via AcoustID; return matches (possibly empty).
 
-    When *track_number* is given, single-track results with number=None are
-    tagged with that number so title/ISRC merge into the correct disc track.
-    Returns the (possibly updated) disc; identity unchanged means no change applied.
+    Pure of menu navigation: prints progress, runs the lookup, and tags
+    single-track results carrying ``number=None`` with *track_number* so the
+    title/ISRC merge into the correct disc track. The selection / confirm / apply
+    tail lives in ``menu_state.ResultsScreen`` (source="acoustid"). Shared by
+    ``AcoustidScreen`` (track-picker) and ``AcoustidFileScreen`` (file path).
     """
     from cdda2img import acoustid_lookup
-    from cdda2img.mb_lookup import _merge_into_disc, _overwrite_disc, lookup_release
 
     print(f"  Fingerprinting {wav_path.name}... (may take a few seconds)")
     results = acoustid_lookup.fingerprint_and_lookup(wav_path, verbose=True)
     if not results:
-        print("  No confident matches found.")
-        print(
-            "  (Ensure fpcalc/libchromaprint is on PATH and ACOUSTID_API_KEY is set.)"
-        )
-        return disc
+        return []
     if track_number is not None:
         for result in results:
             if len(result.tracks) == 1 and result.tracks[0].number is None:
                 result.tracks[0].number = track_number
-    selected = _select_from_results(results, "AcoustID Matches")
-    if selected is not None:
-        mode = _confirm_apply(selected, disc)
-        if mode:
-            if selected.mb_release_id and len(selected.tracks) < len(disc.tracks):
-                print("  Fetching full track listing from MusicBrainz...")
-                full = lookup_release(
-                    selected.mb_release_id, disc_number=disc.disc_number
-                )
-                if full and (full.album or full.tracks):
-                    selected = full
-            updated = (
-                _merge_into_disc(selected, disc)
-                if mode == "update"
-                else _overwrite_disc(selected, disc)
-            )
-            print("  Applied.")
-            return updated
-    return disc
+    return results
 
 
-def _acoustid_file_loop(disc: RBIDisc) -> RBIDisc:
-    """Prompt for a file path; loop until Enter with no path."""
-    while True:
-        path_str = _prompt("  Audio file path (or Enter to return): ").strip()
-        if not path_str:
-            return disc
-        wav_path = Path(path_str)
-        if not wav_path.exists():
-            print(f"  File not found: {path_str}")
-            continue
-        num_str = _prompt("  Track number (or Enter to skip): ").strip()
-        track_num = int(num_str) if num_str.isdigit() else None
-        disc = _acoustid_run_one(disc, wav_path, track_number=track_num)
+def _render_acoustid_tracklist(disc: RBIDisc) -> None:
+    """Pure repaint of the AcoustID track-picker list (header + per-track rows).
 
-
-def _acoustid_pcm_loop(disc: RBIDisc, source_pcm: Path) -> RBIDisc:
-    """Per-track fingerprint loop — extracts each track on demand from *source_pcm*."""
-    valid_nums = {t.track_number for t in disc.tracks}
-    wav_cache: dict[int, Path] = {}
-
-    with tempfile.TemporaryDirectory(prefix="cdda2img_aid_") as td:
-        tmp_dir = Path(td)
-        while True:
-            _header("AcoustID Fingerprint")
-            print(f"  {'#':>3}  {'Duration':>8}  Title")
-            print(f"  {'─' * 3}  {'─' * 8}  {'─' * 32}")
-            for t in sorted(disc.tracks, key=lambda x: x.track_number):
-                mm = int(t.duration_frames / CD_FRAMES_PER_SECOND / 60)
-                ss = int(t.duration_frames / CD_FRAMES_PER_SECOND) % 60
-                print(
-                    f"  {t.track_number:>3}  {mm}:{ss:02d}       "
-                    f"{_trunc(t.title or '(untitled)', 32)}"
-                )
-            print()
-            print("  Enter track number, [f] for file path, or [b] to return:")
-            choice = _prompt("  > ").strip().lower()
-
-            if choice == "b":
-                return disc
-            if choice == "f":
-                disc = _acoustid_file_loop(disc)
-                continue
-            if not choice.isdigit() or int(choice) not in valid_nums:
-                print("  Invalid selection.")
-                continue
-            track_num = int(choice)
-            if track_num not in wav_cache:
-                out_path = tmp_dir / f"track{track_num:02d}.wav"
-                extracted = _pcm_extract_track_wav(
-                    disc, source_pcm, track_num, out_path
-                )
-                if not extracted:
-                    print(f"  Could not extract track {track_num}.")
-                    continue
-                wav_cache[track_num] = extracted
-            disc = _acoustid_run_one(disc, wav_cache[track_num], track_number=track_num)
-
-
-def _acoustid_wavs_loop(disc: RBIDisc, source_wavs: list[Path]) -> RBIDisc:
-    """Per-track fingerprint loop — uses pre-transcoded WAV files from the create pipeline."""
-    valid_nums = {t.track_number for t in disc.tracks}
-    while True:
-        _header("AcoustID Fingerprint")
-        print(f"  {'#':>3}  {'Duration':>8}  Title")
-        print(f"  {'─' * 3}  {'─' * 8}  {'─' * 32}")
-        for t in sorted(disc.tracks, key=lambda x: x.track_number):
-            mm = int(t.duration_frames / CD_FRAMES_PER_SECOND / 60)
-            ss = int(t.duration_frames / CD_FRAMES_PER_SECOND) % 60
-            print(
-                f"  {t.track_number:>3}  {mm}:{ss:02d}       "
-                f"{_trunc(t.title or '(untitled)', 32)}"
-            )
-        print()
-        print("  Enter track number, [f] for file path, or [b] to return:")
-        choice = _prompt("  > ").strip().lower()
-
-        if choice == "b":
-            return disc
-        if choice == "f":
-            disc = _acoustid_file_loop(disc)
-            continue
-        if not choice.isdigit() or int(choice) not in valid_nums:
-            print("  Invalid selection.")
-            continue
-        track_num = int(choice)
-        idx = track_num - 1
-        if idx >= len(source_wavs):
-            print(f"  No WAV file for track {track_num}.")
-            continue
-        wav_path = source_wavs[idx]
-        if not wav_path.exists():
-            print(f"  WAV file not found: {wav_path.name}")
-            continue
-        disc = _acoustid_run_one(disc, wav_path, track_number=track_num)
-
-
-def _acoustid_menu(
-    disc: RBIDisc,
-    source_pcm: Path | None = None,
-    source_wavs: list[Path] | None = None,
-) -> RBIDisc:
-    from cdda2img import acoustid_lookup
-
-    if not acoustid_lookup.is_available():
-        _header("AcoustID Fingerprint")
-        print(f"  Not available: {acoustid_lookup.unavailability_reason()}")
-        _prompt("  [Enter to return] ")
-        return disc
-
-    if source_wavs and disc.tracks:
-        return _acoustid_wavs_loop(disc, source_wavs)
-    if source_pcm and source_pcm.exists() and disc.tracks:
-        return _acoustid_pcm_loop(disc, source_pcm)
-
+    Shared by ``menu_state.AcoustidScreen``; side-effect-free except ``print``.
+    """
     _header("AcoustID Fingerprint")
-    return _acoustid_file_loop(disc)
+    print(f"  {'#':>3}  {'Duration':>8}  Title")
+    print(f"  {'─' * 3}  {'─' * 8}  {'─' * 32}")
+    for t in sorted(disc.tracks, key=lambda x: x.track_number):
+        mm = int(t.duration_frames / CD_FRAMES_PER_SECOND / 60)
+        ss = int(t.duration_frames / CD_FRAMES_PER_SECOND) % 60
+        print(
+            f"  {t.track_number:>3}  {mm}:{ss:02d}       "
+            f"{_trunc(t.title or '(untitled)', 32)}"
+        )
 
 
 # ---------------------------------------------------------------------------
-# Fetch sub-menu — native screen-stack port (cp3a): the blocking _fetch_menu
-# loop was replaced by menu_state.FetchScreen, which dispatches MusicBrainz to
-# the native MBSearchScreen and (pending cp3b/cp3c) Discogs/AcoustID to the
-# legacy _discogs_menu / _acoustid_menu blocking helpers below.
+# Fetch sub-menu — fully native (cp3a/cp3b/cp3c). The blocking _fetch_menu loop
+# and the per-service _mb_*/_discogs_*/_acoustid_* loops were replaced by
+# menu_state screens (FetchScreen → MBSearchScreen / DiscogsSearchScreen /
+# AcoustidScreen + the shared ResultsScreen). The pure helpers above
+# (_render_results_page, _acoustid_fingerprint, _render_acoustid_tracklist,
+# _pcm_extract_track_wav) back those screens.
 # ---------------------------------------------------------------------------
 
 

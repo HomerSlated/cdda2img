@@ -292,11 +292,18 @@ behaviour, not a regression.
           sort, no `mb_rg_id` threading — noted in a code comment as a deliberate carry-over.
           Removed `_discogs_menu`/`_discogs_execute_search`; FetchScreen [d] pushes native. +6
           tests. 815 pass.
-    - [ ] **3c** · AcoustID → track-picker screen + `ResultsScreen(source="acoustid")` (no sort;
-          tag single-track `number=None` before the results frame; fetch-full when
-          `len(tracks) < len(disc.tracks)`). Decide then whether `_acoustid_file_loop` is its own
-          screen or a blocking helper. Results frame pops back to the track-picker (which loops),
-          not to Fetch. Then `_acoustid_*` loops removed; FetchScreen [a] pushes native.
+    - [x] **3c** · AcoustID. DONE 2026-06-06. `AcoustidScreen` (track-picker; wavs/pcm modes;
+          pcm mode lazily creates a `TemporaryDirectory` + per-track WAV cache, cleaned by the
+          finalizer on pop/GC) + `AcoustidFileScreen` (file-path entry — made its own screen, not
+          a blocking helper, for stack uniformity) + `ResultsScreen(source="acoustid")`. Avail
+          guard moved to `FetchScreen._push_acoustid` (banner on unavailable; same wavs→pcm→file
+          dispatch as legacy `_acoustid_menu`). Tagging (single-track `number=None` → track
+          number) in the extracted pure `_acoustid_fingerprint`; track-list render in pure
+          `_render_acoustid_tracklist`. Apply tail preserves legacy order: confirm before
+          fetch-full, fetch-full when `len(tracks) < len(disc.tracks)`, no `mb_rg_id`. Results
+          frame pops back to the picker (loops). Removed `_acoustid_run_one`/`_acoustid_file_loop`/
+          `_acoustid_pcm_loop`/`_acoustid_wavs_loop`/`_acoustid_menu` + the orphaned `tempfile`
+          import. Migrated 2 tests + 10 new. 826 pass. **cp3 (FETCH) fully native.**
   - [ ] **4** · ORIGINAL_RELEASE → `OriginalReleaseScreen`.
   - [ ] **5** · Delete the dead legacy helpers (`_edit_menu`, `_edit_track`,
         `_edit_disc_position` — now unreferenced after cp2); collapse/retire the

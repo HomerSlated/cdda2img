@@ -10,12 +10,15 @@ patched out to keep test output readable.
 
 from __future__ import annotations
 
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 
 from cdda2img.lookup_result import DiscMeta, TrackMeta
 from cdda2img.menu_state import (
+    AcoustidFileScreen,
+    AcoustidScreen,
     DiscogsSearchScreen,
     EditDiscPositionScreen,
     EditScreen,
@@ -253,15 +256,38 @@ def test_fetch_screen_d_pushes_native_discogs_seeded_from_disc() -> None:
     assert top.title_q == "Seed Album"
 
 
-def test_fetch_screen_a_delegates_to_legacy_acoustid_and_stays() -> None:
+def test_fetch_screen_a_unavailable_sets_banner_and_stays() -> None:
     ctl = MenuController(_disc())
     ctl.stack.append(FetchScreen())
-    edited = _disc(album="Via AcoustID")
-    with patch("cdda2img.metadata_menu._acoustid_menu", return_value=edited) as aid:
+    with (
+        patch("cdda2img.acoustid_lookup.is_available", return_value=False),
+        patch(
+            "cdda2img.acoustid_lookup.unavailability_reason",
+            return_value="fpcalc not found",
+        ),
+    ):
         _step_with(ctl, "a")
-    aid.assert_called_once()
-    assert ctl.disc.album == "Via AcoustID"
     assert ctl.state is MenuState.FETCH
+    assert "not available" in ctl.banner.lower()
+    assert "fpcalc not found" in ctl.banner
+
+
+def test_fetch_screen_a_with_wavs_pushes_track_picker() -> None:
+    ctl = MenuController(_disc(), source_wavs=[Path("/fake/t1.wav")])
+    ctl.stack.append(FetchScreen())
+    with patch("cdda2img.acoustid_lookup.is_available", return_value=True):
+        _step_with(ctl, "a")
+    top = ctl.stack[-1]
+    assert isinstance(top, AcoustidScreen)
+    assert top.source_wavs == [Path("/fake/t1.wav")]
+
+
+def test_fetch_screen_a_no_sources_pushes_file_screen() -> None:
+    ctl = MenuController(_disc())  # no source_wavs / source_pcm
+    ctl.stack.append(FetchScreen())
+    with patch("cdda2img.acoustid_lookup.is_available", return_value=True):
+        _step_with(ctl, "a")
+    assert isinstance(ctl.stack[-1], AcoustidFileScreen)
 
 
 def test_mb_search_back_pops_to_fetch() -> None:
@@ -477,6 +503,114 @@ def test_discogs_select_confirms_before_fetch_full_then_applies() -> None:
     assert ctl.mb_rg_id is None  # Discogs never threads the MB rg
     assert ctl.banner == "Applied."
     assert ctl.state is MenuState.DISCOGS  # popped back to search
+
+
+# ---------------------------------------------------------------------------
+# cp3c — AcoustID native screens
+# ---------------------------------------------------------------------------
+
+
+def test_acoustid_track_picker_back_pops_to_fetch() -> None:
+    ctl = MenuController(_multitrack_disc(3), source_wavs=[Path("/x")])
+    ctl.stack.append(FetchScreen())
+    ctl.stack.append(AcoustidScreen(source_wavs=[Path("/x")]))
+    _step_with(ctl, "b")
+    assert ctl.state is MenuState.FETCH
+
+
+def test_acoustid_track_picker_f_pushes_file_screen() -> None:
+    ctl = MenuController(_multitrack_disc(3), source_wavs=[Path("/x")])
+    ctl.stack.append(AcoustidScreen(source_wavs=[Path("/x")]))
+    _step_with(ctl, "f")
+    assert isinstance(ctl.stack[-1], AcoustidFileScreen)
+
+
+def test_acoustid_track_picker_invalid_track_banner() -> None:
+    ctl = MenuController(_multitrack_disc(3), source_wavs=[Path("/x")])
+    ctl.stack.append(AcoustidScreen(source_wavs=[Path("/x")]))
+    _step_with(ctl, "99")  # not a valid track number
+    assert ctl.state is MenuState.ACOUSTID
+    assert "Invalid" in ctl.banner
+
+
+def test_acoustid_track_pick_fingerprints_and_pushes_results() -> None:
+    """Picking a track resolves its WAV, fingerprints, tags single-track results
+    with the track number, and pushes a ResultsScreen(source='acoustid')."""
+    wav = Path("/fake/track01.wav")
+    ctl = MenuController(_multitrack_disc(3), source_wavs=[wav, wav, wav])
+    ctl.stack.append(AcoustidScreen(source_wavs=[wav, wav, wav]))
+    match = DiscMeta(
+        album="Found", tracks=[TrackMeta(number=None, isrc="USRHD0709703")]
+    )
+    with (
+        patch("pathlib.Path.exists", return_value=True),
+        patch("cdda2img.acoustid_lookup.fingerprint_and_lookup", return_value=[match]),
+    ):
+        _step_with(ctl, "1")
+    top = ctl.stack[-1]
+    assert isinstance(top, ResultsScreen)
+    assert top.source == "acoustid"
+    # single-track result tagged with the picked track number (1) before the frame
+    assert top.results[0].tracks[0].number == 1
+
+
+def test_acoustid_no_matches_sets_banner_and_stays() -> None:
+    wav = Path("/fake/t.wav")
+    ctl = MenuController(_multitrack_disc(2), source_wavs=[wav, wav])
+    ctl.stack.append(AcoustidScreen(source_wavs=[wav, wav]))
+    with (
+        patch("pathlib.Path.exists", return_value=True),
+        patch("cdda2img.acoustid_lookup.fingerprint_and_lookup", return_value=[]),
+    ):
+        _step_with(ctl, "1")
+    assert ctl.state is MenuState.ACOUSTID
+    assert "No confident matches" in ctl.banner
+
+
+def test_acoustid_file_screen_blank_path_pops() -> None:
+    ctl = MenuController(_disc())
+    ctl.stack.append(FetchScreen())
+    ctl.stack.append(AcoustidFileScreen())
+    _step_with(ctl, "")  # blank path returns
+    assert ctl.state is MenuState.FETCH
+
+
+def test_acoustid_file_screen_missing_file_banner() -> None:
+    ctl = MenuController(_disc())
+    ctl.stack.append(AcoustidFileScreen())
+    with patch("pathlib.Path.exists", return_value=False):
+        _step_with(ctl, "/no/such/file.wav")
+    assert ctl.state is MenuState.ACOUSTID
+    assert "not found" in ctl.banner.lower()
+
+
+def test_acoustid_select_confirms_before_fetch_full_when_partial() -> None:
+    """AcoustID apply tail: confirm before fetch-full; fetch-full fires only when
+    the match has fewer tracks than the disc (partial single-track stub)."""
+    ctl = MenuController(_multitrack_disc(3))
+    ctl.stack.append(AcoustidScreen(source_wavs=[Path("/x")]))  # frame popped to
+    stub = DiscMeta(
+        album="E",
+        mb_release_id="r",
+        tracks=[TrackMeta(number=1, isrc="AAA000000001")],  # 1 < 3 disc tracks
+    )
+    full = DiscMeta(
+        album="E",
+        mb_release_id="r",
+        mb_release_group_id="rg",
+        tracks=[TrackMeta(number=i, isrc=f"AAA00000000{i}") for i in (1, 2, 3)],
+    )
+    ctl.stack.append(ResultsScreen([stub], "AcoustID Matches", "acoustid"))
+    with (
+        patch("cdda2img.metadata_menu._confirm_apply", return_value="update"),
+        patch("cdda2img.mb_lookup.lookup_release", return_value=full) as lr,
+    ):
+        _step_with(ctl, "1")
+    lr.assert_called_once()  # partial stub triggered the full fetch
+    assert ctl.disc.tracks[1].isrc == "AAA000000002"  # full applied
+    assert ctl.mb_rg_id is None  # AcoustID never threads the MB rg
+    assert ctl.banner == "Applied."
+    assert ctl.state is MenuState.ACOUSTID  # popped back to track picker
 
 
 def test_original_release_state_returns_to_main_and_threads_rg_id() -> None:

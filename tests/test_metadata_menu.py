@@ -712,24 +712,18 @@ def test_acoustid_fingerprint_deduplicates_releases():
     assert release_ids.count("shared-rel") == 1
 
 
-# acoustid — track_number assignment and merge
+# _acoustid_fingerprint — single-track result tagging (cp3c). The select/confirm/
+# apply tail moved to menu_state.ResultsScreen(source="acoustid"); see
+# test_menu_state.py::test_acoustid_select_confirms_before_fetch_full_when_partial.
 
 
-def _mystery_disc() -> RBIDisc:
-    """A disc with no metadata — empty titles, unknown artist — simulating a raw import."""
-    entries = [
-        RBITocEntry(i, "", "", start_frame=(i - 1) * 10000, duration_frames=10000)
-        for i in range(1, 3)
-    ]
-    return RBIDisc(album="", artist="", tracks=entries)
-
-
-def test_acoustid_run_one_assigns_track_number_to_single_track_result():
-    """When track_number=1 is passed, the single TrackMeta gets number=1 so title merges."""
+def test_acoustid_fingerprint_tags_single_track_result_with_number():
+    """track_number tags a single-track number=None result so title/ISRC merge
+    into the right disc track in the apply tail."""
     from pathlib import Path
 
     from cdda2img.lookup_result import DiscMeta, TrackMeta
-    from cdda2img.metadata_menu import _acoustid_run_one
+    from cdda2img.metadata_menu import _acoustid_fingerprint
 
     result_no_number = DiscMeta(
         artist="Technotronic",
@@ -737,30 +731,21 @@ def test_acoustid_run_one_assigns_track_number_to_single_track_result():
         source="acoustid",
         tracks=[TrackMeta(title="Pump Up the Jam", performer="Technotronic")],
     )
-    disc = _mystery_disc()
-
-    with (
-        patch.dict("os.environ", {"ACOUSTID_API_KEY": "fake"}),
-        patch(
-            "cdda2img.acoustid_lookup.fingerprint_and_lookup",
-            return_value=[result_no_number],
-        ),
-        patch("cdda2img.metadata_menu._prompt", side_effect=["1", "u"]),
-        patch("cdda2img.acoustid_lookup.is_available", return_value=True),
+    with patch(
+        "cdda2img.acoustid_lookup.fingerprint_and_lookup",
+        return_value=[result_no_number],
     ):
-        updated = _acoustid_run_one(disc, Path("/fake/t.wav"), track_number=1)
-
-    assert updated.artist == "Technotronic"
-    assert updated.tracks[0].title == "Pump Up the Jam"  # title merged into track 1
-    assert updated.tracks[1].title == ""  # track 2 untouched
+        out = _acoustid_fingerprint(Path("/fake/t.wav"), track_number=1)
+    assert out[0].tracks[0].number == 1  # tagged for the apply-side merge
 
 
-def test_acoustid_run_one_without_track_number_does_not_apply_title():
-    """Without track_number, track title is not merged (number=None means no match)."""
+def test_acoustid_fingerprint_without_track_number_leaves_number_none():
+    """Without track_number the single-track result keeps number=None, so the
+    apply-side merge (matched by track number) leaves the disc title untouched."""
     from pathlib import Path
 
     from cdda2img.lookup_result import DiscMeta, TrackMeta
-    from cdda2img.metadata_menu import _acoustid_run_one
+    from cdda2img.metadata_menu import _acoustid_fingerprint
 
     result_no_number = DiscMeta(
         artist="Technotronic",
@@ -768,22 +753,21 @@ def test_acoustid_run_one_without_track_number_does_not_apply_title():
         source="acoustid",
         tracks=[TrackMeta(title="Pump Up the Jam", performer="Technotronic")],
     )
-    disc = _mystery_disc()
-
-    with (
-        patch.dict("os.environ", {"ACOUSTID_API_KEY": "fake"}),
-        patch(
-            "cdda2img.acoustid_lookup.fingerprint_and_lookup",
-            return_value=[result_no_number],
-        ),
-        patch("cdda2img.metadata_menu._prompt", side_effect=["1", "u"]),
-        patch("cdda2img.acoustid_lookup.is_available", return_value=True),
+    with patch(
+        "cdda2img.acoustid_lookup.fingerprint_and_lookup",
+        return_value=[result_no_number],
     ):
-        updated = _acoustid_run_one(disc, Path("/fake/t.wav"))
+        out = _acoustid_fingerprint(Path("/fake/t.wav"))
+    assert out[0].tracks[0].number is None
 
-    # Disc-level fields applied; track title stays empty — number=None means no match
-    assert updated.artist == "Technotronic"
-    assert updated.tracks[0].title == ""
+
+def test_acoustid_fingerprint_no_matches_returns_empty():
+    from pathlib import Path
+
+    from cdda2img.metadata_menu import _acoustid_fingerprint
+
+    with patch("cdda2img.acoustid_lookup.fingerprint_and_lookup", return_value=[]):
+        assert _acoustid_fingerprint(Path("/fake/t.wav"), track_number=1) == []
 
 
 # _pcm_extract_track_wav
