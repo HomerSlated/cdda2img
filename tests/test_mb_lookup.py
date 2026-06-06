@@ -1223,8 +1223,16 @@ def test_find_disc_medium_selects_correct_medium():
     assert _find_disc_medium(medium_list, "disc-Z") is None
 
 
-def test_lookup_disc_id_requests_discids_include():
-    """C3/F-003: lookup must ask MB for "discids" so disc-list is populated."""
+def test_lookup_disc_id_omits_discids_include():
+    """Regression: "discids" must NOT be requested on the /discid endpoint.
+
+    MB rejects the /discid lookup with HTTP 400 when "discids" is in the inc
+    list (it is only valid on /release). The earlier code requested it (F-003)
+    and the 400 was swallowed as "no match", silently breaking every disc-ID
+    lookup and forcing the whole pipeline onto the CDDB fallback. The matching
+    medium's disc-list is populated by the /discid endpoint regardless, so
+    _find_disc_medium still works (see test_find_disc_medium_*).
+    """
     disc = _make_disc(tracks=[(1, 0, 12345), (2, 12345, 6789)])
     captured: dict = {}
 
@@ -1238,7 +1246,33 @@ def test_lookup_disc_id_requests_discids_include():
         patch("cdda2img.lookup_cache.put_cached_disc_id_lookup"),
     ):
         lookup_disc_id(disc)
-    assert "discids" in captured["includes"]
+    assert "discids" not in captured["includes"]
+
+
+def test_lookup_disc_id_400_logs_warning_not_silent(caplog):
+    """A non-404 ResponseError (e.g. a 400 from a bad include) must be loud.
+
+    Swallowing a 400 as a clean "no match" is exactly what hid the discids
+    regression for so long. 404 stays quiet (a real "disc not in MB").
+    """
+    import logging
+
+    import musicbrainzngs
+
+    disc = _make_disc(tracks=[(1, 0, 12345), (2, 12345, 6789)])
+
+    class _Cause(Exception):
+        code = 400
+
+    err = musicbrainzngs.ResponseError(cause=_Cause())
+
+    with (
+        patch("musicbrainzngs.get_releases_by_discid", side_effect=err),
+        patch("cdda2img.lookup_cache.get_cached_disc_id_lookup", return_value=None),
+        caplog.at_level(logging.WARNING, logger="cdda2img.mb_lookup"),
+    ):
+        assert lookup_disc_id(disc) == []
+    assert any(r.levelno == logging.WARNING for r in caplog.records)
 
 
 def test_compute_disc_id_rejects_too_many_offsets():

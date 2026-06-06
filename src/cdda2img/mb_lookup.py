@@ -356,21 +356,37 @@ def lookup_disc_id(disc: RBIDisc) -> list[DiscMeta]:
     try:
         result = musicbrainzngs.get_releases_by_discid(
             disc_id_str,
-            # F-003: "discids" populates each medium's disc-list so
-            # _find_disc_medium can pick the *correct* medium on a multi-disc
-            # release; without it the mediums flatten and track numbers collide
-            # across discs.
+            # NB: do NOT add "discids" here. It is a valid include on the
+            # /release endpoint, but the /discid endpoint rejects it with HTTP
+            # 400 Bad Request — which the except-clause below then swallowed as
+            # "no match", silently breaking *every* disc-ID lookup and forcing
+            # the whole pipeline onto the CDDB fallback (this was the F-003
+            # regression). The matching medium's disc-list is populated by the
+            # /discid endpoint regardless (we are querying *by* disc id), so
+            # _find_disc_medium still selects the right medium on multi-disc
+            # releases without it.
             includes=[
                 "artists",
                 "recordings",
                 "release-groups",
                 "labels",
                 "isrcs",
-                "discids",
             ],
         )
     except musicbrainzngs.ResponseError as exc:
-        log.debug("MusicBrainz disc ID lookup failed: %s", exc)
+        # A 404 is a legitimate "disc not in MB". Anything else (e.g. a 400 from
+        # a bad include, a 5xx) is NOT a real negative — surface it loudly so a
+        # request-shape regression can never again masquerade as "no match".
+        code = getattr(getattr(exc, "cause", None), "code", None)
+        if code == 404:
+            log.debug("MusicBrainz disc ID %s not found (404)", disc_id_str)
+        else:
+            log.warning(
+                "MusicBrainz disc ID lookup error (HTTP %s) — treating as no "
+                "match, but this is not a clean negative: %s",
+                code,
+                exc,
+            )
         return []
     except musicbrainzngs.NetworkError as exc:
         log.debug("MusicBrainz network error: %s", exc)
