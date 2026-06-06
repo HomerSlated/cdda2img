@@ -25,6 +25,7 @@ import hashlib
 import importlib.metadata
 import logging
 from collections import Counter
+from collections.abc import Iterable
 from dataclasses import replace
 from typing import NamedTuple
 
@@ -923,24 +924,66 @@ def _resolve_multimatch(
     return None, ""
 
 
+def _agreed_value(values: Iterable[str | None]) -> str | None:
+    """Return the single distinct non-blank value across *values*, else None.
+
+    The unanimity primitive behind agreed-facts: 0 distinct (all blank) or >1
+    distinct (disagreement) ⇒ None; exactly one ⇒ that value. Used for album,
+    artist, year, and per-track ISRC/title — never fabricate a value the
+    candidates do not unanimously share.
+    """
+    distinct = {v for v in values if v}
+    return distinct.pop() if len(distinct) == 1 else None
+
+
+def _agreed_tracks(group: list[DiscMeta]) -> list[TrackMeta]:
+    """Per-track ISRC + title where the *group* unanimously agrees on each.
+
+    ISRC and title are decided independently per track number (a track may have
+    a unanimous ISRC but a split title, or vice versa). A track contributes a
+    ``TrackMeta`` only if at least one of the two fields is agreed.
+    """
+    isrc_by_track: dict[int, set[str]] = {}
+    title_by_track: dict[int, set[str]] = {}
+    for m in group:
+        for t in m.tracks:
+            if t.number is None:
+                continue
+            if t.isrc:
+                isrc_by_track.setdefault(t.number, set()).add(t.isrc)
+            if t.title:
+                title_by_track.setdefault(t.number, set()).add(t.title)
+    tracks: list[TrackMeta] = []
+    for n in sorted(set(isrc_by_track) | set(title_by_track)):
+        isrc = _agreed_value(isrc_by_track.get(n, set()))
+        title = _agreed_value(title_by_track.get(n, set()))
+        if isrc or title:
+            tracks.append(TrackMeta(number=n, title=title, isrc=isrc))
+    return tracks
+
+
 def _build_agreed_facts_meta(matches: list[DiscMeta], rg_id: str) -> DiscMeta:
     """Synthesise a DiscMeta of ONLY the facts every candidate in *rg_id* agrees on.
 
     Used when an MB disc-ID multi-match cannot be resolved to a single pressing
     (no ISRC winner, no unique MCN hit). Rather than fabricate a specific
-    pressing's details, we populate the unambiguous, album-level facts shared
-    by every candidate in the plurality release-group:
+    pressing's details, we populate the unambiguous facts shared by every
+    candidate in the (already consistency-filtered, and — when the disc has an
+    MCN — MCN-matched) subset passed in:
 
       * ``mb_release_group_id`` — always (lets original-release resolve);
+      * ``album`` / ``artist`` — only when every candidate agrees on one value
+        (Unit A: safe to widen because the subset is identity-proven by MCN or
+        plurality-corroborated by RG, and unanimity gates out any disagreement);
       * ``release_date`` — a 4-digit **year** only when every dated candidate
         agrees on it (the disc's own year, e.g. four 1983 pressings ⇒ "1983");
-      * per-track ``isrc`` — only where every candidate listing that track
-        agrees on a single value.
+      * per-track ``isrc`` / ``title`` — only where every candidate listing that
+        track agrees on a single value.
 
     Deliberately left None: country, catalogue number, exact date, and
     ``mb_release_id`` — genuinely undetermined across the multi-match, so we do
     not guess them. ``_merge_into_disc`` fills blanks only, so this never
-    overwrites a value the disc already carries.
+    overwrites a value the disc already carries (disc-baked CD-Text still wins).
 
     Q2 — why the R3 track-count gate is unreachable here (by design): because
     ``mb_release_id`` is None, ``original_release._verify_rg_path_for_disc``
@@ -953,23 +996,12 @@ def _build_agreed_facts_meta(matches: list[DiscMeta], rg_id: str) -> DiscMeta:
     an arbitrarily-chosen pressing would be the bug, not the absence of it.
     """
     group = [m for m in matches if m.mb_release_group_id == rg_id]
-    years = {m.release_date[:4] for m in group if m.release_date}
-    agreed_year = years.pop() if len(years) == 1 else None
-
-    isrc_by_track: dict[int, set[str]] = {}
-    for m in group:
-        for t in m.tracks:
-            if t.number is not None and t.isrc:
-                isrc_by_track.setdefault(t.number, set()).add(t.isrc)
-    tracks = [
-        TrackMeta(number=n, isrc=next(iter(s)))
-        for n, s in sorted(isrc_by_track.items())
-        if len(s) == 1
-    ]
     return DiscMeta(
+        album=_agreed_value(m.album for m in group),
+        artist=_agreed_value(m.artist for m in group),
         mb_release_group_id=rg_id,
-        release_date=agreed_year,
-        tracks=tracks,
+        release_date=_agreed_value(m.release_date[:4] for m in group if m.release_date),
+        tracks=_agreed_tracks(group),
         source="musicbrainz",
     )
 
@@ -1065,13 +1097,28 @@ def _prepop_multimatch(
             meta=winner,
         )
     # No single pressing could be resolved. Rather than guess one, merge only the
-    # facts every candidate in the plurality release-group agrees on — year,
-    # shared per-track ISRCs, and the release-group itself (so original-release
-    # can still resolve). Returned as ``meta`` so the parallel pre-menu path
+    # facts every candidate agrees on — album/artist, year, shared per-track
+    # ISRCs/titles, and the release-group itself (so original-release can still
+    # resolve). Returned as ``meta`` so the parallel pre-menu path
     # (_finalize_import) re-applies it onto the CDDB-merged disc like a single.
-    rg = _plurality_release_group(matches)
+    #
+    # Unit A: when the disc carries an MCN, narrow the agreed-facts population to
+    # the candidates whose barcode positively matches it — identity proven, so
+    # widening album/artist/title over them is safe. Survivors with a *blank*
+    # barcode passed the Unit-G gate only vacuously (blank = no contradiction)
+    # and are not identity-proven; drop them once a positively-matching subset
+    # exists. Fall back to the full consistent set when none positively match
+    # (e.g. MB carries no barcodes for this disc) — RG plurality still holds.
+    from cdda2img.barcode import mcn_matches
+
+    subset = matches
+    if disc.catalog:
+        mcn_hits = [m for m in matches if mcn_matches(disc.catalog, m.catalog)]
+        if mcn_hits:
+            subset = mcn_hits
+    rg = _plurality_release_group(subset)
     if rg is not None:
-        agreed = _build_agreed_facts_meta(matches, rg)
+        agreed = _build_agreed_facts_meta(subset, rg)
         disc = _merge_into_disc(agreed, disc)
         log.debug(
             "MB multi-match (%d): merged agreed facts (year=%s, %d ISRCs, rg=%s)",

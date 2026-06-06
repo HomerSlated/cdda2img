@@ -16,6 +16,9 @@ from cdda2img.lookup_result import (
     TrackMeta,
 )
 from cdda2img.mb_lookup import (
+    _agreed_tracks,
+    _agreed_value,
+    _build_agreed_facts_meta,
     _disambiguate_by_mcn,
     _find_disc_medium,
     _is_consistent,
@@ -1441,3 +1444,164 @@ def test_prepopulate_r4_tally_winner_gated_by_consistency():
     assert r.disc.release_date is None  # winner rejected on MCN contradiction
     assert r.disc.album == "Test Album"
     assert r.meta is None
+
+
+# ---------------------------------------------------------------------------
+# #3-a Unit A — agreed-facts widening (album/artist/title) + MCN-matched subset
+# ---------------------------------------------------------------------------
+
+
+def test_agreed_value_unanimous_returns_value():
+    assert _agreed_value(["A", "A", "A"]) == "A"
+
+
+def test_agreed_value_ignores_blanks_among_agreers():
+    """A blank/None is no evidence: a single distinct non-blank still wins."""
+    assert _agreed_value(["A", None, "", "A"]) == "A"
+
+
+def test_agreed_value_disagreement_returns_none():
+    assert _agreed_value(["A", "B"]) is None
+
+
+def test_agreed_value_all_blank_returns_none():
+    assert _agreed_value([None, "", None]) is None
+
+
+def test_agreed_tracks_isrc_and_title_decided_independently():
+    """A track with a unanimous ISRC but a split title keeps the ISRC, drops the
+    title (and vice versa) — the two fields are gated separately per track."""
+    group = [
+        DiscMeta(
+            tracks=[
+                TrackMeta(number=1, title="Song One", isrc="USRHD0709703"),
+                TrackMeta(number=2, title="Song Two", isrc="USWB10301935"),
+            ]
+        ),
+        DiscMeta(
+            tracks=[
+                TrackMeta(number=1, title="Song One", isrc="USRHD0709703"),
+                TrackMeta(number=2, title="Song 2 (remaster)", isrc="USWB10301935"),
+            ]
+        ),
+    ]
+    tracks = {t.number: t for t in _agreed_tracks(group)}
+    assert tracks[1].title == "Song One"  # unanimous title kept
+    assert tracks[1].isrc == "USRHD0709703"
+    assert tracks[2].title is None  # split title dropped
+    assert tracks[2].isrc == "USWB10301935"  # unanimous ISRC kept
+
+
+def test_build_agreed_facts_widens_album_artist_and_titles():
+    """The Unit A widening: album, artist and per-track title now populate when
+    the whole group agrees (previously only RG/year/ISRC were extracted)."""
+    group = [
+        DiscMeta(
+            album="American Idiot",
+            artist="Green Day",
+            release_date="2004-09-20",
+            mb_release_group_id="rg-ai",
+            tracks=[TrackMeta(number=1, title="American Idiot")],
+        ),
+        DiscMeta(
+            album="American Idiot",
+            artist="Green Day",
+            release_date="2004-09-21",  # different exact date, same year
+            mb_release_group_id="rg-ai",
+            tracks=[TrackMeta(number=1, title="American Idiot")],
+        ),
+    ]
+    meta = _build_agreed_facts_meta(group, "rg-ai")
+    assert meta.album == "American Idiot"
+    assert meta.artist == "Green Day"
+    assert meta.release_date == "2004"  # year only, not the split exact date
+    assert meta.tracks[0].title == "American Idiot"
+    assert meta.mb_release_id is None  # pressing still undetermined
+
+
+def test_build_agreed_facts_album_disagreement_stays_none():
+    """Disagreement on a field ⇒ that field is left None, never fabricated."""
+    group = [
+        DiscMeta(album="American Idiot", mb_release_group_id="rg-ai"),
+        DiscMeta(album="American Idiot (Deluxe)", mb_release_group_id="rg-ai"),
+    ]
+    meta = _build_agreed_facts_meta(group, "rg-ai")
+    assert meta.album is None
+
+
+def test_prepop_multimatch_mcn_subset_excludes_blank_barcode_variant():
+    """The American Idiot fix: a same-RG variant with a BLANK barcode passes the
+    Unit-G gate vacuously and would break album unanimity — but the MCN-matched
+    subset narrowing drops it, so the agreed album resolves to the original.
+
+    Without narrowing, the variant's divergent album would collapse the agreed
+    album to None (two distinct values); with it, only the two barcode-proven
+    originals contribute → "American Idiot" fills the blank disc album.
+    """
+    disc = _make_disc(tracks=[(1, 0, 18000)])
+    disc.album = ""  # blank so the agreed album can fill through (fill-blanks)
+    disc.catalog = "093624877721"
+    orig1 = DiscMeta(
+        album="American Idiot",
+        artist="Green Day",
+        catalog="0093624877721",  # fuzzy-matches the disc MCN
+        release_date="2004-09-20",
+        mb_release_id="o1",
+        mb_release_group_id="rg-ai",
+    )
+    orig2 = DiscMeta(
+        album="American Idiot",
+        artist="Green Day",
+        catalog="093624877721",
+        release_date="2004-11-18",
+        mb_release_id="o2",
+        mb_release_group_id="rg-ai",
+    )
+    blank_variant = DiscMeta(
+        album="American Idiot: The Ultimate American Idiot",
+        artist="Green Day",
+        catalog=None,  # blank → vacuously consistent, NOT identity-proven
+        release_date="2015",
+        mb_release_id="v",
+        mb_release_group_id="rg-ai",
+    )
+    with patch(
+        "cdda2img.mb_lookup.lookup_disc_id",
+        return_value=[orig1, orig2, blank_variant],
+    ):
+        r = prepopulate_from_mb(disc, verbose=False)
+    assert r.rejected_inconsistent == 0  # blank barcode is not a contradiction
+    assert r.match_count == 3  # all three survive Unit G
+    assert r.disc.album == "American Idiot"  # narrowing excluded the variant
+    assert r.disc.release_date == "2004"  # agreed year over the two originals
+    assert r.disc.mb_release_id is None
+
+
+def test_prepop_multimatch_no_positive_mcn_falls_back_to_full_set():
+    """When the disc has an MCN but NO candidate barcode matches (MB lists none),
+    the subset falls back to the full consistent set — RG plurality still holds,
+    so the agreed album/year are taken over every candidate."""
+    disc = _make_disc(tracks=[(1, 0, 18000)])
+    disc.album = ""
+    disc.catalog = "093624877721"
+    matches = [
+        DiscMeta(
+            album="American Idiot",
+            catalog=None,
+            release_date="2004",
+            mb_release_id="a",
+            mb_release_group_id="rg-ai",
+        ),
+        DiscMeta(
+            album="American Idiot",
+            catalog=None,
+            release_date="2004",
+            mb_release_id="b",
+            mb_release_group_id="rg-ai",
+        ),
+    ]
+    with patch("cdda2img.mb_lookup.lookup_disc_id", return_value=matches):
+        r = prepopulate_from_mb(disc, verbose=False)
+    assert r.match_count == 2
+    assert r.disc.album == "American Idiot"  # full set used, both agree
+    assert r.disc.release_date == "2004"

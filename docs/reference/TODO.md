@@ -212,12 +212,30 @@ never gated** (R9 stays as-is — gating titles is the gnudb-era regression we e
       `_build_agreed_facts_meta`, so it does most of Unit A's plumbing (Stage 4 is just the
       field-widening). `prepopulate_from_mb` split into `_prepop_zero_match` + `_prepop_multimatch`
       to stay under C901.
-- [ ] **A (#3-a proper) — agreed-facts over the consistent / MCN-matched subset.** Feed
-      `_build_agreed_facts_meta` the consistent set (= the MCN-matched subset when the disc has an
-      MCN), not the whole RG. Widen the extracted fields (album/artist/per-track titles where the
-      subset agrees) since the MCN proves identity. **Preserve the Q2 verify-skip rationale** in
-      that function (still valid — the subset is even more corroborated). Live-verify with
-      `tools/trace_album_live.py` that *American Idiot* resolves to the original.
+- [x] **A (#3-a proper) — agreed-facts over the consistent / MCN-matched subset. DONE 2026-06-06.**
+      `_prepop_multimatch` now narrows the agreed-facts population to the **positively** MCN-matched
+      subset when the disc carries an MCN (a same-RG variant with a *blank* barcode passes Unit G
+      vacuously but is not identity-proven → dropped once a positive subset exists; falls back to
+      the full consistent set when none positively match). `_build_agreed_facts_meta` widened to
+      extract **album / artist / per-track title** gated on unanimity (new `_agreed_value` +
+      `_agreed_tracks` helpers); Q2 verify-skip rationale preserved (`mb_release_id` still None).
+      `_merge_into_disc` is fill-blanks-only, so disc-baked CD-Text still wins.
+      - **Live-verify finding:** the captured `rips/cdrdao/American Idiot.toc` has **non-blank**
+        CD-Text (`"American Idiot: The Ultimate American Idiot"`) paired with the 2004 original's
+        MCN — internally contradictory. Because CD-Text is gospel (top precedence, fill-blanks),
+        Unit A is **correctly inert** for that disc: the displayed album is governed by CD-Text,
+        not MB. `tools/trace_album_live.py` against that TOC therefore cannot demonstrate Unit A
+        (CD-Text masks it). Unit A's effect is on the **blank-CD-Text degraded case** (the original
+        P2-B scenario). Proven end-to-end **offline** on the real seed (real MCN/ISRCs, CD-Text
+        blanked, realistic mocked MB multi-match + CDDB mislabel applied last): Unit G drops the
+        contradicting reissue, Unit A drops the blank-barcode variant, agreed album resolves to
+        "American Idiot", and CDDB cannot overwrite it. Tests in `tests/test_mb_lookup.py`
+        (Unit A section: `_agreed_value` / `_agreed_tracks` / widening / disagreement / MCN-subset
+        exclusion / no-positive-match fallback).
+      - **Precedence note:** the 2026-06-01 P2-B remark "MB cannot override the displayed title
+        until precedence changes" is **stale** — `cb4bcc7` demoted CDDB to lowest precedence (MB
+        applies first, CDDB last as zero-trust gap-filler), confirmed live in
+        `cdda2img._run_metadata_lookups`.
 
 **Cascade note:** the gate makes MB return blank more often → AcoustID (last-resort autopopulate)
 and the manual menu fire more often. That is the intended "prefer no-answer over wrong-answer"
