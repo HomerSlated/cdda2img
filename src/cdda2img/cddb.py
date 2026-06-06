@@ -17,6 +17,7 @@ import contextlib
 import importlib.metadata
 import logging
 import socket
+import time
 
 from cdda2img.lookup_result import DiscMeta, TrackMeta
 
@@ -26,6 +27,13 @@ _DEFAULT_SERVER = "gnudb.gnudb.org"
 _DEFAULT_PORT = 8880
 _TIMEOUT = 10  # seconds per socket operation
 _CLIENT_NAME = "cdda2img"
+# #3-d: a cold-connect or mid-session TCP flake raises OSError and would
+# otherwise return [] — indistinguishable from a legitimate "disc not in DB".
+# Retry the whole query a few times before giving up; a transport failure is
+# never cached (only the protocol-level 202 no-match is), so a flake cannot
+# poison the cache with a false negative.
+_CONNECT_ATTEMPTS = 3
+_RETRY_BACKOFF_S = 0.5
 
 
 # ---------------------------------------------------------------------------
@@ -204,10 +212,7 @@ def query_cddb(
     a 30-day TTL. Cache reads work in offline mode.
     """
     from cdda2img.config import is_no_network_active
-    from cdda2img.lookup_cache import (
-        get_cached_cddb_lookup,
-        put_cached_cddb_lookup,
-    )
+    from cdda2img.lookup_cache import get_cached_cddb_lookup
 
     disc_id = compute_cddb_disc_id(track_lsns, disc_last_lsn)
     cached = get_cached_cddb_lookup(disc_id)
@@ -224,43 +229,81 @@ def query_cddb(
     offset_str = " ".join(str(o) for o in offsets)
     version = importlib.metadata.version("cdda2img")
 
-    try:
-        with _CddbSession(host, port) as sess:
-            greeting = sess.readline()
-            log.debug("CDDB greeting: %s", greeting)
-            if greeting[:3] not in ("200", "201"):
-                log.warning("CDDB: unexpected greeting: %r", greeting)
-                return []
+    last_exc: OSError | None = None
+    for attempt in range(_CONNECT_ATTEMPTS):
+        try:
+            return _query_cddb_session(
+                host, port, disc_id, n, offset_str, total_secs, version
+            )
+        except OSError as exc:
+            last_exc = exc
+            log.debug(
+                "CDDB attempt %d/%d failed (%s:%d): %s",
+                attempt + 1,
+                _CONNECT_ATTEMPTS,
+                host,
+                port,
+                exc,
+            )
+            if attempt + 1 < _CONNECT_ATTEMPTS:
+                time.sleep(_RETRY_BACKOFF_S)
+    # Every attempt hit a transport error — this is NOT a clean negative, so
+    # (unlike the 202 path) we do not cache an empty result.
+    log.warning(
+        "CDDB query failed after %d attempt(s) (%s:%d): %s",
+        _CONNECT_ATTEMPTS,
+        host,
+        port,
+        last_exc,
+    )
+    return []
 
-            r = sess.cmd(f"cddb hello anonymous localhost {_CLIENT_NAME} {version}")
-            log.debug("CDDB hello: %s", r)
-            r = sess.cmd("proto 6")
-            log.debug("CDDB proto: %s", r)
-            r = sess.cmd(f"cddb query {disc_id} {n} {offset_str} {total_secs}")
-            log.debug("CDDB query: %s", r)
 
-            code = r[:3]
-            if code == "202":
-                put_cached_cddb_lookup(disc_id, [])  # cache the empty result too
-                return []
-            if code not in ("200", "210", "211"):
-                log.warning("CDDB: unexpected query response: %r", r)
-                return []
+def _query_cddb_session(
+    host: str,
+    port: int,
+    disc_id: str,
+    n: int,
+    offset_str: str,
+    total_secs: int,
+    version: str,
+) -> list[DiscMeta]:
+    """Run one CDDB session attempt. Raises OSError on a transport flake (the
+    caller retries); returns [] on a protocol-level negative (no retry)."""
+    from cdda2img.lookup_cache import put_cached_cddb_lookup
 
-            candidates = _collect_candidates(code, r[4:], sess)
-            results: list[DiscMeta] = []
-            for category, cid in candidates:
-                r2 = sess.cmd(f"cddb read {category} {cid}")
-                log.debug("CDDB read %s/%s: %s", category, cid, r2)
-                if not r2.startswith("210"):
-                    log.warning("CDDB: unexpected read response: %r", r2)
-                    continue
-                xmcd_lines = sess.read_until_dot()
-                results.append(_parse_xmcd(xmcd_lines, n))
+    with _CddbSession(host, port) as sess:
+        greeting = sess.readline()
+        log.debug("CDDB greeting: %s", greeting)
+        if greeting[:3] not in ("200", "201"):
+            log.warning("CDDB: unexpected greeting: %r", greeting)
+            return []
 
-            put_cached_cddb_lookup(disc_id, results)
-            return results
+        r = sess.cmd(f"cddb hello anonymous localhost {_CLIENT_NAME} {version}")
+        log.debug("CDDB hello: %s", r)
+        r = sess.cmd("proto 6")
+        log.debug("CDDB proto: %s", r)
+        r = sess.cmd(f"cddb query {disc_id} {n} {offset_str} {total_secs}")
+        log.debug("CDDB query: %s", r)
 
-    except OSError as exc:
-        log.warning("CDDB query failed (%s:%d): %s", host, port, exc)
-        return []
+        code = r[:3]
+        if code == "202":
+            put_cached_cddb_lookup(disc_id, [])  # cache the empty result too
+            return []
+        if code not in ("200", "210", "211"):
+            log.warning("CDDB: unexpected query response: %r", r)
+            return []
+
+        candidates = _collect_candidates(code, r[4:], sess)
+        results: list[DiscMeta] = []
+        for category, cid in candidates:
+            r2 = sess.cmd(f"cddb read {category} {cid}")
+            log.debug("CDDB read %s/%s: %s", category, cid, r2)
+            if not r2.startswith("210"):
+                log.warning("CDDB: unexpected read response: %r", r2)
+                continue
+            xmcd_lines = sess.read_until_dot()
+            results.append(_parse_xmcd(xmcd_lines, n))
+
+        put_cached_cddb_lookup(disc_id, results)
+        return results

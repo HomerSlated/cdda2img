@@ -167,9 +167,11 @@ not chase certainty the medium cannot provide.
       Surfaced a latent bug (now fixed): freedb `TTITLE` uses "Artist / Title"; `_parse_xmcd`
       now splits it (first " / " only, medley-safe). Also added Type/Tracks columns to the MB
       results menu (interim — CD singles shown, not filtered) + `tools/disc_scan.py`.
-- [ ] **#3-d** · (minor hardening) `query_cddb` has no retry on a cold-connect TCP flake →
-      silently returns `[]`, indistinguishable from a legitimate "disc not in DB". Add a small
-      retry / distinguish transport-error from empty-result (distrust-silent-nulls again).
+- [x] **#3-d** · (minor hardening) **DONE 2026-06-06.** `query_cddb` now retries the whole
+      session `_CONNECT_ATTEMPTS=3` times on `OSError` (cold-connect / mid-session TCP flake),
+      with a `_RETRY_BACKOFF_S` pause. Session body extracted to `_query_cddb_session`. Transport
+      failure is logged at WARNING and **never cached**; only the protocol-level `202` no-match
+      caches `[]` — so a flake can no longer masquerade as a legitimate "disc not in DB".
 
 #### #3-a plan — whole-record consistency gate + fuzzy MCN (decided 2026-06-04; execute next session)
 

@@ -5,7 +5,9 @@ in-track pre-gap, producing an off-by-1 disc-ID and 404s at AccurateRip.
 
 from __future__ import annotations
 
+from cdda2img import cddb
 from cdda2img.cddb import _parse_xmcd, compute_cddb_disc_id
+from cdda2img.lookup_result import DiscMeta
 
 # Sheryl Crow — Sheryl Crow (1996), 14 tracks. Whipper and EAC both compute
 # CDDB id e00e160e for this disc; AccurateRip serves a 1529-byte dBAR at the
@@ -115,3 +117,43 @@ def test_compute_cddb_disc_id_floor_boundary_no_bias() -> None:
     # total_secs = 150//75 - 0//75 = 2
     # id = (5 << 24) | (2 << 8) | 2 = 0x05000202
     assert compute_cddb_disc_id(lsns, last_lsn) == "05000202"
+
+
+# ---------------------------------------------------------------------------
+# #3-d — transport-error retry (cold-connect TCP flake)
+# ---------------------------------------------------------------------------
+
+
+def _force_online_cache_miss(monkeypatch):
+    monkeypatch.setattr(cddb.time, "sleep", lambda *_: None)
+    monkeypatch.setattr("cdda2img.lookup_cache.get_cached_cddb_lookup", lambda *_: None)
+    monkeypatch.setattr("cdda2img.config.is_no_network_active", lambda: False)
+
+
+def test_query_cddb_retries_then_gives_up_on_transport_error(monkeypatch):
+    _force_online_cache_miss(monkeypatch)
+    calls = {"n": 0}
+
+    def _boom(*_a, **_k):
+        calls["n"] += 1
+        raise OSError
+
+    monkeypatch.setattr(cddb, "_query_cddb_session", _boom)
+    assert cddb.query_cddb([0, 18000], 40000) == []
+    assert calls["n"] == cddb._CONNECT_ATTEMPTS  # every attempt tried
+
+
+def test_query_cddb_succeeds_after_transient_flake(monkeypatch):
+    _force_online_cache_miss(monkeypatch)
+    calls = {"n": 0}
+
+    def _flaky(*_a, **_k):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise OSError
+        return [DiscMeta(album="OK")]
+
+    monkeypatch.setattr(cddb, "_query_cddb_session", _flaky)
+    result = cddb.query_cddb([0, 18000], 40000)
+    assert [m.album for m in result] == ["OK"]
+    assert calls["n"] == 2  # one flake, then success
