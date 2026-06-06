@@ -285,9 +285,13 @@ behaviour, not a regression.
           `mb_rg_id`. Removed legacy `_fetch_menu`/`_mb_search_menu`/`_mb_select_and_apply`;
           `_select_from_results` kept (Discogs/AcoustID/original use it) refactored onto
           `_render_results_page`. Migrated 2 tests + 13 new native tests. 810 pass.
-    - [ ] **3b** · Discogs → `DiscogsSearchScreen` + reuse `ResultsScreen(source="discogs")`
-          (no sort; `fetch_release` when `discogs_release_id and not tracks`; no `mb_rg_id`).
-          Then `_discogs_menu`/`_discogs_execute_search` removed; FetchScreen [d] pushes native.
+    - [x] **3b** · Discogs. DONE 2026-06-06. `DiscogsSearchScreen` (mirrors `MBSearchScreen`;
+          token-unavailable guard renders help + pops on any key, preserving legacy
+          `_discogs_menu`) + `ResultsScreen(source="discogs")`. Apply tail preserves the legacy
+          asymmetry vs MB: confirm runs BEFORE `fetch_release` (stub reaches the preview), no
+          sort, no `mb_rg_id` threading — noted in a code comment as a deliberate carry-over.
+          Removed `_discogs_menu`/`_discogs_execute_search`; FetchScreen [d] pushes native. +6
+          tests. 815 pass.
     - [ ] **3c** · AcoustID → track-picker screen + `ResultsScreen(source="acoustid")` (no sort;
           tag single-track `number=None` before the results frame; fetch-full when
           `len(tracks) < len(disc.tracks)`). Decide then whether `_acoustid_file_loop` is its own

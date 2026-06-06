@@ -16,6 +16,7 @@ import pytest
 
 from cdda2img.lookup_result import DiscMeta, TrackMeta
 from cdda2img.menu_state import (
+    DiscogsSearchScreen,
     EditDiscPositionScreen,
     EditScreen,
     EditTrackScreen,
@@ -241,16 +242,15 @@ def test_fetch_screen_m_pushes_mb_search_seeded_from_disc() -> None:
     assert top.title_q == "Seed Album"
 
 
-def test_fetch_screen_d_delegates_to_legacy_discogs_and_stays() -> None:
-    """Discogs is still a blocking leaf helper (cp3b pending); FetchScreen stays."""
-    ctl = MenuController(_disc())
+def test_fetch_screen_d_pushes_native_discogs_seeded_from_disc() -> None:
+    """[d] pushes the native DiscogsSearchScreen (cp3b), seeded from the disc."""
+    ctl = MenuController(_disc(album="Seed Album", artist="Seed Artist"))
     ctl.stack.append(FetchScreen())
-    edited = _disc(album="Via Discogs")
-    with patch("cdda2img.metadata_menu._discogs_menu", return_value=edited) as dg:
-        _step_with(ctl, "d")
-    dg.assert_called_once()
-    assert ctl.disc.album == "Via Discogs"
-    assert ctl.state is MenuState.FETCH  # stayed on FetchScreen
+    _step_with(ctl, "d")
+    top = ctl.stack[-1]
+    assert isinstance(top, DiscogsSearchScreen)
+    assert top.artist_q == "Seed Artist"
+    assert top.title_q == "Seed Album"
 
 
 def test_fetch_screen_a_delegates_to_legacy_acoustid_and_stays() -> None:
@@ -391,6 +391,92 @@ def test_results_mb_select_cancel_applies_nothing() -> None:
     assert ctl.mb_rg_id is None  # nothing applied
     assert ctl.banner == ""  # no 'Applied.' banner on cancel
     assert ctl.state is MenuState.MB_SEARCH  # still popped back
+
+
+# ---------------------------------------------------------------------------
+# cp3b — Discogs native screens
+# ---------------------------------------------------------------------------
+
+
+def test_discogs_unavailable_renders_help_and_pops_on_any_key() -> None:
+    """No DISCOGS_TOKEN → token help, pop on Enter (legacy guard preserved)."""
+    ctl = MenuController(_disc())
+    ctl.stack.append(FetchScreen())
+    ctl.stack.append(DiscogsSearchScreen())
+    with patch("cdda2img.discogs_lookup.is_available", return_value=False):
+        _step_with(ctl, "")  # any key returns
+    assert ctl.state is MenuState.FETCH  # popped back
+
+
+def test_discogs_back_pops_to_fetch() -> None:
+    ctl = MenuController(_disc())
+    ctl.stack.append(FetchScreen())
+    ctl.stack.append(DiscogsSearchScreen())
+    with patch("cdda2img.discogs_lookup.is_available", return_value=True):
+        _step_with(ctl, "b")
+    assert ctl.state is MenuState.FETCH
+
+
+def test_discogs_search_pushes_results_unsorted() -> None:
+    """[s] pushes ResultsScreen(source='discogs') with results in API order
+    (Discogs is not sorted, unlike MB)."""
+    ctl = MenuController(_disc())
+    ctl.stack.append(DiscogsSearchScreen(artist_q="A", title_q="T"))
+    r1 = DiscMeta(album="Z", release_date="1990", discogs_release_id=1)
+    r2 = DiscMeta(album="A", release_date="1980", discogs_release_id=2)
+    with (
+        patch("cdda2img.discogs_lookup.is_available", return_value=True),
+        patch("cdda2img.discogs_lookup.search_releases", return_value=[r1, r2]),
+    ):
+        _step_with(ctl, "s")
+    top = ctl.stack[-1]
+    assert isinstance(top, ResultsScreen)
+    assert top.source == "discogs"
+    assert [m.discogs_release_id for m in top.results] == [1, 2]  # unsorted
+
+
+def test_discogs_no_results_sets_banner_and_stays() -> None:
+    ctl = MenuController(_disc())
+    ctl.stack.append(DiscogsSearchScreen(artist_q="A", title_q="T"))
+    with (
+        patch("cdda2img.discogs_lookup.is_available", return_value=True),
+        patch("cdda2img.discogs_lookup.search_releases", return_value=[]),
+    ):
+        _step_with(ctl, "s")
+    assert ctl.state is MenuState.DISCOGS
+    assert "No results" in ctl.banner
+
+
+def test_discogs_select_confirms_before_fetch_full_then_applies() -> None:
+    """The legacy Discogs asymmetry preserved: confirm runs BEFORE fetch_release,
+    so the stub (no tracks) reaches the preview; the full meta is applied. No
+    mb_rg_id threading on the Discogs path."""
+    ctl = MenuController(_disc())
+    ctl.stack.append(DiscogsSearchScreen())  # frame popped back to
+    stub = DiscMeta(album="E", discogs_release_id=42)  # no tracks
+    full = DiscMeta(
+        album="E",
+        discogs_release_id=42,
+        mb_release_group_id="should-not-thread",
+        tracks=[TrackMeta(number=1, isrc="USRHD0709703")],
+    )
+    ctl.stack.append(ResultsScreen([stub], "Discogs Results", "discogs"))
+    captured: dict = {}
+
+    def fake_confirm(meta, _disc):
+        captured["preview_tracks"] = list(meta.tracks)  # stub → empty
+        return "update"
+
+    with (
+        patch("cdda2img.metadata_menu._confirm_apply", side_effect=fake_confirm),
+        patch("cdda2img.discogs_lookup.fetch_release", return_value=full),
+    ):
+        _step_with(ctl, "1")
+    assert captured["preview_tracks"] == []  # confirmed on the stub, pre-fetch
+    assert ctl.disc.tracks[0].isrc == "USRHD0709703"  # full meta applied
+    assert ctl.mb_rg_id is None  # Discogs never threads the MB rg
+    assert ctl.banner == "Applied."
+    assert ctl.state is MenuState.DISCOGS  # popped back to search
 
 
 def test_original_release_state_returns_to_main_and_threads_rg_id() -> None:

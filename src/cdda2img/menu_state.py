@@ -61,6 +61,7 @@ class MenuState(Enum):
     EDIT_DISC_POSITION = auto()
     FETCH = auto()
     MB_SEARCH = auto()
+    DISCOGS = auto()
     RESULTS = auto()
     ORIGINAL_RELEASE = auto()
     DONE = auto()
@@ -359,11 +360,10 @@ class EditDiscPositionScreen(Screen):
 class FetchScreen(Screen):
     """Fetch-metadata sub-menu: MusicBrainz / Discogs / AcoustID.
 
-    Native port of the legacy ``metadata_menu._fetch_menu`` loop (cp3a).
-    MusicBrainz is fully ported — [m] pushes :class:`MBSearchScreen`. Discogs and
-    AcoustID still call the legacy blocking helpers (``_discogs_menu`` /
-    ``_acoustid_menu``) as a bounded leaf interaction in ``handle_input``, pending
-    their own screen ports (cp3b / cp3c).
+    Native port of the legacy ``metadata_menu._fetch_menu`` loop. MusicBrainz
+    (cp3a) and Discogs (cp3b) are fully ported — [m]/[d] push native search
+    screens. AcoustID still calls the legacy blocking helper (``_acoustid_menu``)
+    as a bounded leaf interaction in ``handle_input``, pending its port (cp3c).
     """
 
     state = MenuState.FETCH
@@ -382,7 +382,7 @@ class FetchScreen(Screen):
         print("  [b]  Back")
 
     def handle_input(self, ctl: MenuController) -> Nav:
-        from cdda2img.metadata_menu import _acoustid_menu, _discogs_menu, _prompt
+        from cdda2img.metadata_menu import _acoustid_menu, _prompt
 
         choice = _prompt("  > ").strip().lower()
         if choice == "b":
@@ -395,10 +395,12 @@ class FetchScreen(Screen):
                 )
             )
         if choice == "d":
-            ctl.disc = _discogs_menu(
-                ctl.disc, seed_artist=ctl.seed_artist, seed_title=ctl.seed_title
+            return Push(
+                DiscogsSearchScreen(
+                    artist_q=ctl.disc.artist or ctl.seed_artist,
+                    title_q=ctl.disc.album or ctl.seed_title,
+                )
             )
-            return Stay()
         if choice == "a":
             ctl.disc = _acoustid_menu(
                 ctl.disc, source_pcm=ctl.source_pcm, source_wavs=ctl.source_wavs
@@ -488,6 +490,88 @@ class MBSearchScreen(Screen):
         return Stay()
 
 
+class DiscogsSearchScreen(Screen):
+    """Discogs search — the "enter query" frame (cp3b).
+
+    Mirrors :class:`MBSearchScreen`: artist/title query as instance state seeded
+    at entry, mutated only by [e]. When Discogs is unavailable (no DISCOGS_TOKEN)
+    the screen renders the token help and pops on any key, preserving the legacy
+    ``_discogs_menu`` guard. [s]/[c] run the search in ``handle_input`` and push a
+    :class:`ResultsScreen` with ``source="discogs"``.
+    """
+
+    state = MenuState.DISCOGS
+
+    def __init__(self, artist_q: str = "", title_q: str = "") -> None:
+        self.artist_q = artist_q
+        self.title_q = title_q
+
+    def render(self, ctl: MenuController) -> None:
+        from cdda2img import discogs_lookup
+        from cdda2img.metadata_menu import _header
+
+        _header("Discogs Search")
+        if not discogs_lookup.is_available():
+            print("  Discogs requires a free personal access token.")
+            print("  Set DISCOGS_TOKEN in your environment.")
+            print("  Obtain one at: discogs.com/settings/developers")
+            return
+        print(f"  Artist: {self.artist_q or '(none)'}")
+        print(f"  Title:  {self.title_q or '(none)'}")
+        print()
+        if ctl.banner:
+            print(f"  ! {ctl.banner}")
+            print()
+            ctl.banner = ""
+        print("  [s]  Search with current fields")
+        print("  [e]  Edit artist / title")
+        print("  [c]  Search by UPC/barcode")
+        print("  [b]  Back")
+
+    def handle_input(self, ctl: MenuController) -> Nav:
+        from cdda2img import discogs_lookup
+        from cdda2img.barcode import normalize_barcode
+        from cdda2img.metadata_menu import _prompt, _prompt_search_fields
+
+        if not discogs_lookup.is_available():
+            _prompt("  [Enter to return] ")
+            return Pop()
+        choice = _prompt("  > ").strip().lower()
+        if choice == "b":
+            return Pop()
+        if choice == "e":
+            self.artist_q, self.title_q = _prompt_search_fields(
+                self.artist_q, self.title_q
+            )
+            return Stay()
+        if choice == "s":
+            label = f"artist={self.artist_q!r} title={self.title_q!r}"
+            print(f"\n  Searching Discogs for {label} ...")
+            results = discogs_lookup.search_releases(
+                artist=self.artist_q, release_title=self.title_q
+            )
+            if not results:
+                ctl.banner = "No results found."
+                return Stay()
+            return Push(ResultsScreen(results, "Discogs Results", "discogs"))
+        if choice == "c":
+            current = ctl.disc.catalog or ""
+            raw = _prompt(f"  UPC/barcode [{current}]: ").strip()
+            effective = raw or current
+            if not effective:
+                ctl.banner = "No barcode to search."
+                return Stay()
+            normalized = normalize_barcode(effective) or effective
+            print(f"\n  Searching Discogs for barcode {normalized!r} ...")
+            results = discogs_lookup.search_by_barcode(normalized)
+            if not results:
+                ctl.banner = "No results found."
+                return Stay()
+            return Push(ResultsScreen(results, "Discogs Results", "discogs"))
+        ctl.banner = "Unknown command."
+        return Stay()
+
+
 class ResultsScreen(Screen):
     """Paginated result picker — the "pick result" frame (cp3a).
 
@@ -546,30 +630,59 @@ class ResultsScreen(Screen):
         return Pop()
 
     def _apply_selected(self, ctl: MenuController, selected: DiscMeta) -> None:
-        """Source-specific apply tail. cp3a implements MB; cp3b/cp3c extend."""
+        """Source-specific apply tail. cp3a implements MB; cp3b adds Discogs."""
+        if self.source == "mb":
+            self._apply_mb(ctl, selected)
+        elif self.source == "discogs":
+            self._apply_discogs(ctl, selected)
+
+    def _apply_mb(self, ctl: MenuController, selected: DiscMeta) -> None:
         from cdda2img.mb_lookup import _merge_into_disc, _overwrite_disc, lookup_release
         from cdda2img.metadata_menu import _confirm_apply
 
-        if self.source == "mb":
-            # Search hits are stubs (no track listing / ISRCs). Fetch the full
-            # release BEFORE previewing so the diff reflects what will be applied.
-            if selected.mb_release_id and not selected.tracks:
-                print("  Fetching full track listing from MusicBrainz...")
-                full = lookup_release(
-                    selected.mb_release_id, disc_number=ctl.disc.disc_number
-                )
-                if full and (full.album or full.tracks):
-                    selected = full
-            mode = _confirm_apply(selected, ctl.disc)
-            if not mode:
-                return
-            ctl.disc = (
-                _merge_into_disc(selected, ctl.disc)
-                if mode == "update"
-                else _overwrite_disc(selected, ctl.disc)
+        # Search hits are stubs (no track listing / ISRCs). Fetch the full
+        # release BEFORE previewing so the diff reflects what will be applied.
+        if selected.mb_release_id and not selected.tracks:
+            print("  Fetching full track listing from MusicBrainz...")
+            full = lookup_release(
+                selected.mb_release_id, disc_number=ctl.disc.disc_number
             )
-            ctl.mb_rg_id = selected.mb_release_group_id or ctl.mb_rg_id
-            ctl.banner = "Applied."
+            if full and (full.album or full.tracks):
+                selected = full
+        mode = _confirm_apply(selected, ctl.disc)
+        if not mode:
+            return
+        ctl.disc = (
+            _merge_into_disc(selected, ctl.disc)
+            if mode == "update"
+            else _overwrite_disc(selected, ctl.disc)
+        )
+        ctl.mb_rg_id = selected.mb_release_group_id or ctl.mb_rg_id
+        ctl.banner = "Applied."
+
+    def _apply_discogs(self, ctl: MenuController, selected: DiscMeta) -> None:
+        from cdda2img import discogs_lookup
+        from cdda2img.mb_lookup import _merge_into_disc, _overwrite_disc
+        from cdda2img.metadata_menu import _confirm_apply
+
+        # Behaviour-preserving asymmetry vs MB: the legacy Discogs path confirms
+        # BEFORE fetching the full release, so the preview diff shows the stub
+        # (no track listing) while the apply uses the full meta. Kept as-is in
+        # cp3b; fetch-before-preview parity with MB would be a separate change.
+        mode = _confirm_apply(selected, ctl.disc)
+        if not mode:
+            return
+        if selected.discogs_release_id and not selected.tracks:
+            print("  Fetching full track listing from Discogs...")
+            full = discogs_lookup.fetch_release(selected.discogs_release_id)
+            if full and (full.album or full.tracks):
+                selected = full
+        ctl.disc = (
+            _merge_into_disc(selected, ctl.disc)
+            if mode == "update"
+            else _overwrite_disc(selected, ctl.disc)
+        )
+        ctl.banner = "Applied."
 
 
 class LegacyDelegateScreen(Screen):

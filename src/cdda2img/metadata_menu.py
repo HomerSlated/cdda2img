@@ -325,102 +325,10 @@ def _confirm_apply(meta: DiscMeta, disc: RBIDisc) -> str | None:
 
 
 # ---------------------------------------------------------------------------
-# Discogs search sub-menu
+# Discogs search — native screen-stack port (cp3b) lives in menu_state.py
+# (DiscogsSearchScreen + ResultsScreen source="discogs"). The legacy
+# _discogs_menu / _discogs_execute_search blocking loops were removed in cp3b.
 # ---------------------------------------------------------------------------
-
-
-def _discogs_execute_search(
-    disc: RBIDisc,
-    use_barcode: bool,
-    *,
-    artist: str = "",
-    release_title: str = "",
-    barcode: str = "",
-) -> RBIDisc:
-    """Run one Discogs search (barcode or structured artist/title) and apply if confirmed."""
-    from cdda2img import discogs_lookup
-    from cdda2img.barcode import normalize_barcode
-    from cdda2img.mb_lookup import _merge_into_disc, _overwrite_disc
-
-    if use_barcode:
-        effective = barcode or disc.catalog or ""
-        normalized = normalize_barcode(effective) or effective
-        label = f"barcode {normalized!r}"
-        results = discogs_lookup.search_by_barcode(normalized)
-    else:
-        label = f"artist={artist!r} title={release_title!r}"
-        results = discogs_lookup.search_releases(
-            artist=artist, release_title=release_title
-        )
-    print(f"\n  Searching Discogs for {label} ...")
-    if not results:
-        print("  No results found.")
-        return disc
-    selected = _select_from_results(results, "Discogs Results")
-    if selected is not None:
-        mode = _confirm_apply(selected, disc)
-        if mode:
-            if selected.discogs_release_id and not selected.tracks:
-                print("  Fetching full track listing from Discogs...")
-                full = discogs_lookup.fetch_release(selected.discogs_release_id)
-                if full and (full.album or full.tracks):
-                    selected = full
-            disc = (
-                _merge_into_disc(selected, disc)
-                if mode == "update"
-                else _overwrite_disc(selected, disc)
-            )
-            print("  Applied.")
-    return disc
-
-
-def _discogs_menu(
-    disc: RBIDisc, seed_artist: str = "", seed_title: str = ""
-) -> RBIDisc:
-    from cdda2img import discogs_lookup
-
-    if not discogs_lookup.is_available():
-        _header("Discogs Search")
-        print("  Discogs requires a free personal access token.")
-        print("  Set DISCOGS_TOKEN in your environment.")
-        print("  Obtain one at: discogs.com/settings/developers")
-        _prompt("  [Enter to return] ")
-        return disc
-
-    artist_q = disc.artist or seed_artist
-    title_q = disc.album or seed_title
-
-    while True:
-        _header("Discogs Search")
-        print(f"  Artist: {artist_q or '(none)'}")
-        print(f"  Title:  {title_q or '(none)'}")
-        print()
-        print("  [s]  Search with current fields")
-        print("  [e]  Edit artist / title")
-        print("  [c]  Search by UPC/barcode")
-        print("  [b]  Back")
-        choice = _prompt("  > ").strip().lower()
-
-        if choice == "b":
-            return disc
-        elif choice == "e":
-            artist_q, title_q = _prompt_search_fields(artist_q, title_q)
-        elif choice == "s":
-            disc = _discogs_execute_search(
-                disc, use_barcode=False, artist=artist_q, release_title=title_q
-            )
-        elif choice == "c":
-            current = disc.catalog or ""
-            raw = _prompt(f"  UPC/barcode [{current}]: ").strip()
-            effective = raw or current
-            if effective:
-                disc = _discogs_execute_search(
-                    disc, use_barcode=True, barcode=effective
-                )
-            else:
-                print("  No barcode to search.")
-        else:
-            print("  Unknown command.")
 
 
 # ---------------------------------------------------------------------------
