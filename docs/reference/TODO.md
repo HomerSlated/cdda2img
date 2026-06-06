@@ -65,7 +65,14 @@ checkpoint (run `make check` + tests + py3.10 at each). Do units in order
 - [x] **P2** · Remove dead helpers `_best_fuzzy_match` and the tuple-returning
       `_gather_artist_catalogue_via_mb` (reachable only from tests + `tools/demo_title_fuzz.py`);
       update those call sites.
-- [ ] **P3** · (optional / may defer) Extend the R7 cache to by-release-id / by-RG-id lookups.
+- [ ] **P3** · (optional / **DEFERRED 2026-06-06**) Extend the R7 cache to by-release-id / by-RG-id
+      lookups. Surveyed: the cache is uniformly `key → DiscMeta[]` (4 tables). `get_release_by_id`
+      (`mb_lookup.py:416`) returns a `DiscMeta` and would fit a 5th table cleanly; but
+      `get_release_group_by_id` (`original_release.py:247`, `mb_lookup.py:496`) returns a
+      release-group shape (list of releases + dates) that needs a new serialiser/table — extra
+      surface against the cache's "one shape, fail-safe" design, for an explicitly-optional item.
+      User chose to defer (2026-06-06). Revisit only if MB round-trips become a measured cost; the
+      by-release-id slice is the tractable first step if so.
 
 **Unit Q — Clarity (mostly comments/decisions; fold into the touching unit where possible)**
 - [x] **Q1** · F-005 — resolve the dead `_R3_PER_TRACK_TOLERANCE_MS`: wire the intended per-track
