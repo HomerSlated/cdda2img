@@ -84,7 +84,9 @@ def _parse_year(date_str: str | None) -> int | None:
 # ---------------------------------------------------------------------------
 
 
-def _verify_release_matches_disc(meta: DiscMeta, disc: RBIDisc) -> bool:
+def _verify_release_matches_disc(
+    meta: DiscMeta, disc: RBIDisc, *, check_durations: bool = True
+) -> bool:
     """R3: conjunctive verifier — does *meta* plausibly describe *disc*?
 
     Four gates, all skip-on-no-evidence (innocent until proven guilty):
@@ -95,7 +97,14 @@ def _verify_release_matches_disc(meta: DiscMeta, disc: RBIDisc) -> bool:
       evidence that we're looking at the wrong release.
     * **Sum-of-durations** — within ±2 s when both sides have lengths.
       Catches structural mismatches (different versions, extra/missing
-      track) even when track counts agree.
+      track) even when track counts agree. Only valid when *meta* is the
+      disc's **own** pressing (track.length agrees with the physical TOC to
+      within rounding); across *different* pressings of the same album the
+      per-track lengths legitimately drift by tens of seconds, so callers
+      comparing the disc against an arbitrary release in a group must pass
+      ``check_durations=False`` (see :func:`find_original_release_fuzzy`).
+      Disabling it is safe because it is the only pressing-*specific* gate —
+      track count, ISRC, and title are all pressing-stable.
     * **Per-track ISRC** — agreement at matching track numbers when both
       sides have ISRCs. Reuses R1's helper. Positive evidence of identity
       when present; absent ISRCs skip.
@@ -121,11 +130,12 @@ def _verify_release_matches_disc(meta: DiscMeta, disc: RBIDisc) -> bool:
         return False
 
     # Gate 2: sum-of-durations within ±2 s. Frame_to_ms via 1000/75 ≈ 13.33.
+    # Pressing-specific — skipped when verifying a cross-pressing candidate.
     disc_sum_ms = sum(
         int(t.duration_frames * 1000 / 75) for t in disc.tracks if t.duration_frames
     )
     meta_sum_ms = sum(t.duration_ms or 0 for t in meta.tracks if t.duration_ms)
-    if disc_sum_ms > 0 and meta_sum_ms > 0:
+    if check_durations and disc_sum_ms > 0 and meta_sum_ms > 0:
         diff = abs(disc_sum_ms - meta_sum_ms)
         if diff > _R3_SUM_DURATION_TOLERANCE_MS:
             log.debug(
@@ -241,24 +251,30 @@ def _fetch_release_group(rg_id: str):  # type: ignore[no-untyped-def]
     return result.get("release-group") or None
 
 
-def _find_original_release_via_rg(
-    disc: RBIDisc, verify_meta: DiscMeta | None = None
-) -> tuple[bool, str | None, int | None]:
-    """Primary path: MB release-group lookup by MBID.
+def _resolve_rg_original(
+    rg_id: str, disc: RBIDisc
+) -> tuple[str | None, int | None] | None:
+    """Resolve ``(original title, original year)`` from an MB release group.
 
-    R3: also verifies that the disc tracklist matches the disc's own MB
-    release (via ``_verify_rg_path_for_disc``) before accepting the RG
-    first-release-date. A mismatch indicates the RG identification was
-    wrong upstream (e.g. a different disc with similar TOC matched the
-    same MB disc-ID); fall through to fuzzy.
+    Shared by both lookup paths: the RG-primary path and the title-fuzz
+    fallback both need the release group's ``first-release-date`` to answer
+    "what is the *original* release", but they discover *rg_id* differently
+    (disc-ID prepop vs. text search). Centralising this is also what fixes the
+    fuzzy path: MB text-search stubs never carry the release-group
+    first-release-date, so the year MUST come from a release-group fetch, not
+    the stub's ``original_release_date`` (which is always ``None`` there).
+
+    Returns ``None`` when the group is unusable as an original — a derivative
+    secondary type (Compilation / Live / Remix / …), an unparseable
+    first-release date, or an R14 pre-emphasis year-cap violation.
+
+    Does NOT verify the disc tracklist against a release — that gate belongs to
+    the caller, because the two paths verify *different* releases (the disc's
+    own MBID vs. each fuzzy candidate's fetched release).
     """
-    rg_id = disc.mb_release_group_id
-    if not rg_id:
-        return (False, None, None)
-
     rg = _fetch_release_group(rg_id)
     if rg is None:
-        return (False, None, None)
+        return None
 
     # Reject derivative release groups (Compilation, Live, Remix, etc.) —
     # their "first release date" is the earliest derivative date, not the
@@ -266,12 +282,11 @@ def _find_original_release_via_rg(
     secondary = set(rg.get("secondary-type-list") or [])
     if secondary & _DERIVATIVE_SECONDARY_TYPES:
         log.debug("RG %s rejected (secondary types: %s)", rg_id, sorted(secondary))
-        return (False, None, None)
+        return None
 
-    first_date = rg.get("first-release-date") or ""
-    year = _parse_year(first_date)
+    year = _parse_year(rg.get("first-release-date") or "")
     if year is None:
-        return (False, None, None)
+        return None
 
     # R14: pre-emphasis effectively died with the early-80s catalogue.
     # When the disc has pre-emphasis but the RG says > 1986, the
@@ -284,13 +299,32 @@ def _find_original_release_via_rg(
             _R14_PRE_EMPH_YEAR_CAP,
             rg_id,
         )
-        return (False, None, None)
+        return None
 
+    return (rg.get("title") or disc.album, year)
+
+
+def _find_original_release_via_rg(
+    disc: RBIDisc, verify_meta: DiscMeta | None = None
+) -> tuple[bool, str | None, int | None]:
+    """Primary path: MB release-group lookup by the disc's own MBID.
+
+    R3: verifies the disc tracklist matches the disc's own MB release (via
+    ``_verify_rg_path_for_disc``) before accepting the RG first-release-date.
+    A mismatch indicates the RG identification was wrong upstream (e.g. a
+    different disc with similar TOC matched the same MB disc-ID); fall through
+    to fuzzy.
+    """
+    rg_id = disc.mb_release_group_id
+    if not rg_id:
+        return (False, None, None)
+    resolved = _resolve_rg_original(rg_id, disc)
+    if resolved is None:
+        return (False, None, None)
     # R3: gate the RG identification against the disc tracklist.
     if not _verify_rg_path_for_disc(disc, verify_meta):
         return (False, None, None)
-
-    title = rg.get("title") or disc.album
+    title, year = resolved
     return (True, title, year)
 
 
@@ -533,10 +567,13 @@ def _deny_match(disc_title: str, candidate_title: str) -> str | None:
 def _gather_artist_catalogue_metas_via_mb(artist: str, album: str) -> list[DiscMeta]:
     """R3 fuzzy-path helper: returns *DiscMeta* objects (preserves release IDs).
 
-    Deduped by release-group, sorted by first-release-date ascending.
-    A non-blank ``original_release_date`` and album title are required —
-    matches the R5 rule (the per-release-date fallback was the
-    pre-album-promo-pressing false-positive class).
+    Deduped by release-group, sorted by release date ascending (a *proxy*:
+    MB text-search stubs do not carry the release-group ``first-release-date``,
+    so the true original year is resolved per-candidate from the release group
+    in :func:`find_original_release_fuzzy` — not here). An album title is
+    required; the per-stub ``original_release_date`` deliberately is **not**
+    (it is structurally always ``None`` on the text-search path, so filtering
+    on it discarded every candidate and made the whole fuzzy path dead code).
     """
     from cdda2img.mb_lookup import build_mb_search_query, search_releases
 
@@ -550,16 +587,15 @@ def _gather_artist_catalogue_metas_via_mb(artist: str, album: str) -> list[DiscM
     seen_rg: set[str] = set()
     out: list[DiscMeta] = []
     for r in releases:
+        if not r.album:
+            continue
         rg_id = r.mb_release_group_id
         if rg_id and rg_id in seen_rg:
             continue
         if rg_id:
             seen_rg.add(rg_id)
-        year = _parse_year(r.original_release_date)
-        if year is None or not r.album:
-            continue
         out.append(r)
-    out.sort(key=lambda m: _parse_year(m.original_release_date) or 9999)
+    out.sort(key=lambda m: m.release_date or "9999")
     return out
 
 
@@ -619,24 +655,36 @@ def find_original_release_fuzzy(
     from cdda2img.mb_lookup import lookup_release
 
     for meta in qualified:
-        year = _parse_year(meta.original_release_date)
-        if year is None or not meta.album:
+        rg_id = meta.mb_release_group_id
+        if not rg_id:
+            # No release group → no way to the *original* year. The stub's own
+            # date is the matched pressing's, not the album's first release.
             continue
-        # R14: pre-emphasis year upper-bound on fuzzy candidates too.
-        if disc.pre_emphasis is True and year > _R14_PRE_EMPH_YEAR_CAP:
+        # The original title+year come from the release GROUP, not the search
+        # stub (whose ``original_release_date`` is always None here). This also
+        # applies the derivative-secondary-type and R14 pre-emphasis gates.
+        resolved = _resolve_rg_original(rg_id, disc)
+        if resolved is None:
             continue
+        title, year = resolved
         # R3: fetch the candidate release and verify against the disc.
         # Stub metadata from search_releases lacks per-track durations /
         # ISRCs / titles, so the verifier would skip every gate; only the
         # fetched release has enough data to gate meaningfully.
+        #
+        # check_durations=False: this release is an *arbitrary* pressing of
+        # the group, not the disc's own disc-ID-matched pressing, so its
+        # per-track lengths drift from the disc by tens of seconds (the same
+        # cross-pressing drift ef428fc identified). Track count + ISRC +
+        # per-track title (all pressing-stable) still gate the match.
         if meta.mb_release_id is None:
             # No way to fetch full release data → can't verify → trust the
             # candidate (skip-on-no-evidence applies at the meta-level too).
-            return (True, meta.album, year)
+            return (True, title, year)
         full = lookup_release(meta.mb_release_id, disc_number=disc.disc_number)
         if full is None:
-            # Network failure ≠ evidence of mismatch — accept stub.
-            return (True, meta.album, year)
-        if _verify_release_matches_disc(full, disc):
-            return (True, meta.album, year)
+            # Network failure ≠ evidence of mismatch — accept.
+            return (True, title, year)
+        if _verify_release_matches_disc(full, disc, check_durations=False):
+            return (True, title, year)
     return (False, None, None)

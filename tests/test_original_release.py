@@ -369,19 +369,33 @@ def test_fuzzy_prefers_earliest_year():
 
 
 def test_find_original_release_uses_fuzzy_when_no_rg():
-    """When disc has no mb_release_group_id, fall through to fuzzy search."""
+    """When disc has no mb_release_group_id, fall through to fuzzy search.
+
+    The original *year* comes from the candidate's release GROUP (resolved via
+    _fetch_release_group), not the search stub: MB text-search stubs never
+    carry the release-group first-release-date (it is always None there), so
+    requiring it on the stub used to make this whole path dead code.
+    """
     from cdda2img.lookup_result import DiscMeta
 
     disc = _disc(album="Eliminator (2008 Remaster)", rg_id=None)
+    # Note: NO original_release_date on the stub — that is exactly the real
+    # shape of a search result. mb_release_id is None, so the loop trusts the
+    # candidate without a per-release verify (skip-on-no-evidence).
     fake_search = [
         DiscMeta(
             album="Eliminator",
             mb_release_group_id="rg-x",
             release_date="1983",
-            original_release_date="1983",
         )
     ]
-    with patch("cdda2img.mb_lookup.search_releases", return_value=fake_search):
+    with (
+        patch("cdda2img.mb_lookup.search_releases", return_value=fake_search),
+        patch(
+            "cdda2img.original_release._fetch_release_group",
+            return_value=_rg(title="Eliminator", first_date="1983"),
+        ),
+    ):
         found, title, year = find_original_release(disc)
     assert found is True
     assert title == "Eliminator"
@@ -627,6 +641,8 @@ def test_r3_fuzzy_loop_drops_unverified_candidates() -> None:
     )
     # Two candidates from MB search, both at year=1983 (sorted by year asc).
     # First one's full release has 5 tracks → fails verify; second one matches.
+    # original_release_date on the stubs is used only to order the candidates
+    # (earliest-first); the returned year comes from the release GROUP below.
     bad = DiscMeta(
         album="Album",
         mb_release_id="rel-bad",
@@ -650,15 +666,80 @@ def test_r3_fuzzy_loop_drops_unverified_candidates() -> None:
     def fake_lookup_release(rid: str, disc_number: int | None = None):
         return {"rel-bad": bad_full, "rel-good": good_full}.get(rid)
 
+    def fake_rg(rg_id: str):
+        return {"rg-bad": _rg(first_date="1983"), "rg-good": _rg(first_date="1985")}[
+            rg_id
+        ]
+
     with (
         patch("cdda2img.mb_lookup.search_releases", return_value=[bad, good]),
         patch("cdda2img.mb_lookup.lookup_release", side_effect=fake_lookup_release),
+        patch("cdda2img.original_release._fetch_release_group", side_effect=fake_rg),
     ):
         found, title, year = find_original_release_fuzzy(disc)
 
     assert found is True
     assert title == "Album"
-    assert year == 1985  # 'bad' rejected, 'good' (1985) accepted
+    assert year == 1985  # 'bad' rejected on track-count, 'good' (RG 1985) accepted
+
+
+def test_verify_skips_duration_gate_when_check_durations_false() -> None:
+    """check_durations=False removes the pressing-specific sum-of-durations gate.
+
+    Regression for the dead fuzzy path: the fuzzy fallback verifies the disc
+    against an *arbitrary* pressing in the release group, whose per-track
+    lengths drift by tens of seconds. With durations on, that drift wrongly
+    rejected the correct group; with them off, track count + ISRC + title (all
+    pressing-stable) still gate.
+    """
+    from cdda2img.original_release import _verify_release_matches_disc
+
+    # Same 2 tracks + titles, but durations 30 s apart in aggregate.
+    disc = _disc_with_tracks([(1, 22500, "T1", None), (2, 22500, "T2", None)])
+    meta = _meta_with_tracks([(1, 285000, "T1", None), (2, 300000, "T2", None)])
+    # disc sum = 2*22500 frames = 600000 ms; meta sum = 585000 ms → 15 s off.
+    assert _verify_release_matches_disc(meta, disc, check_durations=True) is False
+    assert _verify_release_matches_disc(meta, disc, check_durations=False) is True
+
+
+def test_fuzzy_path_tolerates_cross_pressing_duration_drift() -> None:
+    """End-to-end: a drifted-duration candidate still resolves via fuzzy.
+
+    This is the ZZ Top *Eliminator* bug in miniature — the matching release
+    group's fetched release is a different pressing (durations off), but track
+    count and per-track titles agree, so the original year resolves.
+    """
+    from cdda2img.lookup_result import DiscMeta
+
+    disc = _disc_with_tracks(
+        [(1, 22500, "Song A", None), (2, 22500, "Song B", None)],
+        album="The Album",
+        artist="The Band",
+        rg_id=None,
+        release_id=None,
+    )
+    cand = DiscMeta(
+        album="The Album",
+        mb_release_id="rel-1",
+        mb_release_group_id="rg-1",
+    )
+    # Fetched pressing: same titles, durations 30 s short overall.
+    full = _meta_with_tracks(
+        [(1, 270000, "Song A", None), (2, 300000, "Song B", None)],
+        mb_release_id="rel-1",
+    )
+    with (
+        patch("cdda2img.mb_lookup.search_releases", return_value=[cand]),
+        patch("cdda2img.mb_lookup.lookup_release", return_value=full),
+        patch(
+            "cdda2img.original_release._fetch_release_group",
+            return_value=_rg(title="The Album", first_date="1979"),
+        ),
+    ):
+        found, title, year = find_original_release_fuzzy(disc)
+    assert found is True
+    assert title == "The Album"
+    assert year == 1979
 
 
 # ---------------------------------------------------------------------------
@@ -714,7 +795,13 @@ def test_r14_rg_path_year_unchanged_when_no_pre_emphasis():
 
 
 def test_r14_fuzzy_path_filters_late_candidates():
-    """Fuzzy candidates with year > 1986 are skipped when pre_emphasis=True."""
+    """A post-1986 fuzzy candidate is R14-skipped when pre_emphasis=True.
+
+    R14 now lives in _resolve_rg_original, so the year (and the cap) come from
+    the release GROUP, not the search stub. A single 2009-RG candidate against
+    a pre-emphasis disc must be rejected (no earlier candidate to fall to ⇒
+    Unknown); the same candidate without pre-emphasis must be accepted.
+    """
     from cdda2img.lookup_result import DiscMeta
 
     disc = _disc_with_tracks(
@@ -724,34 +811,35 @@ def test_r14_fuzzy_path_filters_late_candidates():
         rg_id=None,
         release_id=None,
     )
-    disc.pre_emphasis = True
-    # 2 candidates: 2009 (would be the earliest qualifying without R14)
-    # and 1986 (under the cap).
     late = DiscMeta(
         album="Album",
         mb_release_id="rel-late",
         mb_release_group_id="rg-late",
         original_release_date="2009",
     )
-    early = DiscMeta(
-        album="Album",
-        mb_release_id="rel-early",
-        mb_release_group_id="rg-early",
-        original_release_date="1986",
-    )
-
-    early_full = _meta_with_tracks([(1, None, None, None)], mb_release_id="rel-early")
+    late_full = _meta_with_tracks([(1, None, None, None)], mb_release_id="rel-late")
 
     def fake_lookup_release(rid: str, disc_number: int | None = None):
-        return early_full if rid == "rel-early" else None
+        return late_full if rid == "rel-late" else None
 
-    with (
-        patch("cdda2img.mb_lookup.search_releases", return_value=[late, early]),
+    ctx = (
+        patch("cdda2img.mb_lookup.search_releases", return_value=[late]),
         patch("cdda2img.mb_lookup.lookup_release", side_effect=fake_lookup_release),
-    ):
+        patch(
+            "cdda2img.original_release._fetch_release_group",
+            return_value=_rg(first_date="2009"),
+        ),
+    )
+
+    disc.pre_emphasis = True
+    with ctx[0], ctx[1], ctx[2]:
+        assert find_original_release_fuzzy(disc) == (False, None, None)
+
+    disc.pre_emphasis = False
+    with ctx[0], ctx[1], ctx[2]:
         found, _title, year = find_original_release_fuzzy(disc)
     assert found is True
-    assert year == 1986  # late (2009) skipped by R14
+    assert year == 2009  # no R14 cap without pre-emphasis
 
 
 # ---------------------------------------------------------------------------

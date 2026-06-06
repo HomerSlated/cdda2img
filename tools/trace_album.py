@@ -10,11 +10,12 @@ line, and every other field are out of scope.
 
 The load-bearing logic for the album title is *merge precedence*, nothing else:
 
-  * Every automatic, pre-menu lookup (CD-Text seed, CDDB, MusicBrainz, AcoustID,
-    Discogs) fills ``album`` ONLY when the disc's existing ``album`` is blank.
-    The rule is literally ``album = disc.album if disc.album else (meta.album or
-    disc.album)`` — see ``cddb.prepopulate_from_cddb`` and
-    ``mb_lookup._merge_into_disc``. "First non-blank wins."
+  * Every automatic, pre-menu lookup (CD-Text seed, MusicBrainz, Discogs,
+    AcoustID, CDDB) fills ``album`` ONLY when the disc's existing ``album`` is
+    blank. The rule is literally ``album = disc.album if disc.album else
+    (meta.album or disc.album)`` — see ``mb_lookup._merge_into_disc`` (every
+    source, including the now-lowest-precedence CDDB, applied last via
+    ``_run_metadata_lookups``). "First non-blank wins."
   * The interactive metadata menu is the only place a *non-blank* album is
     replaced: Edit-album (direct set), Clear (set ""), Reset/undo (restore the
     menu-start snapshot), and Fetch with the "Overwrite all" mode
@@ -27,7 +28,8 @@ The load-bearing logic for the album title is *merge precedence*, nothing else:
 Pipeline divergence (album seed origin and which lookups run):
 
   * rip    — seed = cdrdao CD-Text TITLE (PTI 0x80); blank-fill order
-              CD-Text > CDDB > MB (Discogs/AcoustID merge album-level only).
+              CD-Text > MB > Discogs > AcoustID > CDDB (CDDB demoted to last,
+              zero-trust gap-filler, in commit cb4bcc7).
   * import — seed = per-reader CD-Text/metadata parse; MB only (CDDB skipped).
   * create — seed = file tags (mutagen, ``metadata.derive_album_info``); NO
               network lookups at all — only the menu can change the album.
@@ -78,17 +80,22 @@ def overwrite(existing: str, candidate: str | None) -> str:
 
 
 def resolve_seed_rip(cdtext: str, cddb: str | None, mb: str | None) -> tuple[str, str]:
-    """Rip blank-fill chain: CD-Text seed > CDDB > MB. Returns (album, winner)."""
+    """Rip blank-fill chain: CD-Text seed > MB > CDDB. Returns (album, winner).
+
+    MB is applied first over the CD-Text baseline (``_run_metadata_lookups``);
+    CDDB is the lowest-precedence, zero-trust gap-filler applied last (cb4bcc7),
+    so it only wins a still-blank album.
+    """
     album = cdtext  # parsed_to_rbi_disc(album=parsed.title) — CD-Text PTI 0x80
     winner = "CD-Text (PTI 0x80 TITLE)" if album else "(none)"
-    after_cddb = fill_blank(album, cddb)
-    if after_cddb != album:
-        winner = "CDDB"
-    album = after_cddb
     after_mb = fill_blank(album, mb)
     if after_mb != album:
         winner = "MusicBrainz disc-ID (resolved pressing)"
     album = after_mb
+    after_cddb = fill_blank(album, cddb)
+    if after_cddb != album:
+        winner = "CDDB (lowest-precedence gap-filler)"
+    album = after_cddb
     return album, winner
 
 
