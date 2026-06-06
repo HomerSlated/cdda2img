@@ -63,6 +63,7 @@ class TerminalUI:
         self._status = ""
         self._prog = 0.0
         self._detail = ""
+        self._header: list[str] = []
         self._output: list[str] = []
 
         # Number of lines written in the last render frame (renderer thread only).
@@ -123,6 +124,21 @@ class TerminalUI:
             self._status = text
             self._prog = progress
             self._detail = detail
+
+    def set_header(self, lines: list[str]) -> None:
+        """Replace the fixed header region rendered *above* the progress line.
+
+        Unlike add_output() (which appends below the spinner), the header sits at
+        the top of the TUI area and is repainted every frame, so a caller can
+        update a header line live — e.g. fill in the disc title once a background
+        lookup returns. Note the header is part of the TUI region and is cleared
+        on pause()/stop(), so it is for transient, during-run context only.
+        """
+        with self._slk:
+            self._header = list(lines)
+        with self._lock:
+            if self._st == _St.RUNNING:
+                self._tick.set()
 
     def add_output(self, text: str) -> None:
         """Append *text* (may contain newlines) to the output region below the progress line."""
@@ -191,6 +207,7 @@ class TerminalUI:
             status = self._status
             prog = self._prog
             detail = self._detail
+            header = list(self._header)
             output = list(self._output)
 
         cols = shutil.get_terminal_size().columns - 1
@@ -224,7 +241,7 @@ class TerminalUI:
         pct_part = f"{pct}   {detail}" if detail else pct
         progress_line = f"{sp}  {status} {bar}  {pct_part}"
 
-        all_lines = [progress_line, *output]
+        all_lines = [*header, progress_line, *output]
         new_height = len(all_lines)
 
         # Rewind cursor to the top of the TUI area, then erase to screen bottom.

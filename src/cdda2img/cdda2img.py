@@ -5,6 +5,7 @@ import importlib.metadata
 import logging
 import re
 import textwrap
+import threading
 from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
@@ -1501,15 +1502,15 @@ def _resolve_drive_offsets(
 
     drive_name = probe_drive_name(device)
     if drive_name is None:
-        print("  Drive: unknown (sysfs probe failed); using read_offset=0")
+        print(_fmt_kv("Drive", "unknown (sysfs probe failed) — using read offset +0"))
         return 0, None, None
 
-    print(f"  Drive: {drive_name}")
+    print(_fmt_kv("Drive", drive_name))
 
     # 1. User-confirmed per-drive entry in config takes precedence over AR catalog.
     for d in cfg.drives:
         if d.name == drive_name:
-            print(f"  Read offset: {d.read_offset:+d} samples (from config)")
+            print(_fmt_kv("Read offset", f"{d.read_offset:+d} samples (from config)"))
             return d.read_offset, d.write_offset, drive_name
 
     # 2. AccurateRip catalog lookup.
@@ -1538,7 +1539,10 @@ def _resolve_drive_offsets(
 
         if use_it:
             print(
-                f"  Read offset: {offset:+d} samples (AccurateRip, {submissions} submission(s))"
+                _fmt_kv(
+                    "Read offset",
+                    f"{offset:+d} samples (AccurateRip, {submissions} submission(s))",
+                )
             )
             try:
                 save_drive_read_offset(drive_name, offset)
@@ -1548,10 +1552,19 @@ def _resolve_drive_offsets(
 
     # 3. Drive not configured — warn and use 0.
     if ar is None:
-        print("  Drive not in AccurateRip catalog; using read_offset=0")
+        print(_fmt_kv("Read offset", "+0 samples (drive not in AccurateRip catalog)"))
     else:
-        print("  AccurateRip match not applied; using read_offset=0")
+        print(_fmt_kv("Read offset", "+0 samples (AccurateRip match not applied)"))
     return 0, None, drive_name
+
+
+def _fmt_kv(label: str, value: str) -> str:
+    """Aligned ``key: value`` line for the rip header.
+
+    Three-space indent + a 13-wide label field puts every value at column 16,
+    which lines the values up under the spinner's content column (``⠷  text``).
+    """
+    return f"   {label + ':':<13}{value}"
 
 
 def _ui_status(ui: TerminalUI | None, text: str, prog: float = -1.0) -> None:
@@ -1592,6 +1605,82 @@ def _phase_progress_cb(
         )
 
     return _cb
+
+
+def _fast_scan_disc(device: str):
+    """Read the disc TOC quickly via ``cdrdao read-toc --fast-toc`` → RBIDisc.
+
+    Cosmetic only — used to derive the disc-title preview line. Returns None on
+    any failure (no disc, drive busy, parse error); never raises into the rip.
+    Must run *before* the track-1 grab: both touch the single optical drive.
+    """
+    import subprocess
+    import tempfile
+
+    from cdda2img.cdrdao_reader import parsed_to_rbi_disc
+    from cdda2img.toc_parser import parse_toc
+
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "preview.toc"
+            cmd = ["cdrdao", "read-toc", "--fast-toc", "--device", device, str(out)]
+            result = subprocess.run(  # noqa: S603  # LINT-013
+                cmd, capture_output=True, timeout=60
+            )
+            if result.returncode != 0 or not out.exists():
+                return None
+            toc_bytes = out.read_bytes()
+        return parsed_to_rbi_disc(parse_toc(toc_bytes))
+    except Exception as exc:
+        log.debug("fast TOC scan for disc preview failed: %s", exc)
+        return None
+
+
+def _disc_preview_label(disc) -> str:
+    """Best-guess ``Album - Artist`` label for the disc-title preview line.
+
+    Disc-baked CD-Text (captured by the fast TOC scan) is authoritative and used
+    as-is. Otherwise fall back to a non-authoritative MusicBrainz disc-ID lookup,
+    picking the album/artist by *plurality* across the matching releases — this is
+    only a nicety (the menu later confirms), so a popular guess is acceptable.
+    """
+    from collections import Counter
+
+    from cdda2img.mb_lookup import lookup_disc_id
+
+    if disc.album:
+        return f"{disc.album} - {disc.artist}" if disc.artist else disc.album
+
+    pairs = [(m.album, m.artist) for m in lookup_disc_id(disc) if m.album]
+    if not pairs:
+        return "(unknown)"
+    album, artist = Counter(pairs).most_common(1)[0][0]
+    return f"{album} - {artist}" if artist else album
+
+
+def _start_disc_preview(device: str, ui: TerminalUI) -> None:
+    """Show a best-guess disc title in the TUI header (preview pipeline only).
+
+    Runs the drive-bound fast TOC scan synchronously (it must finish before the
+    track-1 grab — single drive), then resolves the title on a background thread
+    so the network MusicBrainz lookup overlaps the track-1 grab. The header line
+    starts as ``Disc: (identifying…)`` and is repainted once the lookup returns.
+    """
+    ui.set_header([_fmt_kv("Disc", "(identifying…)")])
+    disc = _fast_scan_disc(device)
+    if disc is None:
+        ui.set_header([])  # nothing to show — drop the line
+        return
+
+    def _worker() -> None:
+        try:
+            label = _disc_preview_label(disc)
+        except Exception as exc:
+            log.debug("disc preview lookup failed: %s", exc)
+            label = "(unknown)"
+        ui.set_header([_fmt_kv("Disc", label)])
+
+    threading.Thread(target=_worker, daemon=True).start()
 
 
 def _start_track_preview(
@@ -1715,6 +1804,10 @@ def rip_image(  # noqa: C901
 
     track_preview: TrackPreview | None = None
     try:
+        # Cosmetic disc-title preview (preview pipeline only): fast TOC scan now
+        # (drive-bound, must precede the track-1 grab), MB lookup in background.
+        if preview and ui is not None:
+            _start_disc_preview(device, ui)
         # Grab track 1 first (drive is single-use), then play it on a loop in
         # the background while the rest of the rip runs.
         track_preview = _start_track_preview(device, temp_base, ui, enabled=preview)
