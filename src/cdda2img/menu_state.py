@@ -18,11 +18,12 @@ and unit-testable in isolation.
 live in ``handle_input``. ``--no-tui`` drops the screen-clear only (output
 appends to scrollback and stays capturable); the menu is still interactive.
 
-EDIT is a native screen stack (:class:`EditScreen` → :class:`EditTrackScreen` /
-:class:`EditDiscPositionScreen`). FETCH / ORIGINAL_RELEASE are still bridged by
-:class:`LegacyDelegateScreen`, which calls the existing procedural helpers in
-``metadata_menu``. Migrating those to native screens (so nested result pages
-also participate in the stack) is the remaining work — see TODO.
+Every sub-menu is now a native screen stack: EDIT (:class:`EditScreen` →
+:class:`EditTrackScreen` / :class:`EditDiscPositionScreen`), FETCH
+(:class:`FetchScreen` → :class:`MBSearchScreen` / :class:`DiscogsSearchScreen` /
+:class:`AcoustidScreen` → :class:`ResultsScreen`), and ORIGINAL_RELEASE
+(:class:`OriginalReleaseScreen` → :class:`ResultsScreen`). Nested result pages
+participate in the stack, so the legacy procedural-loop bridge is gone.
 
 stdin-not-a-tty → ``run()`` returns the disc unchanged; the loop never runs.
 """
@@ -158,7 +159,7 @@ class MainScreen(Screen):
         if choice == "e":
             return Push(EditScreen())
         if choice == "r":
-            return Push(LegacyDelegateScreen(MenuState.ORIGINAL_RELEASE))
+            return Push(OriginalReleaseScreen())
         if choice == "u":
             ctl.disc = copy.deepcopy(ctl._original_disc)
             ctl.mb_rg_id = None
@@ -644,13 +645,16 @@ class ResultsScreen(Screen):
         return Pop()
 
     def _apply_selected(self, ctl: MenuController, selected: DiscMeta) -> None:
-        """Source-specific apply tail (cp3a MB, cp3b Discogs, cp3c AcoustID)."""
+        """Source-specific apply tail (cp3a MB, cp3b Discogs, cp3c AcoustID,
+        cp4 original-release)."""
         if self.source == "mb":
             self._apply_mb(ctl, selected)
         elif self.source == "discogs":
             self._apply_discogs(ctl, selected)
         elif self.source == "acoustid":
             self._apply_acoustid(ctl, selected)
+        elif self.source == "original":
+            self._apply_original(ctl, selected)
 
     def _apply_mb(self, ctl: MenuController, selected: DiscMeta) -> None:
         from cdda2img.mb_lookup import _merge_into_disc, _overwrite_disc, lookup_release
@@ -723,6 +727,19 @@ class ResultsScreen(Screen):
             if mode == "update"
             else _overwrite_disc(selected, ctl.disc)
         )
+        ctl.banner = "Applied."
+
+    def _apply_original(self, ctl: MenuController, selected: DiscMeta) -> None:
+        # Original-release is not a whole-disc merge: it only sets the disc's
+        # original_release_* fields. The confirm is the simpler [a]/[b] modal
+        # (_confirm_original), not the update/overwrite _confirm_apply. Threads
+        # the chosen release's MB rg id back, matching the legacy apply.
+        from cdda2img.metadata_menu import _apply_selected_release, _confirm_original
+
+        if not _confirm_original(selected):
+            return
+        new_rg = _apply_selected_release(ctl.disc, selected)
+        ctl.mb_rg_id = new_rg or ctl.mb_rg_id
         ctl.banner = "Applied."
 
 
@@ -859,30 +876,88 @@ class AcoustidFileScreen(Screen):
         return Push(ResultsScreen(results, "AcoustID Matches", "acoustid"))
 
 
-class LegacyDelegateScreen(Screen):
-    """Checkpoint-1 bridge for the not-yet-migrated sub-menus.
+class OriginalReleaseScreen(Screen):
+    """Find-original-release hub (cp4). Native port of ``_original_release_menu``.
 
-    Until ORIGINAL_RELEASE is ported to a native screen (cp4), this calls the
-    existing procedural helper in ``metadata_menu`` — which runs its own
-    render+input loop and returns when the user backs out. ``render`` is a no-op
-    (the helper draws itself); the work happens once in ``handle_input``, after
-    which we pop back to the parent. Behaviour-preserving. EDIT (cp2) and FETCH
-    (cp3a) are now native screens and no longer routed through here.
+    A persistent hub, mirroring :class:`EditScreen`: every action returns here
+    (``Stay``) re-rendering the live "Current:" line, and ``[b]`` is the single
+    exit to MAIN. ``[m]`` (set manually) and ``[c]`` (clear) are inline mutations
+    — bounded blocking modals run in ``handle_input``, then ``Stay`` + banner.
+    ``[s]`` fetches MusicBrainz releases (by threaded rg id, else a prompted text
+    search — both inside ``_fetch_releases_for_group``) and pushes a paginated
+    :class:`ResultsScreen` with ``source="original"``; its apply tail
+    (``_apply_original``) pops back here, so the applied original shows in the
+    re-rendered "Current:" line.
+
+    Deviation from legacy (noted): the procedural ``_original_release_menu``
+    exited to MAIN after a manual-set / clear / apply. The native hub stays put
+    for consistency with EditScreen and the cp3 apply-destination convention; the
+    user leaves with ``[b]``.
     """
 
-    def __init__(self, state: MenuState) -> None:
-        self.state = state
+    state = MenuState.ORIGINAL_RELEASE
 
     def render(self, ctl: MenuController) -> None:
-        # The legacy helper renders itself inside handle_input.
-        return
+        from cdda2img.metadata_menu import _header
+
+        _header("Find Original Release")
+        d = ctl.disc
+        if d.original_release_found and d.original_release_title:
+            year = f" ({d.original_release_year})" if d.original_release_year else ""
+            print(f"  Current: {d.original_release_title}{year}")
+        else:
+            print("  Current: (none set)")
+        print()
+        if ctl.banner:
+            print(f"  ! {ctl.banner}")
+            print()
+            ctl.banner = ""
+        print("  [s]  Search MusicBrainz")
+        print("  [m]  Set manually")
+        print("  [c]  Clear")
+        print("  [b]  Back")
 
     def handle_input(self, ctl: MenuController) -> Nav:
-        from cdda2img.metadata_menu import _original_release_menu
+        from cdda2img.metadata_menu import (
+            _fetch_releases_for_group,
+            _prompt,
+            _set_original_manually,
+        )
 
-        if self.state is MenuState.ORIGINAL_RELEASE:
-            ctl.disc, ctl.mb_rg_id = _original_release_menu(ctl.disc, ctl.mb_rg_id)
-        return Pop()
+        choice = _prompt("  > ").strip().lower()
+        if choice in ("b", "q", ""):
+            return Pop()
+        if choice == "m":
+            # Derive the banner from post-call state: _set_original_manually
+            # may set OR clear (blank title), and its own inline prints are
+            # wiped by the TUI screen-clear, so the banner must not lie.
+            ctl.disc = _set_original_manually(ctl.disc)
+            ctl.banner = (
+                f"Original release set: {ctl.disc.original_release_title}."
+                if ctl.disc.original_release_found
+                else "Original release cleared."
+            )
+            return Stay()
+        if choice == "c":
+            ctl.disc.original_release_found = False
+            ctl.disc.original_release_title = None
+            ctl.disc.original_release_year = None
+            ctl.banner = "Cleared."
+            return Stay()
+        if choice != "s":
+            ctl.banner = "Enter s, m, c, or b."
+            return Stay()
+        releases, _ = _fetch_releases_for_group(ctl.disc, ctl.mb_rg_id)
+        if not releases:
+            ctl.banner = "No results found."
+            return Stay()
+        # Earliest-first so the original pressing leads (legacy parity).
+        releases_sorted = sorted(releases, key=lambda m: m.release_date or "9999")
+        return Push(
+            ResultsScreen(
+                releases_sorted, "Original Release - Earliest First", "original"
+            )
+        )
 
 
 class MenuController:

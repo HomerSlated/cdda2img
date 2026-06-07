@@ -24,10 +24,10 @@ from cdda2img.menu_state import (
     EditScreen,
     EditTrackScreen,
     FetchScreen,
-    LegacyDelegateScreen,
     MBSearchScreen,
     MenuController,
     MenuState,
+    OriginalReleaseScreen,
     ResultsScreen,
 )
 from cdda2img.rbi_format import RBIDisc, RBITocEntry
@@ -206,7 +206,7 @@ def test_banner_clears_on_next_render() -> None:
 
 
 # ---------------------------------------------------------------------------
-# EDIT / FETCH / ORIGINAL_RELEASE delegate states
+# EDIT / FETCH back-navigation (all native screens now)
 # ---------------------------------------------------------------------------
 
 
@@ -613,17 +613,138 @@ def test_acoustid_select_confirms_before_fetch_full_when_partial() -> None:
     assert ctl.state is MenuState.ACOUSTID  # popped back to track picker
 
 
-def test_original_release_state_returns_to_main_and_threads_rg_id() -> None:
+# ---------------------------------------------------------------------------
+# cp4 — Original-release native screens
+# ---------------------------------------------------------------------------
+
+
+def test_main_r_pushes_native_original_release_screen() -> None:
+    """MAIN [r] now pushes the native OriginalReleaseScreen (cp4)."""
     ctl = MenuController(_disc())
-    ctl.stack.append(LegacyDelegateScreen(MenuState.ORIGINAL_RELEASE))
-    fake_edited = _disc(album="With Original Release")
-    with patch(
-        "cdda2img.metadata_menu._original_release_menu",
-        return_value=(fake_edited, "rg-x"),
-    ):
-        ctl._apply(ctl.stack[-1].handle_input(ctl))
+    _step_with(ctl, "r")
+    assert isinstance(ctl.stack[-1], OriginalReleaseScreen)
+    assert ctl.state is MenuState.ORIGINAL_RELEASE
+
+
+def test_original_release_back_pops_to_main() -> None:
+    """[b] is the single exit to MAIN (the hub stays put on every other action)."""
+    ctl = MenuController(_disc())
+    ctl.stack.append(OriginalReleaseScreen())
+    _step_with(ctl, "b")
     assert ctl.state is MenuState.MAIN
-    assert ctl.mb_rg_id == "rg-x"
+
+
+def test_original_release_set_manually_stays_and_banners() -> None:
+    """[m] runs the blocking _set_original_manually modal, then Stays on the hub
+    (deviation from legacy's exit-to-MAIN, for EditScreen-style consistency)."""
+    ctl = MenuController(_disc())
+    ctl.stack.append(OriginalReleaseScreen())
+    edited = _disc()
+    edited.original_release_found = True
+    edited.original_release_title = "By Hand"
+    edited.original_release_year = 1984
+    with patch("cdda2img.metadata_menu._set_original_manually", return_value=edited):
+        _step_with(ctl, "m")
+    assert ctl.disc.original_release_title == "By Hand"
+    assert ctl.state is MenuState.ORIGINAL_RELEASE  # hub stays
+    assert ctl.banner == "Original release set: By Hand."
+
+
+def test_original_release_set_manually_blank_title_banners_cleared() -> None:
+    """[m] with a blank title clears the fields; the banner reflects the cleared
+    state, not a generic 'updated' (the helper's inline print is wiped in TUI)."""
+    ctl = MenuController(_disc())
+    ctl.disc.original_release_found = True
+    ctl.disc.original_release_title = "Was Set"
+    ctl.stack.append(OriginalReleaseScreen())
+    cleared = _disc()  # original_release_found defaults to False
+    with patch("cdda2img.metadata_menu._set_original_manually", return_value=cleared):
+        _step_with(ctl, "m")
+    assert ctl.disc.original_release_found is False
+    assert ctl.banner == "Original release cleared."
+
+
+def test_original_release_clear_resets_fields_and_stays() -> None:
+    """[c] clears the original_release_* fields in place and Stays on the hub."""
+    ctl = MenuController(_disc())
+    ctl.disc.original_release_found = True
+    ctl.disc.original_release_title = "Set Earlier"
+    ctl.disc.original_release_year = 1979
+    ctl.stack.append(OriginalReleaseScreen())
+    _step_with(ctl, "c")
+    assert ctl.disc.original_release_found is False
+    assert ctl.disc.original_release_title is None
+    assert ctl.disc.original_release_year is None
+    assert ctl.state is MenuState.ORIGINAL_RELEASE
+    assert "cleared" in ctl.banner.lower()
+
+
+def test_original_release_search_no_results_banners_and_stays() -> None:
+    ctl = MenuController(_disc())
+    ctl.stack.append(OriginalReleaseScreen())
+    with patch(
+        "cdda2img.metadata_menu._fetch_releases_for_group",
+        return_value=([], None),
+    ):
+        _step_with(ctl, "s")
+    assert ctl.state is MenuState.ORIGINAL_RELEASE
+    assert "No results" in ctl.banner
+
+
+def test_original_release_search_pushes_results_sorted_earliest_first() -> None:
+    """[s] pushes ResultsScreen(source='original'), sorted earliest-first so the
+    original pressing leads (legacy parity)."""
+    ctl = MenuController(_disc())
+    ctl.stack.append(OriginalReleaseScreen())
+    later = DiscMeta(album="A", release_date="1990", mb_release_group_id="rg-late")
+    earlier = DiscMeta(album="A", release_date="1980", mb_release_group_id="rg-early")
+    with patch(
+        "cdda2img.metadata_menu._fetch_releases_for_group",
+        return_value=([later, earlier], None),
+    ):
+        _step_with(ctl, "s")
+    top = ctl.stack[-1]
+    assert isinstance(top, ResultsScreen)
+    assert top.source == "original"
+    assert [m.release_date for m in top.results] == ["1980", "1990"]  # earliest first
+
+
+def test_original_release_apply_sets_fields_threads_rg_and_pops_to_hub() -> None:
+    """Selecting a result → _confirm_original [a] → fields set from the release,
+    mb_rg_id threaded, 'Applied.' banner, pop back to the hub."""
+    ctl = MenuController(_disc())
+    ctl.stack.append(OriginalReleaseScreen())
+    selected = DiscMeta(
+        album="Original Title", release_date="1981-06-01", mb_release_group_id="rg-o"
+    )
+    ctl.stack.append(
+        ResultsScreen([selected], "Original Release - Earliest First", "original")
+    )
+    with patch("cdda2img.metadata_menu._confirm_original", return_value=True):
+        _step_with(ctl, "1")
+    assert ctl.disc.original_release_found is True
+    assert ctl.disc.original_release_title == "Original Title"
+    assert ctl.disc.original_release_year == 1981
+    assert ctl.mb_rg_id == "rg-o"
+    assert ctl.banner == "Applied."
+    assert ctl.state is MenuState.ORIGINAL_RELEASE  # popped back to the hub
+
+
+def test_original_release_apply_declined_changes_nothing() -> None:
+    """_confirm_original [b] (decline) applies nothing; still pops back (cp3
+    decline→pop convention)."""
+    ctl = MenuController(_disc())
+    ctl.stack.append(OriginalReleaseScreen())
+    selected = DiscMeta(album="X", release_date="1981", mb_release_group_id="rg-o")
+    ctl.stack.append(
+        ResultsScreen([selected], "Original Release - Earliest First", "original")
+    )
+    with patch("cdda2img.metadata_menu._confirm_original", return_value=False):
+        _step_with(ctl, "1")
+    assert ctl.disc.original_release_found is False
+    assert ctl.mb_rg_id is None
+    assert ctl.banner == ""
+    assert ctl.state is MenuState.ORIGINAL_RELEASE
 
 
 # ---------------------------------------------------------------------------

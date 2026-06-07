@@ -158,9 +158,8 @@ _PAGE = 10
 def _render_results_page(results: list[DiscMeta], page: int, title: str) -> None:
     """Pure repaint of one page of a paginated DiscMeta result list.
 
-    Side-effect-free except for ``print``: no prompting, no state mutation. Shared
-    by the legacy blocking ``_select_from_results`` loop and the native
-    ``menu_state.ResultsScreen`` frame, so both render byte-identical pages.
+    Side-effect-free except for ``print``: no prompting, no state mutation. Used
+    by the native ``menu_state.ResultsScreen`` frame for its page repaint.
     """
     total = len(results)
     total_pages = max(1, (total + _PAGE - 1) // _PAGE)
@@ -197,39 +196,6 @@ def _render_results_page(results: list[DiscMeta], page: int, title: str) -> None
         nav.append("[n] next")
     nav.append("[b] back without selecting")
     print("  " + "  ".join(nav))
-
-
-def _select_from_results(
-    results: list[DiscMeta], title: str = "Results"
-) -> DiscMeta | None:
-    """Display a paginated list of DiscMeta; return user selection or None (back).
-
-    Legacy blocking loop, still used by the Discogs / AcoustID / original-release
-    flows pending their own screen-stack ports (cp3b / cp3c / cp4). The MB path
-    now uses the native ``ResultsScreen``; both share ``_render_results_page``.
-    """
-    total = len(results)
-    total_pages = max(1, (total + _PAGE - 1) // _PAGE)
-    page = 0
-
-    while True:
-        _render_results_page(results, page, title)
-
-        choice = _prompt(f"  Select 1-{total}: ").strip().lower()
-        if choice == "n" and page < total_pages - 1:
-            page += 1
-        elif choice == "p" and page > 0:
-            page -= 1
-        elif choice == "b":
-            return None
-        else:
-            try:
-                idx = int(choice) - 1
-                if 0 <= idx < total:
-                    return results[idx]
-                print("  Invalid selection.")
-            except ValueError:
-                pass
 
 
 # ---------------------------------------------------------------------------
@@ -571,74 +537,19 @@ def _apply_selected_release(disc: RBIDisc, selected: DiscMeta) -> str | None:
     return selected.mb_release_group_id
 
 
-def _search_and_select_original(
-    disc: RBIDisc, mb_rg_id: str | None
-) -> tuple[bool, str | None]:
-    """Run the MB search/select loop.
+def _confirm_original(selected: DiscMeta) -> bool:
+    """Blocking modal: show *selected* and ask whether to apply it as the original.
 
-    Returns ``(applied, new_mb_rg_id)``.  ``applied=True`` means the user
-    pressed [a] on a result — the menu should exit even when the chosen
-    release carries no RG id of its own.  ``applied=False`` means the user
-    backed out without applying anything.
+    The original-release confirm is the simpler [a]/[b] choice (apply vs. back),
+    not the update/overwrite ``_confirm_apply`` used by the whole-disc merges.
+    Called from ``menu_state.ResultsScreen._apply_original``.
     """
-    releases, mb_rg_id = _fetch_releases_for_group(disc, mb_rg_id)
-    if not releases:
-        print("  No results found.")
-        _prompt("  [Enter to return] ")
-        return (False, mb_rg_id)
-
-    releases_sorted = sorted(releases, key=lambda m: m.release_date or "9999")
-    print(f"\n  {len(releases_sorted)} release(s) found, sorted earliest first.")
-
-    while True:
-        selected = _select_from_results(
-            releases_sorted, "Original Release - Earliest First"
-        )
-        if selected is None:
-            return (False, mb_rg_id)
-
-        _header("Selected Release")
-        _print_meta_summary(selected)
-        print()
-        print("  [a]  Apply as original release")
-        print("  [b]  Back to list")
-        sel_choice = _prompt("  > ").strip().lower()
-
-        if sel_choice == "a":
-            new_rg = _apply_selected_release(disc, selected)
-            return (True, new_rg or mb_rg_id)
-
-
-def _original_release_menu(
-    disc: RBIDisc, mb_rg_id: str | None
-) -> tuple[RBIDisc, str | None]:
-    while True:
-        _header("Find Original Release")
-        print("  [s]  Search MusicBrainz")
-        print("  [m]  Set manually")
-        print("  [c]  Clear")
-        print("  [b]  Back")
-        choice = _prompt("  > ").strip().lower()
-
-        if choice in ("b", "q", ""):
-            return disc, mb_rg_id
-        if choice == "m":
-            disc = _set_original_manually(disc)
-            return disc, mb_rg_id
-        if choice == "c":
-            disc.original_release_found = False
-            disc.original_release_title = None
-            disc.original_release_year = None
-            print("  Cleared.")
-            return disc, mb_rg_id
-        if choice != "s":
-            print("  Enter s, m, c, or b.")
-            continue
-
-        applied, mb_rg_id = _search_and_select_original(disc, mb_rg_id)
-        if applied:
-            return disc, mb_rg_id
-        # Otherwise loop back to the top menu.
+    _header("Selected Release")
+    _print_meta_summary(selected)
+    print()
+    print("  [a]  Apply as original release")
+    print("  [b]  Back to list")
+    return _prompt("  > ").strip().lower() == "a"
 
 
 # ---------------------------------------------------------------------------
