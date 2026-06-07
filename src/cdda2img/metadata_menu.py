@@ -384,92 +384,6 @@ def _render_acoustid_tracklist(disc: RBIDisc) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Edit sub-menu
-# ---------------------------------------------------------------------------
-
-
-def _edit_disc_position(disc: RBIDisc) -> RBIDisc:
-    """Prompt for disc number and total; validate and update disc in place."""
-    _header("Edit Disc Position")
-    print(f"  Current: disc {disc.disc_number} of {disc.disc_total}")
-    print()
-    while True:
-        raw_num = _prompt(f"  Disc number [{disc.disc_number}]: ").strip()
-        num = int(raw_num) if raw_num.isdigit() else disc.disc_number
-        raw_total = _prompt(f"  Total discs [{disc.disc_total}]: ").strip()
-        total = int(raw_total) if raw_total.isdigit() else disc.disc_total
-        if num < 1 or total < 1 or num > total:
-            print(f"  Invalid: disc {num} of {total} — number must be 1..total.")
-            continue
-        disc.disc_number = num
-        disc.disc_total = total
-        print(f"  Set: disc {num} of {total}.")
-        return disc
-
-
-def _edit_menu(disc: RBIDisc) -> RBIDisc:
-    while True:
-        _header("Edit Metadata")
-        _print_disc_summary(disc)
-        print()
-        print("  [a]   Edit album title")
-        print("  [r]   Edit artist")
-        print("  [d]   Edit disc number / total")
-        print("  [t N] Edit track N  (e.g.  t 3)")
-        print("  [b]   Back")
-        choice = _prompt("  > ").strip().lower()
-
-        if choice == "b":
-            return disc
-        elif choice == "a":
-            disc.album = _prompt_edit("Album title", disc.album or "")
-        elif choice == "r":
-            disc.artist = _prompt_edit("Artist", disc.artist or "")
-        elif choice == "d":
-            disc = _edit_disc_position(disc)
-        elif choice.startswith("t "):
-            try:
-                num = int(choice[2:].strip())
-                disc = _edit_track(disc, num)
-            except ValueError:
-                print("  Invalid track number.")
-        else:
-            print("  Unknown command.")
-
-
-def _edit_track(disc: RBIDisc, track_number: int) -> RBIDisc:
-    track = next((t for t in disc.tracks if t.track_number == track_number), None)
-    if not track:
-        print(f"  Track {track_number} not found.")
-        return disc
-    while True:
-        _header(f"Edit Track {track_number}")
-        print(f"  Title:     {track.title}")
-        print(f"  Performer: {track.performer}")
-        print(f"  ISRC:      {track.isrc or '(none)'}")
-        print()
-        print("  [t]  Edit title")
-        print("  [p]  Edit performer")
-        print("  [i]  Edit ISRC")
-        print("  [b]  Back")
-        choice = _prompt("  > ").strip().lower()
-
-        if choice == "b":
-            return disc
-        elif choice == "t":
-            track.title = _prompt_edit("Title", track.title)
-        elif choice == "p":
-            track.performer = _prompt_edit("Performer", track.performer)
-        elif choice == "i":
-            raw = _prompt_edit(
-                "ISRC (12 chars, blank to clear)", track.isrc or ""
-            ).upper()
-            track.isrc = raw if raw else None
-        else:
-            print("  Unknown command.")
-
-
-# ---------------------------------------------------------------------------
 # Find Original Release sub-menu
 # ---------------------------------------------------------------------------
 
@@ -606,9 +520,9 @@ def run_metadata_menu(
     Returns the (possibly updated) RBIDisc. Returns *disc* unchanged when stdin
     is not a TTY (batch/scripted mode).
 
-    Backed by ``menu_state.MenuController`` — the top-level event loop is
-    a state machine over ``MenuState``. Each state's renderer clears the
-    screen and draws from origin (fixed-position / redraw semantics).
+    Backed by ``menu_state.MenuController`` — a stack of ``Screen`` objects
+    pushed/popped by each screen's ``Nav`` intent. Each screen's renderer
+    clears the screen and draws from origin (fixed-position / redraw semantics).
     """
     from cdda2img.menu_state import MenuController
 

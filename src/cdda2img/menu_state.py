@@ -203,7 +203,7 @@ class ARPauseScreen(Screen):
 class EditScreen(Screen):
     """Edit-metadata sub-menu: album, artist, disc position, per-track edits.
 
-    Native port of the legacy ``metadata_menu._edit_menu`` loop. Album and
+    Native port of the legacy procedural Edit-metadata loop. Album and
     artist are edited inline (one ``_prompt_edit`` → ``Stay``); disc position
     and per-track edits descend into their own screens via ``Push``. The legacy
     loop's "re-render after each action" is the controller's ``Stay`` re-render.
@@ -259,7 +259,7 @@ class EditScreen(Screen):
 class EditTrackScreen(Screen):
     """Per-track edit page: title, performer, ISRC. Carries the track number.
 
-    Native port of ``metadata_menu._edit_track``. The track is re-resolved from
+    Native port of the legacy per-track edit loop. The track is re-resolved from
     ``ctl.disc.tracks`` each step (tracks don't reorder mid-edit, so this is the
     same object the legacy helper held). If the track has vanished, pops back.
     """
@@ -324,7 +324,7 @@ class EditTrackScreen(Screen):
 class EditDiscPositionScreen(Screen):
     """Edit disc number / total, with a validation loop expressed as ``Stay``.
 
-    Native port of ``metadata_menu._edit_disc_position``. Both fields are read
+    Native port of the legacy disc-position edit loop. Both fields are read
     in one ``handle_input`` step; invalid input (number/total < 1 or
     number > total) sets a banner and stays (the legacy ``while True`` re-prompt);
     a valid pair is applied and we pop back to :class:`EditScreen`.
