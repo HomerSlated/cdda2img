@@ -304,17 +304,25 @@ behaviour, not a regression.
           frame pops back to the picker (loops). Removed `_acoustid_run_one`/`_acoustid_file_loop`/
           `_acoustid_pcm_loop`/`_acoustid_wavs_loop`/`_acoustid_menu` + the orphaned `tempfile`
           import. Migrated 2 tests + 10 new. 826 pass. **cp3 (FETCH) fully native.**
-  - [ ] **4** · ORIGINAL_RELEASE → `OriginalReleaseScreen`.
-  - [ ] **5** · Delete the dead legacy helpers (`_edit_menu`, `_edit_track`,
-        `_edit_disc_position` — now unreferenced after cp2); collapse/retire the
-        `MenuState` enum.
-- **Track ISRC cannot be cleared from the edit menu** (latent bug, preserved
-  through the cp2 port for behaviour-fidelity): `EditTrackScreen` [i] uses
-  `_prompt_edit("ISRC …", track.isrc or "")`, and `_prompt_edit` returns the
-  *current* value on blank input — so a non-empty ISRC can never be cleared
-  despite the "blank to clear" label. Fix is to read the prompt directly for
-  the ISRC field (blank → `None`) rather than via `_prompt_edit`. Deliberate
-  change, not to be folded into a refactor; needs its own test.
+  - [x] **4** · ORIGINAL_RELEASE → `OriginalReleaseScreen`. DONE 2026-06-07 (a4b9cef).
+        Persistent hub (mirrors `EditScreen`): [m] set-manually / [c] clear are inline
+        bounded modals → `Stay`+banner ([m] banner derived from post-call disc state, set
+        vs clear); [s] fetches MB releases (rg id or prompted text via
+        `_fetch_releases_for_group`), sorts earliest-first, pushes
+        `ResultsScreen(source="original")`; [b] is the single exit to MAIN. `ResultsScreen`
+        gains the `original` apply tail (`_confirm_original` → `_apply_selected_release`,
+        threads `mb_rg_id`, pops to hub). Removed `LegacyDelegateScreen`,
+        `_original_release_menu`, `_search_and_select_original`, `_select_from_results`.
+        +9 native tests. 834 pass. **Whole menu now a native screen stack; no
+        procedural-loop bridge remains.**
+  - [x] **5** · Delete the dead legacy helpers. DONE 2026-06-07 (c6293ae). Removed
+        `_edit_menu`/`_edit_disc_position`/`_edit_track` (−89 lines; referenced only each
+        other once cp2 made EDIT native). Shared helpers
+        `_print_disc_summary`/`_prompt_edit`/`_header` survive. Reworded 4 docstrings that
+        named the deleted symbols / "state machine over `MenuState`". `MenuState` enum
+        **kept** (not collapsed): all 12 members are live screen identities, controller
+        `.state` reads `stack[-1].state`, ~40 tests assert on it — retiring = pure churn,
+        zero behaviour change. 834 pass.
 - **Suppress the duplicate AR report print in `rip_image`** — once AR_PAUSE
   is the canonical display surface, the standalone `print_ar_report` call
   in `rip_image` writes to stdout and is immediately wiped by AR_PAUSE's

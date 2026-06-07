@@ -310,12 +310,14 @@ class EditTrackScreen(Screen):
             track.performer = _prompt_edit("Performer", track.performer)
             return Stay()
         if choice == "i":
-            # Behaviour-preserving quirk: _prompt_edit returns the current value
-            # on blank input, so a non-empty ISRC cannot be cleared here despite
-            # the label. Fixing that is a separate, deliberate change (see TODO).
-            raw = _prompt_edit("ISRC (12 chars, blank to clear)", track.isrc or "")
-            raw = raw.upper()
-            track.isrc = raw if raw else None
+            # ISRC is the one field where blank means *clear*, not *keep*, so it
+            # reads the prompt directly instead of via _prompt_edit (which returns
+            # the current value on blank — the right idiom for title/performer but
+            # wrong here). The current ISRC, echoed in the render above, is shown
+            # in the prompt too when set.
+            shown = f" [{track.isrc}]" if track.isrc else ""
+            raw = _prompt(f"  ISRC (12 chars, blank to clear){shown}: ").strip().upper()
+            track.isrc = raw or None
             return Stay()
         ctl.banner = "Unknown command."
         return Stay()

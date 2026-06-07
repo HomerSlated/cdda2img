@@ -858,14 +858,23 @@ def test_edit_track_isrc_is_uppercased() -> None:
     assert ctl.disc.tracks[0].isrc == "GBAYE0601498"
 
 
-def test_edit_track_isrc_blank_does_not_clear_existing() -> None:
-    """Preserved quirk: _prompt_edit keeps the current value on blank input, so
-    a non-empty ISRC cannot be cleared from this screen despite the label."""
+def test_edit_track_isrc_blank_clears_existing() -> None:
+    """Blank input clears a non-empty ISRC (the label's promise). Unlike
+    title/performer, this branch reads the prompt directly, not via _prompt_edit."""
     ctl = MenuController(_multitrack_disc(1))
     ctl.disc.tracks[0].isrc = "GBAYE0601498"
     ctl.stack.append(EditTrackScreen(1))
     _step_with(ctl, "i", "")
-    assert ctl.disc.tracks[0].isrc == "GBAYE0601498"
+    assert ctl.disc.tracks[0].isrc is None
+
+
+def test_edit_track_isrc_overwrites_existing() -> None:
+    """A non-blank value replaces an existing ISRC (and is uppercased)."""
+    ctl = MenuController(_multitrack_disc(1))
+    ctl.disc.tracks[0].isrc = "GBAYE0601498"
+    ctl.stack.append(EditTrackScreen(1))
+    _step_with(ctl, "i", "usrc17607839")
+    assert ctl.disc.tracks[0].isrc == "USRC17607839"
 
 
 def test_edit_track_back_pops() -> None:
