@@ -1344,6 +1344,19 @@ def _run_metadata_lookups(
     if cddb_meta is not None:
         disc = _merge_into_disc(cddb_meta, disc)
 
+    # Stage 7: last-resort duration match. Fires only when nothing above
+    # identified the release in MusicBrainz (no release id) but we still have an
+    # album/artist to search with. Applied dead last via fill-blank — the lowest
+    # precedence of any source, below even CDDB — so it only supplies fields no
+    # richer guess provided. The user remains the final arbiter in the menu.
+    if disc.mb_release_id is None and (disc.album or disc.artist):
+        from cdda2img.mb_lookup import duration_match_lookup
+
+        dm = duration_match_lookup(disc, verbose=mb_verbose)
+        if dm is not None:
+            provenance["duration_match_release"] = dm.mb_release_id or "?"
+            disc = _merge_into_disc(dm, disc)
+
     return disc, mb_result
 
 

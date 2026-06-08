@@ -339,6 +339,40 @@ behaviour, not a regression.
 
 ---
 
+## ✅ DONE — Stage 7: last-resort duration match (2026-06-08)
+
+Final stage of the metadata-pipeline plan. A whipper-style duration matcher as
+the **lowest-precedence** source, below even CDDB — surfacing a best-guess MB
+release for the user to correct in the menu when nothing richer identified one
+("Guess the Album" model; no authoritative ground truth exists, so no-answer is
+the wrong default).
+
+`mb_lookup.duration_match_lookup(disc)` fires only when `disc.mb_release_id is
+None` and an album/artist is available to search with. It text-searches MB,
+**pre-filters stubs by track count** (a stronger gross discriminator than
+duration, and it slashes the per-candidate fetch-full fan-out — MB is pinned to
+1 req/s), fetches the survivors full (capped at `_DURATION_MATCH_MAX_FETCH=8`),
+and picks the candidate whose total duration best matches the physical disc.
+
+Two duration conventions, anchored separately so a constant offset never sways
+the `argmin` winner (only the absolute accept/reject gate):
+- `track.length` (TOC-derived; **includes** the following track's pregap) →
+  compared against the pregap-inclusive `RBIDisc.total_frames`.
+- `recording.length` (canonical pure-audio; the rare fallback for a medium with
+  no per-track length) → compared against the audio-only `sum(duration_frames)`,
+  read self-contained so it never leaks into `TrackMeta.duration_ms` / the R3
+  ±2 s gate (which deliberately refuses `recording.length`). The two pools are
+  never mixed into one ranking; track.length is preferred whole.
+
+Gate `_DURATION_MATCH_TOLERANCE_MS=15_000` is generous (rejects only off-by-
+minutes); it's the single knob to tune from real-world testing + bug reports.
+Wired as the final step of `cdda2img._run_metadata_lookups` after the CDDB
+merge, via fill-blank `_merge_into_disc`. Surfaces `duration_match_release` in
+PROV. `_fetch_release_raw` extracted (raw release dict retaining
+`recording.length`); `lookup_release` now delegates to it. +14 tests (pure
+`_sum_*`/`pick_duration_match` + mocked `duration_match_lookup` incl. track-count
+pre-filter and tolerance reject). 849 pass (3.14 + 3.10); make check clean.
+
 ## ✅ DONE — disc_scan `--deep`: raw subchannel Q-channel provenance (2026-06-03)
 
 Groundwork for the "disc is gospel" authority model (Priority #3): true lead-in

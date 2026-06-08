@@ -35,7 +35,7 @@ from cdda2img.lookup_result import (
     DiscMeta,
     TrackMeta,
 )
-from cdda2img.rbi_format import RBIDisc, RBITocEntry
+from cdda2img.rbi_format import CD_FRAMES_PER_SECOND, RBIDisc, RBITocEntry
 
 log = logging.getLogger(__name__)
 
@@ -398,12 +398,15 @@ def lookup_disc_id(disc: RBIDisc) -> list[DiscMeta]:
     return parsed
 
 
-def lookup_release(release_id: str, disc_number: int | None = None) -> DiscMeta | None:
-    """Fetch a single MusicBrainz release by ID with full track listing.
+def _fetch_release_raw(release_id: str) -> dict | None:
+    """Fetch a single MusicBrainz release by ID and return the **raw** release
+    dict (track-list with both per-track ``length`` and ``recording.length``).
 
-    *disc_number* selects the matching medium for multi-disc releases so that
-    only that disc's tracks are returned.  Pass ``disc.disc_number`` when
-    applying to a known disc in a set.
+    ``lookup_release`` parses this into a ``DiscMeta`` and deliberately drops
+    ``recording.length`` (see ``_parse_release``). The stage-7 duration matcher
+    needs the raw form so it can read ``recording.length`` self-contained,
+    without that canonical-but-noisy value ever reaching ``TrackMeta.duration_ms``
+    or the R3 sum-of-durations gate.
 
     Returns None on network/response error or when offline mode is active (R10).
     """
@@ -421,7 +424,19 @@ def lookup_release(release_id: str, disc_number: int | None = None) -> DiscMeta 
     except (musicbrainzngs.ResponseError, musicbrainzngs.NetworkError) as exc:
         log.debug("MusicBrainz release lookup for %s failed: %s", release_id, exc)
         return None
-    release = result.get("release") or {}
+    return result.get("release") or None
+
+
+def lookup_release(release_id: str, disc_number: int | None = None) -> DiscMeta | None:
+    """Fetch a single MusicBrainz release by ID with full track listing.
+
+    *disc_number* selects the matching medium for multi-disc releases so that
+    only that disc's tracks are returned.  Pass ``disc.disc_number`` when
+    applying to a known disc in a set.
+
+    Returns None on network/response error or when offline mode is active (R10).
+    """
+    release = _fetch_release_raw(release_id)
     if not release:
         return None
     return _parse_release(release, _disc_number=disc_number)
@@ -479,6 +494,156 @@ def search_releases_by_barcode(barcode: str, limit: int = 25) -> list[DiscMeta]:
         log.debug("MusicBrainz barcode search failed: %s", exc)
         return []
     return [_parse_release(r) for r in (result.get("release-list") or [])]
+
+
+# ---------------------------------------------------------------------------
+# Stage 7: last-resort duration match
+# ---------------------------------------------------------------------------
+#
+# When no higher source (CD-Text, MB disc-ID, Discogs, AcoustID, CDDB) has
+# identified the release in MusicBrainz, fall back to whipper's trick: find the
+# MB release whose total duration best matches the physical disc. This is the
+# weakest, lowest-precedence guess in the "Guess the Album" pipeline — the user
+# is the final arbiter in the metadata menu.
+#
+# Two duration conventions, anchored separately (a constant offset would not
+# change the argmin winner, only the absolute accept/reject gate):
+#   - track.length  — TOC-derived per-medium span that INCLUDES the following
+#     track's pregap; sums to the program span → compare against the
+#     pregap-inclusive RBIDisc.total_frames.
+#   - recording.length — canonical pure-audio value; sums to audio-only →
+#     compare against sum(duration_frames). Used only as a fallback for the
+#     rare release whose medium carries no per-track length (digital/manual
+#     entry), and read here self-contained so it never leaks into duration_ms.
+
+# Generous gate: argmin already picks the closest candidate, so this only
+# rejects gross (off-by-minutes) mismatches. Tune via real-world testing /
+# bug reports, not from first principles.
+_DURATION_MATCH_TOLERANCE_MS = 15_000
+# Cap the per-candidate fetch-full fan-out (MB is pinned to 1 req/s, R15).
+_DURATION_MATCH_MAX_FETCH = 8
+
+
+def _sum_track_lengths(release: dict) -> int | None:
+    """Sum of per-medium ``track.length`` over every track (ms), or None if any
+    track lacks it. TOC-derived program span — includes inter-track pregaps."""
+    total = 0
+    seen = False
+    for medium in release.get("medium-list") or []:
+        for track in medium.get("track-list") or []:
+            length = track.get("length")
+            if not length:
+                return None
+            total += int(length)
+            seen = True
+    return total if seen else None
+
+
+def _sum_recording_lengths(release: dict) -> int | None:
+    """Sum of per-recording ``recording.length`` over every track (ms), or None
+    if any track lacks it. Canonical pure-audio value, read self-contained so it
+    never reaches ``TrackMeta.duration_ms`` or the R3 gate."""
+    total = 0
+    seen = False
+    for medium in release.get("medium-list") or []:
+        for track in medium.get("track-list") or []:
+            recording = track.get("recording") or {}
+            length = recording.get("length")
+            if not length:
+                return None
+            total += int(length)
+            seen = True
+    return total if seen else None
+
+
+def pick_duration_match(
+    releases: list[dict],
+    *,
+    program_anchor_ms: int,
+    audio_anchor_ms: int,
+    tolerance_ms: int = _DURATION_MATCH_TOLERANCE_MS,
+) -> dict | None:
+    """Pure selection: of *releases* (raw MB dicts), return the one whose total
+    duration best matches the physical disc, or None if the best is off by more
+    than *tolerance_ms*.
+
+    track.length-scored candidates form the preferred pool (scored against the
+    pregap-inclusive *program_anchor_ms*); the recording.length pool (scored
+    against the audio-only *audio_anchor_ms*) is consulted only when no candidate
+    has a complete track.length set. The two conventions are never mixed into one
+    ranking — they are not comparable on a single scale.
+    """
+    track_pool = [
+        (abs(total - program_anchor_ms), r)
+        for r in releases
+        if (total := _sum_track_lengths(r)) is not None
+    ]
+    rec_pool = [
+        (abs(total - audio_anchor_ms), r)
+        for r in releases
+        if _sum_track_lengths(r) is None
+        and (total := _sum_recording_lengths(r)) is not None
+    ]
+    pool = track_pool or rec_pool
+    if not pool:
+        return None
+    delta, winner = min(pool, key=lambda pair: pair[0])
+    if delta > tolerance_ms:
+        return None
+    return winner
+
+
+def duration_match_lookup(disc: RBIDisc, *, verbose: bool = False) -> DiscMeta | None:
+    """Stage 7 last-resort source: identify a release by matching the physical
+    disc's total duration against MusicBrainz text-search candidates.
+
+    Fires only as a last resort (the caller gates on ``disc.mb_release_id is
+    None``). Requires an album or artist to search with. Honours R10 offline
+    mode. Returns a parsed ``DiscMeta`` for the winner, or None.
+    """
+    from cdda2img.config import is_no_network_active
+
+    if is_no_network_active():
+        return None
+    if not (disc.album or disc.artist):
+        return None
+    query = build_mb_search_query(disc.artist, disc.album)
+    if not query:
+        return None
+    # Stubs carry track_count but no track-list. Pre-filter by track count —
+    # a stronger gross discriminator than duration, and it slashes the
+    # per-candidate fetch-full fan-out before paying the 1-req/s cost.
+    stubs = search_releases(query)
+    candidates = [
+        s for s in stubs if s.mb_release_id and s.track_count == disc.track_count
+    ][:_DURATION_MATCH_MAX_FETCH]
+    if not candidates:
+        return None
+    raw_releases: list[dict] = []
+    for c in candidates:
+        if c.mb_release_id is None:  # narrowed by the filter above; satisfies ty
+            continue
+        raw = _fetch_release_raw(c.mb_release_id)
+        if raw is not None:
+            raw_releases.append(raw)
+    program_anchor_ms = round(disc.total_frames / CD_FRAMES_PER_SECOND * 1000)
+    audio_anchor_ms = round(
+        sum(t.duration_frames for t in disc.tracks) / CD_FRAMES_PER_SECOND * 1000
+    )
+    winner = pick_duration_match(
+        raw_releases,
+        program_anchor_ms=program_anchor_ms,
+        audio_anchor_ms=audio_anchor_ms,
+    )
+    if winner is None:
+        return None
+    meta = _parse_release(winner)
+    if verbose:
+        print(
+            f'  MB duration-match: "{meta.album}" by {meta.artist} '
+            f"(last resort, lowest priority)"
+        )
+    return meta
 
 
 def lookup_release_group(rg_id: str) -> list[DiscMeta]:

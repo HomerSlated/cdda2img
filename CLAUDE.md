@@ -122,7 +122,7 @@ All source lives under `src/cdda2img/`. The pipeline is fully wired end-to-end.
 1. `cdda2img.py:_rip_with_fallback()` — tries `cdrdao_ripper.rip_cdrdao()` (primary); falls back to `disc_reader.rip_disc(paranoia="full")` on RuntimeError
    - `cdrdao_ripper.py:rip_cdrdao()` — runs `cdrdao read-cd`; parses TOC via `toc_parser.py`, builds disc via `cdrdao_reader.parsed_to_rbi_disc()`, byte-swaps s16be BIN via `cdrdao_reader.convert_cdrdao_bin()`; returns `RipInfo(disc, track_lsns, disc_last_lsn)`
    - `disc_reader.py:rip_disc()` — cd-paranoia fallback; queries disc via `-Q`, rips via subprocess; returns same `RipInfo`
-2. CDDB query (`cddb.py:query_cddb()`, TCP, disc TOC fingerprint) runs inside `_finalize_import` via `_run_metadata_lookups`, in parallel with the MB lookup. CDDB is merged at **lowest precedence** (applied last; every other source overwrites it) — its flat "Artist / Title" TTITLE can't separate title from performer cleanly. There is no high-trust CDDB apply helper.
+2. CDDB query (`cddb.py:query_cddb()`, TCP, disc TOC fingerprint) runs inside `_finalize_import` via `_run_metadata_lookups`, in parallel with the MB lookup. CDDB is merged at **second-lowest precedence** (applied after MB/Discogs/AcoustID; every richer source overwrites it) — its flat "Artist / Title" TTITLE can't separate title from performer cleanly. There is no high-trust CDDB apply helper. Below even CDDB sits the **stage-7 duration matcher** (`mb_lookup.duration_match_lookup`): a last-resort source that fires only when nothing above set an MB release id, text-searching MB by album/artist and picking the candidate whose total duration matches the physical disc (fill-blank, so it supplies only fields no other source did). See `duration_match_release` in PROV.
 3. Shared finalization: `_finalize_import()` (see below)
 
 ### Import pipeline (`import` subcommand)
@@ -186,7 +186,7 @@ Variable-length blocks (TOC and PCM are mandatory; the rest are optional and sig
 | Block | Contents |
 |-------|----------|
 | TOC | cdrdao-format text TOC; per-track pre-gap, ISRC, CATALOG (MCN), provenance comments |
-| PROV | Provenance key=value text: creator, mode, source, ripper, drive; lookup-status / disagreement / corroboration surfaces (R9/R11/R12); `arip_transport` + `arip_dbar_sha256` (R2); `pre_emphasis` (R14); `multi_match_isrc_disambiguated` (R1); `acoustid_corroborates` (R6); `discogs_release_id` |
+| PROV | Provenance key=value text: creator, mode, source, ripper, drive; lookup-status / disagreement / corroboration surfaces (R9/R11/R12); `arip_transport` + `arip_dbar_sha256` (R2); `pre_emphasis` (R14); `multi_match_isrc_disambiguated` (R1); `acoustid_corroborates` (R6); `discogs_release_id`; `duration_match_release` (stage 7) |
 | RGDB | 17 + 12×N bytes: per-track and album EBU R128 gain, peak, and LRA (float32) |
 | ARIP | 13 + 15×N bytes: per-track AccurateRip v1/v2 CRCs, confidence, status, disc IDs |
 | RLOG | Structured rip log: drive, engine, offsets, per-track AR results; SHA-256 self-seal |

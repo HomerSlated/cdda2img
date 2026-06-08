@@ -1605,3 +1605,204 @@ def test_prepop_multimatch_no_positive_mcn_falls_back_to_full_set():
     assert r.match_count == 2
     assert r.disc.album == "American Idiot"  # full set used, both agree
     assert r.disc.release_date == "2004"
+
+
+# ---------------------------------------------------------------------------
+# Stage 7: last-resort duration match
+# ---------------------------------------------------------------------------
+
+
+def _raw_release(
+    release_id: str,
+    *,
+    track_lengths: list[int | None] | None = None,
+    recording_lengths: list[int | None] | None = None,
+    album: str = "An Album",
+    artist: str = "An Artist",
+) -> dict:
+    """Build a raw MB release dict with per-track ``length`` and/or
+    ``recording.length``. A None entry omits that field for that track."""
+    n = len(track_lengths or recording_lengths or [])
+    tracks: list[dict] = []
+    for i in range(n):
+        track: dict = {"number": str(i + 1), "recording": {"title": f"T{i + 1}"}}
+        if track_lengths is not None and track_lengths[i] is not None:
+            track["length"] = str(track_lengths[i])
+        if recording_lengths is not None and recording_lengths[i] is not None:
+            track["recording"]["length"] = str(recording_lengths[i])
+        tracks.append(track)
+    return {
+        "id": release_id,
+        "title": album,
+        "artist-credit": [{"artist": {"name": artist}, "joinphrase": ""}],
+        "medium-list": [{"track-list": tracks}],
+    }
+
+
+def test_sum_track_lengths_all_present():
+    from cdda2img.mb_lookup import _sum_track_lengths
+
+    r = _raw_release("x", track_lengths=[200000, 180000, 240000])
+    assert _sum_track_lengths(r) == 620000
+
+
+def test_sum_track_lengths_missing_one_returns_none():
+    from cdda2img.mb_lookup import _sum_track_lengths
+
+    r = _raw_release("x", track_lengths=[200000, None, 240000])
+    assert _sum_track_lengths(r) is None
+
+
+def test_sum_track_lengths_empty_returns_none():
+    from cdda2img.mb_lookup import _sum_track_lengths
+
+    assert _sum_track_lengths({"medium-list": []}) is None
+
+
+def test_sum_recording_lengths_all_present():
+    from cdda2img.mb_lookup import _sum_recording_lengths
+
+    r = _raw_release("x", recording_lengths=[210000, 190000])
+    assert _sum_recording_lengths(r) == 400000
+
+
+def test_sum_recording_lengths_missing_one_returns_none():
+    from cdda2img.mb_lookup import _sum_recording_lengths
+
+    r = _raw_release("x", recording_lengths=[210000, None])
+    assert _sum_recording_lengths(r) is None
+
+
+def test_pick_duration_match_closest_track_length_wins():
+    from cdda2img.mb_lookup import pick_duration_match
+
+    near = _raw_release("near", track_lengths=[300000, 300000])  # 600000
+    far = _raw_release("far", track_lengths=[300000, 360000])  # 660000
+    winner = pick_duration_match(
+        [far, near], program_anchor_ms=602000, audio_anchor_ms=0
+    )
+    assert winner is not None
+    assert winner["id"] == "near"
+
+
+def test_pick_duration_match_rejects_beyond_tolerance():
+    from cdda2img.mb_lookup import pick_duration_match
+
+    r = _raw_release("x", track_lengths=[300000, 300000])  # 600000
+    # 100s off the anchor — well beyond the 15s gross-mismatch gate.
+    assert pick_duration_match([r], program_anchor_ms=700000, audio_anchor_ms=0) is None
+
+
+def test_pick_duration_match_prefers_track_pool_over_recording_pool():
+    """A track.length candidate wins even when a recording.length candidate is
+    numerically closer — the two conventions are never mixed in one ranking."""
+    from cdda2img.mb_lookup import pick_duration_match
+
+    track_cand = _raw_release("track", track_lengths=[300000, 305000])  # 605000
+    rec_cand = _raw_release("rec", recording_lengths=[300000, 300000])  # 600000
+    winner = pick_duration_match(
+        [rec_cand, track_cand],
+        program_anchor_ms=600000,  # rec is exact, track is 5s off — yet track wins
+        audio_anchor_ms=600000,
+    )
+    assert winner is not None
+    assert winner["id"] == "track"
+
+
+def test_pick_duration_match_falls_to_recording_pool_when_no_track_length():
+    from cdda2img.mb_lookup import pick_duration_match
+
+    rec_near = _raw_release("near", recording_lengths=[300000, 300000])  # 600000
+    rec_far = _raw_release("far", recording_lengths=[300000, 360000])  # 660000
+    winner = pick_duration_match(
+        [rec_far, rec_near],
+        program_anchor_ms=0,  # no track.length candidates → program anchor unused
+        audio_anchor_ms=601000,
+    )
+    assert winner is not None
+    assert winner["id"] == "near"
+
+
+def test_pick_duration_match_empty_returns_none():
+    from cdda2img.mb_lookup import pick_duration_match
+
+    assert pick_duration_match([], program_anchor_ms=1, audio_anchor_ms=1) is None
+
+
+def _dm_disc(
+    album: str = "Match Album",
+    artist: str = "Match Artist",
+    n: int = 2,
+    dur_frames: int = 15000,
+) -> RBIDisc:
+    entries = [
+        RBITocEntry(
+            track_number=i + 1,
+            title=f"T{i + 1}",
+            performer=artist,
+            start_frame=i * dur_frames,
+            duration_frames=dur_frames,
+        )
+        for i in range(n)
+    ]
+    return RBIDisc(album=album, artist=artist, tracks=entries)
+
+
+def test_duration_match_lookup_offline_returns_none():
+    from cdda2img.mb_lookup import duration_match_lookup
+
+    disc = _dm_disc()
+    with patch("cdda2img.config.is_no_network_active", return_value=True):
+        assert duration_match_lookup(disc) is None
+
+
+def test_duration_match_lookup_no_album_or_artist_returns_none():
+    from cdda2img.mb_lookup import duration_match_lookup
+
+    disc = _dm_disc(album="", artist="")
+    with patch("cdda2img.config.is_no_network_active", return_value=False):
+        assert duration_match_lookup(disc) is None
+
+
+def test_duration_match_lookup_prefilters_by_track_count_and_picks():
+    from cdda2img.mb_lookup import duration_match_lookup
+
+    # 2 tracks x 15000 frames = 30000 frames = 400000 ms program anchor.
+    disc = _dm_disc(n=2, dur_frames=15000)
+    stub_match = DiscMeta(mb_release_id="match", track_count=2)
+    stub_wrong_count = DiscMeta(mb_release_id="wrong", track_count=3)
+    raw_match = _raw_release("match", track_lengths=[200000, 200000])  # 400000
+
+    fetched: list[str] = []
+
+    def fake_fetch(rid: str) -> dict | None:
+        fetched.append(rid)
+        return raw_match if rid == "match" else None
+
+    with (
+        patch("cdda2img.config.is_no_network_active", return_value=False),
+        patch(
+            "cdda2img.mb_lookup.search_releases",
+            return_value=[stub_wrong_count, stub_match],
+        ),
+        patch("cdda2img.mb_lookup._fetch_release_raw", side_effect=fake_fetch),
+    ):
+        meta = duration_match_lookup(disc)
+    assert meta is not None
+    assert meta.mb_release_id == "match"
+    assert fetched == ["match"]  # the wrong-track-count stub is never fetched
+
+
+def test_duration_match_lookup_rejects_when_no_candidate_in_tolerance():
+    from cdda2img.mb_lookup import duration_match_lookup
+
+    disc = _dm_disc(n=2, dur_frames=15000)  # 400000 ms anchor
+    stub = DiscMeta(mb_release_id="off", track_count=2)
+    raw_off = _raw_release("off", track_lengths=[300000, 300000])  # 600000 — 200s off
+
+    with (
+        patch("cdda2img.config.is_no_network_active", return_value=False),
+        patch("cdda2img.mb_lookup.search_releases", return_value=[stub]),
+        patch("cdda2img.mb_lookup._fetch_release_raw", return_value=raw_off),
+    ):
+        assert duration_match_lookup(disc) is None
