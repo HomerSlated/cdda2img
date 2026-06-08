@@ -47,9 +47,30 @@ if TYPE_CHECKING:
 # pathological terminals — harmless.
 _CLEAR_SCREEN = "\033[2J\033[H"
 
+# Alternate screen buffer (DECSET 1049), the same mechanism vim/less/htop use.
+# TUI mode runs the whole menu on the alt buffer so per-frame `\033[2J` redraws
+# never pollute the main scrollback: `\033[2J` only erases the visible viewport
+# and — on xterm/VTE — *saves* the erased lines into scrollback, so a clear-and-
+# redraw menu on the main buffer accumulates its header up the scrollback on
+# every repaint (the bug this fixes). On exit, 1049l restores the main buffer
+# exactly as it was, preserving the pre-menu pipeline output (MB match line, AR
+# report) that `--no-tui` exists to keep capturable.
+_ENTER_FULLSCREEN = "\033[?1049h"
+_EXIT_FULLSCREEN = "\033[?1049l"
+
 
 def _clear_screen() -> None:
     sys.stdout.write(_CLEAR_SCREEN)
+    sys.stdout.flush()
+
+
+def _enter_fullscreen() -> None:
+    sys.stdout.write(_ENTER_FULLSCREEN)
+    sys.stdout.flush()
+
+
+def _exit_fullscreen() -> None:
+    sys.stdout.write(_EXIT_FULLSCREEN)
     sys.stdout.flush()
 
 
@@ -1015,11 +1036,23 @@ class MenuController:
         return self.stack[-1].state
 
     def run(self) -> RBIDisc:
-        """Drive the stack until accepted. Returns the final disc."""
+        """Drive the stack until accepted. Returns the final disc.
+
+        In TUI mode the whole menu runs on the alternate screen buffer so the
+        per-frame clear+redraw never leaks header copies into the main
+        scrollback; the main buffer is restored on exit (including on an
+        exception, via ``finally``).
+        """
         if not sys.stdin.isatty():
             return self.disc
-        while not self.done and self.stack:
-            self._step()
+        if self.tui:
+            _enter_fullscreen()
+        try:
+            while not self.done and self.stack:
+                self._step()
+        finally:
+            if self.tui:
+                _exit_fullscreen()
         return self.disc
 
     def _step(self) -> None:

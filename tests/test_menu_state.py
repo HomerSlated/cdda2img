@@ -1108,25 +1108,53 @@ def test_format_ar_report_partial_mismatch_row_and_footer() -> None:
 
 
 def test_no_tui_skips_screen_clear() -> None:
-    """tui=False (--no-tui): the menu renders without clearing the screen, so
-    earlier pipeline output stays in the terminal scrollback."""
+    """tui=False (--no-tui): the menu renders without clearing the screen and
+    without the alternate screen buffer, so earlier pipeline output stays in the
+    terminal scrollback."""
     ctl = MenuController(_disc(), tui=False)
     with (
         patch("cdda2img.menu_state.sys.stdin.isatty", return_value=True),
         patch("cdda2img.menu_state._clear_screen") as clear,
+        patch("cdda2img.menu_state._enter_fullscreen") as enter,
+        patch("cdda2img.menu_state._exit_fullscreen") as exit_,
         patch("cdda2img.metadata_menu._prompt", return_value="a"),
     ):
         ctl.run()
     clear.assert_not_called()
+    enter.assert_not_called()
+    exit_.assert_not_called()
 
 
 def test_tui_clears_screen_by_default() -> None:
-    """tui=True (default): each frame clears + redraws (fixed-position UX)."""
+    """tui=True (default): the menu runs on the alternate screen buffer (entered
+    once, restored once) and each frame clears + redraws (fixed-position UX)."""
     ctl = MenuController(_disc(), tui=True)
     with (
         patch("cdda2img.menu_state.sys.stdin.isatty", return_value=True),
         patch("cdda2img.menu_state._clear_screen") as clear,
+        patch("cdda2img.menu_state._enter_fullscreen") as enter,
+        patch("cdda2img.menu_state._exit_fullscreen") as exit_,
         patch("cdda2img.metadata_menu._prompt", return_value="a"),
     ):
         ctl.run()
     clear.assert_called()
+    enter.assert_called_once()
+    exit_.assert_called_once()
+
+
+def test_tui_restores_main_screen_on_exception() -> None:
+    """The alt buffer must be restored even if a screen raises — otherwise the
+    user's terminal is left stuck on the (now-frozen) alt buffer."""
+    ctl = MenuController(_disc(), tui=True)
+    boom = RuntimeError("render exploded")
+    with (
+        patch("cdda2img.menu_state.sys.stdin.isatty", return_value=True),
+        patch("cdda2img.menu_state._clear_screen"),
+        patch("cdda2img.menu_state._enter_fullscreen") as enter,
+        patch("cdda2img.menu_state._exit_fullscreen") as exit_,
+        patch.object(MenuController, "_step", side_effect=boom),
+        pytest.raises(RuntimeError, match="render exploded"),
+    ):
+        ctl.run()
+    enter.assert_called_once()
+    exit_.assert_called_once()  # finally ran despite the exception
