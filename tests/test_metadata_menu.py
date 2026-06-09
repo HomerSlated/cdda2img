@@ -9,6 +9,8 @@ from __future__ import annotations
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import pytest
+
 from cdda2img.lookup_result import DiscMeta, TrackMeta
 from cdda2img.metadata_menu import _show_diff, _trunc, run_metadata_menu
 from cdda2img.rbi_format import RBIDisc, RBITocEntry
@@ -228,6 +230,45 @@ def test_discogs_parse_result_no_separator():
     meta = _parse_result(r)
     assert meta.artist is None
     assert meta.album == "Just An Album"
+
+
+@pytest.mark.parametrize(
+    ("formats", "expected"),
+    [
+        (["CD", "Album"], "Album"),
+        (["CD", "Single"], "Single"),
+        (["CD", "Maxi-Single"], "Single"),
+        (["Vinyl", "LP", "Album"], "Album"),
+        (["CD", "EP"], "EP"),
+        (["CD", "Compilation"], "Album"),  # MB-style: Compilation folds to Album
+        (["File", "Mini-Album"], "Album"),
+        (["Cassette", "Mixtape"], "Album"),
+        (["CD"], None),  # bare medium, no descriptor → honest unknown
+        ([], None),
+        (None, None),  # missing field
+        ("Album", None),  # malformed (not a list)
+    ],
+)
+def test_discogs_primary_type_mapping(formats, expected):
+    from cdda2img.discogs_lookup import _discogs_primary_type
+
+    assert _discogs_primary_type(formats) == expected
+
+
+def test_discogs_parse_result_sets_primary_type_from_format():
+    from cdda2img.discogs_lookup import _parse_result
+
+    r = SimpleNamespace(
+        data={"title": "X - Y", "format": ["CD", "Single"], "year": 1990}
+    )
+    assert _parse_result(r).primary_type == "Single"
+
+
+def test_discogs_parse_result_primary_type_none_without_format():
+    from cdda2img.discogs_lookup import _parse_result
+
+    r = SimpleNamespace(data={"title": "X - Y"})
+    assert _parse_result(r).primary_type is None
 
 
 def test_discogs_parse_full_release_prefers_scanned_barcode():
@@ -618,6 +659,31 @@ def test_acoustid_fingerprint_chains_to_mb():
     assert r.release_date == "1989"
     assert r.tracks[0].isrc == "USTEST000001"
     assert r.source == "acoustid"
+
+
+def test_acoustid_chain_sets_primary_type_from_release_group():
+    """The "release-groups" include populates the release-group primary type,
+    surfaced on DiscMeta.primary_type (the menu's Type column)."""
+    from pathlib import Path
+
+    from cdda2img import acoustid_lookup
+
+    match_data = [(0.9, "rec-uuid-1", "Title", "Artist")]
+    mb_resp = _mb_recording_response(
+        "rec-uuid-1", "Title", "Artist", "rel-1", "Album", "1989"
+    )
+    mb_resp["recording"]["release-list"][0]["release-group"]["primary-type"] = "Single"
+
+    with (
+        patch.dict("os.environ", {"ACOUSTID_API_KEY": "fake"}),
+        patch("acoustid.match", return_value=iter(match_data)),
+        patch("musicbrainzngs.get_recording_by_id", return_value=mb_resp) as gr,
+    ):
+        results = acoustid_lookup.fingerprint_and_lookup(Path("/fake/track.wav"))
+
+    assert results[0].primary_type == "Single"
+    # the include is requested (zero extra queries — folded into this one call)
+    assert "release-groups" in gr.call_args.kwargs["includes"]
 
 
 def test_acoustid_fingerprint_falls_back_on_mb_failure():

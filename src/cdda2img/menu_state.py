@@ -708,18 +708,19 @@ class ResultsScreen(Screen):
         from cdda2img.mb_lookup import _merge_into_disc, _overwrite_disc
         from cdda2img.metadata_menu import _confirm_apply
 
-        # Behaviour-preserving asymmetry vs MB: the legacy Discogs path confirms
-        # BEFORE fetching the full release, so the preview diff shows the stub
-        # (no track listing) while the apply uses the full meta. Kept as-is in
-        # cp3b; fetch-before-preview parity with MB would be a separate change.
-        mode = _confirm_apply(selected, ctl.disc)
-        if not mode:
-            return
+        # Fetch the full release (track listing) BEFORE previewing, so the
+        # confirm diff shows the real track count — the visible payoff of
+        # "Trk on select". This brings Discogs to parity with the MB path
+        # (_apply_mb); the prior confirm-before-fetch order only ever previewed
+        # the stub. One fetch per pick — never a per-row fetch to fill the list.
         if selected.discogs_release_id and not selected.tracks:
             print("  Fetching full track listing from Discogs...")
             full = discogs_lookup.fetch_release(selected.discogs_release_id)
             if full and (full.album or full.tracks):
                 selected = full
+        mode = _confirm_apply(selected, ctl.disc)
+        if not mode:
+            return
         ctl.disc = (
             _merge_into_disc(selected, ctl.disc)
             if mode == "update"
@@ -732,12 +733,10 @@ class ResultsScreen(Screen):
         from cdda2img.metadata_menu import _confirm_apply
 
         # AcoustID results are tagged with the track number before this frame
-        # (see _acoustid_fingerprint). Like Discogs, the legacy path confirmed
-        # BEFORE fetching the full release; fetch-full fires when the match is a
-        # partial single-track stub (fewer tracks than the disc). No rg threading.
-        mode = _confirm_apply(selected, ctl.disc)
-        if not mode:
-            return
+        # (see _acoustid_fingerprint). Fetch-full fires when the match is a
+        # partial single-track stub (fewer tracks than the disc), and now runs
+        # BEFORE the confirm so the preview shows the real track count (parity
+        # with the MB and Discogs paths). No rg threading. One fetch per pick.
         if selected.mb_release_id and len(selected.tracks) < len(ctl.disc.tracks):
             print("  Fetching full track listing from MusicBrainz...")
             full = lookup_release(
@@ -745,6 +744,9 @@ class ResultsScreen(Screen):
             )
             if full and (full.album or full.tracks):
                 selected = full
+        mode = _confirm_apply(selected, ctl.disc)
+        if not mode:
+            return
         ctl.disc = (
             _merge_into_disc(selected, ctl.disc)
             if mode == "update"

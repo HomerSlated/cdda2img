@@ -79,6 +79,30 @@ def _get_client():
         return None
 
 
+def _discogs_primary_type(formats) -> str | None:
+    """Map a Discogs search-stub ``format`` list to an MB-style primary type.
+
+    Discogs encodes format descriptors as a list of strings on the search stub,
+    e.g. ``["CD", "Album"]`` or ``["CD", "Single"]``. We fold these to the same
+    vocabulary MusicBrainz uses for its release-group primary type
+    (Album / Single / EP) so the menu's Type column reads consistently across
+    sources. Discogs "Compilation" (a *secondary* type in MB, where the primary
+    stays "Album") folds to Album for that consistency. Returns None when no
+    descriptor is recognised or the field is missing/malformed (→ "?" in the
+    menu, an honest unknown).
+    """
+    if not isinstance(formats, list):
+        return None
+    tokens = {str(f).strip().lower() for f in formats if f}
+    if "single" in tokens or "maxi-single" in tokens:
+        return "Single"
+    if "ep" in tokens:
+        return "EP"
+    if tokens & {"album", "lp", "mini-album", "compilation", "mixtape"}:
+        return "Album"
+    return None
+
+
 def _parse_result(r) -> DiscMeta:
     """Parse a Discogs search result object into a DiscMeta.
 
@@ -119,6 +143,7 @@ def _parse_result(r) -> DiscMeta:
         country=str(country) if country else None,
         label=str(label) if label else None,
         catalog_number=catalog_number or None,
+        primary_type=_discogs_primary_type(data.get("format")),
         source="discogs",
     )
 

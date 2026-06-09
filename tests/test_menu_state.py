@@ -473,10 +473,10 @@ def test_discogs_no_results_sets_banner_and_stays() -> None:
     assert "No results" in ctl.banner
 
 
-def test_discogs_select_confirms_before_fetch_full_then_applies() -> None:
-    """The legacy Discogs asymmetry preserved: confirm runs BEFORE fetch_release,
-    so the stub (no tracks) reaches the preview; the full meta is applied. No
-    mb_rg_id threading on the Discogs path."""
+def test_discogs_select_fetches_full_before_confirm_then_applies() -> None:
+    """Discogs now fetches the full release BEFORE confirming (parity with MB),
+    so the full track listing reaches the preview — the visible payoff of
+    "Trk on select". The full meta is applied. No mb_rg_id threading."""
     ctl = MenuController(_disc())
     ctl.stack.append(DiscogsSearchScreen())  # frame popped back to
     stub = DiscMeta(album="E", discogs_release_id=42)  # no tracks
@@ -490,7 +490,7 @@ def test_discogs_select_confirms_before_fetch_full_then_applies() -> None:
     captured: dict = {}
 
     def fake_confirm(meta, _disc):
-        captured["preview_tracks"] = list(meta.tracks)  # stub → empty
+        captured["preview_tracks"] = list(meta.tracks)  # full → 1 track
         return "update"
 
     with (
@@ -498,7 +498,8 @@ def test_discogs_select_confirms_before_fetch_full_then_applies() -> None:
         patch("cdda2img.discogs_lookup.fetch_release", return_value=full),
     ):
         _step_with(ctl, "1")
-    assert captured["preview_tracks"] == []  # confirmed on the stub, pre-fetch
+    # confirmed on the FULL release (fetched first), not the stub
+    assert [t.isrc for t in captured["preview_tracks"]] == ["USRHD0709703"]
     assert ctl.disc.tracks[0].isrc == "USRHD0709703"  # full meta applied
     assert ctl.mb_rg_id is None  # Discogs never threads the MB rg
     assert ctl.banner == "Applied."
@@ -584,9 +585,11 @@ def test_acoustid_file_screen_missing_file_banner() -> None:
     assert "not found" in ctl.banner.lower()
 
 
-def test_acoustid_select_confirms_before_fetch_full_when_partial() -> None:
-    """AcoustID apply tail: confirm before fetch-full; fetch-full fires only when
-    the match has fewer tracks than the disc (partial single-track stub)."""
+def test_acoustid_select_fetches_full_before_confirm_when_partial() -> None:
+    """AcoustID apply tail: fetch-full now runs BEFORE confirm (parity with MB
+    and Discogs), so the preview shows the full track listing. Fetch-full fires
+    only when the match has fewer tracks than the disc (partial single-track
+    stub)."""
     ctl = MenuController(_multitrack_disc(3))
     ctl.stack.append(AcoustidScreen(source_wavs=[Path("/x")]))  # frame popped to
     stub = DiscMeta(
@@ -601,12 +604,19 @@ def test_acoustid_select_confirms_before_fetch_full_when_partial() -> None:
         tracks=[TrackMeta(number=i, isrc=f"AAA00000000{i}") for i in (1, 2, 3)],
     )
     ctl.stack.append(ResultsScreen([stub], "AcoustID Matches", "acoustid"))
+    captured: dict = {}
+
+    def fake_confirm(meta, _disc):
+        captured["preview_n"] = len(meta.tracks)  # full → 3 tracks, pre-confirm
+        return "update"
+
     with (
-        patch("cdda2img.metadata_menu._confirm_apply", return_value="update"),
+        patch("cdda2img.metadata_menu._confirm_apply", side_effect=fake_confirm),
         patch("cdda2img.mb_lookup.lookup_release", return_value=full) as lr,
     ):
         _step_with(ctl, "1")
     lr.assert_called_once()  # partial stub triggered the full fetch
+    assert captured["preview_n"] == 3  # full listing reached the preview
     assert ctl.disc.tracks[1].isrc == "AAA000000002"  # full applied
     assert ctl.mb_rg_id is None  # AcoustID never threads the MB rg
     assert ctl.banner == "Applied."

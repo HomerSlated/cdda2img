@@ -70,7 +70,9 @@ def _chain_to_mb(top: list, *, verbose: bool = False) -> list[DiscMeta]:
         try:
             mb_result = musicbrainzngs.get_recording_by_id(
                 recording_id,
-                includes=["artists", "releases", "isrcs"],
+                # "release-groups" folds into this same request (zero extra
+                # queries) and is what populates the per-release primary type.
+                includes=["artists", "releases", "isrcs", "release-groups"],
             )
         except Exception as exc:
             log.debug("MB recording lookup for %s failed: %s", recording_id, exc)
@@ -135,6 +137,7 @@ def _chain_to_mb(top: list, *, verbose: bool = False) -> list[DiscMeta]:
                     release_date=date or None,
                     original_release_date=original_date or None,
                     country=release.get("country") or None,
+                    primary_type=rg.get("primary-type") or rg.get("type") or None,
                     source="acoustid",
                     tracks=[
                         TrackMeta(title=rec_title, performer=rec_artist, isrc=isrc)
