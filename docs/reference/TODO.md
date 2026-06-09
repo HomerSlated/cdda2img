@@ -103,7 +103,11 @@ calculation" pattern — now hit 3× (R3 duration field, AcoustID pressing, and 
       v2 formula `v2 = (csum_lo + csum_hi) & 0xFFFFFFFF`; `_parse_dbar` per-track v2_crc read
       (struct offset `<BLL` = conf, v1, v2); the v2 match loop in `verify_rip`. Cross-check
       against ARver's reference v2 algorithm. Evidence: `rips/IN/American Idiot…rbi`.
-- [ ] **P2-B** · **MB multi-match ignores the disc MCN/barcode → wrong release chosen.** The
+- [x] **P2-B** · **RESOLVED 2026-06-06 — folded into the #3-a plan (Units M + G + A, all done):**
+      the shared fuzzy-MCN matcher + strict-reject consistency gate + agreed-facts over the
+      MCN-matched subset together exclude releases whose barcode contradicts the disc MCN, and the
+      #3-b precedence rework makes MB apply before CDDB. Original investigation retained below for
+      history. **(orig)** MB multi-match ignores the disc MCN/barcode → wrong release chosen. The
       disc (MCN **093624877721**, the 2004 original — confirmed on the physical media, a
       commercial pressing not a CD-R) was identified as *"American Idiot: The Ultimate American
       Idiot" (2015)* — a reissue whose barcode is **093624922315**, which does NOT match the
@@ -155,9 +159,10 @@ current model. This work is a *quality* refinement of the guess, not a capabilit
 not chase certainty the medium cannot provide.
 
 **Changes (do in this order — sequencing matters):**
-- [ ] **#3-a** · **Fix MB first** so it stops punting on multi-match: `_build_agreed_facts_meta`
-      over the **MCN-matched subset**, not the whole RG. Expanded into a full whole-record
-      consistency gate — see the dedicated **#3-a plan** block below (decided 2026-06-04).
+- [x] **#3-a** · **DONE 2026-06-06 — see the #3-a plan below (Units M + G + A all complete).**
+      `_build_agreed_facts_meta` now runs over the MCN-matched / consistent subset, not the whole
+      RG. Expanded into a full whole-record consistency gate — see the dedicated **#3-a plan**
+      block below (decided 2026-06-04).
 - [x] **#3-b** · **Rework "who wins and why"** (lookup precedence) — DONE `cb4bcc7` (2026-06-04).
       CDDB demoted to LOWEST precedence (CD-Text > MB > Discogs > AcoustID > CDDB) via
       `_run_metadata_lookups`; CDDB query still parallel with MB but applied last as a zero-trust
@@ -330,7 +335,8 @@ behaviour, not a regression.
   the stdout copy); the refactor should route both paths through one
   helper, ideally gated on `sys.stdout.isatty()` or an explicit "batch"
   flag.
-- **Research `private/code/beets`** — analyse its metadata workflow
+- **⭐ NEXT (chosen 2026-06-09; target this weekend) — Research `private/code/beets`** —
+  analyse its metadata workflow
   (resolver chain, plugin model, ID-tagger, MB/AcoustID integration) and
   compare to cdda2img. Specifically check whether beets has a better
   approach to the multi-source merge problem that R1/R8/R9 address, and
