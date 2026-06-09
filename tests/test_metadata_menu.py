@@ -661,18 +661,29 @@ def test_acoustid_fingerprint_chains_to_mb():
     assert r.source == "acoustid"
 
 
-def test_acoustid_chain_sets_primary_type_from_release_group():
-    """The "release-groups" include populates the release-group primary type,
-    surfaced on DiscMeta.primary_type (the menu's Type column)."""
+def test_acoustid_chain_uses_only_valid_recording_includes():
+    """Regression guard: every include passed to get_recording_by_id must be
+    valid for the recording endpoint. "release-groups" is NOT — passing it
+    raises musicbrainzngs.UsageError, which the broad except in _chain_to_mb
+    swallows, silently collapsing every AcoustID match to the bare-track
+    fallback (no album/country/Type). This test asserts the includes are a
+    subset of the library's own VALID_INCLUDES, so re-adding an invalid one
+    fails loudly here instead of in production.
+
+    (Type genuinely cannot be cheaply sourced for AcoustID: primary-type lives
+    on the release-group, which the recording endpoint will not embed, so the
+    Type column stays "?" for AcoustID rows by design.)"""
     from pathlib import Path
+
+    import musicbrainzngs  # type: ignore[import-untyped]
 
     from cdda2img import acoustid_lookup
 
+    valid = set(musicbrainzngs.VALID_INCLUDES["recording"])
     match_data = [(0.9, "rec-uuid-1", "Title", "Artist")]
     mb_resp = _mb_recording_response(
         "rec-uuid-1", "Title", "Artist", "rel-1", "Album", "1989"
     )
-    mb_resp["recording"]["release-list"][0]["release-group"]["primary-type"] = "Single"
 
     with (
         patch.dict("os.environ", {"ACOUSTID_API_KEY": "fake"}),
@@ -681,9 +692,11 @@ def test_acoustid_chain_sets_primary_type_from_release_group():
     ):
         results = acoustid_lookup.fingerprint_and_lookup(Path("/fake/track.wav"))
 
-    assert results[0].primary_type == "Single"
-    # the include is requested (zero extra queries — folded into this one call)
-    assert "release-groups" in gr.call_args.kwargs["includes"]
+    passed = set(gr.call_args.kwargs["includes"])
+    assert passed <= valid, f"invalid recording includes: {passed - valid}"
+    # a valid lookup carries full release metadata (did not hit the fallback)
+    assert results[0].album == "Album"
+    assert results[0].primary_type is None  # Type unavailable for AcoustID
 
 
 def test_acoustid_fingerprint_falls_back_on_mb_failure():

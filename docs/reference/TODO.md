@@ -337,6 +337,16 @@ behaviour, not a regression.
   whether its conflict-resolution UI is worth porting. Write findings to
   `private/research/incoming/beets-comparison.md`.
 
+### Minor / pre-existing
+
+- **AcoustID `_chain_to_mb` reads an empty release-group stub.** On the recording
+  endpoint, `inc=releases` does *not* embed the release-group's fields, so
+  `rg.get("id")` and `rg.get("first-release-date")` are always None on the AcoustID
+  path — `mb_release_group_id` and `original_release_date` have never populated there.
+  (Confirmed live 2026-06-09 while fixing the invalid-include regression.) Low impact:
+  the full-release fetch on select recovers this via the release endpoint. Fix would
+  need a per-release follow-up call — deferred (same per-row cost we declined for Trk).
+
 ---
 
 ## ✅ DONE — Stage 7: last-resort duration match (2026-06-08)

@@ -70,9 +70,7 @@ def _chain_to_mb(top: list, *, verbose: bool = False) -> list[DiscMeta]:
         try:
             mb_result = musicbrainzngs.get_recording_by_id(
                 recording_id,
-                # "release-groups" folds into this same request (zero extra
-                # queries) and is what populates the per-release primary type.
-                includes=["artists", "releases", "isrcs", "release-groups"],
+                includes=["artists", "releases", "isrcs"],
             )
         except Exception as exc:
             log.debug("MB recording lookup for %s failed: %s", recording_id, exc)
@@ -137,7 +135,12 @@ def _chain_to_mb(top: list, *, verbose: bool = False) -> list[DiscMeta]:
                     release_date=date or None,
                     original_release_date=original_date or None,
                     country=release.get("country") or None,
-                    primary_type=rg.get("primary-type") or rg.get("type") or None,
+                    # primary_type is intentionally left unset: it lives on the
+                    # release-group, which the recording endpoint will not embed
+                    # ("release-groups" is not a valid include there, and the
+                    # release's embedded release-group stub comes back empty
+                    # under inc=releases). So Type stays "?" for AcoustID rows —
+                    # an honest unknown, like the Trk column.
                     source="acoustid",
                     tracks=[
                         TrackMeta(title=rec_title, performer=rec_artist, isrc=isrc)
