@@ -699,6 +699,48 @@ def test_acoustid_chain_uses_only_valid_recording_includes():
     assert results[0].primary_type is None  # Type unavailable for AcoustID
 
 
+@pytest.mark.parametrize(
+    ("medium_list", "expected"),
+    [
+        ([{"track-count": "12"}], 12),  # single-medium album
+        ([{"track-count": "2"}], 2),  # 2-track single
+        ([{"track-count": "10"}, {"track-count": "8"}], 18),  # 2-disc set summed
+        ([{"position": "1"}], None),  # medium with no count → "?"
+        ([], None),  # no media
+        ([{"track-count": "x"}], None),  # malformed count → "?"
+    ],
+)
+def test_acoustid_release_track_count(medium_list, expected):
+    from cdda2img.acoustid_lookup import _release_track_count
+
+    assert _release_track_count({"medium-list": medium_list}) == expected
+
+
+def test_acoustid_chain_populates_trk_from_media_include():
+    """The "media" include (valid for recordings) supplies each release's
+    per-medium track count → DiscMeta.track_count, the menu's Trk column and
+    the album-vs-single cue. Zero extra requests — folded into the one call."""
+    from pathlib import Path
+
+    from cdda2img import acoustid_lookup
+
+    match_data = [(0.9, "rec-uuid-1", "Title", "Artist")]
+    mb_resp = _mb_recording_response(
+        "rec-uuid-1", "Title", "Artist", "rel-1", "Album", "1989"
+    )
+    mb_resp["recording"]["release-list"][0]["medium-list"] = [{"track-count": "2"}]
+
+    with (
+        patch.dict("os.environ", {"ACOUSTID_API_KEY": "fake"}),
+        patch("acoustid.match", return_value=iter(match_data)),
+        patch("musicbrainzngs.get_recording_by_id", return_value=mb_resp) as gr,
+    ):
+        results = acoustid_lookup.fingerprint_and_lookup(Path("/fake/track.wav"))
+
+    assert "media" in gr.call_args.kwargs["includes"]
+    assert results[0].track_count == 2  # 2-track single → distinguishable
+
+
 def test_acoustid_fingerprint_falls_back_on_mb_failure():
     """When the MB follow-up fails, a basic DiscMeta from AcoustID data is returned."""
     from pathlib import Path

@@ -53,6 +53,30 @@ def unavailability_reason() -> str:
     return ""
 
 
+def _release_track_count(release: dict) -> int | None:
+    """Total track count for an MB release dict fetched with inc=media.
+
+    Sums the per-medium ``track-count`` from the ``medium-list`` (the field the
+    recording→releases+media lookup populates — there is no release-level
+    ``medium-track-count`` on this endpoint). Returns None when no medium
+    carries a usable count, so the menu shows "?" rather than a wrong number.
+    This is the album-vs-single cue for AcoustID rows (Type is unavailable —
+    see the release loop): a 2-track single reads "2", an album reads "12".
+    """
+    total = 0
+    seen = False
+    for md in release.get("medium-list") or []:
+        tc = md.get("track-count")
+        if tc:
+            try:
+                total += int(tc)
+            except (ValueError, TypeError):
+                continue
+            else:
+                seen = True
+    return total if seen else None
+
+
 def _chain_to_mb(top: list, *, verbose: bool = False) -> list[DiscMeta]:
     """Query MusicBrainz for each (score, recording_id, title, artist) tuple in *top*.
 
@@ -70,7 +94,11 @@ def _chain_to_mb(top: list, *, verbose: bool = False) -> list[DiscMeta]:
         try:
             mb_result = musicbrainzngs.get_recording_by_id(
                 recording_id,
-                includes=["artists", "releases", "isrcs"],
+                # "media" folds into this same request (zero extra queries) and
+                # carries each release's per-medium track count — the Trk column
+                # / album-vs-single cue. ("release-groups" is NOT valid here, so
+                # primary type / the Type column stays unavailable; see below.)
+                includes=["artists", "releases", "isrcs", "media"],
             )
         except Exception as exc:
             log.debug("MB recording lookup for %s failed: %s", recording_id, exc)
@@ -139,8 +167,10 @@ def _chain_to_mb(top: list, *, verbose: bool = False) -> list[DiscMeta]:
                     # release-group, which the recording endpoint will not embed
                     # ("release-groups" is not a valid include there, and the
                     # release's embedded release-group stub comes back empty
-                    # under inc=releases). So Type stays "?" for AcoustID rows —
-                    # an honest unknown, like the Trk column.
+                    # under inc=releases). So the Type column stays "?" for
+                    # AcoustID rows — but Trk (below) supplies the album-vs-
+                    # single cue from the inc=media track count.
+                    track_count=_release_track_count(release),
                     source="acoustid",
                     tracks=[
                         TrackMeta(title=rec_title, performer=rec_artist, isrc=isrc)
