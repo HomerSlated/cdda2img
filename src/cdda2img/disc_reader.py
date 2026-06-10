@@ -16,6 +16,9 @@ from pathlib import Path
 from typing import TYPE_CHECKING, NamedTuple
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
+    from cdda2img.cdrdao_progress import ProgressUpdate
     from cdda2img.rbi_format import RBIDisc
 
 log = logging.getLogger(__name__)
@@ -34,6 +37,15 @@ _PARANOIA_FLAGS: dict[str, list[str]] = {
 # Matches track table rows from 'cd-paranoia -Q' output (all on stderr).
 # Example: "  1.    24337 [05:24.37]        0 [00:00.00]    no   no  2"
 _TRACK_RE = re.compile(r"^\s+(\d+)\.\s+(\d+)\s+\[[\d:.]+\]\s+(\d+)")
+
+# TUI progress on the fallback path is derived from the growing output WAV's
+# size, not cd-paranoia's stderr meter (which redraws one line with '\r' and
+# reports non-monotonic sectors during paranoia re-reads — unparseable
+# line-by-line). File size is monotonic, format-agnostic, version-proof; it
+# requires only that cd-paranoia stream the WAV, which it does.
+_WAV_HEADER_BYTES = 44
+_CD_FRAME_BYTES = 2352  # one CD frame = 588 stereo s16 sample pairs
+_PARANOIA_POLL_S = 0.3
 
 # ---------------------------------------------------------------------------
 # Public types
@@ -126,6 +138,7 @@ def rip_disc(
     *,
     paranoia: str = "overlap",
     read_offset: int = 0,
+    progress_cb: Callable[[ProgressUpdate], None] | None = None,
 ) -> RipInfo:
     """Rip all audio from *device* to *output_pcm* (raw s16le PCM).
 
@@ -137,8 +150,12 @@ def rip_disc(
     *read_offset* is applied via cd-paranoia's ``-O`` flag so the output PCM
     is offset-corrected at rip time (corrected audio stored directly in the RBI).
 
+    *progress_cb*, when given, receives a :class:`ProgressUpdate` derived from the
+    growing output-file size (see :func:`_run_paranoia_with_progress`) — used to
+    drive the TUI progress bar on the fallback path. When None, cd-paranoia's
+    output passes through to the terminal directly (unchanged behaviour).
+
     Returns a RipInfo with the skeleton RBIDisc and raw TOC data for CDDB lookup.
-    cd-paranoia progress output passes through to the terminal directly.
     """
     from cdda2img.container import wav_to_raw_pcm
 
@@ -164,10 +181,18 @@ def rip_disc(
         "1-",
         str(wav_path),
     ]  # LINT-012
+    total_sectors = disc_last - disc_first + 1
     try:
-        result = subprocess.run(cmd)  # noqa: S603  # LINT-012
-        if result.returncode != 0:
-            msg = f"cd-paranoia exited with code {result.returncode} — rip failed or incomplete"
+        if progress_cb is None:
+            returncode = subprocess.run(cmd).returncode  # noqa: S603  # LINT-012
+        else:
+            returncode = _run_paranoia_with_progress(
+                cmd, wav_path, total_sectors, tracks, disc_first, progress_cb
+            )
+        if returncode != 0:
+            msg = (
+                f"cd-paranoia exited with code {returncode} — rip failed or incomplete"
+            )
             raise RuntimeError(msg)
         wav_to_raw_pcm(wav_path, output_pcm)
     finally:
@@ -176,3 +201,68 @@ def rip_disc(
     disc = _build_rbi_disc(disc_first, tracks)
     track_lsns = [first_lsn for _, first_lsn, _ in tracks]
     return RipInfo(disc=disc, track_lsns=track_lsns, disc_last_lsn=disc_last)
+
+
+def _sector_to_track(tracks: list[tuple[int, int, int]], sector: int) -> int:
+    """Map an absolute LSN to its 1-based track number (clamped to the disc).
+
+    *tracks* is the (num, first_lsn, length) list from :func:`query_disc`.
+    """
+    track = tracks[0][0]
+    for num, first_lsn, length in tracks:
+        if sector >= first_lsn:
+            track = num
+        if first_lsn <= sector < first_lsn + length:
+            return num
+    return track
+
+
+def _run_paranoia_with_progress(
+    cmd: list[str],
+    wav_path: Path,
+    total_sectors: int,
+    tracks: list[tuple[int, int, int]],
+    disc_first: int,
+    progress_cb: Callable[[ProgressUpdate], None],
+) -> int:
+    """Run cd-paranoia, emitting ProgressUpdate from the growing output-file size.
+
+    Polls ``wav_path``'s size every _PARANOIA_POLL_S seconds and converts
+    bytes → sectors → ProgressUpdate, rather than parsing cd-paranoia's stderr
+    meter. stdout/stderr are discarded: the meter is unparseable, and an
+    undrained PIPE would deadlock the child once its buffer fills. Returns the
+    process exit code.
+    """
+    from cdda2img.cdrdao_progress import ProgressUpdate
+
+    n_tracks = len(tracks)
+
+    def emit(sectors_done: int) -> None:
+        sectors_done = max(0, min(sectors_done, total_sectors))
+        progress_cb(
+            ProgressUpdate(
+                track=_sector_to_track(tracks, disc_first + sectors_done),
+                n_tracks=n_tracks,
+                elapsed_frames=sectors_done,
+                total_frames=total_sectors,
+            )
+        )
+
+    proc = subprocess.Popen(  # noqa: S603  # LINT-012
+        cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+    )
+    while True:
+        try:
+            proc.wait(timeout=_PARANOIA_POLL_S)
+        except subprocess.TimeoutExpired:
+            try:
+                size = wav_path.stat().st_size
+            except OSError:
+                continue
+            emit((size - _WAV_HEADER_BYTES) // _CD_FRAME_BYTES)
+        else:
+            break
+
+    if proc.returncode == 0:
+        emit(total_sectors)  # close the bar at 100%
+    return proc.returncode

@@ -1763,7 +1763,11 @@ def _rip_with_fallback(
             print("  Falling back to cd-paranoia (paranoia=full) ...")
         _ui_status(ui, "cd-paranoia (full paranoia)…")
         return rip_disc(
-            device, output_pcm, paranoia="full", read_offset=read_offset
+            device,
+            output_pcm,
+            paranoia="full",
+            read_offset=read_offset,
+            progress_cb=progress_cb,
         ), "cd-paranoia"
 
 
