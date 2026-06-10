@@ -232,6 +232,7 @@ Public documentation and research in `docs/`:
 - `docs/research/NONSPEC.md` — non-spec / real-world disc behaviour notes
 - `docs/research/OFE.md` — offset/framing error notes
 - `docs/research/REPLAYGAIN.md` — ReplayGain / EBU R128 research
+- `docs/research/RIP-ENGINE-BENCHMARK.md` — cdrdao vs cd-paranoia rip-speed / paranoia-level benchmark (clean disc)
 - `docs/research/IEC_60908-1999.pdf.txt` — link to IEC web store for purchasing the Red Book standard
 - `docs/research/Redump-Optical_Disc_Drives_CD_Compatibility_Technical_Details.txt` — Redump drive compatibility data
 - `docs/research/spoons-audio-guide-cd-ripping.txt` — Spoons' audio CD ripping guide
@@ -331,8 +332,14 @@ needed (see AccurateRip validation below).
   ```
 
 - Output format flags: `-r` = s16le, `-R` = s16be, `-w` = WAV. Span `1-` = all tracks.
-- `-Z` disables all paranoia (no scratch detection or repair). There is no intermediate mode
-  in libcdio-paranoia equivalent to cdparanoia's `-Y`/`-X`.
+- Three paranoia levels, all present in libcdio-paranoia (verified against the installed
+  `cdparanoia III release 10.2 libcdio 2.1.0`) and mapped in `disc_reader.py:_PARANOIA_FLAGS`:
+  `-Z` (`--disable-paranoia`, all checking off — `"off"`), `-Y` (`--disable-extra-paranoia`,
+  cdda2wav-style overlap/jitter checking only — `"overlap"`), and no flag (full paranoia with
+  scratch detection + repair — `"full"`). `-X` (`--abort-on-skip`) also exists. (Earlier note
+  claiming `-Y`/`-X` are absent here was wrong — corrected 2026-06-10.)
+- Measured on a clean disc: `-Y` ran ~1.77× slower than cdrdao `--paranoia-mode 3` (244 s vs
+  138 s) — the cost is overlap re-reads, not better recovery; same paranoia-algorithm ceiling.
 - The fallback currently uses `paranoia="full"`. A two-pass approach (fast `-Z` pass →
   AccurateRip validation → full paranoia only on failure) is the intended future refinement
   for this path.
