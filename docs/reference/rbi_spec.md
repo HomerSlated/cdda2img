@@ -22,6 +22,7 @@ RBI is deliberately CD-DA-only. It does not attempt to represent raw physical se
 | v2.0    | Header grew to 169 bytes; added RG block in TOC/PCM gap |
 | v3.0    | Added per-track pre-gap storage and ISRC in TOC; breaking change from v2 |
 | v4.0    | Redesigned around extensible block directory; provenance moved out of TOC; new PROV, ARIP, RLOG block types |
+| v4.1    | Added optional ART block (embedded front-cover image, JPEG) and the `art_source` / `lookup_status_art` PROV keys; backwards-compatible minor bump |
 
 ---
 
@@ -63,6 +64,7 @@ RBI is deliberately CD-DA-only. It does not attempt to represent raw physical se
 │    RGDB block  — EBU R128 ReplayGain data (optional)    │
 │    ARIP block  — AccurateRip results (optional)         │
 │    RLOG block  — rip log text (optional)                │
+│    ART  block  — front-cover image, JPEG (optional)     │
 │    CTDB block  — CUETools DB results (optional, reserved) │
 ├─────────────────────────────────────────────────────────┤
 │  BLOCK DIRECTORY (dir_count × 54 bytes)                 │
@@ -87,7 +89,7 @@ All multi-byte integer fields are **little-endian** unless otherwise noted.
 |--------|-------------|-----------|-------------------|-------------|
 | 0      | 8           | bytes     | `magic`           | `RBIMAGE\x00` (0x52 0x42 0x49 0x4D 0x41 0x47 0x45 0x00) |
 | 8      | 1           | uint8     | `version_major`   | Format major version; current value: `4` |
-| 9      | 1           | uint8     | `version_minor`   | Format minor version; current value: `0` |
+| 9      | 1           | uint8     | `version_minor`   | Format minor version; current value: `1` (was `0` before the ART block; see version history) |
 | 10     | 4           | uint32 LE | `flags`           | Feature bitmask (see §4.2); currently only `FLAG_MASTER_MODE` defined |
 | 14     | 1           | uint8     | `track_count`     | Number of audio tracks (1–99) |
 | 15     | 1           | uint8     | `disc_number`     | This disc's position in a set (1-based; `1` for single discs) |
@@ -149,6 +151,7 @@ All other bits are reserved and **MUST** be `0`. The required blocks (`TOC ` and
 | `b"RGDB"`    | ReplayGain block | No       | Yes               | EBU R128 / ReplayGain 2.0 data (binary) |
 | `b"ARIP"`    | AccurateRip block| No       | Yes               | AccurateRip verification results (binary) |
 | `b"RLOG"`    | Rip log block    | No       | Yes               | Structured rip log text (UTF-8) |
+| `b"ART "`    | Album-art block  | No       | Yes               | Embedded front-cover image, JPEG (binary; see §6.8) |
 | `b"CTDB"`    | CUETools DB      | No       | Yes               | CUETools database results (RESERVED — format not yet defined) |
 
 A conforming v4.0 writer **MUST NOT** write more than one entry of a given `type_id`. A conforming reader **MUST** reject a file containing duplicate `type_id` entries for any required block (`TOC ` or `PCM `); for optional blocks, it **SHOULD** use the first entry and warn.
@@ -340,6 +343,7 @@ The PROV block stores provenance and extended metadata that has no natural home 
 | `mb_release_id`            | MusicBrainz release UUID, e.g. `9d8f7a02-3851-4c49-9dc4-b08e7cb0ad7c` |
 | `mb_release_group_id`      | MusicBrainz release-group UUID (used to re-run the original-release lookup from an existing RBI without redoing the disc-ID query) |
 | `discogs_release_id`       | Discogs release ID (integer as decimal string) |
+| `art_source`               | Origin of the embedded ART-block image, as `<source>:<scope>:<id>`. Values: `caa:release-group:<uuid>`, `caa:release:<uuid>`, `discogs:<id>`, or `file:embedded` (cover lifted from a source file's tags during `create`). Emitted only when an ART block is present. Records the **confirmed** (post-menu) identifier the embedded art was fetched against, so a reader can detect art-vs-metadata drift. |
 | `duration_match_release`   | MusicBrainz release UUID, or `?` if the matched release carried no id. Emitted only when the stage-7 last-resort duration matcher fired — i.e. no higher source (CD-Text / MB disc-ID / Discogs / AcoustID / CDDB) identified the release in MB, and a text-search candidate's total duration matched the physical disc within tolerance. The lowest-trust identifier in the container; treat as a best guess pending user confirmation. |
 | `multi_match_isrc_disambiguated` | `YES`. Present when MB disc-ID returned >1 match and the in-memory ISRC tally (R1) picked a strictly-winning candidate. Absent when N=1 (no disambiguation needed) or when N>1 and the tally was a tie / sub-threshold. |
 | `arip_transport`           | `https` \| `http`. Emitted whenever at least one AccurateRip fetch attempt reached the server (any 2xx/4xx). `http` indicates the HTTPS attempt failed and the fetcher fell back to plaintext — readers SHOULD treat the confidence values with reduced trust. |
@@ -353,6 +357,7 @@ The PROV block stores provenance and extended metadata that has no natural home 
 | `lookup_status_mb`         | As `lookup_status_cddb`, for MusicBrainz disc-ID. |
 | `lookup_status_discogs`    | As `lookup_status_cddb`, for Discogs. `disabled` covers both R10 offline mode and the absence of a `DISCOGS_TOKEN`. |
 | `lookup_status_acoustid`   | As `lookup_status_cddb`, for AcoustID. `disabled` covers R10 offline mode, the absence of an `ACOUSTID_API_KEY`, and missing pyacoustid / libchromaprint. |
+| `lookup_status_art`        | As `lookup_status_cddb`, for the album-art fetch. `OK` = an image was retrieved and embedded; `empty` = no source carried cover art; `down` = network/decode error; `disabled` = R10 offline mode (no live fetch attempted — a cover already embedded from source-file tags may still be present). |
 
 All keys are optional. A v4.0 writer **SHOULD** emit at minimum `creator` and `created`. A reader **MUST NOT** fail on a missing key.
 
@@ -560,13 +565,64 @@ The `CTDB` type identifier is registered to store CUETools Database (CTDB) verif
 
 ---
 
+### 6.8 ART Block (`b"ART "`)
+
+The ART block stores a single embedded front-cover image for the disc. Added in
+format v4.1; a v4.0 reader treats it as an unrecognised block and skips it
+(`BLOCK_FLAG_SKIP` is mandatory). At most one ART block may be present.
+
+The stored image is **always JPEG** and is kept at the **source resolution** of
+the fetched cover (the largest derivative available) — no downscaling is applied
+on the way in. Consumers that need a smaller image (terminal preview, a per-track
+FLAC `PICTURE` block) downscale a working copy at use time; the block itself is
+the full-quality master.
+
+#### 6.8.1 Binary layout
+
+**Block header (10 bytes):**
+
+| Offset | Size | Type      | Field          | Description |
+|--------|------|-----------|----------------|-------------|
+| 0      | 1    | uint8     | `art_version`  | ART block format version; current value: `1` |
+| 1      | 1    | uint8     | `image_format` | Image codec: `1` = JPEG (the only value defined in v4.1) |
+| 2      | 2    | uint16 LE | `width`        | Image width in pixels; `0` = unknown / not recorded |
+| 4      | 2    | uint16 LE | `height`       | Image height in pixels; `0` = unknown / not recorded |
+| 6      | 4    | uint32 LE | `image_length` | Length of `image_data` in bytes |
+
+**Image payload:**
+
+| Offset | Size           | Type  | Field        | Description |
+|--------|----------------|-------|--------------|-------------|
+| 10     | `image_length` | bytes | `image_data` | Encoded image bytes (JPEG when `image_format == 1`) |
+
+**Total block size:** `10 + image_length` bytes.
+
+`image_length` is redundant with the directory entry's `length` field
+(`length == 10 + image_length`); it is stored explicitly so the payload is
+self-describing and a reader can validate the two against each other.
+
+#### 6.8.2 Format and provenance
+
+A conforming v4.1 writer **MUST** store the image as JPEG (`image_format == 1`),
+transcoding from any other source format on ingest, and **MUST** set
+`BLOCK_FLAG_SKIP`. `width` / `height` are best-effort: a writer that cannot
+cheaply determine the dimensions **MAY** write `0` for both.
+
+The image's origin — the **confirmed** (post-metadata-menu) identifier it was
+fetched against — is recorded in the PROV block's `art_source` key (§6.3.1), not
+in the ART block. The embedded image always reflects the user-confirmed release;
+the cosmetic pre-rip preview may have shown a different best-guess cover, which is
+never persisted.
+
+---
+
 ## 7. Validation Rules
 
-A conforming v4.0 reader **MUST** enforce (27 rules):
+A conforming reader **MUST** enforce (30 rules):
 
 1. `magic == b'RBIMAGE\x00'`
 2. `version_major == 4` (reject if not equal)
-3. `version_minor == 0` (warn if greater; MAY attempt to read as minor increments are intended to be backwards-compatible)
+3. `version_minor` known to this revision is `0`–`1`; a reader **MUST** warn (not reject) when `version_minor` exceeds the highest minor it understands, and **MAY** attempt to read, since minor increments are intended to be backwards-compatible
 4. `flags & ~0x00000004 == 0` (all bits except `FLAG_MASTER_MODE` reserved; reject if any unknown odd-position flag bit is set)
 5. `reserved == b'\x00' × 7`
 6. `1 <= track_count <= 99`
@@ -591,6 +647,9 @@ A conforming v4.0 reader **MUST** enforce (27 rules):
 25. ARIP block (if present): `length == 13 + 15 × track_count`
 26. ARIP block (if present): all `status` values are in the range `0`–`2`
 27. RLOG block (if present): last line matches `SHA-256: [0-9a-f]{64}` (optional integrity check; warn on mismatch)
+28. ART block (if present): `length >= 10` (room for the fixed ART header)
+29. ART block (if present): `image_length == length − 10`
+30. ART block (if present): `image_format` is a recognised value (`1` = JPEG); a reader **SHOULD** warn and skip the block on an unrecognised value rather than reject the file (the block carries `BLOCK_FLAG_SKIP`)
 
 ---
 

@@ -247,6 +247,11 @@ def parse_args() -> argparse.Namespace:
     )
     x.add_argument("--log", action="store_true", help="Extract rip log to <stem>.log")
     x.add_argument(
+        "--albumart",
+        action="store_true",
+        help="Extract album art sidecar ({stem}.jpg with --raw, folder.jpg with --tracks)",
+    )
+    x.add_argument(
         "--all",
         action="store_true",
         dest="all_blocks",
@@ -301,7 +306,7 @@ def parse_args() -> argparse.Namespace:
         "--preview",
         action=argparse.BooleanOptionalAction,
         default=None,
-        help="Play track 1 on a loop in the background during rip (default: from config, true)",
+        help="Show album art + disc title before rip starts, and play track 1 in the background (default: from config, true)",
     )
     r_cmd.add_argument(
         "--tui",
@@ -555,9 +560,22 @@ def create_image(
 
             populate_original_release(disc)
 
+            import sys
+
+            from cdda2img.album_art import (
+                cover_from_file_tags,
+                render_cover,
+                to_album_art,
+            )
+
+            _art_raw = cover_from_file_tags(batch[0]) if batch else None
+            if _art_raw is not None and sys.stdin.isatty():
+                render_cover(_art_raw)
+
             from cdda2img.metadata_menu import run_metadata_menu
 
             disc = run_metadata_menu(disc, source_wavs=source_wavs, tui=tui)
+            album_art = to_album_art(_art_raw) if _art_raw is not None else None
 
             raw_titles = [re.sub(r"^\d{1,2}[-. ]+", "", p.stem) for p in batch]
 
@@ -595,6 +613,7 @@ def create_image(
                 rg_block=rg_block,
                 prov_data=provenance,
                 extra_flags=container_flags,
+                album_art=album_art,
             )
             from cdda2img.catalogue import register_rbi
 
@@ -1436,6 +1455,21 @@ def _finalize_import(
     if ui is not None:
         ui.resume()
 
+    # Fetch and embed album art using the confirmed post-menu MB IDs.
+    from cdda2img.album_art import fetch_cover, to_album_art
+    from cdda2img.config import is_no_network_active
+
+    _ui_status(ui, "Fetching album art…")
+    _art_raw = fetch_cover(disc)
+    album_art = to_album_art(_art_raw) if _art_raw is not None else None
+    if album_art is not None:
+        provenance["art_source"] = _art_raw.source  # type: ignore[union-attr]
+        provenance["lookup_status_art"] = "OK"
+    elif is_no_network_active():
+        provenance["lookup_status_art"] = "disabled"
+    else:
+        provenance["lookup_status_art"] = "empty"
+
     if output is None:
         new_stem = sanitize_title(disc.album)
         if new_stem:
@@ -1468,6 +1502,7 @@ def _finalize_import(
         prov_data=provenance,
         extra_flags=FLAG_MASTER_MODE,
         quiet=ui is not None,
+        album_art=album_art,
     )
     # register_rbi() has interactive input() prompts — pause TUI before handing
     # the terminal over so they're visible. No resume needed; this is the last step.
@@ -1671,23 +1706,29 @@ def _disc_preview_label(disc) -> str:
     return f"{album} - {artist}" if artist else album
 
 
-def _start_disc_preview(device: str, ui: TerminalUI) -> None:
+def _start_disc_preview(
+    device: str, ui: TerminalUI, disc: RBIDisc | None = None
+) -> None:
     """Show a best-guess disc title in the TUI header (preview pipeline only).
 
-    Runs the drive-bound fast TOC scan synchronously (it must finish before the
-    track-1 grab — single drive), then resolves the title on a background thread
-    so the network MusicBrainz lookup overlaps the track-1 grab. The header line
-    starts as ``Disc: (identifying…)`` and is repainted once the lookup returns.
+    Accepts an already-scanned *disc* to avoid a second drive round-trip when
+    the caller has already run ``_fast_scan_disc``. When *disc* is None the scan
+    runs here. Resolves the label on a background thread so the MB lookup overlaps
+    the track-1 grab. The header starts as ``Disc: (identifying…)`` and is
+    repainted once the lookup returns.
     """
     ui.set_header([_fmt_kv("Disc", "(identifying…)")])
-    disc = _fast_scan_disc(device)
+    if disc is None:
+        disc = _fast_scan_disc(device)
     if disc is None:
         ui.set_header([])  # nothing to show — drop the line
         return
 
+    _disc = disc  # capture for closure — disc may be rebound in caller
+
     def _worker() -> None:
         try:
-            label = _disc_preview_label(disc)
+            label = _disc_preview_label(_disc)
         except Exception as exc:
             log.debug("disc preview lookup failed: %s", exc)
             label = "(unknown)"
@@ -1703,9 +1744,12 @@ def _start_track_preview(
 
     Cosmetic only — start_preview() swallows every failure and returns None,
     so the rip is never affected. Returns None when *enabled* is False (--no-preview)
-    or when there is no TUI session to host the progress display.
+    or when stdout is not an interactive TTY (e.g. piped output, CI).
+    Works with or without the TUI — the progress callback is None when ui is None.
     """
-    if not enabled or ui is None:
+    import sys
+
+    if not enabled or not sys.stdin.isatty():
         return None
     from cdda2img.track_preview import start_preview
 
@@ -1813,6 +1857,70 @@ def rip_image(  # noqa: C901
     temp_base = resolve_temp_dir()
     temp = TempFiles(temp_base)
 
+    # Pre-TUI one-shot banner: fast disc scan + background MB/art fetch, then render
+    # the cover on the main thread before the TUI starts. The TUI does not use an
+    # alternate screen buffer, so art printed here stays visible above the TUI rows.
+    _preview_disc: RBIDisc | None = None
+    _preview_result: dict = {}
+    if preview and sys.stdin.isatty():
+        _preview_disc = _fast_scan_disc(device)
+
+    if _preview_disc is not None and preview:
+
+        def _preview_worker() -> None:
+            from collections import Counter
+
+            from cdda2img.album_art import fetch_cover
+            from cdda2img.mb_lookup import lookup_disc_id
+
+            try:
+                disc_p = _preview_disc
+                matches = lookup_disc_id(disc_p)  # type: ignore[arg-type]
+                if disc_p.album:  # type: ignore[union-attr]
+                    label = (
+                        f"{disc_p.album} - {disc_p.artist}"  # type: ignore[union-attr]
+                        if disc_p.artist  # type: ignore[union-attr]
+                        else disc_p.album  # type: ignore[union-attr]
+                    )
+                elif matches:
+                    pairs = [(m.album, m.artist) for m in matches if m.album]
+                    if pairs:
+                        album_g, artist_g = Counter(pairs).most_common(1)[0][0]
+                        label = f"{album_g} - {artist_g}" if artist_g else album_g
+                    else:
+                        label = "(unknown)"
+                else:
+                    label = "(unknown)"
+                # Prefer release-group for art; fall back to release.
+                best_rg = next(
+                    (m.mb_release_group_id for m in matches if m.mb_release_group_id),
+                    None,
+                )
+                best_r = next(
+                    (m.mb_release_id for m in matches if m.mb_release_id), None
+                )
+                disc_for_art = replace(
+                    disc_p,  # type: ignore[arg-type]
+                    mb_release_group_id=best_rg,
+                    mb_release_id=best_r,
+                )
+                _preview_result["label"] = label
+                _preview_result["art"] = fetch_cover(disc_for_art)
+            except Exception as exc:
+                log.debug("pre-TUI preview worker: %s", exc)
+
+        _t = threading.Thread(target=_preview_worker, daemon=True)
+        _t.start()
+        _t.join(timeout=5.0)
+        # Main thread renders — race-free (thread is done or timed out; no concurrent stdout).
+        from cdda2img.album_art import render_cover
+
+        _banner_art = _preview_result.get("art")
+        _banner_label = _preview_result.get("label", "(unknown)")
+        if _banner_art is not None:
+            render_cover(_banner_art, left_pad=3)
+        print(_fmt_kv("Disc", _banner_label))
+
     ui: TerminalUI | None = None
     if tui and sys.stdin.isatty():
         from cdda2img.terminal_ui import TerminalUI as _TUI
@@ -1821,10 +1929,6 @@ def rip_image(  # noqa: C901
 
     track_preview: TrackPreview | None = None
     try:
-        # Cosmetic disc-title preview (preview pipeline only): fast TOC scan now
-        # (drive-bound, must precede the track-1 grab), MB lookup in background.
-        if preview and ui is not None:
-            _start_disc_preview(device, ui)
         # Grab track 1 first (drive is single-use), then play it on a loop in
         # the background while the rest of the rip runs.
         track_preview = _start_track_preview(device, temp_base, ui, enabled=preview)
@@ -1982,6 +2086,7 @@ def extract_image(
     ar: bool,
     log: bool,
     all_blocks: bool,
+    albumart: bool = False,
     normalize: bool = False,
     output: Path | None = None,
 ) -> None:
@@ -1995,7 +2100,7 @@ def extract_image(
     else:
         base_dir = Path.cwd() / "extracted"
 
-    use_all = all_blocks or not (raw or tracks or rg or ar or log)
+    use_all = all_blocks or not (raw or tracks or rg or ar or log or albumart)
     if use_all:
         opts = ExtractOptions(
             raw=True,
@@ -2003,6 +2108,7 @@ def extract_image(
             rg=True,
             ar=True,
             log=True,
+            albumart=True,
             normalize=normalize,
             warn_missing=False,
         )
@@ -2013,6 +2119,7 @@ def extract_image(
             rg=rg,
             ar=ar,
             log=log,
+            albumart=albumart,
             normalize=normalize,
             warn_missing=True,
         )
@@ -2166,6 +2273,7 @@ def _dispatch(args: argparse.Namespace) -> None:
             ar=args.ar,
             log=args.log,
             all_blocks=args.all_blocks,
+            albumart=args.albumart,
             normalize=args.normalize,
             output=args.output,
         )

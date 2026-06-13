@@ -50,12 +50,6 @@ uv run python -m cdda2img extract <file.rbi> --tracks --raw  # both
 uv run python -m cdda2img list <file.rbi>
 uv run python -m cdda2img test <file.rbi>
 
-# Offline mode (R10): disable every remote metadata lookup
-# (CDDB / MB / Discogs / AcoustID / AccurateRip). Composes with R7's
-# cache to reproduce a previously-seen disc's metadata without network.
-uv run python -m cdda2img --no-network-services rip
-uv run python -m cdda2img --no-network-services import disc.toc
-
 # Run tests
 uv run pytest tests/
 

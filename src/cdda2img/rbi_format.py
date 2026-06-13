@@ -17,7 +17,7 @@ from dataclasses import dataclass, field
 
 MAGIC: bytes = b"RBIMAGE\x00"  # 8 bytes; null byte prevents text false-matches
 VERSION_MAJOR: int = 4
-VERSION_MINOR: int = 0
+VERSION_MINOR: int = 1  # v4.1: added the optional ART block (see rbi_spec.md §6.8)
 
 # ---------------------------------------------------------------------------
 # Red Book audio constraints (IEC 60908:1999)
@@ -40,7 +40,7 @@ CD_FRAMES_PER_SECOND: int = 75  # Red Book frame rate
 # ------  ----  ----          -----
 #      0     8  bytes         magic             b'RBIMAGE\x00'
 #      8     1  uint8         version_major     4
-#      9     1  uint8         version_minor     0
+#      9     1  uint8         version_minor     1
 #     10     4  uint32 LE     flags             feature bitmask
 #     14     1  uint8         track_count       1-99
 #     15     1  uint8         disc_number       1-based position in set
@@ -116,6 +116,18 @@ ARIP_STATUS_NOT_IN_DB: int = 0
 ARIP_STATUS_MISMATCH: int = 1
 ARIP_STATUS_OK: int = 2
 
+# ART block struct (see rbi_spec.md §6.8); JPEG payload follows the fixed header.
+# Header: art_version(B), image_format(B), width(H), height(H), image_length(I)
+ART_HEADER_STRUCT: str = "<BBHHI"
+ART_HEADER_SIZE: int = struct.calcsize(ART_HEADER_STRUCT)  # 10 bytes
+
+assert ART_HEADER_SIZE == 10, (  # noqa: S101  # LINT-005
+    f"ART_HEADER_STRUCT size {ART_HEADER_SIZE} != 10"
+)
+
+ART_BLOCK_VERSION: int = 1
+ART_IMAGE_FORMAT_JPEG: int = 1  # the only image_format defined in v4.1
+
 # Placeholder checksum used when pre-writing directory entries
 CHECKSUM_SIZE: int = 32  # SHA-256 digest length in bytes
 CHECKSUM_PLACEHOLDER: bytes = b"\x00" * CHECKSUM_SIZE
@@ -130,6 +142,7 @@ BLOCK_TYPE_PROV: bytes = b"PROV"
 BLOCK_TYPE_RGDB: bytes = b"RGDB"
 BLOCK_TYPE_ARIP: bytes = b"ARIP"
 BLOCK_TYPE_RLOG: bytes = b"RLOG"
+BLOCK_TYPE_ART: bytes = b"ART "  # trailing space: 4-byte identifier
 BLOCK_TYPE_CTDB: bytes = b"CTDB"
 
 # ---------------------------------------------------------------------------
@@ -231,6 +244,23 @@ class RBIArip:
     disc_id2: int  # uint32 LE
     cddb_id: int  # uint32 LE
     tracks: list[RBIAripTrack] = field(default_factory=list)
+
+
+@dataclass
+class RBIAlbumArt:
+    """Parsed ART block from an RBI container (rbi_spec.md §6.8).
+
+    The stored image is the full-resolution JPEG master; downscaling for the
+    terminal preview or a per-track FLAC PICTURE block happens at use time.
+    ``width``/``height`` are best-effort (0 = unknown); ``image_length`` is not
+    stored separately — it is ``len(image_data)``.
+    """
+
+    art_version: int  # uint8; current value: ART_BLOCK_VERSION
+    image_format: int  # uint8; ART_IMAGE_FORMAT_JPEG
+    width: int  # uint16; pixels, 0 = unknown
+    height: int  # uint16; pixels, 0 = unknown
+    image_data: bytes  # encoded image bytes (JPEG when image_format == 1)
 
 
 @dataclass

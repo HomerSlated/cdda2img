@@ -18,8 +18,12 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from cdda2img.rbi_format import (
+    ART_HEADER_SIZE,
+    ART_HEADER_STRUCT,
+    ART_IMAGE_FORMAT_JPEG,
     BLOCK_FLAG_SKIP,
     BLOCK_TYPE_ARIP,
+    BLOCK_TYPE_ART,
     BLOCK_TYPE_CTDB,
     BLOCK_TYPE_PCM,
     BLOCK_TYPE_PROV,
@@ -40,6 +44,7 @@ from cdda2img.rbi_format import (
     PCM_SAMPLE_RATE,
     VERSION_MAJOR,
     VERSION_MINOR,
+    RBIAlbumArt,
     RBIDirEntry,
     RBIDisc,
     RBIHeader,
@@ -178,6 +183,37 @@ def build_prov_block(data: dict[str, str]) -> bytes:
     ).encode("utf-8")
 
 
+def pack_art_block(art: RBIAlbumArt) -> bytes:
+    """Serialise an RBIAlbumArt to the on-disk ART block bytes (header + payload)."""
+    header = struct.pack(
+        ART_HEADER_STRUCT,
+        art.art_version,
+        art.image_format,
+        art.width,
+        art.height,
+        len(art.image_data),
+    )
+    return header + art.image_data
+
+
+def unpack_art_block(data: bytes) -> RBIAlbumArt | None:
+    """Deserialise an ART block. Returns None if the header is malformed."""
+    if len(data) < ART_HEADER_SIZE:
+        return None
+    art_version, image_format, width, height, image_length = struct.unpack(
+        ART_HEADER_STRUCT, data[:ART_HEADER_SIZE]
+    )
+    if image_length != len(data) - ART_HEADER_SIZE:
+        return None
+    return RBIAlbumArt(
+        art_version=art_version,
+        image_format=image_format,
+        width=width,
+        height=height,
+        image_data=data[ART_HEADER_SIZE:],
+    )
+
+
 # ---------------------------------------------------------------------------
 # Container writer
 # ---------------------------------------------------------------------------
@@ -192,23 +228,25 @@ def build_container(
     arip_block: bytes | None = None,
     rlog_block: bytes | None = None,
     prov_data: dict[str, str] | None = None,
+    album_art: RBIAlbumArt | None = None,
     extra_flags: int = 0,
     quiet: bool = False,
 ) -> None:
-    """Assemble and write an RBI v4.0 container from raw PCM and TOC data.
+    """Assemble and write an RBI v4.1 container from raw PCM and TOC data.
 
-    Blocks are written in order: TOC → PROV → RGDB → ARIP → RLOG → PCM.  The block
-    directory is appended last, and ``dir_offset`` is patched into the fixed
-    header via a seek after all data is written.
+    Blocks are written in order: TOC → PROV → RGDB → ARIP → RLOG → ART → PCM.
+    The block directory is appended last, and ``dir_offset`` is patched into the
+    fixed header via a seek after all data is written.
 
     *extra_flags* is OR-ed into the flags word. Use FLAG_MASTER_MODE for
     master-mode containers.
     """
     prov_block = build_prov_block(prov_data) if prov_data is not None else None
+    art_block = pack_art_block(album_art) if album_art is not None else None
 
     # TOC + PCM always present; each optional block adds one directory entry.
     dir_count = 2 + sum(
-        b is not None for b in (prov_block, rg_block, arip_block, rlog_block)
+        b is not None for b in (prov_block, rg_block, arip_block, rlog_block, art_block)
     )
 
     header = struct.pack(
@@ -292,6 +330,18 @@ def build_container(
                 rlog_offset,
                 len(rlog_block),
                 sha256_bytes(rlog_block),
+            ))
+
+        # ART block
+        if art_block is not None:
+            art_offset = out.tell()
+            out.write(art_block)
+            dir_entries.append((
+                BLOCK_TYPE_ART,
+                BLOCK_FLAG_SKIP,
+                art_offset,
+                len(art_block),
+                sha256_bytes(art_block),
             ))
 
         # PCM block (streaming to avoid loading the whole file into memory)
@@ -446,6 +496,7 @@ class ExtractOptions:
     rg: bool = False
     ar: bool = False
     log: bool = False
+    albumart: bool = False
     normalize: bool = False
     warn_missing: bool = True
 
@@ -497,6 +548,24 @@ def _gain_from_rg(rg_data: RBIReplayGain) -> float:
     if rg_data.album_peak > 0:
         gf = min(gf, 1.0 / rg_data.album_peak)
     return gf
+
+
+def _extract_art_sidecar(
+    container_file: Path, art_entry: RBIDirEntry, dest: Path
+) -> None:
+    """Read the ART block from *container_file* and write the JPEG payload to *dest*."""
+    with open(container_file, "rb") as f:
+        f.seek(art_entry.offset)
+        art_raw = f.read(art_entry.length)
+    art = unpack_art_block(art_raw)
+    if art is None:
+        print(
+            f"Warning: ART block is malformed — skipping {dest.name}", file=sys.stderr
+        )
+        return
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_bytes(art.image_data)
+    print(f"Album art saved: {dest}")
 
 
 def _measure_gain_from_container(container_file: Path, pcm_offset: int, disc) -> float:
@@ -589,6 +658,7 @@ def extract_data(  # noqa: C901
             )
 
     disc = parse_toc(toc_data)
+    art_entry = header.find_block(BLOCK_TYPE_ART)
 
     _would_write: list[Path] = []
     if opts.raw:
@@ -597,10 +667,16 @@ def extract_data(  # noqa: C901
             base_dir / f"{stem}.bin",
             base_dir / f"{stem}.bin_format.txt",
         ]
+        if opts.albumart and art_entry is not None:
+            _would_write.append(base_dir / f"{stem}.jpg")
+    track_out_paths: list[Path] = []
     if opts.tracks:
-        _would_write += collect_tracks_output_paths(
+        track_out_paths = collect_tracks_output_paths(
             disc, header.disc_number, header.disc_total, base_dir
         )
+        _would_write += track_out_paths
+        if art_entry is not None and track_out_paths:
+            _would_write.append(track_out_paths[0].parent / "folder.jpg")
     if opts.rg and rg_data is not None:
         _would_write.append(base_dir / f"{stem}.rg.json")
     if opts.ar and header.find_block(BLOCK_TYPE_ARIP) is not None:
@@ -640,6 +716,9 @@ def extract_data(  # noqa: C901
         if comment:
             print(f"Created:   {comment}")
         _print_provenance(prov)
+
+        if opts.albumart and art_entry is not None:
+            _extract_art_sidecar(container_file, art_entry, base_dir / f"{stem}.jpg")
 
     if opts.tracks:
         gain_factor: float | None = None
@@ -685,6 +764,10 @@ def extract_data(  # noqa: C901
                 )
                 embed_rg_tags(rg_result, flac_paths)
                 print("ReplayGain tags embedded (computed post-extraction).")
+
+        if art_entry is not None and track_out_paths:
+            folder_jpg = track_out_paths[0].parent / "folder.jpg"
+            _extract_art_sidecar(container_file, art_entry, folder_jpg)
 
     if opts.rg:
         if rg_data is not None:
@@ -804,6 +887,7 @@ _BLOCK_NAMES = {
     BLOCK_TYPE_ARIP: "AccurateRip",
     BLOCK_TYPE_RLOG: "Rip log",
     BLOCK_TYPE_CTDB: "CTDB",
+    BLOCK_TYPE_ART: "Album art",
 }
 
 
@@ -982,6 +1066,17 @@ def _list_info(rbi_file: Path) -> str:  # noqa: C901
         except ValueError:
             pass
 
+    art_entry = header.find_block(BLOCK_TYPE_ART)
+    if art_entry is not None:
+        with open(rbi_file, "rb") as f:
+            f.seek(art_entry.offset)
+            art_raw = f.read(art_entry.length)
+        art = unpack_art_block(art_raw)
+        if art is not None and art.width and art.height:
+            lines.append(f"Album art:           JPEG  {art.width}x{art.height} px")
+        elif art is not None:
+            lines.append(f"Album art:           JPEG  {_fmt_size(len(art.image_data))}")
+
     lines.append("")
 
     with open(rbi_file, "rb") as f:
@@ -1138,7 +1233,10 @@ def verify_container(rbi_file: Path) -> bool:  # noqa: C901
             f"  [WARN] 3. Minor version {version_minor} > {VERSION_MINOR} — proceeding (minor increments are backwards-compatible)"
         )
     else:
-        check("3. Format version minor == 0", version_minor == VERSION_MINOR)
+        check(
+            f"3. Format version minor known (0..{VERSION_MINOR})",
+            version_minor <= VERSION_MINOR,
+        )
 
     unknown_odd_bits = flags & ~FLAG_MASTER_MODE & 0xAAAAAAAA  # odd bit positions
     check(
@@ -1373,6 +1471,34 @@ def verify_container(rbi_file: Path) -> bool:  # noqa: C901
                 all(0 <= s <= 2 for s in statuses),
                 f"invalid: {[s for s in statuses if not 0 <= s <= 2]}",
             )
+
+    # Rules 28-30: ART block
+    art_entry_v = next((e for e in directory if e.type_id == BLOCK_TYPE_ART), None)
+    if art_entry_v is not None:
+        check(
+            "28. ART block length >= 10 (room for fixed header)",
+            art_entry_v.length >= ART_HEADER_SIZE,
+            f"got {art_entry_v.length}",
+        )
+        if art_entry_v.length >= ART_HEADER_SIZE:
+            with open(rbi_file, "rb") as f:
+                f.seek(art_entry_v.offset)
+                art_hdr_raw = f.read(ART_HEADER_SIZE)
+            _, art_img_fmt, _, _, art_img_len = struct.unpack(
+                ART_HEADER_STRUCT, art_hdr_raw
+            )
+            check(
+                "29. ART image_length == block length - 10",
+                art_img_len == art_entry_v.length - ART_HEADER_SIZE,
+                f"header says {art_img_len}, block minus header = {art_entry_v.length - ART_HEADER_SIZE}",
+            )
+            if art_img_fmt != ART_IMAGE_FORMAT_JPEG:
+                print(
+                    f"  [WARN] 30. ART image_format {art_img_fmt} unrecognised"
+                    " — block should be skipped by strict readers"
+                )
+            else:
+                check("30. ART image_format is recognised (1 = JPEG)", True)
 
     total = len(passed) + len(failed)
     print()
