@@ -180,6 +180,15 @@ def _parse_year(date_str: str | None) -> int | None:
     return int(m.group(1)) if m else None
 
 
+def _fmt_datetime(s: str) -> str:
+    """Reformat an ISO 8601 datetime string as RFC 5322 for human display."""
+    try:
+        dt = datetime.fromisoformat(s)
+        return dt.strftime("%a, %d %b %Y %H:%M:%S %z").strip()
+    except (ValueError, TypeError):
+        return s
+
+
 def _ar_status_str(status: int) -> str | None:
     """Map an ARIP_STATUS_* constant to a catalogue status string."""
     from cdda2img.rbi_format import ARIP_STATUS_MISMATCH, ARIP_STATUS_OK
@@ -251,7 +260,7 @@ def _show_duplicate(conn: sqlite3.Connection, dup_id: int) -> None:
     year_str = f" ({year})" if year else ""
     print(f"   Existing: {artist} — {album}{year_str}{disc_str}")
     print(f"     File:       {fpath}")
-    print(f"     Registered: {reg_at[:19]}")
+    print(f"     Registered: {_fmt_datetime(reg_at)}")
 
 
 def _prompt_duplicate_action(conn: sqlite3.Connection, dup_ids: list[int]) -> str:

@@ -333,16 +333,13 @@ def _show_record(conn: object, catalogue_id: int) -> None:  # noqa: C901
     if low_dynamic_range is not None:
         print(f"  Low DR:        {'YES' if low_dynamic_range else 'NO'}")
     if original_release_found:
-        # Canonical original-release line via the shared core — year granularity,
-        # byte-identical to the metadata menu and the RBI `list` view. The disc's
-        # own year is already shown in the header above, so nothing is printed
-        # when no original release was found.
-        print(
-            "  "
-            + format_original_fields(
-                year, True, original_release_title, original_release_year
-            )
+        # Extract value from the canonical "Original:  <value>" form and re-align
+        # to the 15-char label column used by all other fields in this view.
+        orig_text = format_original_fields(
+            year, True, original_release_title, original_release_year
         )
+        _, _, orig_value = orig_text.partition(":  ")
+        print(f"  {'Original:':<15}{orig_value}")
     if mode and mode != "?":
         print(f"  Mode:          {mode}")
     if source:
@@ -382,7 +379,7 @@ def _show_record(conn: object, catalogue_id: int) -> None:  # noqa: C901
         page_items = tracks[start : start + _PAGE]
 
         print()
-        print(f"  {'#':>2}  {'Title':<36}  {'Dur':>5}  AR  Conf")
+        print(f"  {'#':>2}  {'Title':<36}  {'Dur':>5}  {'AR':>3}  Conf")
         print(f"  {'─' * 2}  {'─' * 36}  {'─' * 5}  {'─' * 3}  {'─' * 4}")
         for t in page_items:
             tnum, title, dur, _, _, _, _, _, ar_status, ar_conf = t

@@ -859,6 +859,15 @@ def _write_wav(
 # ---------------------------------------------------------------------------
 
 
+def _fmt_datetime(s: str) -> str:
+    """Reformat an ISO 8601 datetime string as RFC 5322 for human display."""
+    try:
+        dt = datetime.datetime.fromisoformat(s)
+        return dt.strftime("%a, %d %b %Y %H:%M:%S %z").strip()
+    except (ValueError, TypeError):
+        return s
+
+
 def _fmt_size(n: int) -> str:
     if n >= 1 << 30:
         return f"{n / (1 << 30):.2f} GiB"
@@ -991,9 +1000,9 @@ def _list_info(rbi_file: Path) -> str:  # noqa: C901
     creator = prov.get("creator", "")
     created = prov.get("created", "")
     created_str = (
-        f"{creator} on {created}"
+        f"{creator} on {_fmt_datetime(created)}"
         if creator and created
-        else creator or created or "(unknown)"
+        else creator or _fmt_datetime(created) or "(unknown)"
     )
 
     lines: list[str] = [
