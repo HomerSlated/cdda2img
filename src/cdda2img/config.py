@@ -110,6 +110,7 @@ class Config:
     # Combined with R7's SQLite cache, lets a re-run reproduce a prior
     # rip's metadata without network access.
     no_network_services: bool = False
+    auto: bool = False
 
 
 _no_network_override: bool | None = None
@@ -264,6 +265,7 @@ def load_config() -> Config:
     tui = bool(data.get("tui", True))
     # R10: offline mode toggle.
     no_network_services = bool(data.get("no_network_services", False))
+    auto = bool(data.get("auto", False))
 
     raw_low_dr = data.get("low_dr_threshold", 5.0)
     try:
@@ -294,6 +296,7 @@ def load_config() -> Config:
         tui=tui,
         low_dr_threshold=low_dr_threshold,
         no_network_services=no_network_services,
+        auto=auto,
     )
 
 

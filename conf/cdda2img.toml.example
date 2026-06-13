@@ -67,9 +67,9 @@
 # Default: true
 # preview = true
 
-# Use the terminal UI for live progress rendering (currently `rip` only;
-# `create` / `import` will follow). When false, progress falls back to plain
-# stdout. No-op when stdin is not a TTY (CI, pipes, etc.).
+# Use the terminal UI for live progress rendering (rip, create, import).
+# When false, output falls back to plain stdout without screen-clearing.
+# No-op when stdin is not a TTY (CI, pipes, etc.).
 # Default: true
 # tui = true
 
@@ -87,6 +87,13 @@
 # The same effect is available per-invocation via --no-network-services.
 # Default: false
 # no_network_services = false
+
+# Skip the interactive metadata confirmation menu on rip/import/create.
+# The pipeline still fetches and applies all metadata (CDDB, MusicBrainz,
+# AcoustID, Discogs); the menu is simply bypassed and the best-guess result
+# is accepted automatically. Equivalent to always passing --auto.
+# Default: false
+# auto = false
 
 # Per-drive read and write offsets.
 # read_offset is stored automatically after AccurateRip confirmation.

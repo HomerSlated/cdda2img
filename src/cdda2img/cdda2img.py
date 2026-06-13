@@ -231,6 +231,12 @@ def parse_args() -> argparse.Namespace:
         metavar="{skip,replace,add}",
         help="How to handle a duplicate catalogue entry (overrides config duplicate_catalogue_entry for this run)",
     )
+    c.add_argument(
+        "--auto",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Skip the interactive metadata menu; accept the best-guess result automatically (default: from config, false)",
+    )
 
     x = sub.add_parser("extract", help="Extract blocks from an RBI image")
     x.add_argument("rbi_file", type=Path, help="RBI file to extract")
@@ -333,6 +339,12 @@ def parse_args() -> argparse.Namespace:
         metavar="{skip,replace,add}",
         help="How to handle a duplicate catalogue entry (overrides config duplicate_catalogue_entry for this run)",
     )
+    r_cmd.add_argument(
+        "--auto",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Skip the interactive metadata menu; accept the best-guess result automatically (default: from config, false)",
+    )
     i_cmd = sub.add_parser(
         "import",
         help="Import a foreign disc image as an RBI container (master mode): cdrdao .toc, DDP 2.0, or Nero .nrg",
@@ -372,6 +384,12 @@ def parse_args() -> argparse.Namespace:
         choices=["skip", "replace", "add"],
         metavar="{skip,replace,add}",
         help="How to handle a duplicate catalogue entry (overrides config duplicate_catalogue_entry for this run)",
+    )
+    i_cmd.add_argument(
+        "--auto",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Skip the interactive metadata menu; accept the best-guess result automatically (default: from config, false)",
     )
 
     d_cmd = sub.add_parser("catalogue", help="Browse disc catalogue")
@@ -528,6 +546,7 @@ def create_image(
     low_dr_threshold: float = 5.0,
     tui: bool = True,
     duplicate_policy: str | None = None,
+    auto: bool = False,
 ) -> None:
     files = sorted(
         p for p in input_dir.iterdir() if p.is_file() and not p.name.startswith(".")
@@ -601,7 +620,9 @@ def create_image(
 
             from cdda2img.metadata_menu import run_metadata_menu
 
-            disc = run_metadata_menu(disc, source_wavs=source_wavs, tui=tui)
+            disc = run_metadata_menu(
+                disc, source_wavs=source_wavs, tui=tui, auto_apply=auto
+            )
             album_art = to_album_art(_art_raw) if _art_raw is not None else None
 
             raw_titles = [re.sub(r"^\d{1,2}[-. ]+", "", p.stem) for p in batch]
@@ -764,6 +785,7 @@ def import_image(
     low_dr_threshold: float = 5.0,
     tui: bool = True,
     duplicate_policy: str | None = None,
+    auto: bool = False,
 ) -> None:
     import sys
 
@@ -859,6 +881,7 @@ def import_image(
             low_dr_threshold=low_dr_threshold,
             tui=tui,
             duplicate_policy=duplicate_policy,
+            auto=auto,
         )
     finally:
         if ui is not None:
@@ -1437,6 +1460,7 @@ def _finalize_import(
     ar_summary: str | None = None,
     tui: bool = True,
     duplicate_policy: str | None = None,
+    auto: bool = False,
 ) -> None:
     """Shared post-rip/import pipeline: lookups → metadata menu → TOC → RG → container.
 
@@ -1495,7 +1519,7 @@ def _finalize_import(
     match_dist = build_match_distance(disc, provenance)
     provenance["match_confidence"] = f"{match_dist.score:.3f}"
     provenance["match_recommendation"] = match_dist.recommendation.value
-    auto_apply = match_dist.recommendation == MatchRecommendation.STRONG
+    auto_apply = auto or (match_dist.recommendation == MatchRecommendation.STRONG)
 
     # Hand the terminal over to the interactive metadata menu. The
     # ar_summary kwarg is passed through for completeness (rip pipeline only).
@@ -1893,6 +1917,7 @@ def rip_image(  # noqa: C901
     tui: bool = True,
     low_dr_threshold: float = 5.0,
     duplicate_policy: str | None = None,
+    auto: bool = False,
 ) -> None:
     import sys
 
@@ -2114,6 +2139,7 @@ def rip_image(  # noqa: C901
             ar_summary=ar_summary,
             tui=tui,
             duplicate_policy=duplicate_policy,
+            auto=auto,
         )
     finally:
         _stop_preview(track_preview)
@@ -2298,6 +2324,7 @@ def _dispatch(args: argparse.Namespace) -> None:
             low_dr_threshold=cfg.low_dr_threshold,
             tui=args.tui if args.tui is not None else cfg.tui,
             duplicate_policy=args.duplicate,
+            auto=args.auto if args.auto is not None else cfg.auto,
         )
     elif args.cmd == "rip":
         from cdda2img.config import load_config
@@ -2311,6 +2338,7 @@ def _dispatch(args: argparse.Namespace) -> None:
             tui=args.tui if args.tui is not None else cfg.tui,
             low_dr_threshold=cfg.low_dr_threshold,
             duplicate_policy=args.duplicate,
+            auto=args.auto if args.auto is not None else cfg.auto,
         )
     elif args.cmd == "import":
         if args.info:
@@ -2326,6 +2354,7 @@ def _dispatch(args: argparse.Namespace) -> None:
                 low_dr_threshold=cfg.low_dr_threshold,
                 tui=args.tui if args.tui is not None else cfg.tui,
                 duplicate_policy=args.duplicate,
+                auto=args.auto if args.auto is not None else cfg.auto,
             )
     elif args.cmd == "extract":
         extract_image(
