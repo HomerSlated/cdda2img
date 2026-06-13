@@ -10,7 +10,7 @@
 
 ### Catalogue duplicate-registration policy (2026-06-13)
 
-- [ ] **CAT-1** · Add `duplicate_catalogue_entry` config knob (values: `skip` / `replace` / `add`;
+- [x] **CAT-1** · Add `duplicate_catalogue_entry` config knob (values: `skip` / `replace` / `add`;
       default `skip`). When `enable_catalogue = true` and an RBI is registered, the catalogue code
       must decide what to do when a row matching the same disc already exists. "Duplicate" should be
       defined by a deterministic key — candidate: `(mb_release_id, mcn)` with fallback to
@@ -23,7 +23,7 @@
       Also add a `--duplicate {skip,replace,add}` CLI flag (rip / import / create) that overrides
       the config knob for that one invocation — useful for `rip --duplicate replace` after a re-rip.
 
-- [ ] **CAT-2** · Catalogue `delete` input: accept comma-separated entry numbers in addition to the
+- [x] **CAT-2** · Catalogue `delete` input: accept comma-separated entry numbers in addition to the
       existing `N-M` range syntax, and allow combinations (e.g. `1,3`, `2-4,7`, `1,3-5,8`).
       Implementation: a small parser in `catalogue.py` (or `catalogue_menu.py`) that splits on `,`,
       resolves each token as either a single integer or an `N-M` range, unions the resulting sets,
