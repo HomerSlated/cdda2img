@@ -379,15 +379,15 @@ def _show_record(conn: object, catalogue_id: int) -> None:  # noqa: C901
         page_items = tracks[start : start + _PAGE]
 
         print()
-        print(f"  {'#':>2}  {'Title':<36}  {'Dur':>5}  {'AR':>3}  Conf")
+        print(f"  {'#':>2}  {'Title':<36}  {'Dur':>5}  {'AR':>3}  {'Conf':>4}")
         print(f"  {'─' * 2}  {'─' * 36}  {'─' * 5}  {'─' * 3}  {'─' * 4}")
         for t in page_items:
             tnum, title, dur, _, _, _, _, _, ar_status, ar_conf = t
             dur_str = _fmt_dur(dur)
-            ar_str = (ar_status or "   ")[:3]
+            ar_str = (ar_status or "")[:3]
             conf_str = str(ar_conf) if ar_conf is not None else ""
             print(
-                f"  {tnum:>2}  {_trunc(title, 36):<36}  {dur_str:>5}  {ar_str:<3}  {conf_str}"
+                f"  {tnum:>2}  {_trunc(title, 36):<36}  {dur_str:>5}  {ar_str:>3}  {conf_str:>4}"
             )
 
         print()
