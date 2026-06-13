@@ -36,23 +36,34 @@ def _trunc(text: str | None, width: int) -> str:
 
 
 def _parse_selection_range(s: str, total: int) -> list[int]:
-    """Parse a 1-based selection string into a list of 0-based indices.
+    """Parse a 1-based selection string into a sorted list of unique 0-based indices.
 
-    Accepts a single integer ("3") or a range ("1-3", "1 - 3", "1- 3", "1 -3").
-    Returns an empty list for invalid input or values outside 1..total.
+    Accepts single integers ("3"), N-M ranges ("1-3", "1 - 3"), and
+    comma-separated combinations ("1,3", "2-4,7", "1,3-5,8").
+    Returns [] for any non-integer token or out-of-bounds single index
+    (which surfaces as "Invalid selection." to the caller).
+    Range endpoints are silently clipped to [1, total].
     """
-    s = s.strip()
-    m = re.match(r"^(\d+)\s*-\s*(\d+)$", s)
-    if m:
-        lo, hi = int(m.group(1)), int(m.group(2))
-        if lo > hi:
-            lo, hi = hi, lo
-        return [i - 1 for i in range(lo, hi + 1) if 1 <= i <= total]
-    try:
-        idx = int(s) - 1
-    except ValueError:
-        return []
-    return [idx] if 0 <= idx < total else []
+    indices: set[int] = set()
+    for token in s.split(","):
+        token = token.strip()
+        if not token:
+            continue
+        m = re.match(r"^(\d+)\s*-\s*(\d+)$", token)
+        if m:
+            lo, hi = int(m.group(1)), int(m.group(2))
+            if lo > hi:
+                lo, hi = hi, lo
+            indices.update(i - 1 for i in range(lo, hi + 1) if 1 <= i <= total)
+        else:
+            try:
+                n = int(token)
+            except ValueError:
+                return []
+            if not (1 <= n <= total):
+                return []
+            indices.add(n - 1)
+    return sorted(indices)
 
 
 def _prompt(prompt: str) -> str:

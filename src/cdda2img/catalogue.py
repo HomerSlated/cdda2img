@@ -285,33 +285,51 @@ def _prompt_duplicate_action(conn: sqlite3.Connection, dup_ids: list[int]) -> st
         print("  Please enter s, r, or a.")
 
 
-def _get_catalogue_config() -> tuple[bool, Path | None]:
-    """Return (enable_catalogue, catalogue_path) from user config."""
+def _get_catalogue_config() -> tuple[bool, Path | None, str]:
+    """Return (enable_catalogue, catalogue_path, duplicate_policy) from user config."""
     with contextlib.suppress(Exception):
         from cdda2img.config import load_config
 
         cfg = load_config()
-        return cfg.enable_catalogue, cfg.catalogue_path
-    return True, None
+        return cfg.enable_catalogue, cfg.catalogue_path, cfg.duplicate_catalogue_entry
+    return True, None, "ask"
 
 
-def register_rbi(rbi_path: Path, catalogue_path: Path | None = None) -> None:
+def register_rbi(
+    rbi_path: Path,
+    catalogue_path: Path | None = None,
+    duplicate_policy: str | None = None,
+) -> None:
     """Register *rbi_path* in the disc catalogue.
 
     Reads all metadata directly from the RBI container. Silently warns on failure.
     When *catalogue_path* is None, reads enable_catalogue and catalogue_path from config.
+
+    *duplicate_policy* controls what happens when a matching disc is already in the
+    catalogue: ``"skip"`` silently aborts, ``"replace"`` deletes the existing row
+    then inserts, ``"add"`` inserts unconditionally.  ``"ask"`` (the default) prompts
+    interactively when stdin is a TTY; falls back to ``"skip"`` without one.
+    When *duplicate_policy* is None the value is read from config
+    (``duplicate_catalogue_entry``, default ``"ask"``).
     """
-    if catalogue_path is None:
-        enabled, catalogue_path = _get_catalogue_config()
-        if not enabled:
-            return
+    resolved_policy = duplicate_policy
+    if catalogue_path is None or resolved_policy is None:
+        enabled, cfg_path, cfg_policy = _get_catalogue_config()
+        if catalogue_path is None:
+            if not enabled:
+                return
+            catalogue_path = cfg_path
+        if resolved_policy is None:
+            resolved_policy = cfg_policy
     try:
-        _register_impl(rbi_path, catalogue_path)
+        _register_impl(rbi_path, catalogue_path, resolved_policy or "ask")
     except Exception as exc:
         log.warning("Catalogue registration failed for %s: %s", rbi_path.name, exc)
 
 
-def _register_impl(rbi_path: Path, catalogue_path: Path | None) -> None:  # noqa: C901
+def _register_impl(  # noqa: C901
+    rbi_path: Path, catalogue_path: Path | None, duplicate_policy: str = "ask"
+) -> None:
     from cdda2img.accuraterip import unpack_arip_block
     from cdda2img.container import read_header
     from cdda2img.rbi_format import (
@@ -414,7 +432,27 @@ def _register_impl(rbi_path: Path, catalogue_path: Path | None) -> None:  # noqa
 
         action = "n"
         if dups:
-            action = _prompt_duplicate_action(conn, dups)
+            if duplicate_policy == "ask":
+                action = _prompt_duplicate_action(conn, dups)
+            elif duplicate_policy == "skip":
+                log.info(
+                    "Catalogue: duplicate found, skipping registration of %s",
+                    rbi_path.name,
+                )
+                action = "s"
+            elif duplicate_policy == "replace":
+                log.info(
+                    "Catalogue: replacing %d existing entry(s) for %s",
+                    len(dups),
+                    rbi_path.name,
+                )
+                action = "r"
+            elif duplicate_policy == "add":
+                log.info(
+                    "Catalogue: adding duplicate entry for %s",
+                    rbi_path.name,
+                )
+                action = "a"
             if action == "s":
                 return
 

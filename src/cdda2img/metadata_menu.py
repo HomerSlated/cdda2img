@@ -95,7 +95,8 @@ def _print_disc_summary(disc: RBIDisc) -> None:
     print(f"  {'Album:':<9} {disc.album or '(none)'} ({album_year})")
     if disc.set_title:
         print(f"  {'Set:':<9} {disc.set_title}")
-    print(f"  {format_original(disc)}")
+    _orig_value = format_original(disc).split(":", 1)[1].lstrip()
+    print(f"  {'Original:':<9} {_orig_value}")
     print(f"  {'Artist:':<9} {disc.artist or '(none)'}")
     print(f"  {'MCN:':<9} {disc.catalog or '(none)'}")
     if disc.disc_total > 1 or disc.disc_number != 1:
@@ -515,8 +516,8 @@ def run_metadata_menu(
     *source_wavs* — per-track WAV list (create pipeline): used directly for
     AcoustID fingerprinting without extraction.
     *ar_summary* — pre-rendered AccurateRip report (rip pipeline). When
-    provided, an AR_PAUSE state is shown before the main menu so the user
-    can review the verification before editing metadata.
+    provided, it is stored on the controller (for potential future use)
+    but no longer causes a separate pause screen before the main menu.
 
     Returns the (possibly updated) RBIDisc. Returns *disc* unchanged when stdin
     is not a TTY (batch/scripted mode).

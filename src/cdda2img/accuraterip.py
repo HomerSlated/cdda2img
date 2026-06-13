@@ -403,9 +403,7 @@ def verify_rip(
 def format_ar_report(results: list[ARTrackResult], read_offset: int = 0) -> str:
     """Return a per-track AccurateRip verification report as a multi-line string.
 
-    Used by the metadata menu's AR_PAUSE state to render the report into a
-    fixed-position panel. ``print_ar_report`` is a thin wrapper that prints
-    this string verbatim — the two functions are otherwise identical.
+    ``print_ar_report`` is a thin wrapper that prints this string verbatim.
     """
     if not results:
         return ""

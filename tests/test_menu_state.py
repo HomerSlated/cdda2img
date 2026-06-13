@@ -90,9 +90,10 @@ def test_initial_state_is_main_when_no_ar_summary() -> None:
     assert ctl.state is MenuState.MAIN
 
 
-def test_initial_state_is_ar_pause_when_ar_summary_provided() -> None:
+def test_initial_state_is_main_when_ar_summary_provided() -> None:
+    """ar_summary is passed through but no longer causes an AR_PAUSE screen."""
     ctl = MenuController(_disc(), ar_summary="AR text here")
-    assert ctl.state is MenuState.AR_PAUSE
+    assert ctl.state is MenuState.MAIN
 
 
 def test_seed_search_fields_anchored_to_initial_disc() -> None:
@@ -127,22 +128,15 @@ def test_run_returns_disc_unchanged_when_not_a_tty() -> None:
 
 
 # ---------------------------------------------------------------------------
-# AR_PAUSE → MAIN transition
+# ar_summary param is accepted but no longer drives an AR_PAUSE screen
 # ---------------------------------------------------------------------------
 
 
-def test_ar_pause_transitions_to_main_on_keypress() -> None:
-    """Any input at AR_PAUSE transitions to MAIN (current contract)."""
+def test_ar_summary_param_does_not_create_ar_pause_screen() -> None:
+    """ar_summary is stored on the controller but does not push an extra screen."""
     ctl = MenuController(_disc(), ar_summary="AR")
-    # Simulate stdin.isatty=True and a single Enter at the AR_PAUSE prompt,
-    # then 'a' at MAIN to accept and exit.
-    with (
-        patch("cdda2img.menu_state.sys.stdin.isatty", return_value=True),
-        patch("cdda2img.menu_state._clear_screen"),
-        patch("cdda2img.metadata_menu._prompt", side_effect=["", "a"]),
-    ):
-        ctl.run()
-    assert ctl.state is MenuState.DONE
+    assert ctl.ar_summary == "AR"
+    assert ctl.state is MenuState.MAIN
 
 
 # ---------------------------------------------------------------------------
@@ -990,7 +984,7 @@ def test_disc_position_screen_render_shows_current_and_clears_banner(capsys) -> 
 
 
 # ---------------------------------------------------------------------------
-# Format-AR helper feeds AR_PAUSE
+# format_ar_report helper
 # ---------------------------------------------------------------------------
 
 

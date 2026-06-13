@@ -14,15 +14,17 @@ For per-module detail (data shapes, error paths, individual algorithms), see the
 
 - which local-source metadata extraction they run first;
 - which network services they pre-populate from before the menu opens;
-- whether they have AccurateRip / rip-log artefacts to record alongside the metadata.
+- whether they have AccurateRip / rip-log artefacts to record alongside the metadata;
+- whether a high-confidence automatic match can skip interactive confirmation (rip and import only).
 
 The metadata pipeline is itself layered:
 
 1. **Local-source extraction** (no network) — embedded file tags, or the metadata regions of a foreign disc image (cdrdao TOC text, DDP DDPID/PQDESCR/CDTEXT.BIN, NRG CDTX, CCD index + CD-Text). Produces a seed disc with whatever the source itself carries.
 2. **Pre-menu network lookups** (automatic) — fired *before* the interactive menu opens. Each has its own auto-apply gate; some are silently skipped on multiple matches, some auto-apply the first match unconditionally.
-3. **Menu-driven network lookups** (interactive) — the user presses keys in the metadata menu to trigger a MusicBrainz text search, a Discogs search, an AcoustID per-track fingerprint, or to open the original-release finder. Each result is shown with a diff and confirmed (update missing fields, or overwrite all).
-4. **Post-menu enrichment** — once the user accepts, the original-release lookup runs (unless the user already set it manually inside the menu). EBU R128 loudness analysis runs and sets the low-dynamic-range flag.
-5. **Container write** — the accumulated disc is serialised into the RBI container blocks: TOC (cdrdao text), PROV (release intelligence as key/value text), RGDB (per-track loudness), ARIP (AccurateRip results, rip pipeline only), RLOG (structured rip log, rip pipeline only).
+3. **Pre-menu original-release lookup and confidence scoring** — original-release identification runs before the menu in all three pipelines so the menu can display the original-release result in its initial summary. Discogs R11 corroboration and match-confidence computation additionally run before the menu in the rip and import pipelines; a STRONG confidence score causes the menu step to be skipped automatically. (The create pipeline skips the confidence scoring and auto-apply gate — it always presents the interactive menu.)
+4. **Menu-driven interaction** (always interactive on a TTY, unless auto-apply fires) — the user presses keys in the metadata menu to trigger a MusicBrainz text search, a Discogs search, an AcoustID per-track fingerprint, or to open the original-release finder. Each result is shown with a diff and confirmed (update missing fields, or overwrite all).
+5. **Post-menu enrichment** — album art is fetched and embedded. EBU R128 loudness analysis runs and sets the low-dynamic-range flag. In the rip and import pipelines, album art comes from a MusicBrainz cover-art service lookup using the confirmed post-menu release id. In the create pipeline, album art comes from tags already embedded in the source audio files — no network call is needed.
+6. **Container write** — the accumulated disc is serialised into the RBI container blocks: TOC (cdrdao text), PROV (release intelligence as key/value text), RGDB (per-track loudness), ARIP (AccurateRip results, rip pipeline only), RLOG (structured rip log, rip pipeline only).
 
 ## Merge confluence: `_merge_into_disc`
 
@@ -38,6 +40,15 @@ These rules are not visible in the flowcharts; they govern which arrows are foll
 - **MusicBrainz disc-ID pre-population auto-applies only when there is exactly one match.** Zero or multiple matches → the disc is returned unchanged, but normalised 13-digit barcode hints from every returned match are still collected and forwarded to the Discogs step.
 - **Discogs barcode pre-population auto-merges only when both** (a) exactly one search result returns, **and** (b) the result's album passes a substring/separator-asymmetry plausibility check against the working disc's album. Anything else → the canonical MCN is still written to the disc (because a populated MCN is more useful than a blank one, and the menu's edit flow can correct a wrong guess), but no other fields are merged.
 
+### Match-confidence auto-apply gate (rip and import pipelines only)
+
+- Match confidence is computed from additive signals and compared to fixed thresholds to yield one of four recommendation levels: STRONG, MEDIUM, LOW, or NONE.
+- **A STRONG recommendation (score ≥ 0.70) causes the interactive metadata menu to be skipped automatically** — the disc is returned with whatever metadata the automatic lookups merged.
+- Auto-apply only fires in the rip and import pipelines, via `_finalize_import`. The create pipeline never computes match confidence and never auto-applies.
+- No single signal reaches the STRONG threshold alone. A disc-ID fingerprint match alone scores 0.50 (MEDIUM). A disc-ID match plus AcoustID corroboration scores 0.75 (STRONG). A disc-ID match plus ISRC disambiguation alone scores 0.65 (MEDIUM). Effective auto-apply therefore requires corroboration from at least two independent signals.
+- A text-plus-duration MB match contributes only +0.20 (versus +0.50 for a disc-ID fingerprint match). Even with AcoustID corroboration (+0.25) and ISRC disambiguation (+0.15), the ceiling is 0.60 — below the STRONG threshold. A text+duration-matched release can **never** reach STRONG and therefore can never auto-apply.
+- The CDDB/MB disagreement penalty (−0.10) can push a borderline STRONG down to MEDIUM.
+
 ### Canonical MCN selection rule
 
 - Candidates are assembled from the normalised disc catalog (when it already normalises to 13 digits) plus any barcode hints from MusicBrainz, de-duplicated in order.
@@ -46,7 +57,7 @@ These rules are not visible in the flowcharts; they govern which arrows are foll
 
 ### Manual-override gate on original release
 
-- `populate_original_release` returns immediately when `original_release_found` is already True. The user can set this manually inside the metadata menu's "Find Original Release" sub-menu; the automatic post-menu lookup must not overwrite that.
+- `populate_original_release` returns immediately when `original_release_found` is already True. The user can set this manually inside the metadata menu's "Find Original Release" sub-menu; the pre-menu auto-population (which runs in all three pipelines) must not overwrite that. The idempotent gate is the mechanism that makes a second call after the menu a safe no-op.
 
 ### Original-release derivative rejection
 
@@ -57,6 +68,14 @@ These rules are not visible in the flowcharts; they govern which arrows are foll
 - Title normalisation strips a research-derived allow-list of reissue tokens (Remastered, Deluxe, Anniversary, etc., longest-first to avoid collisions).
 - Deny-list rules reject pairs differing in: live/studio markers, roman-numeral suffixes (asymmetric or differing), arabic-numeral suffixes (differing), volume/part numbers (differing), or any "re-recording" marker on either side.
 - Scoring uses a token-set ratio fuzzy match against a fixed threshold of 88. Among candidates passing the threshold, **earliest year wins**; tie-broken by highest score.
+
+### R9 disagreement detection
+
+- The disagreement check compares the pre-MusicBrainz album/artist (from CDDB or embedded metadata) against the MusicBrainz candidate's album/artist using a **pattern-weighted edit distance** measure, not a simple equality check.
+- Before the distance is computed, both strings are normalised: Unicode composition, case-fold, and a short allow-list of release-suffix tokens (Remastered, Deluxe Edition, Anniversary Edition, etc.) are stripped from both sides. These expected differences between CDDB's pressing title and MusicBrainz's canonical title are not disagreement.
+- Disagreement fires when the weighted distance exceeds 0.15. Below this threshold, minor punctuation and article differences are ignored. The threshold is symmetric: the same rule applies to album and to artist independently.
+- When disagreement fires: `disagreement_cddb_mb` is written to PROV as a comma-separated list of affected fields (`album`, `artist`, or `album,artist`), and the numeric distance for each affected field is stored separately (`disagreement_album_dist`, `disagreement_artist_dist`). These float values are formatted to three decimal places.
+- The distance is computed by: normalising to lowercase ASCII, stripping non-alphanumeric characters, then applying a normalised edit distance. Innocuous patterns (leading articles, featuring credits, EP/Single markers, parentheticals, part numbers, "&" → "and") reduce the effective distance at a per-pattern weight between 0.0 (fully ignored) and 1.0 (full weight). The comparison is **suppressed** when either side is blank — both the album and artist comparisons only fire when both values are non-empty. "Unknown Artist" on the pre-MB side additionally suppresses the artist comparison (it is a raw default, not a CDDB result).
 
 ### MusicBrainz disc-ID computation
 
@@ -71,9 +90,16 @@ These rules are not visible in the flowcharts; they govern which arrows are foll
 
 - EBU R128 loudness analysis writes `low_dynamic_range` onto the disc; the provenance dict is assembled from the disc after loudness has run. Reordering these two steps will leave `low_dynamic_range` out of the PROV block.
 
+### Pre-menu original release in all pipelines
+
+- All three pipelines run `populate_original_release` **before** the metadata menu opens, so the menu displays the original-release result as part of its initial summary. The create pipeline does this alongside its pre-menu album-art tag extraction; the rip and import pipelines do it inside `_finalize_import` after the network lookups complete.
+- Discogs R11 corroboration and match-confidence computation run before the menu in the rip and import pipelines only. The create pipeline has no equivalent (it always presents the interactive menu).
+- The manual-override gate in `populate_original_release` is idempotent: if the user sets the original release inside the menu, any subsequent call skips silently because `original_release_found` is already True.
+
 ### TTY gating
 
 - The metadata menu returns the disc unchanged when standard input is not a terminal.
+- Auto-apply also returns the disc unchanged (disc holds the auto-merged state; no interactive prompt is needed).
 - The interactive AccurateRip drive-offset confirmation prompt is skipped when not a terminal.
 - The auto-create-config-from-example prompt is also TTY-gated.
 
@@ -84,6 +110,7 @@ These rules are not visible in the flowcharts; they govern which arrows are foll
 | Local source → seed disc | A full disc record with timing populated and whatever titles/ISRC/MCN the source could extract | Source-specific extractors all produce the same disc structure; downstream code is source-agnostic |
 | Remote service → candidate | One or more candidate disc descriptions, each a flat record of optional fields (album, artist, catalog/MCN, MusicBrainz release id, MusicBrainz release-group id, Discogs release id, release date, original release date, country, label, label catalogue number, disc number, disc total, set title, source-tag) plus an optional per-track list | Sources are tagged with the originating service so downstream logic can prefer or reject by provenance |
 | Candidate → working disc | A merge step that takes one candidate and one working disc, returns a new working disc with either (update) missing fields filled in from the candidate, or (overwrite) all candidate fields replacing existing values | The two merge modes are user-selected in the confirmation step |
+| Post-lookup disc + provenance → match distance | A float confidence score in [0, 1] and a four-level recommendation (STRONG / MEDIUM / LOW / NONE) | Rip and import pipelines only; score is additive over named signals then clamped; thresholds are fixed constants |
 | Final disc + extras → container | One disc record + optional packed loudness block + optional AccurateRip block + optional rip-log block + a key/value provenance dict | Container writer serialises into TOC, PROV, RGDB, ARIP, RLOG, PCM blocks in that order |
 
 ## Stage 1 — Pipeline Entry and Local-Source Extraction
@@ -174,12 +201,12 @@ flowchart TD
     dg_merge --> menu_in
     dg_keep --> menu_in
 
-    create_seed_in --> menu_in([Stage 3 — interactive metadata menu])
+    create_seed_in --> menu_in([Stage 3 — pre-menu enrichment / interactive menu])
 ```
 
 ### Step Descriptions
 
-1. **Query CDDB**: Rip pipeline only. A TCP session computes the CDDB disc ID from the rip's track LSNs and lead-out LSN, then queries the configured server. See `cddb.py:prepopulate_from_cddb`. Called only from `rip_image` in `cdda2img.py:1293`.
+1. **Query CDDB**: Rip pipeline only. A TCP session computes the CDDB disc ID from the rip's track LSNs and lead-out LSN, then queries the configured server. See `cddb.py:prepopulate_from_cddb`. Called only from the rip path inside `_finalize_import`.
 2. **Branch on CDDB matches**: Zero matches → pass through. Any matches → take the first.
 3. **Auto-apply first CDDB match**: Per the CDDB protocol, the server returns matches in best-first order. The implementation takes the first match without consulting the user, even when multiple are returned. Missing album, artist, release year, and per-track titles are filled in.
 4. **Query MusicBrainz by disc ID**: Shared rip and import finalise step. The disc ID is computed in pure code by hashing the 804-character ASCII uppercase-hex representation of the TOC, then URL-safe base64 encoding. See `mb_lookup.py:prepopulate_from_mb`.
@@ -194,16 +221,100 @@ flowchart TD
 13. **Branch on Discogs result count and plausibility**: Exactly one result AND its album passes the substring/separator-asymmetry guard against the working disc's album.
 14. **Merge Discogs metadata**: Label, country, year, and track listing are merged in.
 15. **Keep MCN only**: The merge is skipped, but the MCN already written in step 10 remains.
-16. **Hand off to the menu**: All three pipelines now have whatever the local sources and the auto-apply network lookups could produce.
+16. **Hand off to the next stage**: All three pipelines now have whatever the local sources and the auto-apply network lookups could produce.
+
+## Stage 2b — Pre-Menu Original Release and Confidence Scoring
+
+All three pipelines run the original-release lookup before the menu opens so the menu can display the original-release context in its initial summary. The rip and import pipelines additionally run Discogs R11 corroboration and match-confidence scoring; the create pipeline does not — it always opens the interactive menu.
+
+```mermaid
+flowchart TD
+    after_lookups([After Stage 2 — all pipelines<br/>R11 + confidence: rip and import only])
+
+    after_lookups --> orig_gate{original_release_found<br/>already True?}
+    orig_gate -- yes --> orig_skip[Skip auto-lookup<br/>user already set it manually<br/>in a prior menu session]
+    orig_gate -- no --> orig_primary{{Working disc has a<br/>MusicBrainz release-group id?}}
+
+    orig_primary -- yes --> rg_fetch[/Fetch release group<br/>by id/]
+    rg_fetch --> rg_check{Release group has any<br/>derivative secondary type<br/>Compilation, Live, Remix...?}
+    rg_check -- yes --> orig_fuzzy
+    rg_check -- no --> rg_year{First-release-date<br/>parses to a year?}
+    rg_year -- yes --> orig_set[Set original_release fields<br/>found, title, year]
+    rg_year -- no --> orig_fuzzy
+
+    orig_primary -- no --> orig_fuzzy[Fuzzy fallback<br/>find_original_release_fuzzy]
+    orig_fuzzy --> have_at{Disc has both<br/>artist and album?}
+    have_at -- no --> done_no[Return found=False]
+    have_at -- yes --> cat_search[/Artist+album text search<br/>against service catalogue/]
+    cat_search --> cat_filter[Deduplicate by release-group<br/>extract title + year per release]
+    cat_filter --> deny[Apply deny-list rules<br/>live vs studio, roman numerals,<br/>volume numbers, re-recordings]
+    deny --> norm[Normalise titles<br/>strip allow-list of reissue tokens<br/>year qualifiers, disc tags]
+    norm --> score[Score each candidate<br/>token-set ratio]
+    score --> threshold{Any candidate<br/>scores at least 88?}
+    threshold -- no --> done_no
+    threshold -- yes --> earliest[Earliest year wins<br/>tie-break on highest score]
+    earliest --> orig_set
+
+    orig_set --> pipeline_branch
+    orig_skip --> pipeline_branch
+    done_no --> pipeline_branch
+
+    pipeline_branch{Rip or import pipeline?}
+    pipeline_branch -- no: create --> menu_stage([Stage 3 — interactive metadata menu])
+
+    pipeline_branch -- yes --> r11
+    r11{Both MB original-release year<br/>AND Discogs release id present?}
+    r11 -- no --> match_conf
+    r11 -- yes --> dg_master[/Look up Discogs master year<br/>via release id/]
+    dg_master --> r11_cmp{Years agree?}
+    r11_cmp -- yes --> r11_ok[Emit original_release_corroborated<br/>= discogs,mb to PROV]
+    r11_cmp -- no --> r11_dis[Emit original_release_disagreement<br/>to PROV; adopt the earlier year]
+    r11_ok --> match_conf
+    r11_dis --> match_conf
+
+    match_conf[Compute match confidence<br/>build_match_distance]
+    match_conf --> conf_emit[Write match_confidence<br/>and match_recommendation to PROV]
+    conf_emit --> auto_gate{Recommendation<br/>is STRONG?}
+    auto_gate -- yes --> auto_msg[Print auto-confirm message<br/>skip interactive menu]
+    auto_gate -- no --> menu_stage
+    auto_msg --> post_menu([Stage 4 — album art, loudness, container])
+```
+
+### Step Descriptions
+
+1. **Original-release gate**: Returns immediately when `original_release_found` is already True — this happens when the user set the field manually inside the menu during a prior session (the disc is passed in from the caller with that state already baked in). See `original_release.py:populate_original_release`.
+2. **Primary path — release-group id check**: Only runs when the working disc has a MusicBrainz release-group id (set by an earlier merge from disc-ID prepop or from a menu-driven MusicBrainz selection).
+3. **Fetch release group by id**: A service call retrieves the release-group record.
+4. **Reject derivative release groups**: If any of Compilation, Live, Remix, DJ-mix, Mixtape/Street, Demo, Interview, Audiobook, Audio drama, Spokenword appears in the secondary-type list, the primary path is abandoned and the fuzzy fallback runs. The first-release-date of a derivative release group is the date of the derivative, not of the underlying album.
+5. **Parse first-release-date to a year**: A four-digit year is required. Other formats fall through to the fuzzy path.
+6. **Set original release fields**: `original_release_found` becomes True; title comes from the release-group title (or the disc album as fallback); year is the parsed year.
+7. **Fuzzy fallback entry**: Runs when the primary path was skipped or rejected.
+8. **Artist and album required**: Both must be non-empty; otherwise return not-found.
+9. **Artist + album text search**: A service text-search query is built from the artist and album; up to fifty results are fetched.
+10. **Deduplicate and extract**: Results are deduplicated by release-group id; each yields a (title, year) pair using release-group first-release-date only (R5: candidates without one are skipped — the per-release-date fallback admitted pre-album promo pressings as "the original").
+11. **Apply deny-list rules**: Pairs differing in live vs studio markers, roman-numeral suffixes, volume/part numbers, arabic-numeral suffixes, or with re-recording markers on either side are rejected.
+12. **Normalise titles**: Both sides are run through the title normaliser — strips year qualifiers in brackets, disc-number tags, the longest-first allow-list of reissue tokens, leading "the", and remaining punctuation. The result is the comparable stem.
+13. **Score each candidate**: Token-set ratio between the normalised disc title and each normalised candidate title.
+14. **Threshold check**: Candidates scoring below 88 are dropped.
+15. **Earliest wins**: Among remaining candidates, the earliest year wins; ties broken on highest score. The winning (title, year) becomes the original release.
+16. **Pipeline branch**: If this is the create pipeline, the original-release lookup is complete and control passes directly to Stage 3 (the interactive menu). The create pipeline never computes match confidence and never auto-applies. For the rip and import pipelines, the flow continues with R11 and confidence scoring.
+17. **R11 gate**: Fires only when both a MusicBrainz original-release year and a Discogs release id are present on the disc. See `cdda2img.py:_r11_corroborate_with_discogs_master`.
+18. **Look up Discogs master year**: The Discogs master record associated with the release is fetched; its earliest-known year is extracted.
+19. **Years agree**: Both sources produced the same four-digit year — emit `original_release_corroborated=discogs,mb` to PROV. No change to the disc's year.
+20. **Years disagree**: Both sources are present but give different years — emit `original_release_disagreement=discogs:YYYY|mb:YYYY` to PROV and adopt the earlier of the two (prefer-the-earlier rule).
+21. **Compute match confidence**: All automatic lookup signals are now baked into the provenance dict. `build_match_distance` inspects the post-lookup disc and provenance and computes an additive confidence score. See Algorithm Notes.
+22. **Emit confidence and recommendation**: `match_confidence` (float to three decimal places) and `match_recommendation` (one of strong/medium/low/none) are written to PROV.
+23. **STRONG gate**: Score ≥ 0.70 → the interactive menu is bypassed; a short auto-confirm message is printed and control passes directly to Stage 4.
+24. **Proceed to interactive menu**: Score below STRONG → Stage 3 runs as normal.
 
 ## Stage 3 — Interactive Metadata Menu
 
-The menu is the convergence point of every pipeline. It opens after Stage 2 and lets the user accept, edit, fetch more metadata, or reset.
+The menu is the convergence point of all three pipelines. It opens after Stage 2 (and Stage 2b for rip/import). For the rip and import pipelines, the menu may be bypassed entirely by the auto-apply gate in Stage 2b.
 
 ```mermaid
 flowchart LR
     enter([Menu opens<br/>seed disc + pre-menu fills])
-    enter --> tty{Is stdin a terminal?}
+    enter --> tty{Is stdin a terminal<br/>AND auto_apply is False?}
     tty -- no --> accept_silent([Return disc unchanged])
     tty -- yes --> main[Main menu<br/>Accept / Fetch / Edit /<br/>Find Original / Reset / Clear]
 
@@ -258,7 +369,7 @@ flowchart LR
 ### Step Descriptions
 
 1. **Menu opens**: A deep-copy snapshot of the disc is taken for the Reset option. Seed artist and seed title strings are remembered as immutable search anchors. See `metadata_menu.py:run_metadata_menu`.
-2. **TTY gate**: When standard input is not a terminal (batch mode), the menu returns the disc unchanged. The rest of the pipeline still runs.
+2. **TTY and auto-apply gate**: The menu returns the disc unchanged when **either** standard input is not a terminal (batch mode) **or** the `auto_apply` flag is True (STRONG confidence from Stage 2b). When auto-apply fires, the disc already holds whatever the automatic lookups merged — the menu skips without additional modification. See `menu_state.py:MenuController.run`.
 3. **Main menu**: Six commands — Accept, Fetch, Edit, Find Original Release, Reset, Clear.
 4. **Accept**: Returns the disc to the post-menu stage.
 5. **Edit**: Direct edits to album, artist, disc number, and per-track title/performer/ISRC. No network. See `metadata_menu.py:_edit_menu`.
@@ -277,44 +388,34 @@ flowchart LR
 18. **Candidate-is-a-stub check**: Search-result objects often carry no track listing. When the candidate carries a service release id but no tracks, a second call fetches the full release (with tracklist) and that fuller candidate is used for the merge.
 19. **Find Original Release sub-menu**: Manual entry, MusicBrainz search, or clear. Search uses the remembered release-group id (if any) to enumerate the group; otherwise it does an artist+title text search.
 20. **Original release — paginated select**: Results sorted oldest-first.
-21. **Apply original release**: The four fields original_release_found, original_release_title, original_release_year, original_release_date are populated from the chosen release. The MusicBrainz release-group id of the chosen release is remembered for subsequent sub-menu use.
-22. **Set original manually**: The user types a title and 4-digit year; original_release_found is set to True. This blocks the post-menu auto-population.
-23. **Clear original**: Resets the four original-release fields to None/False. The post-menu auto-population will then run as normal.
+21. **Apply original release**: The four fields `original_release_found`, `original_release_title`, `original_release_year`, `original_release_date` are populated from the chosen release. The MusicBrainz release-group id of the chosen release is remembered for subsequent sub-menu use.
+22. **Set original manually**: The user types a title and 4-digit year; `original_release_found` is set to True. Any subsequent call to `populate_original_release` — such as an app restart that re-runs the pipeline with a cached disc — will skip silently because the manual-override gate fires.
+23. **Clear original**: Resets the four original-release fields to None/False. The next time the pre-menu original-release lookup runs, it will try again.
 
 ## Stage 4 — Post-Menu Enrichment and Container Write
 
-After the user accepts in the metadata menu, two automatic steps run, then the container is written.
+After the user accepts in the metadata menu (or after auto-apply fires), album art is sourced, loudness is analysed, and the container is written.
 
 ```mermaid
 flowchart TD
-    menu_out([User accepted in menu])
-    menu_out --> orig_gate{User already set<br/>original_release_found<br/>in the menu?}
-    orig_gate -- yes --> skip_orig[Skip auto-lookup<br/>manual override wins]
-    orig_gate -- no --> orig_run[Run automatic<br/>original-release lookup]
+    menu_out([User accepted in menu — or auto-apply fired])
 
-    orig_run --> orig_primary{{Working disc has a<br/>MusicBrainz release-group id?}}
-    orig_primary -- yes --> rg_fetch[/Fetch release group<br/>by id/]
-    rg_fetch --> rg_check{Release group has any<br/>derivative secondary type<br/>Compilation, Live, Remix...?}
-    rg_check -- yes --> orig_fuzzy
-    rg_check -- no --> rg_year{First-release-date<br/>parses to a year?}
-    rg_year -- yes --> orig_set[Set original_release_<br/>found, title, year]
-    rg_year -- no --> orig_fuzzy
-    orig_primary -- no --> orig_fuzzy
+    menu_out --> art_branch{Pipeline}
+    art_branch -- rip or import --> art_fetch[/Fetch album art from cover-art service<br/>using confirmed post-menu MB release id/]
+    art_branch -- create --> art_tags[/Extract album art from source file tags<br/>already loaded before the menu opened/]
 
-    orig_fuzzy[Fuzzy fallback path<br/>find_original_release_fuzzy] --> have_at{Disc has both<br/>artist and album?}
-    have_at -- no --> done_no[Return found=False]
-    have_at -- yes --> cat_search[/Artist+album text search<br/>against service catalogue/]
-    cat_search --> cat_filter[Deduplicate by release-group<br/>extract title + year per release]
-    cat_filter --> deny[Apply deny-list rules<br/>live vs studio, roman numerals,<br/>volume numbers, re-recordings]
-    deny --> norm[Normalise titles<br/>strip allow-list of reissue tokens<br/>year qualifiers, disc tags]
-    norm --> score[Score each candidate<br/>token-set ratio]
-    score --> threshold{Any candidate<br/>scores at least 88?}
-    threshold -- no --> done_no
-    threshold -- yes --> earliest[Earliest year wins<br/>tie-break on highest score]
-    earliest --> orig_set
-    skip_orig --> loud_step
-    orig_set --> loud_step
-    done_no --> loud_step
+    art_fetch --> art_gate{Art found<br/>from service?}
+    art_gate -- yes --> art_embed[Embed album art<br/>write art_source to PROV<br/>lookup_status_art = OK]
+    art_gate -- no --> art_miss{Offline mode?}
+    art_miss -- yes --> art_disabled[lookup_status_art = disabled]
+    art_miss -- no --> art_empty[lookup_status_art = empty]
+    art_tags --> art_tags_gate{Tags contained art?}
+    art_tags_gate -- yes --> art_embed
+    art_tags_gate -- no --> loud_step
+
+    art_embed --> loud_step
+    art_disabled --> loud_step
+    art_empty --> loud_step
 
     loud_step[/EBU R128 loudness analysis<br/>over per-track slices of PCM/]
     loud_step --> loud_set[Set low_dynamic_range<br/>= album LRA below threshold]
@@ -323,7 +424,7 @@ flowchart TD
     toc_gen --> container[(Write RBI container)]
 
     container --> blk_toc[TOC block — cdrdao text]
-    container --> blk_prov[PROV block — key=value text:<br/>low_dynamic_range, original_release_*,<br/>release_date, mb_release_id,<br/>mb_release_group_id, set_title,<br/>drive_name, drive_read_offset]
+    container --> blk_prov[PROV block — key=value text:<br/>low_dynamic_range, match_confidence,<br/>match_recommendation, original_release_*,<br/>release_date, mb_release_id,<br/>mb_release_group_id, set_title,<br/>drive_name, drive_read_offset,<br/>disagreement_album_dist, disagreement_artist_dist,<br/>art_source, lookup_status_art]
     container --> blk_rgdb[RGDB block — per-track and album<br/>gain, peak, LRA]
     container --> blk_arip[ARIP block — rip pipeline only<br/>per-track AccurateRip CRCs,<br/>confidence, status, disc IDs]
     container --> blk_rlog[RLOG block — rip pipeline only<br/>drive, engine, offsets,<br/>per-track results]
@@ -332,33 +433,22 @@ flowchart TD
 
 ### Step Descriptions
 
-1. **User accepted in menu**: Control returns to the shared finalise function (rip and import) or the create pipeline tail.
-2. **Manual override gate**: If the user already set the original release manually inside the menu, the automatic lookup is skipped entirely. See `original_release.py:populate_original_release`.
-3. **Run automatic original-release lookup**: Two-path dispatch.
-4. **Primary path — release-group id check**: Only runs when the working disc has a MusicBrainz release-group id (set by an earlier merge from disc-ID prepop or from a menu-driven MusicBrainz selection).
-5. **Fetch release group by id**: A service call retrieves the release-group record.
-6. **Reject derivative release groups**: If any of Compilation, Live, Remix, DJ-mix, Mixtape/Street, Demo, Interview, Audiobook, Audio drama, Spokenword appears in the secondary-type list, the primary path is abandoned and the fuzzy fallback runs. The first-release-date of a derivative release group is the date of the derivative, not of the underlying album.
-7. **Parse first-release-date to a year**: A four-digit year is required. Other formats fall through to the fuzzy path.
-8. **Set original release fields**: original_release_found becomes True; title comes from the release-group title (or the disc album as fallback); year is the parsed year.
-9. **Fuzzy fallback entry**: Runs when the primary path was skipped or rejected.
-10. **Artist and album required**: Both must be non-empty; otherwise return not-found.
-11. **Artist + album text search**: A service text-search query is built from the artist and album; up to fifty results are fetched.
-12. **Deduplicate and extract**: Results are deduplicated by release-group id; each yields a (title, year) pair using **release-group first-release-date only** (R5: candidates without one are skipped — the per-release-date fallback admitted pre-album promo pressings as "the original").
-13. **Apply deny-list rules**: Pairs differing in live vs studio markers, roman-numeral suffixes, volume/part numbers, arabic-numeral suffixes, or with re-recording markers on either side are rejected.
-14. **Normalise titles**: Both sides are run through the title normaliser — strips year qualifiers in brackets (e.g. "2011 remaster"), disc-number tags, the longest-first allow-list of reissue tokens, leading "the", and remaining punctuation. The result is the comparable stem.
-15. **Score each candidate**: Token-set ratio between the normalised disc title and each normalised candidate title.
-16. **Threshold check**: Candidates scoring below 88 are dropped.
-17. **Earliest wins**: Among remaining candidates, the earliest year wins; ties broken on highest score. The winning (title, year) becomes the original release.
-18. **EBU R128 loudness analysis**: Per-track slices of the PCM are analysed for integrated gain, true peak, and loudness range. The album LRA is compared to a configurable threshold; below threshold sets low_dynamic_range to True, above sets it to False.
-19. **Assemble provenance dict**: A flat dict of pipeline-specific keys (mode = create/rip/import, source, ripper, drive name, drive read offset) plus release-intelligence fields written from the disc (low_dynamic_range, original_release_*, release_date, mb_release_id, mb_release_group_id, set_title). See `cdda2img.py:_add_release_provenance`.
-20. **Generate cdrdao-format TOC text**: The disc structure is rendered to cdrdao TOC text, with provenance lines as comments.
-21. **Write RBI container**: All blocks are written in order — TOC, PROV, RGDB, ARIP, RLOG, PCM — followed by the block directory. See `container.py:build_container`.
-22. **TOC block**: cdrdao TOC text.
-23. **PROV block**: UTF-8 key=value lines. Always carries creator and created (UTC ISO timestamp); the rest depends on which pipeline ran and which release-intelligence fields are populated.
-24. **RGDB block**: Per-track and album EBU R128 gain, peak, and LRA as float32. Present only when loudness analysis ran.
-25. **ARIP block**: Per-track AccurateRip v1 and v2 CRCs, confidences, status, plus the two disc IDs and the CDDB id. Present only in the rip pipeline.
-26. **RLOG block**: Structured rip log with drive, engine, offsets, and per-track results. Present only in the rip pipeline.
-27. **PCM block**: Raw s16le audio, no WAV header (PCM parameters are in the fixed file header).
+1. **User accepted (or auto-apply fired)**: Control returns to the pipeline tail. For the rip and import pipelines this is `_finalize_import`; for create it is the tail of `create_image`.
+2. **Album art — rip/import path**: The confirmed post-menu MusicBrainz release id is used to query the cover-art service. See `album_art.py:fetch_cover`.
+3. **Album art — create path**: Art was extracted from the source audio file's embedded tags before the menu opened. The decoded bytes are available immediately after the menu returns; no network call is needed. See `album_art.py:cover_from_file_tags`.
+4. **Art found (service or tags)**: Art is encoded and attached to the container. `art_source` and `lookup_status_art=OK` are written to PROV (rip/import only; the create pipeline does not write `lookup_status_art`).
+5. **Service art not found — offline mode**: `lookup_status_art=disabled` is written to PROV.
+6. **Service art not found — network mode**: `lookup_status_art=empty` is written to PROV.
+7. **EBU R128 loudness analysis**: Per-track slices of the PCM are analysed for integrated gain, true peak, and loudness range. The album LRA is compared to a configurable threshold; below threshold sets `low_dynamic_range` to True, above sets it to False.
+8. **Assemble provenance dict**: A flat dict of pipeline-specific keys (mode = create/rip/import, source, ripper, drive name, drive read offset) plus release-intelligence fields written from the disc (low_dynamic_range, original_release_*, release_date, mb_release_id, mb_release_group_id, set_title, match_confidence, match_recommendation, disagreement_album_dist, disagreement_artist_dist, art_source, lookup_status_art). See `cdda2img.py:_add_release_provenance`.
+9. **Generate cdrdao-format TOC text**: The disc structure is rendered to cdrdao TOC text, with provenance lines as comments.
+10. **Write RBI container**: All blocks are written in order — TOC, PROV, RGDB, ARIP, RLOG, PCM — followed by the block directory. See `container.py:build_container`.
+11. **TOC block**: cdrdao TOC text.
+12. **PROV block**: UTF-8 key=value lines. Always carries creator and created (UTC ISO timestamp); the rest depends on which pipeline ran and which release-intelligence fields are populated. Rip and import always include `match_confidence` and `match_recommendation`; include `disagreement_album_dist` / `disagreement_artist_dist` when the R9 disagreement check fired; include `art_source` / `lookup_status_art` when the cover-art service fetch was attempted.
+13. **RGDB block**: Per-track and album EBU R128 gain, peak, and LRA as float32. Present only when loudness analysis ran.
+14. **ARIP block**: Per-track AccurateRip v1 and v2 CRCs, confidences, status, plus the two disc IDs and the CDDB id. Present only in the rip pipeline.
+15. **RLOG block**: Structured rip log with drive, engine, offsets, and per-track results. Present only in the rip pipeline.
+16. **PCM block**: Raw s16le audio, no WAV header (PCM parameters are in the fixed file header).
 
 ## Error Handling
 
@@ -371,13 +461,42 @@ flowchart TD
 | Discogs returns zero or many results, or album fails plausibility check | Result count not 1, or `_albums_match` returns False | No merge; MCN already written | Pre-menu Discogs step returns disc with MCN populated only |
 | AcoustID unavailable (no API key, no client library, no native fingerprint tool) | Any of: ACOUSTID_API_KEY unset, the AcoustID client library is not installed, the native fingerprint binary is missing from PATH | Menu shows unavailability reason and returns | Disc unchanged |
 | AcoustID returns no confident matches | All scores below threshold, or no matches at all | "No confident matches found." printed | Disc unchanged from that sub-menu pass |
+| R9 disagreement one-sided blank | Pre-MB album or MB album is blank (not both) | Comparison skipped for that field | No disagreement emitted for blank-side comparisons |
+| Discogs master year lookup fails (R11) | `lookup_master_year` returns None (no master, network failure, or offline) | R11 step silently skips | No corroboration or disagreement written to PROV |
+| Album art fetch fails | Network error, no release id, or offline mode | `lookup_status_art` set to empty or disabled; pipeline continues | No art embedded; PROV records the outcome |
 | Original-release primary path rejects (derivative or no year) | Secondary-type intersection non-empty, or first-release-date missing/unparseable | Falls through to fuzzy fallback | Whatever fuzzy returns, or found=False |
 | Original-release fuzzy returns no candidate above threshold | No score reaches 88, or deny-list rejects all | Return found=False | Fields remain None/False on the disc |
 | Metadata menu opened on non-TTY stdin | `sys.stdin.isatty()` returns False | Menu returns immediately | Disc unchanged; downstream pipeline continues |
+| Metadata menu bypassed by auto-apply | STRONG confidence in Stage 2b | Menu returns disc unchanged (already holds auto-merged state) | Disc with automatic lookups applied; no interactive confirmation |
 | Foreign image parse error (any of TOC/DDP/NRG/CCD) | Missing required block, malformed magic, file not found | Exception raised (FileNotFoundError or ValueError) | Caller's try/finally cleans temp files; main handler prints error and exits non-zero |
 | MusicBrainz disc-ID computation on a disc with no tracks | `disc.tracks` is empty | Return None | Lookup short-circuits; no service call made |
 
 ## Algorithm Notes
+
+### Match-confidence scoring
+
+- **Objective**: Assign a single confidence score to the automatically assembled metadata so the pipeline can decide whether interactive confirmation is needed.
+- **Input**: The post-lookup working disc (after MB, CDDB, Discogs, AcoustID, and stage-7 duration-match have all run) and the provenance dict (which captures which signals fired).
+- **Signals (additive)**:
+  - Disc-ID fingerprint match (MB release id present and `duration_match_release` absent from PROV): +0.50. This is the deterministic, collision-resistant signal.
+  - Stage-7 text+duration-match (MB release id present and `duration_match_release` present in PROV): +0.20. These two signals are mutually exclusive.
+  - AcoustID corroboration (pre-menu R6 check confirmed the MB release): +0.25.
+  - ISRC disambiguation (ISRCs resolved a multi-match disc-ID, per R1): +0.15.
+  - CDDB/MB disagreement (R9 fired, indicating the two sources gave conflicting album or artist): −0.10.
+- **Score**: Raw sum of contributors, clamped to [0.0, 1.0].
+- **Thresholds**: STRONG ≥ 0.70, MEDIUM ≥ 0.40, LOW ≥ 0.10, NONE below 0.10.
+- **Auto-apply condition**: STRONG only — the menu is bypassed, accepting the automatically merged metadata without user confirmation.
+- **Note on reachability**: No single signal reaches STRONG on its own. Effective auto-apply requires at least disc-ID + AcoustID (0.75). A text+duration-matched release tops out at 0.60 (with AcoustID + ISRC disambiguation, before any penalty) — always below the STRONG threshold, always interactive.
+
+### R9 disagreement detection
+
+- **Objective**: Flag cases where CDDB and MusicBrainz gave meaningfully different album or artist names, as a signal that one source is misidentifying the disc.
+- **Input**: The pre-MusicBrainz album/artist values (from CDDB or embedded metadata) and the MusicBrainz candidate's album/artist values.
+- **Normalisation** (applied to both sides before comparison): Unicode composition normalisation, case folding, collapse whitespace, and stripping a short allow-list of release-suffix tokens (Remastered, Remaster, Deluxe Edition, Deluxe, Anniversary Edition, Expanded Edition, Expanded, Special Edition) from within brackets. These are expected differences between a pressing title and a canonical album title and should not trigger disagreement.
+- **Distance measure**: Normalised character edit distance over ASCII-folded, lowercased, non-alphanumeric-stripped strings. Pattern-weighted adjustments reduce the effective distance for innocuous differences: leading article ("the") reduces at weight 0.1; featuring credits reduce at weight 0.1; EP/Single markers are fully ignored (weight 0.0); parenthetical remarks at weight 0.3; bracketed remarks at weight 0.3; part numbers ("Pt. N") at weight 0.2. "&" is replaced with "and" before processing. When both inputs are absent, distance is 0.0 (both unknown = agreement); when only one is absent, distance is 1.0 (maximally different). The comparison is skipped when either side is blank — the caller's guard ensures the function is only invoked with both sides present.
+- **Threshold**: Fire when weighted distance > 0.15. Below this threshold, minor punctuation and article differences are not flagged.
+- **Output**: `disagreement_cddb_mb` in PROV (comma-separated list of disagreeing fields). `disagreement_album_dist` and `disagreement_artist_dist` as three-decimal-place floats when the respective field exceeded the threshold.
+- **Downstream effect**: `disagreement_cddb_mb` in PROV is read by `build_match_distance` as a −0.10 penalty on the match confidence score.
 
 ### Canonical MCN selection
 
@@ -396,7 +515,7 @@ flowchart TD
 
 - **Objective**: Same as primary, but for discs where the working disc has no release-group id (e.g. a disc not in the MusicBrainz disc-ID database).
 - **Inputs**: Artist and album from the working disc.
-- **Candidate generation**: An artist+album text search against the MusicBrainz service, fetching up to fifty releases, deduplicated by release-group id. Each release contributes a (title, year) pair using **release-group first-release-date only** (R5: candidates without one are skipped).
+- **Candidate generation**: An artist+album text search against the MusicBrainz service, fetching up to fifty releases, deduplicated by release-group id. Each release contributes a (title, year) pair using release-group first-release-date only (R5: candidates without one are skipped).
 - **Filtering**: Deny-list rules reject pairs differing in live/studio markers, roman-numeral suffixes, arabic-numeral suffixes, volume/part numbers, or with a re-recording marker on either side.
 - **Title normalisation**: Strip year qualifiers in brackets, disc-number tags, a longest-first allow-list of reissue tokens (Super Deluxe Edition, Super Deluxe, Deluxe Edition, Deluxe, Expanded Edition, ..., Mobile Fidelity, ...) — longest-first to avoid partial matches eating shorter tokens. Strip leading "the". Strip remaining punctuation.
 - **Scoring**: Token-set ratio fuzzy match between the disc's normalised title and each candidate's normalised title.
@@ -426,18 +545,21 @@ flowchart TD
 | Environment variable for AcoustID API key (`ACOUSTID_API_KEY`) | Any POSIX-style environment | Portable; consider also reading from the project's TOML config |
 | Environment variable for Discogs token (`DISCOGS_TOKEN`) | Any POSIX-style environment | Portable; consider also reading from the project's TOML config |
 | TCP outbound to a CDDB server on port 888 | Any TCP-capable host with outbound network | Server availability is fragile (the public CDDB ecosystem has decayed); a reimplementation should make the server endpoint configurable and tolerate the long-term disappearance of that protocol |
-| HTTPS to MusicBrainz, Discogs, AcoustID endpoints | Any TCP/TLS-capable host | Portable; rate limits apply (1 req/sec for MusicBrainz; check Discogs terms) |
+| HTTPS to MusicBrainz, Discogs, AcoustID, and cover-art endpoints | Any TCP/TLS-capable host | Portable; rate limits apply (1 req/sec for MusicBrainz; check Discogs terms) |
 | Standard-input TTY detection (`isatty()`) gating interactive prompts | POSIX terminal semantics | Portable across POSIX-like terminals; Windows console behaviour for `isatty()` is equivalent. Headless CI must not trigger interactive prompts |
 | XDG-style configuration path for the per-drive TOML config | Linux/macOS | Replace with a platform-appropriate config path on Windows; the same TOML schema applies |
 
 ## Connects To
 
 - **`cddb.py`** — TCP CDDB query, called from the rip pipeline only. Produces a disc with album, artist, release year, and per-track titles.
-- **`mb_lookup.py`** — MusicBrainz disc-ID lookup (pre-menu), text search (menu), barcode search (menu), release-group lookup (menu and post-menu original-release primary path), single-release lookup (menu, for stub expansion). Provides the `_merge_into_disc` and `_overwrite_disc` functions used everywhere a candidate is applied to a disc.
-- **`acoustid_lookup.py`** — Per-track fingerprint and AcoustID query chained to MusicBrainz recording lookup. Menu-driven only; produces one candidate per unique release.
-- **`discogs_lookup.py`** — Discogs barcode and structured-search queries. Used both pre-menu (barcode auto-merge with strict plausibility gate) and menu-driven (full search by either MCN or artist+title).
-- **`original_release.py`** — Post-menu lookup; primary path queries MusicBrainz release-group, fuzzy fallback queries MusicBrainz text search and scores with a fuzzy string matcher.
+- **`mb_lookup.py`** — MusicBrainz disc-ID lookup (pre-menu), text search (menu), barcode search (menu), release-group lookup (menu and pre-menu original-release primary path), single-release lookup (menu, for stub expansion). Provides the `_merge_into_disc` and `_overwrite_disc` functions used everywhere a candidate is applied to a disc.
+- **`acoustid_lookup.py`** — Per-track fingerprint and AcoustID query chained to MusicBrainz recording lookup. Used both pre-menu (R6 corroboration) and menu-driven; produces one candidate per unique release.
+- **`discogs_lookup.py`** — Discogs barcode and structured-search queries. Used both pre-menu (barcode auto-merge with strict plausibility gate; R11 master-year lookup) and menu-driven (full search by either MCN or artist+title).
+- **`original_release.py`** — Pre-menu lookup in all three pipelines; primary path queries MusicBrainz release-group, fuzzy fallback queries MusicBrainz text search and scores with a fuzzy string matcher.
+- **`match_distance.py`** — Computes additive match confidence from the post-lookup disc and provenance dict. Produces the `MatchDistance` and `MatchRecommendation` that drive the auto-apply gate. Used only in `_finalize_import` (rip/import pipelines).
+- **`string_dist.py`** — Pattern-weighted edit-distance function. Used by the R9 disagreement check in `_emit_r9_disagreement` to measure how far apart CDDB and MusicBrainz album/artist names are.
 - **`metadata.py`** — Local-source tag extraction for the create pipeline. Interactive accept/edit prompt for album and artist.
+- **`album_art.py`** — Cover-art source in all pipelines. Rip and import: post-menu fetch by MusicBrainz release id from the cover-art service. Create: pre-menu extraction from the source audio file's embedded tags. Result embedded in the RBI container in all cases.
 - **`toc_parser.py`** — Parses cdrdao TOC text; used by both the cdrdao-rip integration and the cdrdao-TOC import path.
 - **`cdrdao_reader.py`** — cdrdao TOC+BIN import; consumes `toc_parser` output and produces a seed disc.
 - **`ddp_reader.py`** — DDP 2.0 import; parses DDPID, PQDESCR, CDTEXT.BIN. Also exports a CD-Text pack parser used by `nrg_reader` and `ccd_reader`.
@@ -445,7 +567,8 @@ flowchart TD
 - **`ccd_reader.py`** — CloneCD CCD/IMG import; parses the text index and embedded CD-Text.
 - **`lookup_result.py`** — Defines the shared candidate-record structure (DiscMeta + TrackMeta). The actual merge into the working disc is done by `mb_lookup._merge_into_disc` / `_overwrite_disc`.
 - **`metadata_menu.py`** — The interactive confirmation menu. Orchestrates MusicBrainz, Discogs, AcoustID, and the Find Original Release sub-menu.
-- **`cdda2img.py`** — Pipeline entry points (`create_image`, `rip_image`, `import_image`) and the shared `_finalize_import` post-rip/import step. Holds `_resolve_drive_offsets`, `_collect_barcode_candidates`, `_pick_canonical_mcn`, `_prepopulate_from_discogs`, `_albums_match`, `_add_release_provenance`.
+- **`menu_state.py`** — `MenuController` drives the menu stack. Accepts `auto_apply` flag; returns disc unchanged without entering the interactive loop when `auto_apply=True` or stdin is not a TTY.
+- **`cdda2img.py`** — Pipeline entry points (`create_image`, `rip_image`, `import_image`) and the shared `_finalize_import` post-rip/import step. Holds `_resolve_drive_offsets`, `_collect_barcode_candidates`, `_pick_canonical_mcn`, `_prepopulate_from_discogs`, `_albums_match`, `_add_release_provenance`, `_emit_r9_disagreement`, `_r11_corroborate_with_discogs_master`, `_r12_status`.
 - **`rbi_format.py`** — `RBIDisc` is the target into which every lookup result is eventually merged.
 - **`container.py`** — Writes the final RBI file. `build_prov_block` serialises the provenance dict; `build_container` assembles all blocks.
 - **`replaygain.py`** — EBU R128 loudness analysis; sets `low_dynamic_range` on the disc before the provenance dict is built.
@@ -454,17 +577,26 @@ flowchart TD
 
 ## File:Line Index
 
-For quick navigation between this document and the source:
+For quick navigation between this document and the source. All citations verified in the session that produced this document:
 
-- Pipeline entry points: `cdda2img.py:441` (`create_image`), `cdda2img.py:663` (`import_image`), `cdda2img.py:1242` (`rip_image`), `cdda2img.py:944` (`_finalize_import`).
-- Drive-offset resolution (rip only): `cdda2img.py:1030` (`_resolve_drive_offsets`).
-- CDDB pre-population: `cddb.py:236` (`prepopulate_from_cddb`); called from `cdda2img.py:1294`.
+- Pipeline entry points: `cdda2img.py:520` (`create_image`), `cdda2img.py:1399` (`_finalize_import`, shared rip/import tail).
+- Drive-offset resolution (rip only): `cdda2img.py:1550` (`_resolve_drive_offsets`).
+- CDDB pre-population: `cddb.py:236` (`prepopulate_from_cddb`); called from `_finalize_import` via `_run_metadata_lookups`.
 - MusicBrainz pre-population: `mb_lookup.py:575` (`prepopulate_from_mb`); auto-fill gate at `mb_lookup.py:596`.
-- Discogs pre-population: `cdda2img.py:844` (`_prepopulate_from_discogs`); MCN candidate build at `cdda2img.py:768`; canonical pick at `cdda2img.py:795`; album plausibility at `cdda2img.py:820`.
-- Metadata menu entry: `metadata_menu.py:950` (`run_metadata_menu`); fetch sub-menu at `metadata_menu.py:662`.
+- Discogs pre-population: `cdda2img.py:956` (`_prepopulate_from_discogs`); MCN candidate build at `cdda2img.py:867`; canonical pick at `cdda2img.py:908`; album plausibility at `cdda2img.py:932`.
+- R9 disagreement: `cdda2img.py:1116` (`_emit_r9_disagreement`); threshold constant at `cdda2img.py:1113`; normalise helper at `cdda2img.py:1038`.
+- String distance: `string_dist.py:59` (`string_dist`).
+- Match confidence: `match_distance.py:60` (`build_match_distance`); thresholds at `match_distance.py:26`; called from `_finalize_import` at `cdda2img.py:1470`.
+- Original-release pre-menu call (rip/import): `cdda2img.py:1460` (`populate_original_release`); pre-menu call in create at `cdda2img.py:587`.
+- R11 Discogs corroboration: `cdda2img.py:1078` (`_r11_corroborate_with_discogs_master`); called at `cdda2img.py:1465`.
+- Auto-apply gate: `cdda2img.py:1473`; menu call with `auto_apply` at `cdda2img.py:1482`.
+- Menu auto-apply short-circuit: `menu_state.py:1053`.
+- Metadata menu entry: `metadata_menu.py:503` (`run_metadata_menu`).
 - Menu-driven applies (the confluence): `mb_lookup.py:452` (`_merge_into_disc`), `mb_lookup.py:514` (`_overwrite_disc`); confirm-apply diff at `metadata_menu.py:247`.
-- Original release post-menu: `original_release.py:137` (`populate_original_release`); manual-override gate at `original_release.py:143`; primary path at `original_release.py:82`; fuzzy fallback at `original_release.py:402`.
-- Loudness sets `low_dynamic_range`: `cdda2img.py:911` (`_measure_loudness_phase`); create-pipeline equivalent at `cdda2img.py:514`.
-- Provenance assembly: `cdda2img.py:371` (`_add_release_provenance`); called at `cdda2img.py:533` (create) and `cdda2img.py:999` (shared finalise).
+- Album art — rip/import: `cdda2img.py:1489` (`fetch_cover` call in `_finalize_import`).
+- Album art — create: `cdda2img.py:591` (`cover_from_file_tags` call in `create_image`).
+- Original-release: `original_release.py:137` (`populate_original_release`); manual-override gate at `original_release.py:143`; primary path at `original_release.py:82`; fuzzy fallback at `original_release.py:402`.
+- Loudness sets `low_dynamic_range` (rip/import): `cdda2img.py:1510` (`_measure_loudness_phase` in `_finalize_import`); create equivalent at `cdda2img.py:610`.
+- Provenance assembly: `cdda2img.py:439` (`_add_release_provenance`); called at `cdda2img.py:628` (create) and `cdda2img.py:1541` (shared finalise).
 - Container write: `container.py:141` (`build_container`); PROV block at `container.py:122` (`build_prov_block`).
 - Disc-ID computation: `mb_lookup.py:65` (`compute_disc_id`), `cddb.py:40` (`compute_cddb_disc_id`).

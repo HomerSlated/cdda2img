@@ -35,6 +35,15 @@
 # Default: true
 # enable_catalogue = true
 
+# What to do when a disc matching an existing catalogue entry is registered.
+# "ask"     — prompt interactively (default; falls back to "skip" without a TTY)
+# "skip"    — silently abort registration if a matching row already exists
+# "replace" — delete the existing row(s) and insert the new one
+# "add"     — always insert, allowing multiple entries for the same disc
+# Can be overridden per-run with --duplicate skip|replace|add on rip/import/create.
+# Default: "ask"
+# duplicate_catalogue_entry = "ask"
+
 # Default CD drive device used when no --device argument is supplied.
 # Default: /dev/sr0
 # default_device = "/dev/sr0"

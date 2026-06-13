@@ -370,7 +370,8 @@ def test_register_rbi_disabled(tmp_path):
 
     with (
         patch(
-            "cdda2img.catalogue._get_catalogue_config", return_value=(False, None)
+            "cdda2img.catalogue._get_catalogue_config",
+            return_value=(False, None, "ask"),
         ) as mock_cfg,
         patch("cdda2img.catalogue._register_impl") as mock_impl,
     ):
@@ -457,7 +458,9 @@ def test_register_rbi_explicit_path_bypasses_enable_flag(tmp_path, built_rbi):
     from cdda2img.catalogue import register_rbi
 
     db_path = tmp_path / "c.db"
-    with patch("cdda2img.catalogue._get_catalogue_config", return_value=(False, None)):
+    with patch(
+        "cdda2img.catalogue._get_catalogue_config", return_value=(False, None, "ask")
+    ):
         register_rbi(built_rbi, catalogue_path=db_path)
 
     conn = sqlite3.connect(db_path)

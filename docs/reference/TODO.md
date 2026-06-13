@@ -8,6 +8,29 @@
 
 - [ ] **BEETS-5** · Sort AcoustID release candidates by preferred date/country before MB fetch (beets `chroma.py:releases_key`, lines 72–92). cdda2img's R6 AcoustID corroboration (`_r6_acoustid_corroborate`) picks tracks 1 and ceil(N/2) but does not sort the candidate releases by likelihood before the full MB lookup. Low-effort improvement to the order in which candidates appear in the metadata menu.
 
+### Catalogue duplicate-registration policy (2026-06-13)
+
+- [ ] **CAT-1** · Add `duplicate_catalogue_entry` config knob (values: `skip` / `replace` / `add`;
+      default `skip`). When `enable_catalogue = true` and an RBI is registered, the catalogue code
+      must decide what to do when a row matching the same disc already exists. "Duplicate" should be
+      defined by a deterministic key — candidate: `(mb_release_id, mcn)` with fallback to
+      `(album_casefold, artist_casefold)` when both identifiers are absent.
+      - `skip` — silently drop the registration if a matching row exists (current implicit behaviour)
+      - `replace` — overwrite the existing row (useful after a re-rip with better metadata)
+      - `add` — always insert, allowing multiple RBIs for the same disc (e.g., different pressings)
+      Implementation: `config.py` (`Config.duplicate_catalogue_entry: str = "skip"`); logic in
+      `catalogue.py` at the registration call site; `conf/cdda2img.toml.example` entry with comment.
+      Also add a `--duplicate {skip,replace,add}` CLI flag (rip / import / create) that overrides
+      the config knob for that one invocation — useful for `rip --duplicate replace` after a re-rip.
+
+- [ ] **CAT-2** · Catalogue `delete` input: accept comma-separated entry numbers in addition to the
+      existing `N-M` range syntax, and allow combinations (e.g. `1,3`, `2-4,7`, `1,3-5,8`).
+      Implementation: a small parser in `catalogue.py` (or `catalogue_menu.py`) that splits on `,`,
+      resolves each token as either a single integer or an `N-M` range, unions the resulting sets,
+      and validates all indices before deleting any. Input `"1,3"` must not delete entry 2; mixed
+      `"1,3-5"` must expand to `{1,3,4,5}`. Error message on invalid token (non-integer, reversed
+      range, out-of-bounds index).
+
 ### Rip-to-tracks convenience pipeline (2026-06-13)
 
 - [ ] **RIP-1** · Add `rip --extract` flag: after the rip completes, call `extract_image()` on the

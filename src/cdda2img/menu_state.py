@@ -10,7 +10,7 @@ not the screen, mutates the stack. That keeps screens free of stack plumbing
 and unit-testable in isolation.
 
     [MainScreen]                      ← root; "accept" → Done (exit)
-    [MainScreen, ARPauseScreen]       ← AR summary shown first; Enter pops it
+    [MainScreen]
     [MainScreen, <sub-menu screen>]   ← Fetch / Edit / Original-release
 
 ``render`` runs every loop iteration after a screen-clear, giving the
@@ -77,7 +77,6 @@ def _exit_fullscreen() -> None:
 class MenuState(Enum):
     """Identity of each screen — retained for inspection and the ``.state`` shim."""
 
-    AR_PAUSE = auto()
     MAIN = auto()
     EDIT = auto()
     EDIT_TRACK = auto()
@@ -193,32 +192,6 @@ class MainScreen(Screen):
             return Stay()
         ctl.banner = "Unknown command. Use a / f / e / r / u / c."
         return Stay()
-
-
-class ARPauseScreen(Screen):
-    """AccurateRip verification summary, shown before the main menu."""
-
-    state = MenuState.AR_PAUSE
-
-    def render(self, ctl: MenuController) -> None:
-        from cdda2img.metadata_menu import _hr
-
-        print()
-        _hr("═")
-        print("  AccurateRip Verification")
-        _hr("─")
-        print()
-        for line in (ctl.ar_summary or "").splitlines():
-            print(f"  {line}")
-        print()
-        _hr("─")
-        print()
-
-    def handle_input(self, ctl: MenuController) -> Nav:
-        from cdda2img.metadata_menu import _prompt
-
-        _prompt("  Press Enter to continue to the metadata menu > ")
-        return Pop()
 
 
 class EditScreen(Screen):
@@ -991,7 +964,7 @@ class MenuController:
     Constructed once per menu invocation. Owns the working disc, the user's
     undo savepoint, the seed search fields (immutable across edits — so "search
     again" doesn't drift after an edit), the MB release-group ID threaded
-    between Fetch and Original-Release, and the AR summary for the AR_PAUSE page.
+    between Fetch and Original-Release screens.
 
     ``run()`` drives the stack until accepted and returns the final disc.
     """
@@ -1030,10 +1003,7 @@ class MenuController:
         self.banner: str = ""
         # True once the user accepts at the root; ends run().
         self.done: bool = False
-        # Screen stack: MAIN at the root, AR_PAUSE pushed on top when present.
         self.stack: list[Screen] = [MainScreen()]
-        if ar_summary is not None:
-            self.stack.append(ARPauseScreen())
 
     @property
     def state(self) -> MenuState:

@@ -98,6 +98,7 @@ class Config:
     drives: list[DriveConfig] = field(default_factory=list)
     catalogue_path: Path | None = None
     enable_catalogue: bool = True
+    duplicate_catalogue_entry: str = "ask"
     default_device: str = "/dev/sr0"
     silence_threshold: int = 55
     capacity: int = 80
@@ -178,6 +179,19 @@ def _parse_drives(raw_drives: object) -> list[DriveConfig]:
     return result
 
 
+_DUP_POLICY_VALID = {"ask", "skip", "replace", "add"}
+
+
+def _parse_dup_policy(raw: object) -> str:
+    value = str(raw).lower()
+    if value not in _DUP_POLICY_VALID:
+        log.warning(
+            "Invalid duplicate_catalogue_entry %r in config; defaulting to 'ask'", raw
+        )
+        return "ask"
+    return value
+
+
 def load_config() -> Config:
     """Load and return the user configuration from the TOML file."""
     data = _load_raw()
@@ -214,6 +228,9 @@ def load_config() -> Config:
     )
 
     enable_catalogue = bool(data.get("enable_catalogue", True))
+    duplicate_catalogue_entry = _parse_dup_policy(
+        data.get("duplicate_catalogue_entry", "ask")
+    )
     default_device = str(data.get("default_device", "/dev/sr0"))
 
     if "silence" in data and "silence_threshold" not in data:
@@ -269,6 +286,7 @@ def load_config() -> Config:
         drives=drives,
         catalogue_path=catalogue_path,
         enable_catalogue=enable_catalogue,
+        duplicate_catalogue_entry=duplicate_catalogue_entry,
         default_device=default_device,
         silence_threshold=silence_threshold,
         capacity=capacity,
