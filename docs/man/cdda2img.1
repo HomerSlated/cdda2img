@@ -126,6 +126,47 @@ written into that directory; otherwise
 .I PATH
 is treated as the explicit output file.
 Default: the album\-derived filename in the current working directory.
+.TP
+.BR \-\-preview ", " \-\-no\-preview
+Show a terminal album art preview and play track 1 in the background
+during the rip.
+Purely cosmetic; never blocks or fails the rip.
+Default: from config
+.RB ( preview ),
+true.
+.TP
+.BR \-\-tui ", " \-\-no\-tui
+Use the terminal UI for live rip progress.
+.B \-\-no\-tui
+renders progress to plain stdout without screen clearing.
+No\-op when stdin is not a TTY.
+Default: from config
+.RB ( tui ),
+true.
+.TP
+.BI \-\-duplicate " {skip|replace|add}"
+How to handle an existing catalogue entry for this disc:
+.B skip
+aborts registration silently;
+.B replace
+deletes the existing entry and inserts the new one;
+.B add
+always inserts, allowing multiple entries per disc.
+Overrides the
+.B duplicate_catalogue_entry
+configuration key for this run.
+Default: from config, ask (prompt if TTY, skip otherwise).
+.TP
+.BR \-\-auto ", " \-\-no\-auto
+Skip the interactive metadata menu and accept the best\-guess result
+automatically.
+See
+.B METADATA MATCHING
+for score details.
+Overrides the
+.B auto
+configuration key for this run.
+Default: from config, false.
 .\"
 .SS create \(em Create
 Creates one or more RBI images from a directory of audio files.
@@ -194,6 +235,30 @@ final group.
 .TP
 .B \-\-preserve\-pregaps
 Preserves pre\-gaps in trim mode (no\-op for audio\-file input).
+.TP
+.BI \-\-output " PATH"
+Output
+.B .rbi
+file path, or a directory to receive album\-derived filenames.
+For multi\-disc batches the stem is used as a base name with a
+.I _discN
+suffix.
+Default: album\-derived filename(s) in the current working directory.
+.TP
+.BR \-\-tui ", " \-\-no\-tui
+Same as for the
+.B rip
+subcommand.
+.TP
+.BI \-\-duplicate " {skip|replace|add}"
+Same as for the
+.B rip
+subcommand.
+.TP
+.BR \-\-auto ", " \-\-no\-auto
+Same as for the
+.B rip
+subcommand.
 .\"
 .SS extract \(em Extract
 Extracts one or more block types from an RBI image.
@@ -299,6 +364,25 @@ written into that directory; otherwise
 .I PATH
 is treated as the explicit output file.
 Default: the album\-derived filename in the current working directory.
+.TP
+.B \-\-info
+Dry\-run mode: parse and display image metadata without importing.
+No output file is written.
+.TP
+.BR \-\-tui ", " \-\-no\-tui
+Same as for the
+.B rip
+subcommand.
+.TP
+.BI \-\-duplicate " {skip|replace|add}"
+Same as for the
+.B rip
+subcommand.
+.TP
+.BR \-\-auto ", " \-\-no\-auto
+Same as for the
+.B rip
+subcommand.
 .\"
 .SS burn \(em Burn
 Burns an RBI image to a blank CD\-DA disc via cdrdao.
@@ -425,6 +509,89 @@ in the TOML configuration.
 .B \-\-version
 Print the cdda2img version and exit.
 .\"
+.SH METADATA MATCHING
+After every rip, import, and create pipeline completes the remote metadata
+lookups (CDDB, MusicBrainz, AcoustID, Discogs), cdda2img computes a
+.I match confidence score
+that summarises how many independent signals agreed on the disc's identity.
+The score is additive and is written as
+.B match_confidence
+in the RBI provenance block.
+.SS Score components
+Each signal contributes a fixed weight when present:
+.TP
+.B mb_disc_id  +0.50
+A MusicBrainz disc ID SHA\-1 fingerprint uniquely identified a release.
+This is the strongest signal: it is derived from the exact physical disc
+geometry (track count, track start frames, lead\-out offset) and matches
+only one release in the MusicBrainz database.
+.TP
+.B acoustid  +0.25
+AcoustID per\-track audio fingerprints corroborated the match.
+At least one track's Chromaprint fingerprint returned a recording that
+agrees with the disc ID or duration\-match release.
+.TP
+.B mb_duration_match  +0.20
+A text search of MusicBrainz (artist + album title) found a release whose
+total duration matches the physical disc (last\-resort fallback when the
+disc ID returned no results).
+.TP
+.B isrc_disambiguated  +0.15
+Per\-track ISRCs from the Q\-channel broke a tie between multiple
+MusicBrainz releases that share the same disc ID, requiring at least two
+ISRCs to agree.
+.TP
+.B cddb_mb_disagreement  \-0.10
+The CDDB server's artist or album title string diverges significantly from
+the MusicBrainz result, suggesting the CDDB entry may be wrong or the
+disc is a re\-press with different metadata.
+.SS Recommendation thresholds
+.TP
+.B STRONG  (score \(>= 0.70)
+The pipeline is highly confident.
+The metadata menu is skipped automatically and the result is accepted
+without user interaction, even without
+.BR \-\-auto .
+A message is printed:
+.IR "Metadata auto-confirmed \(em <score summary>" .
+.TP
+.B MEDIUM  (score \(>= 0.40)
+Two or more independent signals agree.
+The metadata menu is shown with a MEDIUM recommendation.
+.TP
+.B LOW  (score \(>= 0.10)
+At least one weak signal matched.
+The metadata menu is shown with a LOW recommendation.
+.TP
+.B NONE  (score < 0.10)
+No lookup signals matched.
+The metadata menu is shown without a recommendation.
+.SS Example scores
+.TP
+.B 0.90 (STRONG)
+Disc ID confirmed in MusicBrainz (+0.50), AcoustID corroborated (+0.25),
+ISRCs broke a release tie (+0.15).
+.TP
+.B 0.45 (MEDIUM)
+Duration match only, no disc ID (+0.20), AcoustID corroborated (+0.25).
+Typical for a disc not yet catalogued in MusicBrainz by disc ID.
+.TP
+.B 0.00 (NONE)
+No remote lookup returned a usable result (network down, disc not in any
+database, or
+.B \-\-no\-network\-services
+active without a cache hit).
+.SS Effect of \-\-auto
+Passing
+.B \-\-auto
+(or setting
+.B auto = true
+in the configuration) forces
+.B auto_apply
+unconditionally, regardless of the score.
+A STRONG score auto\-applies without
+.BR \-\-auto .
+.\"
 .SH ENVIRONMENT
 .TP
 .B ACOUSTID_API_KEY
@@ -527,6 +694,119 @@ Accepts the same format as
 .BR database_backup_frequency .
 Default:
 .BR 1d .
+.TP
+.BI "contact_email = " \(dq\(dq
+Email address included in the MusicBrainz API User\-Agent header, as required
+by the MusicBrainz terms of service.
+Without it, MusicBrainz lookups may be rate\-limited or blocked.
+Default: empty.
+.TP
+.BI "catalogue_path = " \(dqPATH\(dq
+Path to the disc catalogue SQLite database.
+Default:
+.IR $XDG_DATA_HOME/cdda2img/cdda2img.db
+.RI ( ~/.local/share/cdda2img/cdda2img.db ).
+.TP
+.BI "enable_catalogue = " true
+Set to
+.B false
+to disable automatic catalogue registration after rip, import, or create.
+Default:
+.BR true .
+.TP
+.BI "duplicate_catalogue_entry = " \(dqask\(dq
+What to do when a disc matching an existing catalogue entry is registered.
+.RS
+.TP
+.B ask
+Prompt interactively (default); falls back to
+.B skip
+when stdin is not a TTY.
+.TP
+.B skip
+Silently abort registration if a matching entry already exists.
+.TP
+.B replace
+Delete the existing entry and insert the new one.
+.TP
+.B add
+Always insert, allowing multiple entries for the same disc.
+.RE
+Overridable per\-run with
+.B \-\-duplicate
+on rip, import, and create.
+Default:
+.BR ask .
+.TP
+.BI "default_device = " \(dq/dev/sr0\(dq
+Default CD drive device used when no
+.B \-\-device
+argument is supplied.
+Default:
+.BR /dev/sr0 .
+.TP
+.BI "silence_threshold = " 55
+Silence detection threshold for the
+.B create
+pipeline, in \-dBFS.
+Audio below this level at the head and tail of each track is trimmed when
+.B \-\-silence trim
+is in effect.
+Useful range: 40 (loose) to 70 (strict).
+Valid range: 1\(en90.
+Default:
+.BR 55 .
+.TP
+.BI "capacity = " 80
+Disc capacity in minutes for the
+.B create
+pipeline batcher.
+80 corresponds to a standard 700\~MB CD\-R.
+Valid range: 1\(en99.
+Default:
+.BR 80 .
+.TP
+.BI "preview = " true
+Show a terminal album art preview and play track 1 in the background during
+.BR "cdda2img rip" .
+Best\-effort and cosmetic; never blocks or fails the rip.
+Default:
+.BR true .
+.TP
+.BI "tui = " true
+Use the terminal UI for live progress rendering on rip, import, and create.
+No\-op when stdin is not a TTY (CI, pipes, etc.).
+Default:
+.BR true .
+.TP
+.BI "low_dr_threshold = " 5.0
+Album EBU\~R128 loudness range (LU) below which the disc is flagged
+.B low_dynamic_range\~=\~YES
+in the RBI provenance block and the catalogue.
+The default of 5.0\~LU corresponds to a heavily compressed master.
+Valid range: 0.5\(en20.0.
+Default:
+.BR 5.0 .
+.TP
+.BI "no_network_services = " false
+When true, every remote metadata lookup (CDDB, MusicBrainz, Discogs,
+AcoustID, AccurateRip) short\-circuits to
+.IR unavailable .
+Combined with the SQLite lookup cache, a re\-run can reproduce a
+previously\-seen disc's metadata without network access.
+Equivalent to
+.BR \-\-no\-network\-services .
+Default:
+.BR false .
+.TP
+.BI "auto = " false
+Skip the interactive metadata menu on rip, import, and create.
+The pipeline still fetches and applies all metadata; the menu is bypassed
+and the best\-guess result is accepted automatically.
+Equivalent to always passing
+.BR \-\-auto .
+Default:
+.BR false .
 .SS Per-drive offset entries
 Per-drive sample offsets are stored as an array of TOML tables under
 .BR [[drives]] ,
