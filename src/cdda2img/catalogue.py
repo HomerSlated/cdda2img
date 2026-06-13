@@ -249,9 +249,9 @@ def _show_duplicate(conn: sqlite3.Connection, dup_id: int) -> None:
     album, artist, year, dn, dt, fpath, reg_at = row
     disc_str = f" disc {dn}/{dt}" if dt > 1 else ""
     year_str = f" ({year})" if year else ""
-    print(f"  Existing: {artist} — {album}{year_str}{disc_str}")
-    print(f"    File:       {fpath}")
-    print(f"    Registered: {reg_at[:19]}")
+    print(f"   Existing: {artist} — {album}{year_str}{disc_str}")
+    print(f"     File:       {fpath}")
+    print(f"     Registered: {reg_at[:19]}")
 
 
 def _prompt_duplicate_action(conn: sqlite3.Connection, dup_ids: list[int]) -> str:
@@ -259,13 +259,14 @@ def _prompt_duplicate_action(conn: sqlite3.Connection, dup_ids: list[int]) -> st
     if not sys.stdin.isatty():
         log.info("Catalogue duplicate detected (non-TTY) — skipping registration")
         return "s"
-    print(f"\n  Catalogue: {len(dup_ids)} duplicate(s) found:")
+    print(f"\n   Catalogue: {len(dup_ids)} duplicate(s) found:")
     for dup_id in dup_ids:
         _show_duplicate(conn, dup_id)
     while True:
         try:
             answer = (
-                input("  [s]kip  [r]eplace  [a]dd anyway  [s]: ").strip().lower() or "s"
+                input("   [s]kip  [r]eplace  [a]dd anyway  [s]: ").strip().lower()
+                or "s"
             )
         except (EOFError, KeyboardInterrupt):
             print()
@@ -496,6 +497,6 @@ def _register_impl(rbi_path: Path, catalogue_path: Path | None) -> None:  # noqa
                 (now,),
             )
 
-        print(f"  Catalogue: registered {artist} — {album} ({rbi_path.name})")
+        print(f"   Catalogue: registered {artist} — {album} ({rbi_path.name})")
     finally:
         conn.close()

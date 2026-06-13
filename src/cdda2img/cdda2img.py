@@ -252,6 +252,11 @@ def parse_args() -> argparse.Namespace:
         help="Extract album art sidecar ({stem}.jpg with --raw, folder.jpg with --tracks)",
     )
     x.add_argument(
+        "--embedart",
+        action="store_true",
+        help="Embed album art as a PICTURE block in each extracted FLAC (~600 px JPEG; modifier for --tracks/--all)",
+    )
+    x.add_argument(
         "--all",
         action="store_true",
         dest="all_blocks",
@@ -1511,7 +1516,7 @@ def _finalize_import(
         # warnings) must be printed *after* pause.
         ui.pause()
         diag.flush()
-        print(f"  Container: {output}")
+        print(f"   Container: {output}")
     from cdda2img.catalogue import register_rbi
 
     register_rbi(output)
@@ -1911,7 +1916,7 @@ def rip_image(  # noqa: C901
 
         _t = threading.Thread(target=_preview_worker, daemon=True)
         _t.start()
-        _t.join(timeout=5.0)
+        _t.join(timeout=15.0)
         # Main thread renders — race-free (thread is done or timed out; no concurrent stdout).
         from cdda2img.album_art import render_cover
 
@@ -2087,6 +2092,7 @@ def extract_image(
     log: bool,
     all_blocks: bool,
     albumart: bool = False,
+    embedart: bool = False,
     normalize: bool = False,
     output: Path | None = None,
 ) -> None:
@@ -2109,6 +2115,7 @@ def extract_image(
             ar=True,
             log=True,
             albumart=True,
+            embedart=embedart,
             normalize=normalize,
             warn_missing=False,
         )
@@ -2120,6 +2127,7 @@ def extract_image(
             ar=ar,
             log=log,
             albumart=albumart,
+            embedart=embedart,
             normalize=normalize,
             warn_missing=True,
         )
@@ -2274,6 +2282,7 @@ def _dispatch(args: argparse.Namespace) -> None:
             log=args.log,
             all_blocks=args.all_blocks,
             albumart=args.albumart,
+            embedart=args.embedart,
             normalize=args.normalize,
             output=args.output,
         )

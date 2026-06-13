@@ -459,9 +459,8 @@ def print_ar_report(results: list[ARTrackResult], read_offset: int = 0) -> None:
     """Print a per-track AccurateRip verification report to stdout."""
     text = format_ar_report(results, read_offset)
     if text:
-        # Indent two spaces to match the legacy formatting.
         for line in text.splitlines():
-            print(f"  {line}")
+            print(f"   {line}")
 
 
 # ---------------------------------------------------------------------------

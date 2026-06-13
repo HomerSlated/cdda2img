@@ -2,6 +2,22 @@
 
 ## Open
 
+### Rip-to-tracks convenience pipeline (2026-06-13)
+
+- [ ] **RIP-1** · Add `rip --extract` flag: after the rip completes, call `extract_image()` on the
+      output RBI in-process (no subprocess) to produce per-track FLACs + CUE sheet. Default:
+      keep the RBI. Add `--no-keep-rbi` to discard it after successful extraction. Implementation:
+      ~10 lines in `rip_image()` — detect `--extract`, call `extract_image(output, ...)`, optionally
+      `unlink`. No pipeline refactoring; the RBI is the verified intermediate.
+
+### Album art follow-ups (2026-06-13)
+
+- [ ] **ART-1** · Step 7: tests — ART block round-trip in `test_container.py`; new `test_album_art.py` covering `sniff`, `transcode_to_jpeg`, `downscale_jpeg`, and `render_cover` (mock subprocess)
+- [ ] **ART-2** · Wire `embedart: bool = False` into `Config` dataclass (`config.py`) + `conf/cdda2img.toml.example` — CLI flag exists; config knob not yet connected
+- [ ] **ART-3** · Review `tools/albumart.py` — old standalone probe; retire or reduce to a thin wrapper around `album_art.py` now that the production module exists
+
+---
+
 ### ⭐ Priority #1 — Agent-audit remediation (2026-05-31)
 
 Single plan covering **every** issue raised by the four background agents run on

@@ -541,7 +541,7 @@ def test_release_intelligence_found_routes_through_core():
         "original_release_year": "1983",
         "release_date": "1983-11-18",
     }
-    assert _release_intelligence_line(prov) == "Original: Yes, this release (1983)"
+    assert _release_intelligence_line(prov) == "Original:  Yes, this release (1983)"
 
 
 def test_release_intelligence_found_no_names_earlier_release():
@@ -551,7 +551,7 @@ def test_release_intelligence_found_no_names_earlier_release():
         "original_release_year": "1982",
         "release_date": "2008",
     }
-    assert _release_intelligence_line(prov) == "Original: No, Thriller (1982)"
+    assert _release_intelligence_line(prov) == "Original:  No, Thriller (1982)"
 
 
 def test_release_intelligence_same_year_different_title_is_yes():
@@ -563,7 +563,7 @@ def test_release_intelligence_same_year_different_title_is_yes():
         "original_release_year": "1983",
         "release_date": "1983",
     }
-    assert _release_intelligence_line(prov) == "Original: Yes, this release (1983)"
+    assert _release_intelligence_line(prov) == "Original:  Yes, this release (1983)"
 
 
 def test_release_intelligence_date_fallback_preserved():
@@ -587,5 +587,5 @@ def test_release_intelligence_found_but_no_disc_year_is_unknown():
         "original_release_year": "1982",
     }
     assert _release_intelligence_line(prov) == (
-        "Original: Unknown, unknown release (unknown year)"
+        "Original:  Unknown, unknown release (unknown year)"
     )

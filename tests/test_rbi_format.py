@@ -44,7 +44,7 @@ def test_format_original_yes_this_release():
     disc = _disc(
         release_date="2024", original_release_found=True, original_release_year=2024
     )
-    assert format_original(disc) == "Original: Yes, this release (2024)"
+    assert format_original(disc) == "Original:  Yes, this release (2024)"
 
 
 def test_format_original_no_names_the_earlier_release():
@@ -54,7 +54,7 @@ def test_format_original_no_names_the_earlier_release():
         original_release_title="Thriller",
         original_release_year=1982,
     )
-    assert format_original(disc) == "Original: No, Thriller (1982)"
+    assert format_original(disc) == "Original:  No, Thriller (1982)"
 
 
 def test_format_original_no_with_unknown_earlier_fields():
@@ -64,7 +64,7 @@ def test_format_original_no_with_unknown_earlier_fields():
         original_release_title=None,
         original_release_year=None,
     )
-    assert format_original(disc) == "Original: No, unknown release (unknown year)"
+    assert format_original(disc) == "Original:  No, unknown release (unknown year)"
 
 
 def test_format_original_unknown_when_disc_year_unknown():
@@ -75,12 +75,12 @@ def test_format_original_unknown_when_disc_year_unknown():
         original_release_title="Thriller",
         original_release_year=1982,
     )
-    assert format_original(disc) == "Original: Unknown, unknown release (unknown year)"
+    assert format_original(disc) == "Original:  Unknown, unknown release (unknown year)"
 
 
 def test_format_original_unknown_when_not_found():
     disc = _disc(release_date="1983", original_release_found=False)
-    assert format_original(disc) == "Original: Unknown, unknown release (unknown year)"
+    assert format_original(disc) == "Original:  Unknown, unknown release (unknown year)"
 
 
 def test_format_original_year_granularity():
@@ -92,7 +92,7 @@ def test_format_original_year_granularity():
         original_release_title="Eliminator",
         original_release_year=1983,
     )
-    assert format_original(disc) == "Original: Yes, this release (1983)"
+    assert format_original(disc) == "Original:  Yes, this release (1983)"
 
 
 # ---------------------------------------------------------------------------
@@ -105,23 +105,23 @@ def test_format_original_fields_golden_strings():
     # core can't drift independently of the RBIDisc adapter.
     assert (
         format_original_fields(2024, True, None, 2024)
-        == "Original: Yes, this release (2024)"
+        == "Original:  Yes, this release (2024)"
     )
     assert (
         format_original_fields(2008, True, "Thriller", 1982)
-        == "Original: No, Thriller (1982)"
+        == "Original:  No, Thriller (1982)"
     )
     assert (
         format_original_fields(2008, True, None, None)
-        == "Original: No, unknown release (unknown year)"
+        == "Original:  No, unknown release (unknown year)"
     )
     assert (
         format_original_fields(None, True, "Thriller", 1982)
-        == "Original: Unknown, unknown release (unknown year)"
+        == "Original:  Unknown, unknown release (unknown year)"
     )
     assert (
         format_original_fields(1983, False, None, None)
-        == "Original: Unknown, unknown release (unknown year)"
+        == "Original:  Unknown, unknown release (unknown year)"
     )
 
 

@@ -131,6 +131,26 @@ def _wav_bytes_to_flac(
                 out_c.mux(out_packet)
 
 
+def _embed_picture(flac_path: Path, jpeg: bytes) -> None:
+    """Embed *jpeg* as a front-cover PICTURE block in an existing FLAC file."""
+    from mutagen.flac import FLAC, Picture  # type: ignore[import-untyped]  # LINT-004
+
+    from cdda2img.album_art import sniff
+
+    _, w, h = sniff(jpeg)
+    pic = Picture()
+    pic.type = 3  # front cover
+    pic.mime = "image/jpeg"
+    pic.desc = ""
+    pic.width = w or 0
+    pic.height = h or 0
+    pic.depth = 24  # 8 bits x 3 channels
+    pic.data = jpeg
+    f = FLAC(str(flac_path))
+    f.add_picture(pic)
+    f.save()
+
+
 def extract_tracks(
     disc: ParsedDisc,
     container_file: Path,
@@ -144,6 +164,7 @@ def extract_tracks(
     base: Path,
     rg_data: RBIReplayGain | None = None,
     gain_factor: float | None = None,
+    cover_jpeg: bytes | None = None,
 ) -> None:
     d = _disc_dir(disc, disc_number, disc_total, base)
     d.mkdir(parents=True, exist_ok=True)
@@ -178,6 +199,8 @@ def extract_tracks(
 
         out_path = d / _track_filename(track)
         _wav_bytes_to_flac(wav, out_path, metadata, sample_rate)
+        if cover_jpeg is not None:
+            _embed_picture(out_path, cover_jpeg)
         print(f"    → {out_path}")
 
 

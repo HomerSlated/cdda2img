@@ -497,6 +497,7 @@ class ExtractOptions:
     ar: bool = False
     log: bool = False
     albumart: bool = False
+    embedart: bool = False
     normalize: bool = False
     warn_missing: bool = True
 
@@ -566,6 +567,15 @@ def _extract_art_sidecar(
     dest.parent.mkdir(parents=True, exist_ok=True)
     dest.write_bytes(art.image_data)
     print(f"Album art saved: {dest}")
+
+
+def _read_art_jpeg(container_file: Path, art_entry: RBIDirEntry) -> bytes | None:
+    """Return the raw JPEG payload from the ART block, or None if malformed."""
+    with open(container_file, "rb") as f:
+        f.seek(art_entry.offset)
+        art_raw = f.read(art_entry.length)
+    art = unpack_art_block(art_raw)
+    return art.image_data if art is not None else None
 
 
 def _measure_gain_from_container(container_file: Path, pcm_offset: int, disc) -> float:
@@ -730,6 +740,15 @@ def extract_data(  # noqa: C901
                 gain_factor = _measure_gain_from_container(
                     container_file, pcm_entry.offset, disc
                 )
+        # Read art once; reuse for both FLAC embedding and folder.jpg.
+        cover_jpeg: bytes | None = None
+        if art_entry is not None and opts.embedart:
+            from cdda2img.album_art import downscale_jpeg
+
+            _raw = _read_art_jpeg(container_file, art_entry)
+            if _raw is not None:
+                cover_jpeg = downscale_jpeg(_raw, max_edge=600)
+
         print(f"\nExtracting {header.track_count} tracks...")
         extract_tracks(
             disc=disc,
@@ -744,7 +763,10 @@ def extract_data(  # noqa: C901
             base=base_dir,
             rg_data=rg_data if not opts.normalize else None,
             gain_factor=gain_factor,
+            cover_jpeg=cover_jpeg,
         )
+        if cover_jpeg is not None:
+            print("PICTURE tags embedded.")
         write_cue(disc, header.disc_number, header.disc_total, base_dir)
         if not opts.normalize:
             if rg_data is not None:
@@ -1010,7 +1032,7 @@ def _list_info(rbi_file: Path) -> str:  # noqa: C901
 
     lines.append("")
 
-    col_w = len("Provenance block") + 2
+    col_w = 22
     hdr_line = f"{'Block':<{col_w}}  {'Offset':>14}  {'Size':>14}"
     lines.append(hdr_line)
     lines.append("-" * len(hdr_line))
@@ -1020,15 +1042,16 @@ def _list_info(rbi_file: Path) -> str:  # noqa: C901
             entry.type_id,
             entry.type_id.decode("ascii", errors="replace"),
         )
-        extra_str = ""
         if entry.type_id == BLOCK_TYPE_PCM:
             pcm_seconds = entry.length / (
                 PCM_SAMPLE_RATE * PCM_CHANNELS * (PCM_BIT_DEPTH // 8)
             )
-            extra_str = f"  ({_fmt_duration(pcm_seconds)})"
+            name = f"{name} ({_fmt_duration(pcm_seconds)})"
         lines.append(
-            f"{name:<{col_w}}  {entry.offset:>14,}  {_fmt_size(entry.length):>14}{extra_str}"
+            f"{name:<{col_w}}  {entry.offset:>14,}  {_fmt_size(entry.length):>14}"
         )
+
+    lines.append("")
 
     arip_entry = header.find_block(BLOCK_TYPE_ARIP)
     if arip_entry is not None:
@@ -1046,23 +1069,20 @@ def _list_info(rbi_file: Path) -> str:  # noqa: C901
             arip = unpack_arip_block(arip_raw, header.track_count)
             statuses = [t.status for t in arip.tracks]
             n = len(statuses)
+            lbl = f"{'AccurateRip:':<{col_w}}"
             if all(s == ARIP_STATUS_NOT_IN_DB for s in statuses):
-                lines.append("AccurateRip:         not in database")
+                lines.append(f"{lbl}not in database")
             elif all(s == ARIP_STATUS_OK for s in statuses):
                 min_conf = min(
                     max(t.v1_confidence, t.v2_confidence) for t in arip.tracks
                 )
-                lines.append(
-                    f"AccurateRip:         {n}/{n} tracks OK  (min conf {min_conf})"
-                )
+                lines.append(f"{lbl}{n}/{n} tracks OK  (min conf {min_conf})")
             elif all(s == ARIP_STATUS_MISMATCH for s in statuses):
                 max_total = max(t.db_total for t in arip.tracks)
-                lines.append(
-                    f"AccurateRip:         in DB (max total {max_total}) but no CRC match"
-                )
+                lines.append(f"{lbl}in DB (max total {max_total}) but no CRC match")
             else:
                 n_ok = sum(1 for s in statuses if s == ARIP_STATUS_OK)
-                lines.append(f"AccurateRip:         {n_ok}/{n} tracks verified")
+                lines.append(f"{lbl}{n_ok}/{n} tracks verified")
         except ValueError:
             pass
 
@@ -1072,10 +1092,11 @@ def _list_info(rbi_file: Path) -> str:  # noqa: C901
             f.seek(art_entry.offset)
             art_raw = f.read(art_entry.length)
         art = unpack_art_block(art_raw)
+        lbl = f"{'Album art:':<{col_w}}"
         if art is not None and art.width and art.height:
-            lines.append(f"Album art:           JPEG  {art.width}x{art.height} px")
+            lines.append(f"{lbl}  {'JPEG':>14}  {f'{art.width}x{art.height} px':>14}")
         elif art is not None:
-            lines.append(f"Album art:           JPEG  {_fmt_size(len(art.image_data))}")
+            lines.append(f"{lbl}  {'JPEG':>14}  {_fmt_size(len(art.image_data)):>14}")
 
     lines.append("")
 

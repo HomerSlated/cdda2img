@@ -404,12 +404,12 @@ def format_original_fields(
     same string is emitted everywhere so the representation is identical.
     """
     if disc_year is None or not found:
-        return "Original: Unknown, unknown release (unknown year)"
+        return "Original:  Unknown, unknown release (unknown year)"
     if disc_year == orig_year:
-        return f"Original: Yes, this release ({disc_year})"
+        return f"Original:  Yes, this release ({disc_year})"
     disp_title = title or "unknown release"
     year_disp = orig_year if orig_year is not None else "unknown year"
-    return f"Original: No, {disp_title} ({year_disp})"
+    return f"Original:  No, {disp_title} ({year_disp})"
 
 
 def format_original(disc: RBIDisc) -> str:
