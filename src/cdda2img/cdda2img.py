@@ -1464,11 +1464,24 @@ def _finalize_import(
     # R11: corroborate with Discogs master if both sources are present.
     _r11_corroborate_with_discogs_master(disc, provenance)
 
+    # Compute match confidence after all lookup signals are baked into prov.
+    from cdda2img.match_distance import MatchRecommendation, build_match_distance
+
+    match_dist = build_match_distance(disc, provenance)
+    provenance["match_confidence"] = f"{match_dist.score:.3f}"
+    provenance["match_recommendation"] = match_dist.recommendation.value
+    auto_apply = match_dist.recommendation == MatchRecommendation.STRONG
+
     # Hand the terminal over to the interactive metadata menu. The
     # ar_summary kwarg drives the AR_PAUSE state (rip pipeline only).
     if ui is not None:
         ui.pause()
-    disc = run_metadata_menu(disc, source_pcm=pcm_file, ar_summary=ar_summary, tui=tui)
+    if auto_apply:
+        _diag = f"  Metadata auto-confirmed — {match_dist.summary()}"
+        print(_diag)
+    disc = run_metadata_menu(
+        disc, source_pcm=pcm_file, ar_summary=ar_summary, tui=tui, auto_apply=auto_apply
+    )
     if ui is not None:
         ui.resume()
 

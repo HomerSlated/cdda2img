@@ -1004,6 +1004,7 @@ class MenuController:
         source_wavs: list[Path] | None = None,
         ar_summary: str | None = None,
         tui: bool = True,
+        auto_apply: bool = False,
     ) -> None:
         self.disc: RBIDisc = disc
         self._original_disc: RBIDisc = copy.deepcopy(disc)  # undo savepoint
@@ -1015,6 +1016,10 @@ class MenuController:
         # pipeline output (MB match line, etc.) stays capturable. The menu is
         # still interactive — only the screen-clear is dropped.
         self.tui = tui
+        # When True (STRONG recommendation), skip the interactive prompt and
+        # return the disc as-is. The caller is responsible for printing a brief
+        # confirmation line before invoking the menu.
+        self.auto_apply = auto_apply
         self.mb_rg_id: str | None = None
         # Seed search fields anchored to the disc state at menu start, not the
         # live disc.album/artist — so "Search again" after an edit still uses
@@ -1045,7 +1050,7 @@ class MenuController:
         scrollback; the main buffer is restored on exit (including on an
         exception, via ``finally``).
         """
-        if not sys.stdin.isatty():
+        if not sys.stdin.isatty() or self.auto_apply:
             return self.disc
         if self.tui:
             _enter_fullscreen()
