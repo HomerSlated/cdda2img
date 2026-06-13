@@ -1110,6 +1110,9 @@ def _r11_corroborate_with_discogs_master(
         disc.original_release_year = discogs_year
 
 
+_R9_DISAGREE_THRESH = 0.15
+
+
 def _emit_r9_disagreement(
     provenance: dict[str, str],
     pre_mb_album: str | None,
@@ -1121,27 +1124,36 @@ def _emit_r9_disagreement(
 
     The pre-MB album/artist were filled by CDDB (or by raw embedded
     metadata); the MB-candidate values come from the candidate that drove
-    the merge. Disagreement is computed after NFC + casefold + reissue
-    suffix stripping. Value is a comma-separated list of fields that
-    disagreed (``album``, ``artist``, or ``album,artist``). Absent when
-    one side is blank or both agree.
+    the merge. Disagreement is computed via pattern-weighted Levenshtein
+    (``string_dist``) after NFC + casefold + reissue-suffix stripping.
+    Fires when the distance exceeds ``_R9_DISAGREE_THRESH`` (0.15), so
+    minor punctuation/article differences are not flagged. Value is a
+    comma-separated list of fields that disagreed (``album``, ``artist``,
+    or ``album,artist``). Absent when one side is blank or below threshold.
     """
+    from cdda2img.string_dist import string_dist
+
     fields: list[str] = []
-    if (
-        pre_mb_album
-        and mb_album
-        and _r9_normalise_for_compare(pre_mb_album)
-        != _r9_normalise_for_compare(mb_album)
-    ):
-        fields.append("album")
+    if pre_mb_album and mb_album:
+        dist = string_dist(
+            _r9_normalise_for_compare(pre_mb_album),
+            _r9_normalise_for_compare(mb_album),
+        )
+        if dist > _R9_DISAGREE_THRESH:
+            fields.append("album")
+            provenance["disagreement_album_dist"] = f"{dist:.3f}"
     if (
         pre_mb_artist
         and mb_artist
         and pre_mb_artist != "Unknown Artist"  # raw default; not from CDDB
-        and _r9_normalise_for_compare(pre_mb_artist)
-        != _r9_normalise_for_compare(mb_artist)
     ):
-        fields.append("artist")
+        dist = string_dist(
+            _r9_normalise_for_compare(pre_mb_artist),
+            _r9_normalise_for_compare(mb_artist),
+        )
+        if dist > _R9_DISAGREE_THRESH:
+            fields.append("artist")
+            provenance["disagreement_artist_dist"] = f"{dist:.3f}"
     if fields:
         provenance["disagreement_cddb_mb"] = ",".join(fields)
 

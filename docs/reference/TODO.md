@@ -2,6 +2,12 @@
 
 ## Open
 
+### Beets metadata comparison — follow-ups (2026-06-13)
+
+- [ ] **BEETS-4** · AcoustID 60%-threshold consensus vote across tracks (beets `chroma.py:COMMON_REL_THRESH=0.6`). Currently cdda2img uses `_MIN_ISRC_AGREE=2` (absolute floor). A ratio-based threshold (e.g., >50% of tracks must agree) is more robust for short/long discs. Discuss: is this better than the current absolute floor for the import-path AcoustID query?
+
+- [ ] **BEETS-5** · Sort AcoustID release candidates by preferred date/country before MB fetch (beets `chroma.py:releases_key`, lines 72–92). cdda2img's R6 AcoustID corroboration (`_r6_acoustid_corroborate`) picks tracks 1 and ceil(N/2) but does not sort the candidate releases by likelihood before the full MB lookup. Low-effort improvement to the order in which candidates appear in the metadata menu.
+
 ### Rip-to-tracks convenience pipeline (2026-06-13)
 
 - [ ] **RIP-1** · Add `rip --extract` flag: after the rip completes, call `extract_image()` on the

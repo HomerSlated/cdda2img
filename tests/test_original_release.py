@@ -1070,7 +1070,9 @@ def test_r9_disagreement_on_both():
     from cdda2img.cdda2img import _emit_r9_disagreement
 
     prov: dict[str, str] = {}
-    _emit_r9_disagreement(prov, "Album A", "Artist X", "Album B", "Artist Y")
+    _emit_r9_disagreement(
+        prov, "Eliminator", "ZZ Top", "Dark Side of the Moon", "Pink Floyd"
+    )
     assert prov.get("disagreement_cddb_mb") == "album,artist"
 
 
