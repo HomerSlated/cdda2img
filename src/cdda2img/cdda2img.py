@@ -807,10 +807,13 @@ def import_image(
 ) -> None:
     import sys
 
+    from cdda2img.config import load_config
+
     if not source.exists():
         msg = f"{source}: no such file or directory"
         raise FileNotFoundError(msg)
 
+    cfg = load_config()
     temp_base = resolve_temp_dir()
     temp = TempFiles(temp_base)
 
@@ -888,6 +891,15 @@ def import_image(
             )
             raise ValueError(msg)
 
+        cddb_track_lsns: list[int] | None = None
+        cddb_disc_last_lsn: int | None = None
+        if disc.tracks:
+            cddb_track_lsns = [t.start_frame + t.pregap_frames for t in disc.tracks]
+            _last = disc.tracks[-1]
+            cddb_disc_last_lsn = (
+                _last.start_frame + _last.pregap_frames + _last.duration_frames - 1
+            )
+
         _finalize_import(
             disc,
             temp.pcm_file,
@@ -897,6 +909,9 @@ def import_image(
             output,
             ui=ui,
             low_dr_threshold=low_dr_threshold,
+            cddb_track_lsns=cddb_track_lsns,
+            cddb_disc_last_lsn=cddb_disc_last_lsn,
+            cddb_server=cfg.cddb_server,
             tui=tui,
             duplicate_policy=duplicate_policy,
             auto=auto,
