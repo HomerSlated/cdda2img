@@ -1322,7 +1322,6 @@ def _r6_tally_and_merge(
     mb_release_id is always cleared — fingerprints identify recordings, not
     pressings).
     """
-    from cdda2img.mb_lookup import _merge_into_disc
 
     all_rids: set[str] = set()
     for hits in per_track_hits:
@@ -1345,19 +1344,14 @@ def _r6_tally_and_merge(
         )
         return disc
 
+    # No disc-ID match from MB. AcoustID identifies *recordings*, not pressings;
+    # the same recording appears on every compilation that includes it, so
+    # "consistent across N fingerprinted tracks" is weak evidence for any specific
+    # release title. Merging album-level metadata here routinely picks the wrong
+    # compilation when MB disc-ID found nothing. Preserve the +0.25 confidence
+    # signal (acoustid_corroborates) but let CDDB / stage-7 supply the title.
     if top_rid is not None:
-        merged_meta = next(
-            (h for hits in per_track_hits for h in hits if h.mb_release_id == top_rid),
-            None,
-        )
-        if merged_meta is not None:
-            # Null out mb_release_id — AcoustID fingerprints identify recordings
-            # (shared across all pressings in a release-group), never the specific
-            # pressing. Writing a fingerprint-guessed pressing would fabricate a
-            # disc-ID-unconfirmed release and break R3's verify precondition.
-            merged_meta = replace(merged_meta, mb_release_id=None)
-            disc = _merge_into_disc(merged_meta, disc)
-            provenance["acoustid_corroborates"] = "YES"
+        provenance["acoustid_corroborates"] = "YES"
     return disc
 
 
