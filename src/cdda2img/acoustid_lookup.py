@@ -22,6 +22,12 @@ log = logging.getLogger(__name__)
 _MAX_RECORDINGS = 5  # cap on recording matches to avoid excessive MB queries
 _SCORE_THRESHOLD = 0.5
 
+_COUNTRY_PREF: dict[str, int] = {"GB": 0, "US": 1, "XW": 2}
+
+
+def _release_sort_key(r: dict) -> tuple[str, int]:
+    return (r.get("date") or "9999", _COUNTRY_PREF.get(r.get("country") or "", 3))
+
 
 def is_available() -> bool:
     """Return True when pyacoustid, libchromaprint, and ACOUSTID_API_KEY are all present.
@@ -146,6 +152,7 @@ def _chain_to_mb(top: list, *, verbose: bool = False) -> list[DiscMeta]:
             )
             continue
 
+        releases = sorted(releases, key=_release_sort_key)
         for release in releases:
             rid = release.get("id")
             if not rid or rid in seen_releases:
