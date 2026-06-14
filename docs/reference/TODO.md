@@ -1225,8 +1225,8 @@ optimisation.
 
 ## Tests (deferred — code verified working in practice)
 
-- [ ] `input_selector.py` — tests for all four strategies (`fcfs`, `aatc`, `best`, `meta`)
-- [ ] `silence.py` — output shorter than input, has correct pad duration
+- [x] `input_selector.py` — tests for all four strategies (`fcfs`, `aatc`, `best`, `meta`)
+- [x] `silence.py` — output shorter than input, has correct pad duration
 - [x] Container roundtrip — write RBI, read back, verify checksums and track list
 - [ ] Foreign format sample bank — acquire authoritative images in each supported format
   using tools in `TOOLING.md`; store in `tests/fixtures/foreign/` with confidence scores
@@ -1360,8 +1360,6 @@ libraries: `libcdio-paranoia` (reading) and `libburn` (writing).
 - [x] Implement AccurateRip v1/v2 checksum computation (own code, no third-party) — `accuraterip.py`
 - [x] Implement AccurateRip database lookup and verify rip — informational only; no paranoia
   fallback on mismatch by design (AccurateRip CRC is a safety net, not a pass/fail gate)
-- [ ] Write thin ctypes/cffi wrapper around `libcdio-paranoia` for paranoia fallback
-- [ ] Parse subchannel Q data for MCN and CD-TEXT (see `private/libmirage/mirage/cdtext-coder.c`)
 - [x] New `burn` subcommand: burn RBI to physical disc via `cdrdao write`; applies write
   offset correction; reads `write_offset` from `[[drives]]` config; `--speed`, `--write-offset`,
   `--yes` options.
@@ -1621,10 +1619,6 @@ Planned elements:
 - Delivery mode audition panel (compare unprocessed / normalised / ReplayGain before
   committing to extract; see `src/cdda2img/audition.py` for the standalone prototype)
 
-- [ ] Design layout and widget hierarchy (see `docs/TUI_Design.md`)
-- [ ] Implement real-time progress feed from pipeline stages
-- [ ] Implement VU meter widget (driven by PyAV decoded frames)
-- [ ] Integrate audition panel into TUI extract screen
 
 ---
 
@@ -1679,10 +1673,6 @@ to the RG block.
 No implementation now — this requires physical ripping hardware to be useful.
 Reserve the flag bit in the spec so the assignment is stable.
 
-- [ ] Reserve `FLAG_SUBCHANNEL_PRESENT` (proposed: bit 3) in `rbi_format.py`
-  and `rbi_spec.md` flags table; no implementation
-- [ ] Storage strategy (when implemented): embedded block preferred over
-  external `.sub` sidecar — self-containment is the archival goal
 
 ### Out-of-scope disc feature support (defer to third-party tools)
 

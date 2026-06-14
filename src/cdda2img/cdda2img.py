@@ -600,6 +600,16 @@ def create_image(
             )
             disc.tracks = build_toc_entries(batch, durations, disc)
 
+            provenance: dict[str, str] = {
+                "mode": "create",
+                "source": str(input_dir.resolve()),
+                "ripper": "file",
+                "lookup_status_mb": "disabled",
+                "lookup_status_cddb": "disabled",
+                "lookup_status_discogs": "disabled",
+            }
+            disc = _r6_acoustid_corroborate_wavs(disc, source_wavs, provenance)
+
             # Identify the original release before the menu so the user
             # sees "Original: <title> (<year>)" in the initial summary.
             from cdda2img.original_release import populate_original_release
@@ -617,11 +627,24 @@ def create_image(
             _art_raw = cover_from_file_tags(batch[0]) if batch else None
             if _art_raw is not None and sys.stdin.isatty():
                 render_cover(_art_raw)
+            provenance["lookup_status_art"] = _r12_status(
+                attempted=True, has_data=_art_raw is not None, errored=False
+            )
 
+            from cdda2img.match_distance import (
+                MatchRecommendation,
+                build_match_distance,
+            )
             from cdda2img.metadata_menu import run_metadata_menu
 
+            match_dist = build_match_distance(disc, provenance)
+            provenance["match_confidence"] = f"{match_dist.score:.3f}"
+            provenance["match_recommendation"] = match_dist.recommendation.value
+            auto_apply = auto or (
+                match_dist.recommendation == MatchRecommendation.STRONG
+            )
             disc = run_metadata_menu(
-                disc, source_wavs=source_wavs, tui=tui, auto_apply=auto
+                disc, source_wavs=source_wavs, tui=tui, auto_apply=auto_apply
             )
             album_art = to_album_art(_art_raw) if _art_raw is not None else None
 
@@ -642,11 +665,6 @@ def create_image(
                 )
                 rg_block = pack_rg_block(rg_result)
 
-            provenance = {
-                "mode": "create",
-                "source": str(input_dir.resolve()),
-                "ripper": "file",
-            }
             _add_release_provenance(provenance, disc)
             toc_data = generate_toc(disc, raw_titles=raw_titles)
 
@@ -1205,7 +1223,60 @@ def _emit_r9_disagreement(
         provenance["disagreement_cddb_mb"] = ",".join(fields)
 
 
-def _r6_acoustid_corroborate(  # noqa: C901
+def _r6_tally_and_merge(
+    per_track_hits: list[list],
+    disc: RBIDisc,
+    provenance: dict[str, str],
+) -> RBIDisc:
+    """Tally AcoustID release MBIDs across fingerprinted tracks; merge winner.
+
+    A "consistent winner" appears in every per-track result set. When the
+    disc already has an MB release MBID (from disc-ID lookup), the winner is
+    used only to set ``acoustid_corroborates`` YES/NO. When the disc has no
+    MBID yet, the winner's album-level fields are merged in (pressing-level
+    mb_release_id is always cleared — fingerprints identify recordings, not
+    pressings).
+    """
+    from cdda2img.mb_lookup import _merge_into_disc
+
+    all_rids: set[str] = set()
+    for hits in per_track_hits:
+        for hit in hits:
+            if hit.mb_release_id:
+                all_rids.add(hit.mb_release_id)
+    if not all_rids:
+        return disc
+
+    consistent_rids = [
+        rid
+        for rid in all_rids
+        if all(any(h.mb_release_id == rid for h in hits) for hits in per_track_hits)
+    ]
+    top_rid = consistent_rids[0] if consistent_rids else None
+
+    if disc.mb_release_id:
+        provenance["acoustid_corroborates"] = (
+            "YES" if top_rid == disc.mb_release_id else "NO"
+        )
+        return disc
+
+    if top_rid is not None:
+        merged_meta = next(
+            (h for hits in per_track_hits for h in hits if h.mb_release_id == top_rid),
+            None,
+        )
+        if merged_meta is not None:
+            # Null out mb_release_id — AcoustID fingerprints identify recordings
+            # (shared across all pressings in a release-group), never the specific
+            # pressing. Writing a fingerprint-guessed pressing would fabricate a
+            # disc-ID-unconfirmed release and break R3's verify precondition.
+            merged_meta = replace(merged_meta, mb_release_id=None)
+            disc = _merge_into_disc(merged_meta, disc)
+            provenance["acoustid_corroborates"] = "YES"
+    return disc
+
+
+def _r6_acoustid_corroborate(
     disc: RBIDisc,
     pcm_file: Path,
     provenance: dict[str, str],
@@ -1226,7 +1297,6 @@ def _r6_acoustid_corroborate(  # noqa: C901
     import wave
 
     from cdda2img import acoustid_lookup
-    from cdda2img.mb_lookup import _merge_into_disc
 
     if not disc.tracks or not acoustid_lookup.is_available():
         return disc
@@ -1261,50 +1331,46 @@ def _r6_acoustid_corroborate(  # noqa: C901
                 w.writeframes(pcm)
             per_track_hits.append(acoustid_lookup.fingerprint_and_lookup(wav_path))
 
-    # Tally release MBIDs across all fingerprinted tracks. A consistent
-    # winner is one that appears in every per-track result set.
-    all_rids: set[str] = set()
-    for hits in per_track_hits:
-        for hit in hits:
-            if hit.mb_release_id:
-                all_rids.add(hit.mb_release_id)
-    if not all_rids:
-        return disc
+    return _r6_tally_and_merge(per_track_hits, disc, provenance)
 
-    consistent_rids = [
-        rid
-        for rid in all_rids
-        if all(any(h.mb_release_id == rid for h in hits) for hits in per_track_hits)
-    ]
-    top_rid = consistent_rids[0] if consistent_rids else None
 
-    if disc.mb_release_id:
-        provenance["acoustid_corroborates"] = (
-            "YES" if top_rid == disc.mb_release_id else "NO"
+def _r6_acoustid_corroborate_wavs(
+    disc: RBIDisc,
+    source_wavs: list[Path],
+    provenance: dict[str, str],
+) -> RBIDisc:
+    """R6 pre-menu AcoustID corroboration for the *create* pipeline.
+
+    Identical tally/merge logic to ``_r6_acoustid_corroborate`` but
+    fingerprints the already-transcoded per-track WAV files directly —
+    no temp-WAV creation, no PCM seek arithmetic. Sets
+    ``provenance["lookup_status_acoustid"]``.
+    """
+    from cdda2img import acoustid_lookup
+
+    if not disc.tracks or not acoustid_lookup.is_available():
+        provenance["lookup_status_acoustid"] = _r12_status(
+            attempted=False, has_data=False, errored=False
         )
         return disc
 
-    # Prepop missed; merge AcoustID's consistent winner — but album-level only.
-    if top_rid is not None:
-        merged_meta = next(
-            (h for hits in per_track_hits for h in hits if h.mb_release_id == top_rid),
-            None,
+    n = len(disc.tracks)
+    indexes = [1]
+    if n >= _R6_MIN_TRACKS_FOR_SECOND_SAMPLE:
+        indexes.append((n + 1) // 2)
+
+    per_track_hits: list[list] = []
+    for idx in indexes:
+        per_track_hits.append(
+            acoustid_lookup.fingerprint_and_lookup(source_wavs[idx - 1])
         )
-        if merged_meta is not None:
-            # AcoustID fingerprints identify *recordings*, which are shared
-            # across every pressing in a release-group. So a fingerprint can
-            # corroborate the album (mb_release_group_id) but can NEVER identify
-            # the specific pressing (mb_release_id). Writing a fingerprint-guessed
-            # pressing both fabricates a pressing the disc-ID never confirmed
-            # (truthfulness rule) and violates _verify_rg_path_for_disc's
-            # precondition that disc.mb_release_id is the disc-ID-matched release
-            # — which made the R3 original-release verify reject the correct RG
-            # (ZZ Top Eliminator: agreed-facts set the right RG, then AcoustID
-            # overwrote mb_release_id with 20f8ccf4 — an in-RG but non-disc-ID
-            # pressing whose rounded track lengths summed 20s short).
-            merged_meta = replace(merged_meta, mb_release_id=None)
-            disc = _merge_into_disc(merged_meta, disc)
-            provenance["acoustid_corroborates"] = "YES"
+
+    disc = _r6_tally_and_merge(per_track_hits, disc, provenance)
+    provenance["lookup_status_acoustid"] = _r12_status(
+        attempted=True,
+        has_data="acoustid_corroborates" in provenance,
+        errored=False,
+    )
     return disc
 
 
