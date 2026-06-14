@@ -47,6 +47,13 @@ _FILE_TS_RE = re.compile(
     r'FILE\s+"[^"]+"\s+(0|\d{2}:\d{2}:\d{2})\s+(\d{2}:\d{2}:\d{2})'
 )
 _START_RE = re.compile(r"^\s*START\s+(\d{2}:\d{2}:\d{2})", re.MULTILINE)
+# SILENCE/ZERO directives that precede the FILE line are synthetic — not stored
+# in the audio file. read-cd embeds them as real PCM in the BIN (so FILE offsets
+# are disc positions); read-toc emits them as directives, leaving FILE offsets as
+# audio-only positions. We track these to adjust start_frame and slot_frames.
+_SILENCE_ZERO_RE = re.compile(
+    r"^\s*(?:SILENCE|ZERO)\s+(\d{2}:\d{2}:\d{2})", re.MULTILINE
+)
 _TRACK_MARKER_RE = re.compile(r"^//\s*Track\s+(\d+)", re.MULTILINE)
 _TITLE_UNICODE_RE = re.compile(r"^//\s*TRACK_TITLE_UNICODE:\s*(.+)$", re.MULTILINE)
 # R14: matches a bare "PRE_EMPHASIS" line. The "NO PRE_EMPHASIS" form is
@@ -82,6 +89,11 @@ def parse_toc(toc_bytes: bytes) -> ParsedDisc:
 
     tracks = []
     any_pre_emph = False
+    # Running total of SILENCE/ZERO frames NOT stored in the audio file.
+    # read-toc emits these as directives; read-cd embeds them as real PCM
+    # in the BIN so FILE offsets already include them. This accumulator
+    # corrects start_frame and slot_frames for the read-toc case.
+    cumulative_out_of_file_silence = 0
     for i, marker in enumerate(markers):
         block_end = markers[i + 1].start() if i + 1 < len(markers) else len(text)
         block = text[marker.start() : block_end]
@@ -105,7 +117,23 @@ def parse_toc(toc_bytes: bytes) -> ParsedDisc:
         else:
             track_title = _first(_TITLE_RE, block)
 
-        slot_frames = frames_from_timestamp(file_m.group(2))
+        # SILENCE/ZERO frames before the FILE line are synthetic (not in the
+        # audio file). Add them to this track's slot and to the accumulator
+        # so all subsequent tracks' start_frame values are shifted correctly.
+        file_pos_in_block = file_m.start()
+        silence_in_block = sum(
+            frames_from_timestamp(sm.group(1))
+            for sm in _SILENCE_ZERO_RE.finditer(block)
+            if sm.start() < file_pos_in_block
+        )
+
+        file_start = (
+            0 if file_m.group(1) == "0" else frames_from_timestamp(file_m.group(1))
+        )
+        start_frame = file_start + cumulative_out_of_file_silence
+        # slot_frames includes the synthetic silence so total_frames reflects
+        # actual disc space (needed for the MB disc-ID lead-out offset).
+        slot_frames = frames_from_timestamp(file_m.group(2)) + silence_in_block
         start_m = _START_RE.search(block)
         pregap_frames = frames_from_timestamp(start_m.group(1)) if start_m else 0
         duration_frames = slot_frames - pregap_frames
@@ -115,14 +143,13 @@ def parse_toc(toc_bytes: bytes) -> ParsedDisc:
                 track_number=int(marker.group(1)),
                 title=track_title,
                 performer=_first(_PERFORMER_RE, block, disc_performer),
-                start_frame=0
-                if file_m.group(1) == "0"
-                else frames_from_timestamp(file_m.group(1)),
+                start_frame=start_frame,
                 duration_frames=duration_frames,
                 pregap_frames=pregap_frames,
                 isrc=_first_or_none(_ISRC_RE, block),
             )
         )
+        cumulative_out_of_file_silence += silence_in_block
 
     return ParsedDisc(
         title=disc_title,

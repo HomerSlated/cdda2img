@@ -194,6 +194,85 @@ def test_parse_toc_no_pregap_duration_unchanged():
     assert t1.audio_start_frame == 0
 
 
+# cdrdao read-toc writes SILENCE directives (not stored in the WAV) for
+# pre-gaps, while read-cd embeds them as real PCM in the BIN. The
+# SILENCE/ZERO before FILE fix in parse_toc must produce the same INDEX 01
+# positions (and thus the same MB disc-ID) from both styles.
+_READ_TOC_STYLE = """\
+CD_DA
+
+// Track 1
+TRACK AUDIO
+NO COPY
+NO PRE_EMPHASIS
+TWO_CHANNEL_AUDIO
+SILENCE 00:00:33
+FILE "data.wav" 0 00:01:00
+START 00:00:33
+
+// Track 2
+TRACK AUDIO
+NO COPY
+NO PRE_EMPHASIS
+TWO_CHANNEL_AUDIO
+FILE "data.wav" 00:01:00 00:01:15
+"""
+
+# Equivalent read-cd style: silence embedded in BIN, FILE offsets include it.
+_READ_CD_STYLE = """\
+CD_DA
+
+// Track 1
+TRACK AUDIO
+NO COPY
+NO PRE_EMPHASIS
+TWO_CHANNEL_AUDIO
+FILE "data.bin" 00:00:00 00:01:33
+START 00:00:33
+
+// Track 2
+TRACK AUDIO
+NO COPY
+NO PRE_EMPHASIS
+TWO_CHANNEL_AUDIO
+FILE "data.bin" 00:01:33 00:01:15
+"""
+
+
+def test_parse_toc_silence_adjusts_start_frame():
+    """SILENCE before FILE must shift subsequent track start_frame by silence duration."""
+    parsed = parse_toc(_READ_TOC_STYLE.encode())
+    t1, t2 = parsed.tracks
+    # Track 1: SILENCE is the pre-gap; start_frame is unchanged (disc position 0).
+    assert t1.start_frame == 0
+    assert t1.pregap_frames == 33
+    assert t1.duration_frames == 75  # audio-only; SILENCE is not in the WAV
+    # Track 2: start_frame shifted forward by 33 (track 1's SILENCE).
+    assert t2.start_frame == 75 + 33  # 108 = WAV offset (75) + accumulated silence (33)
+    assert t2.pregap_frames == 0
+    assert t2.audio_start_frame == 108  # INDEX 01 = INDEX 00 (no pre-gap)
+
+
+def test_parse_toc_silence_index01_matches_read_cd():
+    """read-toc and read-cd styles must produce identical INDEX 01 positions."""
+    rtoc = parse_toc(_READ_TOC_STYLE.encode())
+    rcd = parse_toc(_READ_CD_STYLE.encode())
+    for tr, tc in zip(rtoc.tracks, rcd.tracks, strict=True):
+        assert tr.audio_start_frame == tc.audio_start_frame, (
+            f"track {tr.track_number}: read-toc INDEX 01 = {tr.audio_start_frame}, "
+            f"read-cd INDEX 01 = {tc.audio_start_frame}"
+        )
+
+
+def test_parse_toc_silence_total_frames():
+    """total_frames must include SILENCE bytes (disc space, not WAV size)."""
+    from cdda2img.cdrdao_reader import parsed_to_rbi_disc
+
+    rtoc = parse_toc(_READ_TOC_STYLE.encode())
+    rcd = parse_toc(_READ_CD_STYLE.encode())
+    assert parsed_to_rbi_disc(rtoc).total_frames == parsed_to_rbi_disc(rcd).total_frames
+
+
 # ---------------------------------------------------------------------------
 # Unit tests: BIN filename extraction
 # ---------------------------------------------------------------------------
