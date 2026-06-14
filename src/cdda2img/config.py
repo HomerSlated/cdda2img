@@ -11,9 +11,11 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import shutil
 import sys
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import cast
 
@@ -32,7 +34,16 @@ def config_path() -> Path:
 
 
 def _example_path() -> Path:
-    # TODO: replace with importlib.resources when the package is properly installed
+    import contextlib
+    import importlib.resources
+
+    with contextlib.suppress(Exception):
+        ref = importlib.resources.files("cdda2img").joinpath(
+            "../../conf/cdda2img.toml.example"
+        )
+        p = Path(str(ref))
+        if p.is_file():
+            return p
     return Path(__file__).parent.parent.parent / "conf" / "cdda2img.toml.example"
 
 
@@ -56,6 +67,101 @@ def _prompt_create_config(path: Path) -> bool:
     shutil.copy(example, path)
     print(f"  Created {path}")
     return True
+
+
+_DRIVE_KEY_RE = re.compile(r"^(name|read_offset|write_offset)\s*=")
+_COMMENTED_DRIVE_LINE_RE = re.compile(
+    r"^#\s*(\[\[drives\]\]|(name|read_offset|write_offset)\s*=)"
+)
+
+
+def _render_scalar(key: str, value: object) -> str:
+    if isinstance(value, bool):
+        return f"{key} = {'true' if value else 'false'}"
+    if isinstance(value, (int, float)):
+        return f"{key} = {value}"
+    return f'{key} = "{value}"'
+
+
+def _render_drive(drive: dict) -> str:
+    lines = ["[[drives]]"]
+    for k, v in drive.items():
+        lines.append(_render_scalar(k, v))
+    return "\n".join(lines)
+
+
+def _overlay(example_text: str, user_data: dict) -> str:
+    """Return *example_text* with user values substituted in place."""
+    top_scalars = {k: v for k, v in user_data.items() if k != "drives"}
+    drives = user_data.get("drives", [])
+
+    out: list[str] = []
+    lines = example_text.splitlines()
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        stripped = line.strip()
+
+        if stripped in ("[[drives]]", "# [[drives]]"):
+            if out and out[-1].strip() == "#":
+                out[-1] = ""
+            j = i + 1
+            while j < len(lines):
+                s = lines[j].strip()
+                if s == "[[drives]]" or _DRIVE_KEY_RE.match(s):
+                    j += 1
+                    continue
+                if _COMMENTED_DRIVE_LINE_RE.match(s):
+                    j += 1
+                    continue
+                break
+            for d in drives:
+                out.append(_render_drive(d))
+                out.append("")
+            if out and out[-1] == "":
+                out.pop()
+            i = j
+            continue
+
+        m = re.match(r"^\s*#?\s*([A-Za-z_][A-Za-z0-9_]*)\s*=", line)
+        if m and m.group(1) in top_scalars:
+            out.append(_render_scalar(m.group(1), top_scalars[m.group(1)]))
+        else:
+            out.append(line)
+        i += 1
+
+    return "\n".join(out).rstrip() + "\n"
+
+
+def update_config_from_template(path: Path | None = None) -> bool:
+    """Overlay the user's config onto the bundled template and write it back.
+
+    Makes a timestamped backup before writing.  Returns True on success.
+    """
+    dest = path or config_path()
+    example = _example_path()
+    if not example.is_file():
+        log.warning("Template not found at %s — cannot update config", example)
+        return False
+    if not dest.is_file():
+        log.warning("Config not found at %s — cannot update", dest)
+        return False
+    try:
+        with open(dest, "rb") as f:
+            user_data = tomllib.load(f)
+        merged = _overlay(example.read_text(), user_data)
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+        bak = dest.with_suffix(f".toml.{stamp}.bak")
+        shutil.copy(dest, bak)
+        tmp = dest.with_suffix(".toml.tmp")
+        tmp.write_text(merged)
+        tmp.replace(dest)
+    except Exception as exc:
+        log.warning("Failed to update config from template: %s", exc)
+        return False
+    else:
+        log.info("Config updated from template; backup at %s", bak)
+        return True
 
 
 def _load_raw() -> dict:
