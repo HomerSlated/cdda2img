@@ -2257,8 +2257,8 @@ def rip_image(  # noqa: C901
         # later re-fetches can detect AR-side changes / mirror tampering.
         if ar_verify.transport is not None:
             provenance["arip_transport"] = ar_verify.transport
-        if ar_verify.dbar_sha256 is not None:
-            provenance["arip_dbar_sha256"] = ar_verify.dbar_sha256
+        if ar_verify.dbar_b3sum is not None:
+            provenance["arip_dbar_b3sum"] = ar_verify.dbar_b3sum
         ar_summary = format_ar_report(ar_verify.tracks, read_offset=read_offset)
         _finalize_import(
             disc,

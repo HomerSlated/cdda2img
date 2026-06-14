@@ -1,7 +1,7 @@
 """
 rbi_format.py — RBI (Red Book Image) file format definition.
 
-This module is the canonical Python reference for the RBI format (v4.0).
+This module is the canonical Python reference for the RBI format (v5.0).
 It contains only constants, struct definitions, and dataclasses.
 No I/O. No business logic. Translatable directly to C structs, Rust structs, etc.
 
@@ -16,8 +16,8 @@ from dataclasses import dataclass, field
 # ---------------------------------------------------------------------------
 
 MAGIC: bytes = b"RBIMAGE\x00"  # 8 bytes; null byte prevents text false-matches
-VERSION_MAJOR: int = 4
-VERSION_MINOR: int = 1  # v4.1: added the optional ART block (see rbi_spec.md §6.8)
+VERSION_MAJOR: int = 5
+VERSION_MINOR: int = 0  # v5.0: block checksums use BLAKE3 (was SHA-256 in v4.x)
 
 # ---------------------------------------------------------------------------
 # Red Book audio constraints (IEC 60908:1999)
@@ -129,7 +129,7 @@ ART_BLOCK_VERSION: int = 1
 ART_IMAGE_FORMAT_JPEG: int = 1  # the only image_format defined in v4.1
 
 # Placeholder checksum used when pre-writing directory entries
-CHECKSUM_SIZE: int = 32  # SHA-256 digest length in bytes
+CHECKSUM_SIZE: int = 32  # BLAKE3 digest length in bytes (same as SHA-256)
 CHECKSUM_PLACEHOLDER: bytes = b"\x00" * CHECKSUM_SIZE
 
 # ---------------------------------------------------------------------------
@@ -173,7 +173,7 @@ class RBIDirEntry:
     block_flags: int  # uint16; BLOCK_FLAG_SKIP etc.
     offset: int  # uint64; byte offset to start of block
     length: int  # uint64; byte length of block
-    checksum: bytes  # 32-byte SHA-256 digest of block content
+    checksum: bytes  # 32-byte BLAKE3 digest of block content (SHA-256 in v4.x)
 
     @property
     def is_skippable(self) -> bool:

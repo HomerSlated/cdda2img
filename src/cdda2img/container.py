@@ -61,16 +61,25 @@ _TOOL_VERSION = importlib.metadata.version("cdda2img")
 # ---------------------------------------------------------------------------
 
 
-def sha256_bytes(data: bytes) -> bytes:
-    return hashlib.sha256(data).digest()
+def _checksum_bytes(data: bytes) -> bytes:
+    import blake3 as _blake3
+
+    return _blake3.blake3(data).digest()
 
 
-def sha256_file(path: Path) -> bytes:
-    h = hashlib.sha256()
+def _checksum_file(path: Path) -> bytes:
+    import blake3 as _blake3
+
+    h = _blake3.blake3()
     with open(path, "rb") as f:
         for chunk in iter(lambda: f.read(65536), b""):
             h.update(chunk)
     return h.digest()
+
+
+def _sha256_bytes(data: bytes) -> bytes:
+    """SHA-256 digest — used only when reading v4.x containers."""
+    return hashlib.sha256(data).digest()
 
 
 # ---------------------------------------------------------------------------
@@ -232,7 +241,7 @@ def build_container(
     extra_flags: int = 0,
     quiet: bool = False,
 ) -> None:
-    """Assemble and write an RBI v4.1 container from raw PCM and TOC data.
+    """Assemble and write an RBI v5.0 container from raw PCM and TOC data.
 
     Blocks are written in order: TOC → PROV → RGDB → ARIP → RLOG → ART → PCM.
     The block directory is appended last, and ``dir_offset`` is patched into the
@@ -281,7 +290,7 @@ def build_container(
             0,
             toc_offset,
             len(toc_data),
-            sha256_bytes(toc_data),
+            _checksum_bytes(toc_data),
         ))
 
         # PROV block
@@ -293,7 +302,7 @@ def build_container(
                 BLOCK_FLAG_SKIP,
                 prov_offset,
                 len(prov_block),
-                sha256_bytes(prov_block),
+                _checksum_bytes(prov_block),
             ))
 
         # RGDB block
@@ -305,7 +314,7 @@ def build_container(
                 BLOCK_FLAG_SKIP,
                 rg_offset,
                 len(rg_block),
-                sha256_bytes(rg_block),
+                _checksum_bytes(rg_block),
             ))
 
         # ARIP block
@@ -317,7 +326,7 @@ def build_container(
                 BLOCK_FLAG_SKIP,
                 arip_offset,
                 len(arip_block),
-                sha256_bytes(arip_block),
+                _checksum_bytes(arip_block),
             ))
 
         # RLOG block
@@ -329,7 +338,7 @@ def build_container(
                 BLOCK_FLAG_SKIP,
                 rlog_offset,
                 len(rlog_block),
-                sha256_bytes(rlog_block),
+                _checksum_bytes(rlog_block),
             ))
 
         # ART block
@@ -341,11 +350,11 @@ def build_container(
                 BLOCK_FLAG_SKIP,
                 art_offset,
                 len(art_block),
-                sha256_bytes(art_block),
+                _checksum_bytes(art_block),
             ))
 
         # PCM block (streaming to avoid loading the whole file into memory)
-        pcm_checksum = sha256_file(pcm_path)
+        pcm_checksum = _checksum_file(pcm_path)
         pcm_size = pcm_path.stat().st_size
         pcm_offset = out.tell()
         with open(pcm_path, "rb") as pcm:
@@ -375,7 +384,7 @@ def build_container(
 
 
 def read_header(file: Path) -> RBIHeader:
-    """Read and validate the fixed header and block directory of an RBI v4.0 file."""
+    """Read and validate the fixed header and block directory of an RBI file (v4.x and v5.0+)."""
     with open(file, "rb") as f:
         fixed = f.read(HEADER_FIXED_SIZE)
         if len(fixed) < HEADER_FIXED_SIZE:
@@ -450,7 +459,23 @@ def read_header(file: Path) -> RBIHeader:
 
 
 def _stream_sha256(f, length: int) -> bytes:
+    """SHA-256 streaming digest — used only when reading v4.x containers."""
     h = hashlib.sha256()
+    remaining = length
+    while remaining > 0:
+        chunk = f.read(min(65536, remaining))
+        if not chunk:
+            break
+        h.update(chunk)
+        remaining -= len(chunk)
+    return h.digest()
+
+
+def _stream_checksum(f, length: int) -> bytes:
+    """BLAKE3 streaming digest — used for v5.0+ containers."""
+    import blake3 as _blake3
+
+    h = _blake3.blake3()
     remaining = length
     while remaining > 0:
         chunk = f.read(min(65536, remaining))
@@ -627,6 +652,9 @@ def extract_data(  # noqa: C901
     header = read_header(container_file)
     stem = container_file.stem
 
+    _csum_bytes = _checksum_bytes if header.version_major >= 5 else _sha256_bytes
+    _csum_stream = _stream_checksum if header.version_major >= 5 else _stream_sha256
+
     toc_entry = header.find_block(BLOCK_TYPE_TOC)
     pcm_entry = header.find_block(BLOCK_TYPE_PCM)
     if toc_entry is None or pcm_entry is None:
@@ -637,9 +665,9 @@ def extract_data(  # noqa: C901
         f.seek(toc_entry.offset)
         toc_data = f.read(toc_entry.length)
         f.seek(pcm_entry.offset)
-        pcm_checksum = _stream_sha256(f, pcm_entry.length)
+        pcm_checksum = _csum_stream(f, pcm_entry.length)
 
-    _warn_checksum("TOC", sha256_bytes(toc_data), toc_entry.checksum)
+    _warn_checksum("TOC", _csum_bytes(toc_data), toc_entry.checksum)
     _warn_checksum("PCM", pcm_checksum, pcm_entry.checksum)
 
     prov: dict[str, str] = {}
@@ -660,7 +688,7 @@ def extract_data(  # noqa: C901
         with open(container_file, "rb") as f:
             f.seek(rg_entry.offset)
             rg_raw = f.read(rg_entry.length)
-        if sha256_bytes(rg_raw) == rg_entry.checksum:
+        if _csum_bytes(rg_raw) == rg_entry.checksum:
             rg_data = unpack_rg_block(rg_raw, header.track_count)
         else:
             print(
@@ -1150,7 +1178,8 @@ def list_container(  # noqa: C901
             with open(rbi_file, "rb") as f:
                 f.seek(rg_entry.offset)
                 rg_raw = f.read(rg_entry.length)
-            if sha256_bytes(rg_raw) == rg_entry.checksum:
+            _csum = _checksum_bytes if header.version_major >= 5 else _sha256_bytes
+            if _csum(rg_raw) == rg_entry.checksum:
                 rg_data = unpack_rg_block(rg_raw, header.track_count)
                 parts.append(_rg_json_str(rg_data))
             else:
@@ -1200,8 +1229,9 @@ def list_container(  # noqa: C901
 
 
 def verify_container(rbi_file: Path) -> bool:  # noqa: C901
-    """Validate an RBI file against the v4.0 format specification (27 rules).
+    """Validate an RBI file against the RBI format specification (27 rules).
 
+    Supports v4.x (SHA-256 checksums) and v5.0+ (BLAKE3 checksums).
     Prints a pass/fail line for each check. Returns True if all pass.
     """
     import re as _re
@@ -1251,9 +1281,9 @@ def verify_container(rbi_file: Path) -> bool:  # noqa: C901
     # Rules 1-8
     magic_ok = check("1. Magic bytes", magic == MAGIC, f"got {magic!r}")
     version_ok = check(
-        "2. Format version major == 4",
-        version_major == VERSION_MAJOR,
-        f"major version {version_major} unsupported (need {VERSION_MAJOR})",
+        "2. Format version major in supported range (4-5)",
+        4 <= version_major <= VERSION_MAJOR,
+        f"major version {version_major} unsupported (supported: 4-{VERSION_MAJOR})",
     )
     if not (magic_ok and version_ok):
         print(f"\n  {len(failed)} check(s) FAILED — cannot continue.")
@@ -1411,7 +1441,9 @@ def verify_container(rbi_file: Path) -> bool:  # noqa: C901
         print("  [SKIP] 19. TOC TRACK AUDIO count (no TOC entry)")
         print("  [SKIP] 21. TOC block is valid UTF-8 (no TOC entry)")
 
-    # Rule 20: checksums for all blocks
+    # Rule 20: checksums for all blocks (SHA-256 for v4.x; BLAKE3 for v5.0+)
+    _stream_csum = _stream_checksum if version_major >= 5 else _stream_sha256
+    algo_label = "BLAKE3" if version_major >= 5 else "SHA-256"
     print("  Verifying block checksums (may take a moment for PCM)...")
     for entry in directory:
         type_name = _BLOCK_NAMES.get(
@@ -1419,15 +1451,17 @@ def verify_container(rbi_file: Path) -> bool:  # noqa: C901
         )
         if entry.offset >= file_size or entry.offset + entry.length > file_size:
             check(
-                f"20. {type_name} block checksum (SHA-256)",
+                f"20. {type_name} block checksum ({algo_label})",
                 False,
                 "block out of file bounds",
             )
             continue
         with open(rbi_file, "rb") as f:
             f.seek(entry.offset)
-            computed = _stream_sha256(f, entry.length)
-        check(f"20. {type_name} block checksum (SHA-256)", computed == entry.checksum)
+            computed = _stream_csum(f, entry.length)
+        check(
+            f"20. {type_name} block checksum ({algo_label})", computed == entry.checksum
+        )
 
     # Rule 22: PROV block UTF-8
     prov_entry = next((e for e in directory if e.type_id == BLOCK_TYPE_PROV), None)
@@ -1453,24 +1487,36 @@ def verify_container(rbi_file: Path) -> bool:  # noqa: C901
         except UnicodeDecodeError as exc:
             check("23. RLOG block is valid UTF-8", False, str(exc))
 
-        # Rule 27: RLOG SHA-256 self-seal
+        # Rule 27: RLOG self-seal (SHA-256 in v4.x; BLAKE3 in v5.0+)
+        if version_major >= 5:
+            import blake3 as _blake3
+
+            _seal_pattern = rb"BLAKE3: [0-9a-f]{64}"
+            _seal_prefix = b"BLAKE3: "
+            _seal_algo = lambda b: _blake3.blake3(b).hexdigest()
+            _seal_label = "27. RLOG BLAKE3 self-seal"
+        else:
+            _seal_pattern = rb"SHA-256: [0-9a-f]{64}"
+            _seal_prefix = b"SHA-256: "
+            _seal_algo = lambda b: hashlib.sha256(b).hexdigest()
+            _seal_label = "27. RLOG SHA-256 self-seal"
         lines = rlog_bytes.split(b"\n")
-        if lines and _re.match(rb"SHA-256: [0-9a-f]{64}", lines[-1]):
+        if lines and _re.match(_seal_pattern, lines[-1]):
             body = b"\n".join(lines[:-1]) + b"\n"
-            expected_seal = lines[-1][len(b"SHA-256: ") :].decode()
-            actual_seal = hashlib.sha256(body).hexdigest()
-            check("27. RLOG SHA-256 self-seal", actual_seal == expected_seal)
+            expected_seal = lines[-1][len(_seal_prefix) :].decode()
+            actual_seal = _seal_algo(body)
+            check(_seal_label, actual_seal == expected_seal)
         elif lines and not lines[-1]:
             # trailing newline: try second-to-last
-            if len(lines) >= 2 and _re.match(rb"SHA-256: [0-9a-f]{64}", lines[-2]):
+            if len(lines) >= 2 and _re.match(_seal_pattern, lines[-2]):
                 body = b"\n".join(lines[:-2]) + b"\n"
-                expected_seal = lines[-2][len(b"SHA-256: ") :].decode()
-                actual_seal = hashlib.sha256(body).hexdigest()
-                check("27. RLOG SHA-256 self-seal", actual_seal == expected_seal)
+                expected_seal = lines[-2][len(_seal_prefix) :].decode()
+                actual_seal = _seal_algo(body)
+                check(_seal_label, actual_seal == expected_seal)
             else:
-                print("  [SKIP] 27. RLOG SHA-256 self-seal (no seal line found)")
+                print(f"  [SKIP] {_seal_label} (no seal line found)")
         else:
-            print("  [SKIP] 27. RLOG SHA-256 self-seal (no seal line found)")
+            print(f"  [SKIP] {_seal_label} (no seal line found)")
 
     # Rule 24: RGDB block length
     rgdb_entry = next((e for e in directory if e.type_id == BLOCK_TYPE_RGDB), None)

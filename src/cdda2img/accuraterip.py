@@ -11,7 +11,6 @@ Public interface:
 from __future__ import annotations
 
 import array
-import hashlib
 import logging
 import struct
 import urllib.error
@@ -80,10 +79,10 @@ class ARVerifyResult:
     # not in the database, and we made successful contact at that transport.
     transport: str | None = None
     # 64 lowercase hex chars; None when no body was fetched (404 / network
-    # failure). SHA-256 of the *raw* response bytes lets later re-fetches
+    # failure). BLAKE3 of the *raw* response bytes lets later re-fetches
     # detect AR-side changes or mirror tampering without re-running the
     # full verification pipeline.
-    dbar_sha256: str | None = None
+    dbar_b3sum: str | None = None
 
 
 def _ar_checksums(
@@ -187,11 +186,13 @@ def _fetch_ar(
                 _AR_DBAR_MAX,
             )
             return None, name
+        import blake3 as _blake3
+
         log.debug(
-            "AccurateRip %s: 200 OK, %d bytes, sha256=%s",
+            "AccurateRip %s: 200 OK, %d bytes, b3sum=%s",
             name,
             len(body),
-            hashlib.sha256(body).hexdigest(),
+            _blake3.blake3(body).hexdigest(),
         )
         return body, name
     return None, last_transport
@@ -290,8 +291,10 @@ def verify_rip(
     """
     n = len(track_lsns)
     ar_id1, ar_id2 = _ar_disc_ids(track_lsns, disc_last_lsn)
+    import blake3 as _blake3
+
     ar_data, transport = _fetch_ar(n, ar_id1, ar_id2, cddb_id)
-    dbar_sha256 = hashlib.sha256(ar_data).hexdigest() if ar_data else None
+    dbar_b3sum = _blake3.blake3(ar_data).hexdigest() if ar_data else None
     responses = (
         _parse_dbar(
             ar_data,
@@ -319,7 +322,7 @@ def verify_rip(
                 for i in range(n)
             ],
             transport=transport,
-            dbar_sha256=dbar_sha256,
+            dbar_b3sum=dbar_b3sum,
         )
 
     # Drive offset shifts the read window by offset_bytes relative to track boundaries.
@@ -397,7 +400,7 @@ def verify_rip(
                 )
             )
 
-    return ARVerifyResult(tracks=results, transport=transport, dbar_sha256=dbar_sha256)
+    return ARVerifyResult(tracks=results, transport=transport, dbar_b3sum=dbar_b3sum)
 
 
 def format_ar_report(results: list[ARTrackResult], read_offset: int = 0) -> str:

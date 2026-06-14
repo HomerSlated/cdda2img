@@ -8,7 +8,6 @@ Public interface:
 from __future__ import annotations
 
 import datetime
-import hashlib
 import logging
 import subprocess
 from typing import TYPE_CHECKING
@@ -154,6 +153,8 @@ class RipLogBuilder:
         lines.append("  EOF: End of status report")
         lines.append("")  # trailing blank → body ends with \n after join
 
+        import blake3 as _blake3
+
         body = "\n".join(lines)
-        seal = hashlib.sha256(body.encode("utf-8")).hexdigest()
-        return (body + f"SHA-256: {seal}\n").encode("utf-8")
+        seal = _blake3.blake3(body.encode("utf-8")).hexdigest()
+        return (body + f"BLAKE3: {seal}\n").encode("utf-8")

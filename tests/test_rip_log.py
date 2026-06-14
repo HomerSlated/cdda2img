@@ -1,8 +1,7 @@
-"""Tests for rip_log.py — RipLogBuilder and RLOG block SHA-256 self-seal."""
+"""Tests for rip_log.py — RipLogBuilder and RLOG block BLAKE3 self-seal."""
 
 from __future__ import annotations
 
-import hashlib
 from pathlib import Path
 
 from cdda2img.accuraterip import ARTrackResult
@@ -81,38 +80,44 @@ class TestRipLogBuilderSeal:
         block = builder.finalize(_make_disc(2))
         lines = block.split(b"\n")
 
+        import blake3
+
         # Block ends with "\n" so last element is empty
         assert lines[-1] == b""
-        # Second-to-last must be the SHA-256 line
+        # Second-to-last must be the BLAKE3 line
         seal_line = lines[-2]
-        assert seal_line.startswith(b"SHA-256: ")
-        stored_hex = seal_line[len(b"SHA-256: ") :].decode()
+        assert seal_line.startswith(b"BLAKE3: ")
+        stored_hex = seal_line[len(b"BLAKE3: ") :].decode()
         assert len(stored_hex) == 64
 
-        # Body is everything before the SHA-256 line, plus trailing \n
+        # Body is everything before the BLAKE3 line, plus trailing \n
         body = b"\n".join(lines[:-2]) + b"\n"
-        assert hashlib.sha256(body).hexdigest() == stored_hex
+        assert blake3.blake3(body).hexdigest() == stored_hex
 
     def test_seal_verifies_for_not_in_db(self) -> None:
+        import blake3
+
         builder = RipLogBuilder(rip_type="cdrdao")
         builder.ar_results = _make_ar_not_in_db(1)
 
         block = builder.finalize(_make_disc(1))
         lines = block.split(b"\n")
         seal_line = lines[-2]
-        stored_hex = seal_line[len(b"SHA-256: ") :].decode()
+        stored_hex = seal_line[len(b"BLAKE3: ") :].decode()
         body = b"\n".join(lines[:-2]) + b"\n"
-        assert hashlib.sha256(body).hexdigest() == stored_hex
+        assert blake3.blake3(body).hexdigest() == stored_hex
 
     def test_seal_verifies_without_ar_results(self) -> None:
+        import blake3
+
         builder = RipLogBuilder(rip_type="cdrdao")
 
         block = builder.finalize(_make_disc(2))
         lines = block.split(b"\n")
         seal_line = lines[-2]
-        stored_hex = seal_line[len(b"SHA-256: ") :].decode()
+        stored_hex = seal_line[len(b"BLAKE3: ") :].decode()
         body = b"\n".join(lines[:-2]) + b"\n"
-        assert hashlib.sha256(body).hexdigest() == stored_hex
+        assert blake3.blake3(body).hexdigest() == stored_hex
 
     def test_block_is_valid_utf8(self) -> None:
         builder = RipLogBuilder(rip_type="cd-paranoia", read_offset=-30)

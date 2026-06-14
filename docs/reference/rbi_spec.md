@@ -1,18 +1,18 @@
 # RBI Format Specification
 ## Red Book Image — CD-DA Archive Container
-### Version 4.0 · Format version `major=4, minor=0`
+### Version 5.0 · Format version `major=5, minor=0`
 
 ---
 
 ## 1. Introduction
 
-RBI (Red Book Image) is an open, single-file container format for archiving and mastering Red Book standard (IEC 60908:1999) CD-DA audio discs. It stores a human-readable TOC, raw PCM audio, and optional metadata blocks in a single binary file, with SHA-256 integrity verification for every block.
+RBI (Red Book Image) is an open, single-file container format for archiving and mastering Red Book standard (IEC 60908:1999) CD-DA audio discs. It stores a human-readable TOC, raw PCM audio, and optional metadata blocks in a single binary file, with BLAKE3 integrity verification for every block.
 
 RBI is deliberately CD-DA-only. It does not attempt to represent raw physical sectors, subchannel data, copy-protection artefacts, or data tracks. This makes it unsuitable as a bit-for-bit clone format, but well-suited as a high-fidelity audio archive and mastering source.
 
 ### Backwards compatibility
 
-**RBI v4.0 is not backwards-compatible with v3.0.** The fixed header is redesigned (40 bytes vs. 169 bytes) around an extensible block-directory model; v3.0 files use hard-coded per-block offsets in the header. A v4.0 reader **MUST** reject any file with `version_major != 4`.
+**RBI v4.0 is not backwards-compatible with v3.0.** The fixed header is redesigned (40 bytes vs. 169 bytes) around an extensible block-directory model; v3.0 files use hard-coded per-block offsets in the header. A v5.0 reader **MUST** reject any file with `version_major < 4 or version_major > 5`.
 
 **Version history:**
 
@@ -23,6 +23,7 @@ RBI is deliberately CD-DA-only. It does not attempt to represent raw physical se
 | v3.0    | Added per-track pre-gap storage and ISRC in TOC; breaking change from v2 |
 | v4.0    | Redesigned around extensible block directory; provenance moved out of TOC; new PROV, ARIP, RLOG block types |
 | v4.1    | Added optional ART block (embedded front-cover image, JPEG) and the `art_source` / `lookup_status_art` PROV keys; backwards-compatible minor bump |
+| v5.0    | Block checksums changed from SHA-256 to BLAKE3; RLOG self-seal changed from `SHA-256:` to `BLAKE3:` label; PROV key `arip_dbar_sha256` renamed to `arip_dbar_b3sum`; breaking change from v4.x |
 
 ---
 
@@ -35,7 +36,7 @@ RBI is deliberately CD-DA-only. It does not attempt to represent raw physical se
 | Magic / signature     | None          | None            | `MEDIA DESCRIPTOR`     | `NERO`/`NER5`   | **`RBIMAGE\x00`**           |
 | Endianness            | N/A           | N/A             | Little-endian          | Big-endian      | **Little-endian**           |
 | Specification status  | De facto      | Proprietary     | Proprietary            | Proprietary     | **Open**                    |
-| Integrity checking    | None          | None            | None                   | None            | **SHA-256 (per block)**     |
+| Integrity checking    | None          | None            | None                   | None            | **BLAKE3 (per block)**      |
 | TOC format            | Plain text    | INI text        | Binary structs         | Binary chunks   | **Plain text (cdrdao-compatible)** |
 | Audio storage         | Raw sectors   | Raw sectors     | Raw sectors            | Raw sectors     | **Raw PCM (s16le)**         |
 | Subchannel data       | Optional      | Yes (.SUB)      | Optional               | No              | **No**                      |
@@ -129,7 +130,7 @@ The block directory begins at `dir_offset` bytes from the start of the file. It 
 | 4      | 2           | uint16 LE | `block_flags`  | Block-level flags (see §5.3) |
 | 6      | 8           | uint64 LE | `offset`       | Byte offset from file start to first byte of block |
 | 14     | 8           | uint64 LE | `length`       | Block length in bytes |
-| 22     | 32          | bytes     | `checksum`     | SHA-256 digest of block content (`length` bytes at `offset`) |
+| 22     | 32          | bytes     | `checksum`     | BLAKE3 digest of block content (`length` bytes at `offset`); SHA-256 in v4.x |
 
 **Directory entry size:** 54 bytes
 
@@ -154,7 +155,7 @@ All other bits are reserved and **MUST** be `0`. The required blocks (`TOC ` and
 | `b"ART "`    | Album-art block  | No       | Yes               | Embedded front-cover image, JPEG (binary; see §6.8) |
 | `b"CTDB"`    | CUETools DB      | No       | Yes               | CUETools database results (RESERVED — format not yet defined) |
 
-A conforming v4.0 writer **MUST NOT** write more than one entry of a given `type_id`. A conforming reader **MUST** reject a file containing duplicate `type_id` entries for any required block (`TOC ` or `PCM `); for optional blocks, it **SHOULD** use the first entry and warn.
+A conforming writer **MUST NOT** write more than one entry of a given `type_id`. A conforming reader **MUST** reject a file containing duplicate `type_id` entries for any required block (`TOC ` or `PCM `); for optional blocks, it **SHOULD** use the first entry and warn.
 
 ---
 
@@ -347,7 +348,7 @@ The PROV block stores provenance and extended metadata that has no natural home 
 | `duration_match_release`   | MusicBrainz release UUID, or `?` if the matched release carried no id. Emitted only when the stage-7 last-resort duration matcher fired — i.e. no higher source (CD-Text / MB disc-ID / Discogs / AcoustID / CDDB) identified the release in MB, and a text-search candidate's total duration matched the physical disc within tolerance. The lowest-trust identifier in the container; treat as a best guess pending user confirmation. |
 | `multi_match_isrc_disambiguated` | `YES`. Present when MB disc-ID returned >1 match and the in-memory ISRC tally (R1) picked a strictly-winning candidate. Absent when N=1 (no disambiguation needed) or when N>1 and the tally was a tie / sub-threshold. |
 | `arip_transport`           | `https` \| `http`. Emitted whenever at least one AccurateRip fetch attempt reached the server (any 2xx/4xx). `http` indicates the HTTPS attempt failed and the fetcher fell back to plaintext — readers SHOULD treat the confidence values with reduced trust. |
-| `arip_dbar_sha256`         | 64 lowercase hex chars. SHA-256 of the raw dBAR response body (pre-parse). Emitted only when a body was actually received. Lets later re-fetches detect AR-side changes or mirror tampering without re-running verification. |
+| `arip_dbar_b3sum`          | 64 lowercase hex chars. BLAKE3 of the raw dBAR response body (pre-parse). Emitted only when a body was actually received. Lets later re-fetches detect AR-side changes or mirror tampering without re-running verification. (`arip_dbar_sha256` was the name used in v4.x; the value is semantically equivalent but computed with BLAKE3.) |
 | `acoustid_corroborates`    | `YES` \| `NO`. Emitted only when the pre-menu AcoustID helper (R6) ran (i.e. `acoustid_lookup.is_available()` was true and at least one per-track fingerprint produced a chained MB recording). `YES` = AcoustID's consistent-across-tracks winner agrees with the disc's existing MB release MBID; `NO` = disagrees. |
 | `pre_emphasis`             | `YES` \| `NO`. Aggregate disc-level pre-emphasis flag. `YES` if any track has CONTROL bit 0 set, `NO` otherwise. Absent when not captured by the source parser (today only the cdrdao TOC path populates it). |
 | `disagreement_cddb_mb`     | Comma-separated list of fields where CDDB and MB returned different answers, after NFC + casefold + reissue-suffix allow-list normalisation. Possible values: `album`, `artist`, or `album,artist`. Absent when both agree, when one side is blank, or when the pre-MB artist was the literal `Unknown Artist` default. |
@@ -359,7 +360,7 @@ The PROV block stores provenance and extended metadata that has no natural home 
 | `lookup_status_acoustid`   | As `lookup_status_cddb`, for AcoustID. `disabled` covers R10 offline mode, the absence of an `ACOUSTID_API_KEY`, and missing pyacoustid / libchromaprint. |
 | `lookup_status_art`        | As `lookup_status_cddb`, for the album-art fetch. `OK` = an image was retrieved and embedded; `empty` = no source carried cover art; `down` = network/decode error; `disabled` = R10 offline mode (no live fetch attempted — a cover already embedded from source-file tags may still be present). |
 
-All keys are optional. A v4.0 writer **SHOULD** emit at minimum `creator` and `created`. A reader **MUST NOT** fail on a missing key.
+All keys are optional. A writer **SHOULD** emit at minimum `creator` and `created`. A reader **MUST NOT** fail on a missing key.
 
 Leading and trailing whitespace in values is significant and **MUST** be preserved.
 
@@ -412,7 +413,7 @@ Original: <Yes|No|Unknown>, <this release|<earlier title>|unknown release> (<yea
 The §6.3.1 keys split into two semantic groups:
 
 - **Identifier keys** (`mb_release_id`, `mb_release_group_id`, `discogs_release_id`, `release_date`, `low_dynamic_range`, `original_release_*`, …): each names a single, factual fact about the disc.
-- **Observation keys** (`lookup_status_*`, `disagreement_*`, `*_corroborated`, `*_disagreement`, `acoustid_corroborates`, `multi_match_isrc_disambiguated`, `arip_transport`, `arip_dbar_sha256`): each records *what we asked and what the answer was*.
+- **Observation keys** (`lookup_status_*`, `disagreement_*`, `*_corroborated`, `*_disagreement`, `acoustid_corroborates`, `multi_match_isrc_disambiguated`, `arip_transport`, `arip_dbar_b3sum`): each records *what we asked and what the answer was*.
 
 For observation keys, **presence implies the question was asked**. This lets a verifier distinguish "blank-because-no-data" from "blank-because-service-offline". A blank `mb_release_id` paired with `lookup_status_mb=down` is "we asked MB and the network was down"; the same blank paired with `lookup_status_mb=empty` is "we asked MB and MB had nothing".
 
@@ -490,7 +491,7 @@ The ARIP block stores AccurateRip verification results for the disc.
 
 ### 6.6 RLOG Block (`b"RLOG"`)
 
-The RLOG block stores the complete structured rip log as UTF-8 text. The format follows the whipper log convention: human-readable, one logical section per topic, machine-parseable by line prefix. The final line is a SHA-256 self-seal (see §6.6.2).
+The RLOG block stores the complete structured rip log as UTF-8 text. The format follows the whipper log convention: human-readable, one logical section per topic, machine-parseable by line prefix. The final line is a BLAKE3 self-seal (see §6.6.2; v4.x used SHA-256).
 
 #### 6.6.1 Log structure
 
@@ -542,20 +543,20 @@ Conclusive status report:
   Health status: <No errors occurred | N errors occurred>
   EOF: End of status report
 
-SHA-256: <64 lowercase hex chars>
+BLAKE3: <64 lowercase hex chars>
 ```
 
 Sections are present only when the relevant data is available (e.g. AccurateRip sections are absent when the disc is not in the database).
 
-#### 6.6.2 SHA-256 self-seal
+#### 6.6.2 BLAKE3 self-seal
 
 The final line **MUST** be exactly:
 ```
-SHA-256: <64 lowercase hex chars>
+BLAKE3: <64 lowercase hex chars>
 ```
-The hash is computed over all preceding bytes of the RLOG block (everything before this final line, including the preceding `\n`). A reader verifying the log integrity strips the last line, computes SHA-256 of the remainder, and compares against the stored hex string.
+The hash is computed over all preceding bytes of the RLOG block (everything before this final line, including the preceding `\n`). A reader verifying the log integrity strips the last line, computes BLAKE3 of the remainder, and compares against the stored hex string.
 
-The self-seal is independent of the block-level checksum in the directory entry. The directory checksum covers the entire RLOG block (including the SHA-256 line) and protects against accidental corruption. The in-log SHA-256 protects against deliberate modification after insertion and mirrors the convention established by Exact Audio Copy and whipper.
+The self-seal is independent of the block-level checksum in the directory entry. The directory checksum covers the entire RLOG block (including the BLAKE3 line) and protects against accidental corruption. The in-log BLAKE3 hash protects against deliberate modification after insertion. (v4.x used SHA-256 for the self-seal; the v5.0 reader accepts either label, version-gated on `version_major`.)
 
 ---
 
@@ -603,7 +604,7 @@ self-describing and a reader can validate the two against each other.
 
 #### 6.8.2 Format and provenance
 
-A conforming v4.1 writer **MUST** store the image as JPEG (`image_format == 1`),
+A conforming writer **MUST** store the image as JPEG (`image_format == 1`),
 transcoding from any other source format on ingest, and **MUST** set
 `BLOCK_FLAG_SKIP`. `width` / `height` are best-effort: a writer that cannot
 cheaply determine the dimensions **MAY** write `0` for both.
@@ -639,14 +640,14 @@ A conforming reader **MUST** enforce (30 rules):
 17. For every directory entry: `offset >= 40` (blocks do not overlap the fixed header)
 18. No two directory entries have overlapping byte ranges
 19. Number of `TRACK AUDIO` entries in the TOC block **MUST** equal `track_count` in the fixed header
-20. `sha256(block_content) == directory_entry.checksum` for every block (integrity check; readers **SHOULD** warn on mismatch rather than hard-failing by default, unless policy requires strict verification)
+20. `blake3(block_content) == directory_entry.checksum` for every block (v5.0+; SHA-256 for v4.x); readers **SHOULD** warn on mismatch rather than hard-failing by default, unless policy requires strict verification
 21. TOC block decodes as valid UTF-8
 22. PROV block (if present) decodes as valid UTF-8
 23. RLOG block (if present) decodes as valid UTF-8
 24. RGDB block (if present): `length == 17 + 12 × track_count`
 25. ARIP block (if present): `length == 13 + 15 × track_count`
 26. ARIP block (if present): all `status` values are in the range `0`–`2`
-27. RLOG block (if present): last line matches `SHA-256: [0-9a-f]{64}` (optional integrity check; warn on mismatch)
+27. RLOG block (if present): last line matches `BLAKE3: [0-9a-f]{64}` for v5.0+, or `SHA-256: [0-9a-f]{64}` for v4.x (optional integrity check; warn on mismatch)
 28. ART block (if present): `length >= 10` (room for the fixed ART header)
 29. ART block (if present): `image_length == length − 10`
 30. ART block (if present): `image_format` is a recognised value (`1` = JPEG); a reader **SHOULD** warn and skip the block on an unrecognised value rather than reject the file (the block carries `BLOCK_FLAG_SKIP`)

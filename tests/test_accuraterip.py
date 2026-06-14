@@ -280,7 +280,7 @@ def test_verify_rip_disc_not_in_database(tmp_path: Path) -> None:
     assert all(r.confidence_v1 is None for r in result.tracks)
     assert all(r.confidence_v2 is None for r in result.tracks)
     assert result.transport == "https"
-    assert result.dbar_sha256 is None  # no body → no hash
+    assert result.dbar_b3sum is None  # no body → no hash
 
 
 def test_verify_rip_last_track_zero_padding(tmp_path: Path) -> None:
@@ -593,7 +593,7 @@ def test_verify_rip_total_confidence(tmp_path: Path) -> None:
     assert result.tracks[0].max_confidence == 130
     assert result.tracks[0].total_confidence == 144
     assert result.transport == "https"
-    assert result.dbar_sha256 is not None  # body was fetched → hash present
+    assert result.dbar_b3sum is not None  # body was fetched → hash present
 
 
 # ---------------------------------------------------------------------------
@@ -773,9 +773,9 @@ def test_parse_dbar_legacy_call_unchanged() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_verify_rip_dbar_sha256_matches_body(tmp_path: Path) -> None:
-    """ARVerifyResult.dbar_sha256 is the SHA-256 of the raw fetched body."""
-    import hashlib
+def test_verify_rip_dbar_b3sum_matches_body(tmp_path: Path) -> None:
+    """ARVerifyResult.dbar_b3sum is the BLAKE3 of the raw fetched body."""
+    import blake3
 
     n_sectors = 10 * 75
     pcm_path = tmp_path / "disc.pcm"
@@ -785,15 +785,15 @@ def test_verify_rip_dbar_sha256_matches_body(tmp_path: Path) -> None:
     body = struct.pack("<BLLL", 1, int(id1_hex, 16), int(id2_hex, 16), 0) + struct.pack(
         "<BLL", 50, 0, 0
     )
-    expected_hex = hashlib.sha256(body).hexdigest()
+    expected_hex = blake3.blake3(body).hexdigest()
 
     with patch("cdda2img.accuraterip._fetch_ar", return_value=(body, "https")):
         result = verify_rip(pcm_path, track_lsns=[0], disc_last_lsn=n_sectors - 1)
 
-    assert result.dbar_sha256 == expected_hex
-    assert result.dbar_sha256 is not None
-    assert len(result.dbar_sha256) == 64
-    assert all(c in "0123456789abcdef" for c in result.dbar_sha256)
+    assert result.dbar_b3sum == expected_hex
+    assert result.dbar_b3sum is not None
+    assert len(result.dbar_b3sum) == 64
+    assert all(c in "0123456789abcdef" for c in result.dbar_b3sum)
 
 
 def test_verify_rip_propagates_http_transport(tmp_path: Path) -> None:
@@ -805,7 +805,7 @@ def test_verify_rip_propagates_http_transport(tmp_path: Path) -> None:
         result = verify_rip(pcm_path, track_lsns=[0], disc_last_lsn=74)
 
     assert result.transport == "http"
-    assert result.dbar_sha256 is None
+    assert result.dbar_b3sum is None
     assert all(r.max_confidence is None for r in result.tracks)
 
 
@@ -814,7 +814,7 @@ def test_verify_rip_rejects_block_with_wrong_disc_ids(tmp_path: Path) -> None:
 
     The block is silently dropped by _parse_dbar; verify_rip then returns
     not-in-DB-style results (max_confidence=None) even though _fetch_ar
-    returned a body. transport and dbar_sha256 are still preserved.
+    returned a body. transport and dbar_b3sum are still preserved.
     """
     n_sectors = 10 * 75
     pcm_path = tmp_path / "disc.pcm"
@@ -833,7 +833,7 @@ def test_verify_rip_rejects_block_with_wrong_disc_ids(tmp_path: Path) -> None:
     assert result.tracks[0].max_confidence is None  # block was rejected
     assert result.tracks[0].confidence_v1 is None
     assert result.transport == "https"
-    assert result.dbar_sha256 is not None  # the body was still hashed pre-parse
+    assert result.dbar_b3sum is not None  # the body was still hashed pre-parse
 
 
 # ---------------------------------------------------------------------------
@@ -858,8 +858,8 @@ def test_fetch_ar_debug_log_includes_url_and_body_size(caplog) -> None:
     messages = [rec.getMessage() for rec in caplog.records]
     # URL line:
     assert any("AccurateRip URL (https)" in m for m in messages)
-    # Success line includes byte count + sha256 prefix:
-    assert any("200 OK" in m and "sha256=" in m for m in messages)
+    # Success line includes byte count + b3sum prefix:
+    assert any("200 OK" in m and "b3sum=" in m for m in messages)
 
 
 def test_fetch_ar_debug_log_includes_404(caplog) -> None:

@@ -1,12 +1,11 @@
 """
-test_container.py — RBI v4.0 container roundtrip tests.
+test_container.py — RBI v5.0 container roundtrip tests.
 
 Covers: header fields, checksum integrity, TOC parse round-trip, RG block
 serialisation round-trip, FLAC extraction with embedded RG tags, and the
 no-RG-block code path.
 """
 
-import hashlib
 import struct
 from pathlib import Path
 
@@ -148,7 +147,9 @@ def test_header_fields_without_rg(built_containers):
 
 
 def test_checksums_pass(built_containers):
-    """All SHA-256 checksums in directory entries match the actual block bytes."""
+    """All BLAKE3 checksums in directory entries match the actual block bytes."""
+    import blake3
+
     rbi, _, _ = built_containers["rg"]
     h = read_header(rbi)
 
@@ -156,7 +157,7 @@ def test_checksums_pass(built_containers):
         with open(rbi, "rb") as f:
             f.seek(entry.offset)
             block_bytes = f.read(entry.length)
-        assert hashlib.sha256(block_bytes).digest() == entry.checksum, (
+        assert blake3.blake3(block_bytes).digest() == entry.checksum, (
             f"Checksum mismatch for block {entry.type_id!r}"
         )
 

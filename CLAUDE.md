@@ -134,13 +134,13 @@ Four source types, each producing s16le PCM, then all call `_finalize_import()`:
 5. `container.py:build_container()` — writes the RBI file
 
 ### Extract pipeline (`extract` subcommand)
-1. `container.py:read_header()` — parses the 40-byte fixed RBI v4.0 header plus the block directory at end-of-file; returns `RBIHeader` with `find_block(type_id)`
+1. `container.py:read_header()` — parses the 40-byte fixed RBI header plus the block directory at end-of-file; returns `RBIHeader` with `find_block(type_id)`
 2. `toc_parser.py:parse_toc()` — parses the embedded cdrdao TOC into `ParsedDisc` / `ParsedTrack` dataclasses
 3. `container.py:extract_data()` — dispatches to raw and/or track output, plus optional `--rg`, `--ar`, `--log` sidecars
 4. `track_extract.py` — slices PCM per track, wraps in WAV, encodes to FLAC via PyAV with Vorbis comment metadata; writes CUE sheet; optionally applies −18 LUFS normalisation
 
 ### Key modules
-- **`rbi_format.py`** — RBI v4.0 constants (`VERSION_MAJOR = 4`, `VERSION_MINOR = 0`), `HEADER_STRUCT` (40-byte fixed header), `DIR_ENTRY_STRUCT` (54-byte directory entry), block type IDs (`BLOCK_TYPE_TOC`/`PROV`/`RGDB`/`ARIP`/`RLOG`/`PCM`), `RBIHeader` / `RBIDirEntry` / `RBIDisc` / `RBITocEntry` / `RBIReplayGain` dataclasses, `frames_from_timestamp()`, `timestamp_from_frames()`. `RBIDisc` carries `pre_emphasis: bool | None` (R14 aggregate disc-level flag — None means not captured) and `discogs_release_id: int | None`.
+- **`rbi_format.py`** — RBI v5.0 constants (`VERSION_MAJOR = 5`, `VERSION_MINOR = 0`), `HEADER_STRUCT` (40-byte fixed header), `DIR_ENTRY_STRUCT` (54-byte directory entry), block type IDs (`BLOCK_TYPE_TOC`/`PROV`/`RGDB`/`ARIP`/`RLOG`/`PCM`), `RBIHeader` / `RBIDirEntry` / `RBIDisc` / `RBITocEntry` / `RBIReplayGain` dataclasses, `frames_from_timestamp()`, `timestamp_from_frames()`. `RBIDisc` carries `pre_emphasis: bool | None` (R14 aggregate disc-level flag — None means not captured) and `discogs_release_id: int | None`.
 - **`cdda2img.py`** — CLI entry point; `create_image()`, `import_image()`, `rip_image()`, `extract_image()` top-level functions. PROV-side helpers: `_r6_acoustid_corroborate` (R6 pre-menu fingerprint, tracks 1 and ceil(N/2)), `_emit_r9_disagreement` (NFC + casefold + reissue-suffix allow-list strip), `_r11_corroborate_with_discogs_master` (prefer-the-earlier on disagreement), `_r12_status` (`OK`/`empty`/`down`/`disabled` mapping).
 - **`container.py`** — `build_container()`, `read_header()`, `extract_data()`, `wav_to_raw_pcm()`
 - **`input_selector.py`** — four batching strategies: `fcfs`, `aatc`, `best` (OR-Tools CP-SAT global bin-packing), `meta` (groups by embedded disc-number tag)
@@ -171,22 +171,22 @@ Four source types, each producing s16le PCM, then all call `_finalize_import()`:
 - **`audition.py`** — ffplay subprocess wrapper for interactive audition (pause/resume via SIGSTOP/SIGCONT)
 - **`track_preview.py`** — cosmetic track-1 audio preview for the `rip` pipeline: grabs track 1 via cd-paranoia, loops it via ffplay in the background during the rip; best-effort (never fails a rip)
 
-## RBI Format (v4.0)
+## RBI Format (v5.0)
 
-40-byte fixed header: magic `RBIMAGE\x00`, version `4.0`, flags (uint32), track count (uint8), disc number/total (uint8/uint8), PCM parameters (sample rate uint32, channels uint8, bit depth uint8), block-directory offset (uint64), directory entry count (uint16), reserved bytes. The block directory is appended at end-of-file: each entry is 54 bytes (type ID, flags, offset, length, SHA-256).
+40-byte fixed header: magic `RBIMAGE\x00`, version `5.0`, flags (uint32), track count (uint8), disc number/total (uint8/uint8), PCM parameters (sample rate uint32, channels uint8, bit depth uint8), block-directory offset (uint64), directory entry count (uint16), reserved bytes. The block directory is appended at end-of-file: each entry is 54 bytes (type ID, flags, offset, length, BLAKE3).
 
 Variable-length blocks (TOC and PCM are mandatory; the rest are optional and signalled by directory presence):
 
 | Block | Contents |
 |-------|----------|
 | TOC | cdrdao-format text TOC; per-track pre-gap, ISRC, CATALOG (MCN), provenance comments |
-| PROV | Provenance key=value text: creator, mode, source, ripper, drive; lookup-status / disagreement / corroboration surfaces (R9/R11/R12); `arip_transport` + `arip_dbar_sha256` (R2); `pre_emphasis` (R14); `multi_match_isrc_disambiguated` (R1); `acoustid_corroborates` (R6); `discogs_release_id`; `duration_match_release` (stage 7) |
+| PROV | Provenance key=value text: creator, mode, source, ripper, drive; lookup-status / disagreement / corroboration surfaces (R9/R11/R12); `arip_transport` + `arip_dbar_b3sum` (R2); `pre_emphasis` (R14); `multi_match_isrc_disambiguated` (R1); `acoustid_corroborates` (R6); `discogs_release_id`; `duration_match_release` (stage 7) |
 | RGDB | 17 + 12×N bytes: per-track and album EBU R128 gain, peak, and LRA (float32) |
 | ARIP | 13 + 15×N bytes: per-track AccurateRip v1/v2 CRCs, confidence, status, disc IDs |
-| RLOG | Structured rip log: drive, engine, offsets, per-track AR results; SHA-256 self-seal |
+| RLOG | Structured rip log: drive, engine, offsets, per-track AR results; BLAKE3 self-seal |
 | PCM | Raw s16le — no WAV wrapper; parameters stored in fixed header |
 
-Each block carries its SHA-256 in the directory entry. `BLOCK_FLAG_SKIP` signals blocks safe to ignore for forwards compatibility. Pre-gap audio is stored contiguously in the PCM block; the TOC records the pre-gap duration separately so extraction skips it cleanly.
+Each block carries its BLAKE3 digest in the directory entry (SHA-256 in v4.x). `BLOCK_FLAG_SKIP` signals blocks safe to ignore for forwards compatibility. Pre-gap audio is stored contiguously in the PCM block; the TOC records the pre-gap duration separately so extraction skips it cleanly.
 
 Full specification: `docs/reference/rbi_spec.md`.
 
@@ -204,7 +204,7 @@ Full specification: `docs/reference/rbi_spec.md`.
 - **Subprocess**: `disc_reader.py`, `cdrdao_ripper.py`, and `track_preview.py` spawn `cd-paranoia` and `cdrdao`; `audition.py` and `track_preview.py` spawn `ffplay`; intentional subprocess calls carry `# noqa: S603, S607` (see LINT-008, LINT-012, LINT-013, LINT-017)
 - **Version** lives in `pyproject.toml` only; `container.py` and `cdda2img.py` read it via `importlib.metadata`
 - **spec-before-code**: update `docs/reference/rbi_spec.md` before changing the container format
-- **AccurateRip transport (R2)**: HTTPS is preferred; HTTP fallback only on `URLError` / `OSError`. A 404 over HTTPS is a legitimate negative ("disc not in DB") and does *not* fall back to HTTP. Responses are capped at `_AR_DBAR_MAX = 1 MB`. Per-block `(id1, id2, cddb_id)` header verification drops mismatching blocks at WARNING level — protects against a poisoned plaintext response splicing unrelated discs' blocks. `verify_rip` returns `ARVerifyResult(tracks, transport, dbar_sha256)`.
+- **AccurateRip transport (R2)**: HTTPS is preferred; HTTP fallback only on `URLError` / `OSError`. A 404 over HTTPS is a legitimate negative ("disc not in DB") and does *not* fall back to HTTP. Responses are capped at `_AR_DBAR_MAX = 1 MB`. Per-block `(id1, id2, cddb_id)` header verification drops mismatching blocks at WARNING level — protects against a poisoned plaintext response splicing unrelated discs' blocks. `verify_rip` returns `ARVerifyResult(tracks, transport, dbar_b3sum)`.
 - **MCN / ISRC validation (R13)**: MCN check digit (GS1 §1.3.1 Modulo-10) is enforced inside `barcode.normalize_barcode`; invalid inputs return None + log DEBUG (silent-drop pattern — routine when scanning third-party metadata, must not surface in normal rips). ISRCs from MB pass through `validators.validate_isrc` at ingress (`_parse_release`) and again at the merge sites (`_merge_into_disc`, `_overwrite_disc`); malformed values are dropped, not propagated.
 - **Original-release narrowing (R3)**: prefer no-answer over wrong-answer. A track-count mismatch against the disc's own MB release is positive evidence of upstream RG misidentification and falls through to fuzzy. Network failure during the verify is not evidence of mismatch — the answer stands. `_MIN_ISRC_AGREE=2` floor and strict-uniqueness tie semantics for the R1 disambiguator.
 - **MB rate limit (R15)**: pinned to 1 req/s in `_setup_useragent`. Don't silently inherit a future library default change.
