@@ -97,7 +97,7 @@
 
 # Per-drive read and write offsets.
 # read_offset is stored automatically after AccurateRip confirmation.
-# write_offset is stored automatically by tools/measure_write_offset.py.
+# write_offset is stored automatically by `cdda2img setup --write-offset`.
 # You can also add entries manually:
 #
 # [[drives]]

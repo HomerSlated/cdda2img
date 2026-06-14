@@ -39,6 +39,9 @@ cdda2img \- create and extract RBI audio CD archive images
 .RI [ options ]
 .I FILE.rbi
 .br
+.B "cdda2img setup"
+.RI [ options ]
+.br
 .B "cdda2img \-\-version"
 .br
 .B "cdda2img \-\-no\-network\-services"
@@ -493,6 +496,76 @@ re-ripping and unloading.
 The cdemu daemon must be running and the
 .B vhba
 kernel module must be loaded.
+.\"
+.SS setup \(em Setup wizard
+Interactive setup wizard and maintenance tools.
+When invoked without a subcommand flag, displays a menu of all available
+sections. Each flag jumps directly to the named section without showing the menu.
+.PP
+.BI "cdda2img setup " "[options]"
+.TP
+.B \-\-create\-config
+Copy the bundled template to
+.IR $XDG_CONFIG_HOME/cdda2img/cdda2img.toml .
+Prompts before overwriting an existing file.
+.TP
+.B \-\-update\-config
+Overlay the current config onto the latest template, preserving all
+user-set values. Makes a timestamped backup before writing.
+.TP
+.B \-\-validate\-config
+Parse the config, report unknown keys, and offer to remove them.
+.TP
+.B \-\-read\-offset
+Probe the drive name via sysfs, fetch the AccurateRip drive catalogue,
+display the recommended read offset, and offer to save it to config.
+.TP
+.B \-\-write\-offset
+Measure the drive write offset via burn-and-read-back cycles.
+Each cycle burns a synthetic 75-second test signal to a blank disc,
+rips it back, and locates the known noise pulses. Results accumulate in
+.IR $XDG_DATA_HOME/cdda2img/write_offset_<drive>.toml .
+Prompts are paced with quotes from
+.I 101 Uses For Your Write-Offset Test CDs
+because every cycle consumes a blank disc.
+.TP
+.BI \-\-device " DEV"
+CD drive device (default: from config
+.IR default_device ).
+.TP
+.BI \-\-speed " N"
+Burn speed for
+.B \-\-write\-offset
+cycles (default: 4).
+.TP
+.B \-\-create\-catalogue
+Create the disc catalogue database if it does not exist.
+.TP
+.B \-\-validate\-catalogue
+Run
+.B PRAGMA integrity_check
+and schema migration on the catalogue, and offer
+.BR VACUUM .
+.TP
+.B \-\-verify\-catalogue
+Check every catalogue entry: verify the RBI file exists and that its
+blake3 checksum matches the stored value. Missing files trigger a
+directory scan to locate a relocated copy. Mismatched checksums offer
+to update or delete the record.
+With
+.BR \-\-test ,
+also runs the full 27-rule structural verify (
+.BR "cdda2img test" )
+on every reachable entry.
+.TP
+.B \-\-test
+When used with
+.BR \-\-verify\-catalogue :
+run the full container verify on each reachable entry (slow for large
+catalogues).
+.PP
+The setup wizard fires automatically (as a warning + hint) when a required
+file is missing at startup. It does not block the requested subcommand.
 .\"
 .SH GLOBAL OPTIONS
 .TP
