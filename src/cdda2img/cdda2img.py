@@ -451,6 +451,63 @@ def parse_args() -> argparse.Namespace:
         help="Directory for extracted TOC+BIN (default: ./mnt)",
     )
 
+    s_cmd = sub.add_parser("setup", help="Setup wizard and maintenance tools")
+    s_cmd.add_argument(
+        "--create-config",
+        action="store_true",
+        dest="create_config",
+        help="Create config from template",
+    )
+    s_cmd.add_argument(
+        "--update-config",
+        action="store_true",
+        dest="update_config",
+        help="Update config from template (preserves user values)",
+    )
+    s_cmd.add_argument(
+        "--validate-config",
+        action="store_true",
+        dest="validate_config",
+        help="Validate and optionally repair config",
+    )
+    s_cmd.add_argument(
+        "--read-offset",
+        action="store_true",
+        dest="read_offset",
+        help="Detect drive read offset via AccurateRip",
+    )
+    s_cmd.add_argument(
+        "--write-offset",
+        action="store_true",
+        dest="write_offset",
+        help="Measure drive write offset via burn-and-read-back",
+    )
+    s_cmd.add_argument(
+        "--create-catalogue",
+        action="store_true",
+        dest="create_catalogue",
+        help="Create the disc catalogue database",
+    )
+    s_cmd.add_argument(
+        "--validate-catalogue",
+        action="store_true",
+        dest="validate_catalogue",
+        help="Validate catalogue structure (integrity + VACUUM)",
+    )
+    s_cmd.add_argument(
+        "--verify-catalogue",
+        action="store_true",
+        dest="verify_catalogue",
+        help="Verify RBI file locations in catalogue",
+    )
+    s_cmd.add_argument(
+        "--test",
+        action="store_true",
+        help="Run full RBI verify per entry (with --verify-catalogue)",
+    )
+    s_cmd.add_argument("--device", default=None)
+    s_cmd.add_argument("--speed", type=int, default=4)
+
     return parser.parse_args()
 
 
@@ -2482,6 +2539,61 @@ def _dispatch_utility(args: argparse.Namespace) -> None:
         )
     elif args.cmd == "mount":
         mount_image(args.rbi_file, slot=args.slot, mnt_dir=args.mnt_dir)
+    elif args.cmd == "setup":
+        from cdda2img.setup import run_setup_wizard
+
+        section_flags = [
+            "create_config",
+            "update_config",
+            "validate_config",
+            "read_offset",
+            "write_offset",
+            "create_catalogue",
+            "validate_catalogue",
+            "verify_catalogue",
+        ]
+        section = next(
+            (f.replace("_", "-") for f in section_flags if getattr(args, f, False)),
+            None,
+        )
+        run_setup_wizard(
+            section=section,
+            device=getattr(args, "device", None),
+            speed=getattr(args, "speed", 4),
+            verify_test=getattr(args, "test", False),
+        )
+
+
+def _run_startup_checks(args: argparse.Namespace) -> None:
+    """Warn (and optionally offer the wizard) when required files are absent."""
+    import contextlib
+    import sys
+
+    from cdda2img.config import config_path, load_config
+
+    path = config_path()
+    cfg = None
+    with contextlib.suppress(Exception):
+        cfg = load_config()
+
+    if cfg is None:
+        print(f"  Warning: config not found or unreadable at {path}")
+        print("  Run `cdda2img setup --create-config` to create it.")
+
+    if cfg is not None and cfg.enable_catalogue:
+        from cdda2img.catalogue import catalogue_db_path, open_catalogue_db
+
+        db_path = cfg.catalogue_path or catalogue_db_path()
+        if not db_path.is_file() and sys.stdin.isatty():
+            print(f"  Warning: catalogue not found at {db_path}")
+            print("  Run `cdda2img setup --create-catalogue` to create it.")
+        elif db_path.is_file():
+            try:
+                conn = open_catalogue_db(db_path)
+                conn.close()
+            except Exception as exc:
+                print(f"  Warning: catalogue error ({exc})")
+                print("  Run `cdda2img setup --validate-catalogue` to repair it.")
 
 
 def main() -> None:
@@ -2496,6 +2608,8 @@ def main() -> None:
             format="%(asctime)s %(levelname)-5s %(name)s: %(message)s",
             datefmt="%H:%M:%S",
         )
+    if getattr(args, "cmd", None) != "setup":
+        _run_startup_checks(args)
     try:
         _dispatch(args)
     except FileNotFoundError as e:

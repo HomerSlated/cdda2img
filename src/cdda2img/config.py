@@ -13,7 +13,6 @@ import logging
 import os
 import re
 import shutil
-import sys
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -45,28 +44,6 @@ def _example_path() -> Path:
         if p.is_file():
             return p
     return Path(__file__).parent.parent.parent / "conf" / "cdda2img.toml.example"
-
-
-def _prompt_create_config(path: Path) -> bool:
-    """Offer to create the config from the bundled example. Returns True if created."""
-    if not sys.stdin.isatty():
-        return False
-    example = _example_path()
-    if not example.exists():
-        log.debug("Bundled example config not found at %s", example)
-        return False
-    print(f"  No config file found at {path}")
-    try:
-        answer = input("  Create from example? [y/N] ").strip().lower()
-    except (EOFError, KeyboardInterrupt):
-        print()
-        return False
-    if answer != "y":
-        return False
-    path.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy(example, path)
-    print(f"  Created {path}")
-    return True
 
 
 _DRIVE_KEY_RE = re.compile(r"^(name|read_offset|write_offset)\s*=")
@@ -170,12 +147,6 @@ def _load_raw() -> dict:
         with open(path, "rb") as f:
             return tomllib.load(f)
     except FileNotFoundError:
-        if _prompt_create_config(path):
-            try:
-                with open(path, "rb") as f:
-                    return tomllib.load(f)
-            except Exception as exc:
-                log.warning("Failed to read config %s: %s", path, exc)
         return {}
     except Exception as exc:
         log.warning("Failed to read config %s: %s", path, exc)
