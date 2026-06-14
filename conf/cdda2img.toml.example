@@ -95,6 +95,11 @@
 # Default: false
 # auto = false
 
+# Embed cover art as a PICTURE block in each extracted FLAC (~600 px JPEG).
+# Modifier for --tracks/--all in the extract pipeline. Can also be set per-run
+# via 'cdda2img extract --embedart'. Default: false
+# embedart = false
+
 # Per-drive read and write offsets.
 # read_offset is stored automatically after AccurateRip confirmation.
 # write_offset is stored automatically by `cdda2img setup --write-offset`.

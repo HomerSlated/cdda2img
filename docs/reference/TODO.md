@@ -1363,8 +1363,9 @@ libraries: `libcdio-paranoia` (reading) and `libburn` (writing).
 - [x] New `burn` subcommand: burn RBI to physical disc via `cdrdao write`; applies write
   offset correction; reads `write_offset` from `[[drives]]` config; `--speed`, `--write-offset`,
   `--yes` options.
-- [ ] `drive` subcommand: unified drive management (read offset from AR catalog + write
+- [x] `drive` subcommand: unified drive management (read offset from AR catalog + write
   offset from `measure_write_offset.py` cycles; store both in `[[drives]]`)
+  — DONE: superseded by `setup --read-offset` / `setup --write-offset` (commits b4ba7e6, ac9fd0f)
 - [x] Extend `[[drives]]` TOML schema with `write_offset` field in `config.py`
 
 ### MCN (Media Catalogue Number)
@@ -1372,10 +1373,13 @@ MCN is a physical disc property (EAN-13 barcode); omit silently when the input d
 not provide one. Include in the TOC `CATALOG` field when available.
 
 - [ ] cdrdao rip input: parse `CATALOG "..."` line from `.toc` file if present
-- [ ] `.sub` file input: scan for Mode 2 Q packets (ADR nibble = 0x2, TNO = 0x00), extract 13 BCD digits
 - [ ] Audio files from directory: no MCN — omit `CATALOG` line
 
-### CD-TEXT
+#### Future subchannel work
+
+Deferred 2026-06-14. Requires CloneCD `.sub` parser plumbing; revisit in subchannel work phase.
+
+- [ ] `.sub` file input (MCN): scan for Mode 2 Q packets (ADR nibble = 0x2, TNO = 0x00), extract 13 BCD digits
 - [ ] Read CD-TEXT from subchannel data (physical disc) and from `.sub` files
 - [ ] Write CD-TEXT into generated TOC for CUE/BIN and RBI output
 - [ ] Propagate CD-TEXT fields (performer, title, ISRC) to FLAC metadata on extract

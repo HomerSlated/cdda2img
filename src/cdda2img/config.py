@@ -188,6 +188,7 @@ class Config:
     # rip's metadata without network access.
     no_network_services: bool = False
     auto: bool = False
+    embedart: bool = False
 
 
 _no_network_override: bool | None = None

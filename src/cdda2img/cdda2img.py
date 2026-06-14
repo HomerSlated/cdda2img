@@ -2495,6 +2495,9 @@ def _dispatch(args: argparse.Namespace) -> None:
                 auto=args.auto if args.auto is not None else cfg.auto,
             )
     elif args.cmd == "extract":
+        from cdda2img.config import load_config
+
+        cfg = load_config()
         extract_image(
             args.rbi_file,
             raw=args.raw,
@@ -2504,7 +2507,7 @@ def _dispatch(args: argparse.Namespace) -> None:
             log=args.log,
             all_blocks=args.all_blocks,
             albumart=args.albumart,
-            embedart=args.embedart,
+            embedart=args.embedart or cfg.embedart,
             normalize=args.normalize,
             output=args.output,
         )
