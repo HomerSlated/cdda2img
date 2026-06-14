@@ -345,6 +345,19 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Skip the interactive metadata menu; accept the best-guess result automatically (default: from config, false)",
     )
+    r_cmd.add_argument(
+        "--extract",
+        action="store_true",
+        default=False,
+        help="Extract to per-track FLAC + CUE after building the RBI container",
+    )
+    r_cmd.add_argument(
+        "--no-keep-rbi",
+        action="store_true",
+        default=False,
+        dest="no_keep_rbi",
+        help="Delete the RBI container after successful extraction (only valid with --extract)",
+    )
     i_cmd = sub.add_parser(
         "import",
         help="Import a foreign disc image as an RBI container (master mode): cdrdao .toc, DDP 2.0, or Nero .nrg",
@@ -1599,7 +1612,7 @@ def _finalize_import(
     tui: bool = True,
     duplicate_policy: str | None = None,
     auto: bool = False,
-) -> None:
+) -> Path:
     """Shared post-rip/import pipeline: lookups → metadata menu → TOC → RG → container.
 
     The remote-metadata lookups and their precedence merge are delegated to
@@ -1732,6 +1745,7 @@ def _finalize_import(
     from cdda2img.catalogue import register_rbi
 
     register_rbi(output, duplicate_policy=duplicate_policy)
+    return output
 
 
 def _resolve_drive_offsets(
@@ -2056,6 +2070,8 @@ def rip_image(  # noqa: C901
     low_dr_threshold: float = 5.0,
     duplicate_policy: str | None = None,
     auto: bool = False,
+    extract: bool = False,
+    keep_rbi: bool = True,
 ) -> None:
     import sys
 
@@ -2147,6 +2163,7 @@ def rip_image(  # noqa: C901
         ui = _TUI().start()
 
     track_preview: TrackPreview | None = None
+    rbi_path: Path | None = None
     try:
         # Grab track 1 first (drive is single-use), then play it on a loop in
         # the background while the rest of the rip runs.
@@ -2260,7 +2277,7 @@ def rip_image(  # noqa: C901
         if ar_verify.dbar_b3sum is not None:
             provenance["arip_dbar_b3sum"] = ar_verify.dbar_b3sum
         ar_summary = format_ar_report(ar_verify.tracks, read_offset=read_offset)
-        _finalize_import(
+        rbi_path = _finalize_import(
             disc,
             temp.pcm_file,
             provenance,
@@ -2284,6 +2301,22 @@ def rip_image(  # noqa: C901
         if ui is not None:
             ui.stop()
         temp.cleanup()
+
+    if extract and rbi_path is not None:
+        extract_image(
+            rbi_path,
+            raw=False,
+            tracks=True,
+            rg=False,
+            ar=False,
+            log=False,
+            all_blocks=False,
+            embedart=cfg.embedart,
+            normalize=False,
+            output=None,
+        )
+        if not keep_rbi:
+            rbi_path.unlink()
 
 
 def _confirm_overwrite(output_paths: list[Path]) -> bool:
@@ -2477,6 +2510,8 @@ def _dispatch(args: argparse.Namespace) -> None:
             low_dr_threshold=cfg.low_dr_threshold,
             duplicate_policy=args.duplicate,
             auto=args.auto if args.auto is not None else cfg.auto,
+            extract=args.extract,
+            keep_rbi=not args.no_keep_rbi,
         )
     elif args.cmd == "import":
         if args.info:

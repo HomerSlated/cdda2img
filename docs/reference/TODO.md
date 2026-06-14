@@ -4,9 +4,9 @@
 
 ### Beets metadata comparison — follow-ups (2026-06-13)
 
-- [ ] **BEETS-4** · AcoustID 60%-threshold consensus vote across tracks (beets `chroma.py:COMMON_REL_THRESH=0.6`). Currently cdda2img uses `_MIN_ISRC_AGREE=2` (absolute floor). A ratio-based threshold (e.g., >50% of tracks must agree) is more robust for short/long discs. Discuss: is this better than the current absolute floor for the import-path AcoustID query?
+- [x] **BEETS-4** · DONE 2026-06-14 (`0a42ed6`): ratio-based threshold `max(2, ceil(0.6 × n_isrc_tracks))` in `_disambiguate_by_isrcs`; `_ISRC_AGREE_RATIO = 0.6` constant; 4 new tests covering 3/10/20-track and zero-ISRC cases.
 
-- [ ] **BEETS-5** · Sort AcoustID release candidates by preferred date/country before MB fetch (beets `chroma.py:releases_key`, lines 72–92). cdda2img's R6 AcoustID corroboration (`_r6_acoustid_corroborate`) picks tracks 1 and ceil(N/2) but does not sort the candidate releases by likelihood before the full MB lookup. Low-effort improvement to the order in which candidates appear in the metadata menu.
+- [x] **BEETS-5** · DONE 2026-06-14 (`bde0e5c`): `_release_sort_key` sorts by `(date, country_pref)` before the `for release in releases:` loop in `_chain_to_mb`; `_COUNTRY_PREF = {"GB":0,"US":1,"XW":2}`; 8 new tests in `tests/test_acoustid_lookup.py`.
 
 ### Catalogue duplicate-registration policy (2026-06-13)
 
@@ -33,17 +33,13 @@
 
 ### Rip-to-tracks convenience pipeline (2026-06-13)
 
-- [ ] **RIP-1** · Add `rip --extract` flag: after the rip completes, call `extract_image()` on the
-      output RBI in-process (no subprocess) to produce per-track FLACs + CUE sheet. Default:
-      keep the RBI. Add `--no-keep-rbi` to discard it after successful extraction. Implementation:
-      ~10 lines in `rip_image()` — detect `--extract`, call `extract_image(output, ...)`, optionally
-      `unlink`. No pipeline refactoring; the RBI is the verified intermediate.
+- [x] **RIP-1** · DONE 2026-06-14: `--extract` + `--no-keep-rbi` flags on `rip`; `_finalize_import` returns `Path`; `rip_image` captures it and calls `extract_image(tracks=True, embedart=cfg.embedart)` post-finally; man page updated.
 
 ### Album art follow-ups (2026-06-13)
 
-- [ ] **ART-1** · Step 7: tests — ART block round-trip in `test_container.py`; new `test_album_art.py` covering `sniff`, `transcode_to_jpeg`, `downscale_jpeg`, and `render_cover` (mock subprocess)
-- [ ] **ART-2** · Wire `embedart: bool = False` into `Config` dataclass (`config.py`) + `conf/cdda2img.toml.example` — CLI flag exists; config knob not yet connected
-- [ ] **ART-3** · Review `tools/albumart.py` — old standalone probe; retire or reduce to a thin wrapper around `album_art.py` now that the production module exists
+- [x] **ART-1** · DONE 2026-06-14 (`762d0d6`): `tests/test_album_art.py` (13 tests); ART block round-trip in `TestArtBlockRoundtrip`.
+- [x] **ART-2** · DONE 2026-06-14 (`762d0d6`): `embedart: bool = False` in `Config`; wired as `args.embedart or cfg.embedart` in extract CLI; example key added to `conf/cdda2img.toml.example`.
+- [x] **ART-3** · DONE 2026-06-14 (`762d0d6`): `tools/albumart.py` replaced with 9-line deprecation shim (`raise SystemExit(msg)`).
 
 ---
 
@@ -1473,14 +1469,13 @@ The loudness processing level is not user-selectable. The standard is fixed at �
 
 The audition tool allows the user to compare all three on the loudest 10-second passage
 before committing. It is implemented as `src/cdda2img/audition.py` (run with
-`uv run python -m cdda2img.audition <file>`) and will be integrated into the TUI as
-a panel on the extract screen.
+`uv run python -m cdda2img.audition <file>`). TUI integration is not planned — the
+standalone CLI module is the intended form.
 
 - [x] Find loudest 10-second window (peak-frame centring via PyAV + numpy)
 - [x] Extract clip and prepare all three variants (PyAV + FFmpegNormalize + pyebur128)
 - [x] Embed REPLAYGAIN_* tags in the RG variant (mutagen in-place patch via `replaygain.embed_rg_tags()`)
 - [x] Interruptible looping playback (ffplay subprocess, SIGSTOP/SIGCONT for pause)
-- [ ] Integrate into TUI extract panel (replaces standalone CLI module)
 
 ### Master / Remaster modes
 - [x] `--mode master` — silence trim disabled; transcode to Red Book spec only

@@ -170,6 +170,20 @@ Overrides the
 .B auto
 configuration key for this run.
 Default: from config, false.
+.TP
+.B \-\-extract
+After the RBI container is written, immediately extract it to per\-track
+FLAC files and a CUE sheet in an
+.B extracted/
+subdirectory of the current working directory.
+The RBI file is kept unless
+.B \-\-no\-keep\-rbi
+is also supplied.
+.TP
+.B \-\-no\-keep\-rbi
+Delete the RBI container after successful extraction.
+Only meaningful with
+.BR \-\-extract .
 .\"
 .SS create \(em Create
 Creates one or more RBI images from a directory of audio files.
