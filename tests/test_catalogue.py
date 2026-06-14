@@ -63,7 +63,7 @@ def test_open_catalogue_db_sets_meta(tmp_path):
             "SELECT value FROM db_meta WHERE key='schema_version'"
         ).fetchone()
         assert row is not None
-        assert row[0] == "3"
+        assert row[0] == "4"
     finally:
         conn.close()
 
@@ -85,6 +85,86 @@ def test_open_catalogue_db_too_new_raises(tmp_path):
     conn.close()
     with pytest.raises(RuntimeError, match="schema v99"):
         open_catalogue_db(db_path)
+
+
+def test_migrate_v3_to_v4(tmp_path):
+    """Opening a v3 catalogue auto-migrates to v4 and adds the b3sum column."""
+    import sqlite3 as _sqlite3
+
+    db_path = tmp_path / "v3.db"
+    old_ddl = """
+    CREATE TABLE db_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+    CREATE TABLE catalogue (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        mcn TEXT, album TEXT NOT NULL, artist TEXT NOT NULL,
+        year INTEGER, disc_number INTEGER NOT NULL DEFAULT 1,
+        disc_total INTEGER NOT NULL DEFAULT 1, track_count INTEGER NOT NULL,
+        rg_album_gain REAL, rg_album_peak REAL, rg_album_range REAL,
+        file_basename TEXT NOT NULL, file_path TEXT NOT NULL,
+        file_size INTEGER NOT NULL, registered_at TEXT NOT NULL,
+        created_by TEXT NOT NULL, mode TEXT NOT NULL,
+        source TEXT, ripper TEXT, drive TEXT,
+        low_dynamic_range INTEGER,
+        original_release_found INTEGER NOT NULL DEFAULT 0,
+        original_release_title TEXT, original_release_year INTEGER
+    );
+    CREATE TABLE catalogue_tracks (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        catalogue_id INTEGER NOT NULL,
+        track_number INTEGER NOT NULL, title TEXT NOT NULL,
+        duration_frames INTEGER NOT NULL,
+        rg_track_gain REAL, rg_track_peak REAL, rg_track_range REAL,
+        ar_v1_crc TEXT, ar_v2_crc TEXT, ar_status TEXT, ar_confidence INTEGER,
+        UNIQUE (catalogue_id, track_number)
+    );
+    INSERT INTO db_meta (key, value) VALUES ('schema_version', '3');
+    """
+    conn0 = _sqlite3.connect(db_path)
+    conn0.executescript(old_ddl)
+    conn0.commit()
+    conn0.close()
+
+    conn = open_catalogue_db(db_path)
+    try:
+        ver = conn.execute(
+            "SELECT value FROM db_meta WHERE key='schema_version'"
+        ).fetchone()[0]
+        assert ver == "4"
+        # b3sum column must now exist and accept values
+        conn.execute(
+            "INSERT INTO catalogue "
+            "(album, artist, track_count, file_basename, file_path, file_size, "
+            "registered_at, created_by, mode, b3sum) "
+            "VALUES ('A', 'B', 1, 'a.rbi', '/a.rbi', 0, '2026-01-01', 'test', '?', 'deadbeef')"
+        )
+        b3 = conn.execute("SELECT b3sum FROM catalogue").fetchone()[0]
+        assert b3 == "deadbeef"
+    finally:
+        conn.close()
+
+
+# ---------------------------------------------------------------------------
+# _compute_b3sum
+# ---------------------------------------------------------------------------
+
+
+def test_compute_b3sum_is_64_char_hex(tmp_path):
+    from cdda2img.catalogue import _compute_b3sum
+
+    f = tmp_path / "sample.bin"
+    f.write_bytes(b"hello, cdda2img")
+    result = _compute_b3sum(f)
+    assert len(result) == 64
+    assert all(c in "0123456789abcdef" for c in result)
+
+
+def test_compute_b3sum_empty_file(tmp_path):
+    from cdda2img.catalogue import _compute_b3sum
+
+    f = tmp_path / "empty.bin"
+    f.write_bytes(b"")
+    result = _compute_b3sum(f)
+    assert len(result) == 64
 
 
 # ---------------------------------------------------------------------------
@@ -448,6 +528,26 @@ def test_register_rbi_creates_record(tmp_path, built_rbi):
         assert track_count == len(_EXAMPLE_TRACKS)
         track_rows = conn.execute("SELECT COUNT(*) FROM catalogue_tracks").fetchone()
         assert track_rows[0] == len(_EXAMPLE_TRACKS)
+    finally:
+        conn.close()
+
+
+@_have_examples
+def test_register_rbi_stores_b3sum(tmp_path, built_rbi):
+    """register_rbi must write a valid 64-char hex blake3 digest to the b3sum column."""
+    from cdda2img.catalogue import register_rbi
+
+    db_path = tmp_path / "c.db"
+    register_rbi(built_rbi, catalogue_path=db_path)
+
+    conn = sqlite3.connect(db_path)
+    try:
+        row = conn.execute("SELECT b3sum FROM catalogue").fetchone()
+        assert row is not None
+        b3 = row[0]
+        assert b3 is not None
+        assert len(b3) == 64
+        assert all(c in "0123456789abcdef" for c in b3)
     finally:
         conn.close()
 

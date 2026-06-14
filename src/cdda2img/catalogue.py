@@ -2,7 +2,7 @@
 catalogue.py — disc catalogue SQLite database.
 
 One row per registered RBI file in catalogue; one row per track in catalogue_tracks.
-Schema version 1.
+Schema version 4.
 """
 
 from __future__ import annotations
@@ -18,7 +18,7 @@ from pathlib import Path
 
 log = logging.getLogger(__name__)
 
-_SCHEMA_VERSION = "3"
+_SCHEMA_VERSION = "4"
 _APP_NAME = "cdda2img"
 
 
@@ -69,7 +69,8 @@ CREATE TABLE IF NOT EXISTS catalogue (
     low_dynamic_range          INTEGER,
     original_release_found     INTEGER NOT NULL DEFAULT 0,
     original_release_title     TEXT,
-    original_release_year      INTEGER
+    original_release_year      INTEGER,
+    b3sum                      TEXT
 );
 
 CREATE TABLE IF NOT EXISTS catalogue_tracks (
@@ -133,27 +134,52 @@ def _init_meta(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def _compute_b3sum(path: Path) -> str:
+    """Return the blake3 hex digest of *path*, read in streaming 64 KB chunks."""
+    import blake3 as _blake3
+
+    h = _blake3.blake3()
+    with open(path, "rb") as f:
+        while chunk := f.read(65536):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _migrate_v3_to_v4(conn: sqlite3.Connection) -> None:
+    conn.execute("ALTER TABLE catalogue ADD COLUMN b3sum TEXT")
+    conn.execute(
+        "INSERT OR REPLACE INTO db_meta (key, value) VALUES ('schema_version', '4')"
+    )
+    conn.commit()
+    log.info("Catalogue schema migrated v3 → v4 (added b3sum column)")
+
+
 def _check_schema_version(conn: sqlite3.Connection) -> None:
     row = conn.execute(
         "SELECT value FROM db_meta WHERE key='schema_version'"
     ).fetchone()
     if row is None:
         return
-    if row[0] > _SCHEMA_VERSION:
+    db_ver = row[0]
+    if db_ver == _SCHEMA_VERSION:
+        return
+    if db_ver > _SCHEMA_VERSION:
         log.warning(
             "Catalogue schema v%s is newer than supported v%s; "
             "all rips will skip registration until cdda2img is upgraded",
-            row[0],
+            db_ver,
             _SCHEMA_VERSION,
         )
-        msg = f"catalogue schema v{row[0]} > supported v{_SCHEMA_VERSION}"
+        msg = f"catalogue schema v{db_ver} > supported v{_SCHEMA_VERSION}"
         raise RuntimeError(msg)
-    if row[0] < _SCHEMA_VERSION:
-        msg = (
-            f"catalogue schema v{row[0]} predates current v{_SCHEMA_VERSION}; "
-            f"delete the catalogue and re-scan the archive: rm {catalogue_db_path()}"
-        )
-        raise RuntimeError(msg)
+    if db_ver == "3":
+        _migrate_v3_to_v4(conn)
+        return
+    msg = (
+        f"catalogue schema v{db_ver} predates current v{_SCHEMA_VERSION}; "
+        f"delete the catalogue and re-scan the archive: rm {catalogue_db_path()}"
+    )
+    raise RuntimeError(msg)
 
 
 def _parse_prov(prov_bytes: bytes) -> dict[str, str]:
@@ -400,6 +426,8 @@ def _register_impl(  # noqa: C901
     ripper = prov.get("ripper")
     drive = prov.get("drive_name")
 
+    b3sum = _compute_b3sum(rbi_path)
+
     track_durations = [t.duration_frames for t in disc.tracks]
     ar_v1_crcs: list[str | None] = [None] * n_tracks
     if arip_data is not None:
@@ -470,8 +498,8 @@ def _register_impl(  # noqa: C901
                     file_basename, file_path, file_size,
                     registered_at, created_by, mode, source, ripper, drive,
                     low_dynamic_range, original_release_found,
-                    original_release_title, original_release_year)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    original_release_title, original_release_year, b3sum)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (
                     mcn,
                     album,
@@ -496,6 +524,7 @@ def _register_impl(  # noqa: C901
                     original_release_found,
                     original_release_title,
                     original_release_year,
+                    b3sum,
                 ),
             )
             catalogue_id = cur.lastrowid
