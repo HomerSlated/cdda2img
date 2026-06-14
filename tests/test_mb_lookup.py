@@ -19,6 +19,7 @@ from cdda2img.mb_lookup import (
     _agreed_tracks,
     _agreed_value,
     _build_agreed_facts_meta,
+    _disambiguate_by_isrcs,
     _disambiguate_by_mcn,
     _find_disc_medium,
     _is_consistent,
@@ -988,6 +989,73 @@ def test_prepopulate_multiple_matches_score_below_floor_no_merge():
     assert r.match_count == 2
     assert r.rejected_inconsistent == 0
     assert r.isrc_disambiguated is False
+
+
+# ---------------------------------------------------------------------------
+# R1 — ratio threshold scales with ISRC evidence (BEETS-4)
+# ---------------------------------------------------------------------------
+
+
+def _disc_n_isrcs(n: int) -> RBIDisc:
+    """Build an RBIDisc with *n* tracks all carrying ISRCs."""
+    return RBIDisc(
+        album="Album",
+        artist="Artist",
+        tracks=[
+            RBITocEntry(
+                track_number=i,
+                title=f"T{i}",
+                performer="Artist",
+                start_frame=(i - 1) * 10000,
+                duration_frames=10000,
+                isrc=f"AAAAA{i:07d}",
+            )
+            for i in range(1, n + 1)
+        ],
+    )
+
+
+def _winner_meta(n_agree: int) -> DiscMeta:
+    """DiscMeta that matches the first *n_agree* tracks of _disc_n_isrcs."""
+    return DiscMeta(
+        album="Album",
+        mb_release_id="rid-win",
+        tracks=[
+            TrackMeta(number=i, isrc=f"AAAAA{i:07d}") for i in range(1, n_agree + 1)
+        ],
+    )
+
+
+def _loser_meta() -> DiscMeta:
+    return DiscMeta(album="Loser", mb_release_id="rid-lose", tracks=[])
+
+
+def test_disambiguate_ratio_3_isrc_tracks_floor_still_applies():
+    """n_isrc=3 → threshold=max(2, ceil(1.8))=2; score=2 is enough to win."""
+    disc = _disc_n_isrcs(3)
+    winner = _winner_meta(2)
+    assert _disambiguate_by_isrcs([winner, _loser_meta()], disc) is winner
+
+
+def test_disambiguate_ratio_10_isrc_tracks_threshold_6():
+    """n_isrc=10 → threshold=max(2, ceil(6.0))=6; score=5 is no longer enough."""
+    disc = _disc_n_isrcs(10)
+    winner = _winner_meta(5)
+    assert _disambiguate_by_isrcs([winner, _loser_meta()], disc) is None
+
+
+def test_disambiguate_ratio_20_isrc_tracks_threshold_12():
+    """n_isrc=20 → threshold=max(2, ceil(12.0))=12; score=11 is no longer enough."""
+    disc = _disc_n_isrcs(20)
+    winner = _winner_meta(11)
+    assert _disambiguate_by_isrcs([winner, _loser_meta()], disc) is None
+
+
+def test_disambiguate_ratio_zero_isrcs_floor_preserved():
+    """n_isrc=0 → threshold=max(2,0)=2; score=0 stays below floor → None."""
+    disc = _disc_n_isrcs(0)  # disc has no tracks, no ISRCs
+    winner = _winner_meta(0)  # no ISRCs to match either
+    assert _disambiguate_by_isrcs([winner, _loser_meta()], disc) is None
 
 
 # ---------------------------------------------------------------------------

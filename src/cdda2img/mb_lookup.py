@@ -24,6 +24,7 @@ import base64
 import hashlib
 import importlib.metadata
 import logging
+import math
 from collections import Counter
 from collections.abc import Iterable
 from dataclasses import replace
@@ -876,6 +877,7 @@ def _overwrite_disc(meta: DiscMeta, disc: RBIDisc) -> RBIDisc:
 # multi-match disambiguation. Below this we prefer no-auto-merge (blank but
 # correctable) over a confident-but-possibly-wrong choice.
 _MIN_ISRC_AGREE = 2
+_ISRC_AGREE_RATIO: float = 0.6  # R1: scales threshold with available ISRC evidence
 
 
 def _score_candidate_by_isrcs(meta: DiscMeta, disc: RBIDisc) -> int:
@@ -968,7 +970,9 @@ def _disambiguate_by_isrcs(matches: list[DiscMeta], disc: RBIDisc) -> DiscMeta |
     scored = [(_score_candidate_by_isrcs(m, disc), i, m) for i, m in enumerate(matches)]
     scored.sort(key=lambda t: (-t[0], t[1]))
     top_score, _, top_meta = scored[0]
-    if top_score < _MIN_ISRC_AGREE:
+    n_isrc_tracks = sum(1 for t in disc.tracks if t.isrc)
+    threshold = max(_MIN_ISRC_AGREE, math.ceil(_ISRC_AGREE_RATIO * n_isrc_tracks))
+    if top_score < threshold:
         return None
     if len(scored) > 1 and scored[1][0] == top_score:
         return None
