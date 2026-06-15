@@ -207,13 +207,8 @@ def fetch_cover(disc: RBIDisc) -> CoverArt | None:
     """Fetch the best available front cover for disc.
 
     Chain: CAA release-group → CAA release → Discogs. Best-effort — returns
-    None on network failure. Gated by R10 offline mode.
+    None on network failure.
     """
-    from cdda2img.config import is_no_network_active
-
-    if is_no_network_active():
-        return None
-
     if disc.mb_release_group_id:
         art = _try_caa("release-group", disc.mb_release_group_id)
         if art is not None:

@@ -329,29 +329,9 @@ def lookup_disc_id(disc: RBIDisc) -> list[DiscMeta]:
     """Look up releases on MusicBrainz by Disc ID computed from the disc TOC.
 
     Returns a list of matching DiscMeta (empty on no match or network error).
-
-    R7: results are cached in ``lookup_cache.db`` with a 30-day TTL.
-    Cache hits short-circuit the network call; failures (TTL, parse error,
-    sqlite error) degrade silently to a live request.
-
-    R10: when offline mode is active, the function still reads the cache
-    (cached responses are usable offline) but never makes a network call.
     """
-    from cdda2img.config import is_no_network_active
-    from cdda2img.lookup_cache import (
-        get_cached_disc_id_lookup,
-        put_cached_disc_id_lookup,
-    )
-
     disc_id_str = disc_id_from_rbi(disc)
     if not disc_id_str:
-        return []
-    cached = get_cached_disc_id_lookup(disc_id_str)
-    if cached is not None:
-        log.debug("MB disc ID cache hit: %s", disc_id_str)
-        return cached
-    if is_no_network_active():
-        log.debug("MB disc ID offline (cache miss for %s)", disc_id_str)
         return []
     _setup_useragent()
     log.debug("MusicBrainz disc ID lookup: %s", disc_id_str)
@@ -394,9 +374,7 @@ def lookup_disc_id(disc: RBIDisc) -> list[DiscMeta]:
         log.debug("MusicBrainz network error: %s", exc)
         return []
     releases = (result.get("disc") or {}).get("release-list") or []
-    parsed = [_parse_release(r, _disc_id=disc_id_str) for r in releases]
-    put_cached_disc_id_lookup(disc_id_str, parsed)
-    return parsed
+    return [_parse_release(r, _disc_id=disc_id_str) for r in releases]
 
 
 def _fetch_release_raw(release_id: str) -> dict | None:
@@ -409,12 +387,8 @@ def _fetch_release_raw(release_id: str) -> dict | None:
     without that canonical-but-noisy value ever reaching ``TrackMeta.duration_ms``
     or the R3 sum-of-durations gate.
 
-    Returns None on network/response error or when offline mode is active (R10).
+    Returns None on network/response error.
     """
-    from cdda2img.config import is_no_network_active
-
-    if is_no_network_active():
-        return None
     _setup_useragent()
     log.debug("MusicBrainz release lookup: %s", release_id)
     try:
@@ -435,7 +409,7 @@ def lookup_release(release_id: str, disc_number: int | None = None) -> DiscMeta 
     only that disc's tracks are returned.  Pass ``disc.disc_number`` when
     applying to a known disc in a set.
 
-    Returns None on network/response error or when offline mode is active (R10).
+    Returns None on network/response error.
     """
     release = _fetch_release_raw(release_id)
     if not release:
@@ -466,11 +440,7 @@ def build_mb_search_query(artist: str | None, album: str | None) -> str:
 
 
 def search_releases(query: str, limit: int = 25) -> list[DiscMeta]:
-    """Text search for releases on MusicBrainz. Returns empty list on error or offline (R10)."""
-    from cdda2img.config import is_no_network_active
-
-    if is_no_network_active():
-        return []
+    """Text search for releases on MusicBrainz. Returns empty list on error."""
     _setup_useragent()
     log.debug("MusicBrainz text search: %r", query)
     try:
@@ -482,11 +452,7 @@ def search_releases(query: str, limit: int = 25) -> list[DiscMeta]:
 
 
 def search_releases_by_barcode(barcode: str, limit: int = 25) -> list[DiscMeta]:
-    """Search MusicBrainz for releases by barcode. Returns [] on error or offline (R10)."""
-    from cdda2img.config import is_no_network_active
-
-    if is_no_network_active():
-        return []
+    """Search MusicBrainz for releases by barcode. Returns [] on error."""
     _setup_useragent()
     log.debug("MusicBrainz barcode search: %r", barcode)
     try:
@@ -599,13 +565,9 @@ def duration_match_lookup(disc: RBIDisc, *, verbose: bool = False) -> DiscMeta |
     disc's total duration against MusicBrainz text-search candidates.
 
     Fires only as a last resort (the caller gates on ``disc.mb_release_id is
-    None``). Requires an album or artist to search with. Honours R10 offline
-    mode. Returns a parsed ``DiscMeta`` for the winner, or None.
+    None``). Requires an album or artist to search with.
+    Returns a parsed ``DiscMeta`` for the winner, or None.
     """
-    from cdda2img.config import is_no_network_active
-
-    if is_no_network_active():
-        return None
     if not (disc.album or disc.artist):
         return None
     query = build_mb_search_query(disc.artist, disc.album)
@@ -651,12 +613,8 @@ def lookup_release_group(rg_id: str) -> list[DiscMeta]:
     """Fetch all releases in a MusicBrainz release group, sorted by date (oldest first).
 
     Used by the 'Find Original Release' menu to browse all pressings in a release group.
-    Returns [] when offline mode is active (R10).
+    Returns [] on network error.
     """
-    from cdda2img.config import is_no_network_active
-
-    if is_no_network_active():
-        return []
     _setup_useragent()
     log.debug("MusicBrainz release group lookup: %s", rg_id)
     try:
@@ -684,24 +642,8 @@ def lookup_isrc(isrc: str) -> list[DiscMeta]:
 
     Returns a list of DiscMeta for releases that contain a recording with this ISRC.
     Results are basic (no per-track tracklist) due to the two-step lookup.
-    Returns [] when offline mode is active (R10).
-
-    R7: results cached in ``isrc_lookups`` with no TTL — ISRC→recording
-    bindings are immutable in practice. Cache reads work in offline mode.
+    Returns [] on network error.
     """
-    from cdda2img.config import is_no_network_active
-    from cdda2img.lookup_cache import (
-        get_cached_isrc_lookup,
-        put_cached_isrc_lookup,
-    )
-
-    cached = get_cached_isrc_lookup(isrc)
-    if cached is not None:
-        log.debug("MB ISRC cache hit: %s", isrc)
-        return cached
-    if is_no_network_active():
-        log.debug("MB ISRC offline (cache miss for %s)", isrc)
-        return []
     _setup_useragent()
     log.debug("MusicBrainz ISRC lookup: %s", isrc)
     try:
@@ -736,7 +678,6 @@ def lookup_isrc(isrc: str) -> list[DiscMeta]:
                     source="musicbrainz",
                 )
             )
-    put_cached_isrc_lookup(isrc, results)
     return results
 
 

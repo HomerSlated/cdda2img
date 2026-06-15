@@ -149,14 +149,6 @@ def parse_args() -> argparse.Namespace:
         version=f"cdda2img {importlib.metadata.version('cdda2img')}",
     )
     # R10: process-wide offline-mode toggle. When set, every remote metadata
-    # lookup (CDDB, MB, Discogs, AcoustID, AccurateRip) short-circuits to
-    # "unavailable". Combine with R7's SQLite cache to reproduce a prior
-    # rip's metadata without network access.
-    parser.add_argument(
-        "--no-network-services",
-        action="store_true",
-        help="Disable all remote metadata lookups (CDDB/MB/Discogs/AcoustID/AR).",
-    )
     # Diagnostic-level logging. Surfaces every URL queried (AccurateRip,
     # MusicBrainz, Discogs, AcoustID, CDDB) and the HTTP outcome, so
     # "disc not found" / "no match" failures can be traced to the exact
@@ -1681,7 +1673,6 @@ def _finalize_import(
 
     # Fetch and embed album art using the confirmed post-menu MB IDs.
     from cdda2img.album_art import fetch_cover, to_album_art
-    from cdda2img.config import is_no_network_active
 
     _ui_status(ui, "Fetching album art…")
     _art_raw = fetch_cover(disc)
@@ -1689,8 +1680,6 @@ def _finalize_import(
     if album_art is not None:
         provenance["art_source"] = _art_raw.source  # type: ignore[union-attr]
         provenance["lookup_status_art"] = "OK"
-    elif is_no_network_active():
-        provenance["lookup_status_art"] = "disabled"
     else:
         provenance["lookup_status_art"] = "empty"
 
@@ -2463,13 +2452,6 @@ def mount_image(
 
 
 def _dispatch(args: argparse.Namespace) -> None:
-    # R10: apply the CLI offline-mode override before any subcommand
-    # imports a lookup module. None lets the TOML config value stand;
-    # True forces offline; False forces online (overrides config).
-    from cdda2img.config import set_no_network_override
-
-    if args.no_network_services:
-        set_no_network_override(True)
     if args.cmd == "create":
         from cdda2img.config import load_config
 

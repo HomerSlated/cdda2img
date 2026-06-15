@@ -1320,11 +1320,7 @@ def test_lookup_disc_id_omits_discids_include():
         captured["includes"] = includes
         return {"disc": {"release-list": []}}
 
-    with (
-        patch("musicbrainzngs.get_releases_by_discid", side_effect=_fake),
-        patch("cdda2img.lookup_cache.get_cached_disc_id_lookup", return_value=None),
-        patch("cdda2img.lookup_cache.put_cached_disc_id_lookup"),
-    ):
+    with patch("musicbrainzngs.get_releases_by_discid", side_effect=_fake):
         lookup_disc_id(disc)
     assert "discids" not in captured["includes"]
 
@@ -1348,7 +1344,6 @@ def test_lookup_disc_id_400_logs_warning_not_silent(caplog):
 
     with (
         patch("musicbrainzngs.get_releases_by_discid", side_effect=err),
-        patch("cdda2img.lookup_cache.get_cached_disc_id_lookup", return_value=None),
         caplog.at_level(logging.WARNING, logger="cdda2img.mb_lookup"),
     ):
         assert lookup_disc_id(disc) == []
@@ -1816,20 +1811,11 @@ def _dm_disc(
     return RBIDisc(album=album, artist=artist, tracks=entries)
 
 
-def test_duration_match_lookup_offline_returns_none():
-    from cdda2img.mb_lookup import duration_match_lookup
-
-    disc = _dm_disc()
-    with patch("cdda2img.config.is_no_network_active", return_value=True):
-        assert duration_match_lookup(disc) is None
-
-
 def test_duration_match_lookup_no_album_or_artist_returns_none():
     from cdda2img.mb_lookup import duration_match_lookup
 
     disc = _dm_disc(album="", artist="")
-    with patch("cdda2img.config.is_no_network_active", return_value=False):
-        assert duration_match_lookup(disc) is None
+    assert duration_match_lookup(disc) is None
 
 
 def test_duration_match_lookup_prefilters_by_track_count_and_picks():
@@ -1848,7 +1834,6 @@ def test_duration_match_lookup_prefilters_by_track_count_and_picks():
         return raw_match if rid == "match" else None
 
     with (
-        patch("cdda2img.config.is_no_network_active", return_value=False),
         patch(
             "cdda2img.mb_lookup.search_releases",
             return_value=[stub_wrong_count, stub_match],
@@ -1869,7 +1854,6 @@ def test_duration_match_lookup_rejects_when_no_candidate_in_tolerance():
     raw_off = _raw_release("off", track_lengths=[300000, 300000])  # 600000 — 200s off
 
     with (
-        patch("cdda2img.config.is_no_network_active", return_value=False),
         patch("cdda2img.mb_lookup.search_releases", return_value=[stub]),
         patch("cdda2img.mb_lookup._fetch_release_raw", return_value=raw_off),
     ):

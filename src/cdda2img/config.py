@@ -182,41 +182,8 @@ class Config:
     preview: bool = True
     tui: bool = True
     low_dr_threshold: float = 5.0  # album LRA (LU) below which low_dynamic_range=YES
-    # R10: when True, every remote metadata lookup (CDDB / MB / Discogs /
-    # AcoustID / AccurateRip) short-circuits to "unavailable" semantics.
-    # Combined with R7's SQLite cache, lets a re-run reproduce a prior
-    # rip's metadata without network access.
-    no_network_services: bool = False
     auto: bool = False
     embedart: bool = False
-
-
-_no_network_override: bool | None = None
-
-
-def is_no_network_active() -> bool:
-    """R10: True iff offline mode is active.
-
-    Honours, in order:
-      1. The process-wide override set by ``set_no_network_override``
-         (used by the CLI flag and by tests).
-      2. The ``no_network_services`` key from the loaded TOML config.
-
-    Module-level cache is intentionally absent — config load is cheap
-    and a cache would otherwise race with the CLI-set override.
-    """
-    if _no_network_override is not None:
-        return _no_network_override
-    try:
-        return load_config().no_network_services
-    except Exception:
-        return False
-
-
-def set_no_network_override(value: bool | None) -> None:
-    """Set or clear the process-wide R10 override (None = use config value)."""
-    global _no_network_override
-    _no_network_override = value
 
 
 def _parse_drives(raw_drives: object) -> list[DriveConfig]:
@@ -341,8 +308,6 @@ def load_config() -> Config:
 
     preview = bool(data.get("preview", True))
     tui = bool(data.get("tui", True))
-    # R10: offline mode toggle.
-    no_network_services = bool(data.get("no_network_services", False))
     auto = bool(data.get("auto", False))
 
     raw_low_dr = data.get("low_dr_threshold", 5.0)
@@ -373,7 +338,6 @@ def load_config() -> Config:
         preview=preview,
         tui=tui,
         low_dr_threshold=low_dr_threshold,
-        no_network_services=no_network_services,
         auto=auto,
     )
 

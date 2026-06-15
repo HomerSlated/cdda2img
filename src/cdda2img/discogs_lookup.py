@@ -21,15 +21,7 @@ _USER_AGENT = f"cdda2img/{importlib.metadata.version('cdda2img')} +https://githu
 
 
 def is_available() -> bool:
-    """Return True if DISCOGS_TOKEN is set in the environment.
-
-    R10: returns False unconditionally when ``Config.no_network_services``
-    is True (offline mode).
-    """
-    from cdda2img.config import is_no_network_active
-
-    if is_no_network_active():
-        return False
+    """Return True if DISCOGS_TOKEN is set in the environment."""
     return bool(os.environ.get("DISCOGS_TOKEN"))
 
 
@@ -285,19 +277,7 @@ def search_releases(
 
 
 def search_by_barcode(barcode: str) -> list[DiscMeta]:
-    """Lookup by barcode (EAN-13 / UPC). Returns [] if token not set or on error.
-
-    R7: results cached in ``discogs_barcode`` with a 30-day TTL.
-    """
-    from cdda2img.lookup_cache import (
-        get_cached_discogs_barcode,
-        put_cached_discogs_barcode,
-    )
-
-    cached = get_cached_discogs_barcode(barcode)
-    if cached is not None:
-        log.debug("Discogs barcode cache hit: %s", barcode)
-        return cached
+    """Lookup by barcode (EAN-13 / UPC). Returns [] if token not set or on error."""
     client = _get_client()
     if not client:
         return []
@@ -308,5 +288,4 @@ def search_by_barcode(barcode: str) -> list[DiscMeta]:
     except Exception as exc:
         log.debug("Discogs barcode search failed: %s", exc)
         return []
-    put_cached_discogs_barcode(barcode, parsed)
     return parsed

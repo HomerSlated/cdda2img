@@ -126,8 +126,6 @@ def test_compute_cddb_disc_id_floor_boundary_no_bias() -> None:
 
 def _force_online_cache_miss(monkeypatch):
     monkeypatch.setattr(cddb.time, "sleep", lambda *_: None)
-    monkeypatch.setattr("cdda2img.lookup_cache.get_cached_cddb_lookup", lambda *_: None)
-    monkeypatch.setattr("cdda2img.config.is_no_network_active", lambda: False)
 
 
 def test_query_cddb_retries_then_gives_up_on_transport_error(monkeypatch):

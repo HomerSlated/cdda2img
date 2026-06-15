@@ -156,10 +156,6 @@ def _fetch_ar(
     Responses larger than ``_AR_DBAR_MAX`` are treated as malformed: body
     is dropped, transport is still recorded (the server *did* answer).
     """
-    from cdda2img.config import is_no_network_active
-
-    if is_no_network_active():
-        return None, None
     last_transport: str | None = None
     for base, name in ((_AR_BASE_HTTPS, "https"), (_AR_BASE_HTTP, "http")):
         url = _ar_url(track_count, id1, id2, cddb_id, base=base)
