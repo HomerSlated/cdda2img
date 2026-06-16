@@ -4,6 +4,7 @@ disc_reader.py — CD-DA ripping via cd-paranoia subprocess.
 Public interface:
     RipInfo(disc, track_lsns, disc_last_lsn)
     rip_disc(device, output_pcm, *, paranoia="overlap") -> RipInfo
+    rip_single_track(device, track_num, output_pcm, *, paranoia, read_offset, progress_cb) -> int
     query_disc(device) -> (disc_first, disc_last, [(num, first_lsn, length), ...])
 """
 
@@ -201,6 +202,61 @@ def rip_disc(
     disc = _build_rbi_disc(disc_first, tracks)
     track_lsns = [first_lsn for _, first_lsn, _ in tracks]
     return RipInfo(disc=disc, track_lsns=track_lsns, disc_last_lsn=disc_last)
+
+
+def rip_single_track(
+    device: str,
+    track_num: int,
+    output_pcm: Path,
+    *,
+    paranoia: str = "full",
+    read_offset: int = 0,
+    progress_cb: Callable[[ProgressUpdate], None] | None = None,
+) -> int:
+    """Rip one track by track number to raw s16le PCM. Returns sector count.
+
+    *read_offset* is applied via ``-O`` so the output is offset-corrected,
+    matching the coordinate system of a PCM file already processed by
+    ``apply_offset``. Does not call ``query_disc`` to determine overall disc
+    layout — only queries enough to locate the requested track.
+    """
+    from cdda2img.container import wav_to_raw_pcm
+
+    _, _, tracks = query_disc(device)
+    track_entry = next((t for t in tracks if t[0] == track_num), None)
+    if track_entry is None:
+        msg = f"Track {track_num} not found on disc ({len(tracks)} tracks detected)"
+        raise RuntimeError(msg)
+    _, track_first_lsn, track_length = track_entry
+
+    mode_flags = _PARANOIA_FLAGS.get(paranoia, _PARANOIA_FLAGS["overlap"])
+    offset_flags = ["-O", str(read_offset)] if read_offset != 0 else []
+    wav_path = output_pcm.with_suffix(".paranoia.wav")
+    cmd = [
+        "cd-paranoia",
+        "-d",
+        device,
+        *mode_flags,
+        *offset_flags,
+        "--",
+        str(track_num),
+        str(wav_path),
+    ]  # LINT-012
+    try:
+        if progress_cb is None:
+            returncode = subprocess.run(cmd).returncode  # noqa: S603  # LINT-012
+        else:
+            returncode = _run_paranoia_with_progress(
+                cmd, wav_path, track_length, tracks, track_first_lsn, progress_cb
+            )
+        if returncode != 0:
+            msg = f"cd-paranoia exited with code {returncode} ripping track {track_num}"
+            raise RuntimeError(msg)
+        wav_to_raw_pcm(wav_path, output_pcm)
+    finally:
+        wav_path.unlink(missing_ok=True)
+
+    return track_length
 
 
 def _sector_to_track(tracks: list[tuple[int, int, int]], sector: int) -> int:

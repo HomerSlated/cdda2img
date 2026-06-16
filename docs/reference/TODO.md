@@ -2,6 +2,116 @@
 
 ## Open
 
+### Agent audit — metadata pipeline (2026-06-15)
+
+Sources:
+- bug-hunter: `private/bugs/2026-06-15_163056_metadata-pipeline.md`
+- optimiser: `private/optimiser/2026-06-15_metadata-consensus.md`
+
+#### Bug fixes
+
+- [ ] **BUG-1** · MEDIUM — `cddb.py:228` — `nsecs` in the `cddb query` command is computed as
+      `(disc_last_lsn - track_lsns[0] + 1) // 75` (subtract-then-floor, omits lead-in), producing
+      a value ~3 s short of the correct absolute lead-out in seconds that every reference client
+      emits (`(disc_last_lsn + 1 + 150) // 75`). Worked example from the module's own comment:
+      should be 3608, emits 3605. Exact disc-ID matches still land; impact is the gnudb fuzzy path
+      and any server that re-derives the ID from offsets + nsecs.
+      Fix: compute `total_secs = (disc_last_lsn + 1 + _LEAD_IN) // 75` in `query_cddb`.
+      Add a regression test pinning the existing worked example.
+
+- [ ] **BUG-2** · MEDIUM — `metadata.py:66` — `derive_album_info` album fallback reads
+      `Path.cwd().name` instead of the audio files' parent directory name. Docstring promises
+      "parent directory name"; for `cdda2img create /music/Album` run from `/home/user`, the
+      fallback is "user", not "Album". With `--auto` the wrong name is written silently.
+      Fix: `tracks[0].parent.name if tracks else Path.cwd().name`.
+
+- [ ] **BUG-3** · MEDIUM — `cdda2img.py:1334-1344` — R6 AcoustID corroboration flag picks
+      `consistent_rids[0]` from a list derived from a `set` (nondeterministic order). When
+      AcoustID converges on more than one consistent release (e.g., the disc release plus a
+      compilation sharing the same recordings), `consistent_rids[0]` is arbitrary; if the disc's
+      `mb_release_id` is in the list but not at index 0, the flag is "NO" even though AcoustID
+      corroborates it. Feeds the +0.25 match-confidence signal.
+      Fix: `"YES" if disc.mb_release_id in consistent_rids else "NO"`.
+
+- [ ] **BUG-4** · MEDIUM — `acoustid_lookup.py:135` — AcoustID-sourced ISRCs (`_chain_to_mb`)
+      bypass `validators.validate_isrc`. The merge sites (`_merge_into_disc`, `_overwrite_disc`)
+      validate only the disc-side ISRC and trust that `meta.isrc` was validated at MB ingress —
+      true for `_parse_release` but not for the AcoustID path, which constructs `DiscMeta`
+      directly. On multi-track discs the menu's fetch-full re-parses through the validated
+      `_parse_release`, closing the gap. On **single-track discs** the `DiscMeta` is applied
+      directly; a malformed ISRC can reach `RBITocEntry.isrc` and the TOC `ISRC` line.
+      Fix: call `validate_isrc` on the recording ISRC inside `_chain_to_mb`, or add meta-side
+      validation at the merge sites alongside the existing disc-side check.
+
+- [ ] **BUG-5** · LOW — `metadata_menu.py:489-496` — `_clear_disc` reconstructs `RBIDisc` by
+      hand, silently dropping `pre_emphasis` (the physical R14 year-cap signal) to `None`.
+      Clearing metadata should not reset physical disc properties.
+      Fix: use `dataclasses.replace(disc, album="", artist="", catalog=None, disc_id=None,
+      tracks=cleared_tracks, ...)` so only metadata fields are cleared and physical fields
+      (`pre_emphasis`) are preserved.
+
+- [ ] **BUG-6** · LOW — `config.py` — `Config.embedart` is declared but `load_config()` never
+      reads it from the TOML data dict or passes it to the `Config(...)` constructor, so
+      `embedart = true` in the user's config file has no effect.
+      Fix: add `embedart = bool(data.get("embedart", False))` and include it in the constructor,
+      mirroring how `auto` is handled (line 346 / line 377).
+
+- [ ] **BUG-7** · LOW — `cdda2img.py:1580-1586` — the stage-7 duration matcher returns a
+      `DiscMeta` with `mb_release_id` set (to the text+duration-matched release), and
+      `_merge_into_disc` writes it to `disc.mb_release_id`. This is a non-disc-ID, possibly-
+      wrong pressing MBID baked into PROV as if authoritative. It feeds `populate_original_release`
+      pre-menu. The gate mismatch (matcher ±15 s vs R3 ±2 s) makes it fail safe, but the PROV
+      entry is wrong.
+      Fix: strip `mb_release_id` from the stage-7 result before merging (keep
+      `mb_release_group_id`), matching what the ISRC-tally fallback does (`C2` / `replace(winner,
+      mb_release_id=None)`).
+
+#### Performance / architecture
+
+- [ ] **OPT-1** · **In-process session cache for MB disc-ID lookups** — The Phase-1 banner
+      (`_preview_worker`) and Phase-2 finalization (`prepopulate_from_mb`) both call
+      `lookup_disc_id` with the same disc-ID (identical by construction after the SILENCE fix).
+      Previously the R7 SQLite cache de-duplicated this; that cache is now removed. Replace with a
+      process-lifetime `dict[str, list[DiscMeta]]` in `mb_lookup.py`, populated on first call and
+      returned directly on repeat calls within the same process. No persistence, no TTL, no
+      stale-data risk — the dict is discarded on process exit. Scope: `lookup_disc_id` only;
+      separate dicts for ISRC and by-release-id lookups can follow if needed.
+
+- [ ] **OPT-2** · **In-process session cache for album art fetches** — `fetch_cover` in
+      `album_art.py` has no caching. Phase 1 (banner, `_preview_worker:2137`) and Phase 2
+      (`_finalize_import:1687`) both call it; when the pre- and post-menu MB/Discogs IDs coincide
+      (the common path — strong auto-match or user accepts the guess), it re-downloads the same
+      image bytes twice. Add a process-lifetime dict keyed on `CoverArt.source`
+      (`caa:{entity}:{mbid}` / `discogs:{id}`) in `album_art.py`. Phase 2 returns the cached
+      bytes when IDs match; only re-downloads on an actual ID change (user corrected metadata).
+
+- [ ] **OPT-3** · **CDDB vs stage-7 ordering** — Stage-7 (`duration_match_lookup`) is
+      track-count- and ±15 s-duration-verified against MB. CDDB is unverified gnudb free text.
+      Yet CDDB is applied before stage-7 in `_run_metadata_lookups`, so a contested album/artist
+      field goes to the weaker source. Both targets fire only on disc-ID-miss discs, where CDDB
+      is at its least trustworthy. Options: (a) run stage-7 before CDDB; (b) allow a verified
+      stage-7 result to overwrite (not just fill-blank) a CDDB value; (c) drop CDDB as a
+      metadata source and retain only its disc-ID for fingerprint lookup. Recommend (a) as the
+      minimum; (c) as the cleanest.
+
+- [ ] **OPT-4** · **Per-field trust score model** — The current fill-blank / first-writer-wins
+      model lets a wrong-but-non-blank CD-Text or CDDB value permanently block a stronger MB
+      value; the only escape is the interactive menu's "Overwrite All". The recommended fix is an
+      explicit `(field, value, trust)` proposal model: each source proposes a trust level per
+      field, the highest-trust proposal wins, and near-ties surface as alternatives in the menu.
+      Extend the existing `match_distance` / `build_match_distance` scaffold rather than adding a
+      new framework. This is a substantial rework; design before implementing.
+
+#### P3 superseded
+
+- [x] **P3** · ~~Extend the R7 SQLite cache to by-release-id / by-RG-id~~ — **SUPERSEDED
+      2026-06-15 (commit `559b84a`)**: the entire R7 persistent cache and R10 offline mode have
+      been removed (wrong trade-off — caching wrong results for 30 days, no user visibility or
+      invalidation). Session-lifetime in-process caches (OPT-1, OPT-2) replace R7 for the
+      legitimate within-invocation deduplication use cases. No SQLite extension required.
+
+---
+
 ### Beets metadata comparison — follow-ups (2026-06-13)
 
 - [x] **BEETS-4** · DONE 2026-06-14 (`0a42ed6`): ratio-based threshold `max(2, ceil(0.6 × n_isrc_tracks))` in `_disambiguate_by_isrcs`; `_ISRC_AGREE_RATIO = 0.6` constant; 4 new tests covering 3/10/20-track and zero-ISRC cases.

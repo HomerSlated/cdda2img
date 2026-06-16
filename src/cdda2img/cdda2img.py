@@ -2194,34 +2194,113 @@ def rip_image(  # noqa: C901
             ui.resume()
 
         # AR-triggered fallback: partial mismatch → read error on specific tracks.
-        # Re-rip with cd-paranoia full paranoia; keep disc metadata from cdrdao scan
-        # (cdrdao captures ISRC/MCN/CD-Text from subchannel; cd-paranoia -Q does not).
+        # Re-rip only the failed tracks via cd-paranoia (full paranoia) and splice
+        # them into the already-offset-corrected PCM. cdrdao metadata (ISRC/MCN/
+        # CD-Text from subchannel) is preserved — cd-paranoia -Q does not capture it.
         if rip_type == "cdrdao" and _ar_has_partial_mismatch(ar_verify.tracks):
-            from cdda2img.disc_reader import rip_disc
+            from cdda2img.disc_reader import rip_disc, rip_single_track
 
-            n_bad = sum(
-                1
+            failed_tracks = [
+                r
                 for r in ar_verify.tracks
                 if r.max_confidence is not None
                 and r.confidence_v1 is None
                 and r.confidence_v2 is None
-            )
+            ]
+            n_bad = len(failed_tracks)
             _ui_status(
                 ui,
                 f"{n_bad} track(s) failed AccurateRip — re-ripping with cd-paranoia…",
             )
-            paranoia_info = rip_disc(
-                device, temp.pcm_file, paranoia="full", read_offset=read_offset
-            )
-            rip_type = "cd-paranoia"
-            final_track_lsns = paranoia_info.track_lsns
-            final_disc_last_lsn = paranoia_info.disc_last_lsn
+
+            from cdda2img.cdrdao_progress import ProgressUpdate as _PU
+
+            def _paranoia_cb(update: _PU) -> None:
+                if ui is not None:
+                    ui.set_status(
+                        update.status,
+                        update.fraction,
+                        detail=f"({update.elapsed_frames}/{update.total_frames})",
+                    )
+
+            paranoia_cb = _paranoia_cb if ui is not None else None
+
+            # Per-track splice: replace only failed track(s) in the corrected PCM.
+            # The PCM is already offset-corrected (apply_offset ran above), so each
+            # re-rip uses -O to produce a matching offset-corrected replacement.
+            spliced_ok = True
+            with temp.pcm_file.open("r+b") as pcm_fh:
+                for result in failed_tracks:
+                    t = result.track  # 1-indexed
+                    idx = t - 1
+                    byte_start = final_track_lsns[idx] * _R6_BYTES_PER_FRAME
+                    if idx + 1 < len(final_track_lsns):
+                        byte_end = final_track_lsns[idx + 1] * _R6_BYTES_PER_FRAME
+                    else:
+                        byte_end = (final_disc_last_lsn + 1) * _R6_BYTES_PER_FRAME
+                    expected_bytes = byte_end - byte_start
+
+                    track_tmp = temp.pcm_file.with_stem(f"{temp.pcm_file.stem}.t{t}")
+                    try:
+                        rip_single_track(
+                            device,
+                            t,
+                            track_tmp,
+                            paranoia="full",
+                            read_offset=read_offset,
+                            progress_cb=paranoia_cb,
+                        )
+                        new_pcm = track_tmp.read_bytes()
+                    finally:
+                        track_tmp.unlink(missing_ok=True)
+
+                    if len(new_pcm) != expected_bytes:
+                        # cdrdao and cd-paranoia disagree on track boundaries
+                        # (e.g. nonstandard pregap attribution) — splice would
+                        # corrupt the audio. Fall back to full re-rip.
+                        log.warning(
+                            "track %d: cdrdao=%d bytes, cd-paranoia=%d bytes "
+                            "— boundary mismatch, falling back to full re-rip",
+                            t,
+                            expected_bytes,
+                            len(new_pcm),
+                        )
+                        spliced_ok = False
+                        break
+
+                    pcm_fh.seek(byte_start)
+                    pcm_fh.write(new_pcm)
+
+            if not spliced_ok:
+                # Boundary mismatch: replace entire PCM with a full cd-paranoia rip.
+                _ui_status(
+                    ui,
+                    "Track boundary mismatch — re-ripping full disc with cd-paranoia…",
+                )
+                paranoia_info = rip_disc(
+                    device,
+                    temp.pcm_file,
+                    paranoia="full",
+                    read_offset=read_offset,
+                    progress_cb=paranoia_cb,
+                )
+                final_track_lsns = paranoia_info.track_lsns
+                final_disc_last_lsn = paranoia_info.disc_last_lsn
+                # cd-paranoia "1-" starts at track 1 INDEX 01, not the disc start.
+                # The cdrdao TOC's FILE offsets include the track 1 pregap; prepend
+                # zero-padded silence so the PCM coordinate system matches the TOC.
+                pregap_pad = disc.tracks[0].pregap_frames * _R6_BYTES_PER_FRAME
+                if pregap_pad > 0:
+                    pcm_bytes = temp.pcm_file.read_bytes()
+                    temp.pcm_file.write_bytes(bytes(pregap_pad) + pcm_bytes)
+
+            rip_type = "cdrdao+cd-paranoia"
             _ui_status(ui, "Verifying AccurateRip (re-rip)…")
             ar_verify = verify_rip(
                 temp.pcm_file,
                 final_track_lsns,
                 final_disc_last_lsn,
-                read_offset=0,
+                read_offset=0,  # PCM is offset-corrected: apply_offset or cd-paranoia -O
                 cddb_id=cddb_id,
             )
             if ui is not None:
