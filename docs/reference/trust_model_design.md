@@ -397,3 +397,23 @@ blocks**; the three options (i)/(ii)/(iii) are bundles of them.
 - Whether `metadata_over_engineered` should veto B5 outright, or whether menu alternatives
   are the rare UX feature that *does* improve the guess (the user is the arbiter, and
   alternatives improve what the arbiter sees).
+
+- **(User, 2026-06-17) Reframe D4 as a disambiguation question, not just persist-vs-drop.**
+  The real question about the shown-then-dropped fields (`label` / `catalog_number` /
+  `country`, and any other candidate data) is: **does surfacing more data *assist
+  disambiguation*, or only introduce more irresolvable conflicts?** More fields = more
+  cross-source agreement signals (could sharpen a weak match) *but also* more contested
+  fields with no committed home (more noise, more `metadata_over_engineered` risk). Next
+  session: weigh disambiguation value vs. conflict cost *before* deciding persist/show/drop.
+  This likely wants a worked example — a real disc where catalogue data would have changed
+  the chosen release.
+
+- **(User, 2026-06-17) Preserve the "genuinely elegant solution"; refine, don't replace.**
+  The agent called the typed-schema enforcement "genuinely elegant" (report §7.2, re. §5.2:
+  OBJECTIVE-only fields rejected at `FieldProposal` construction). User preference:
+  **non-destructive** evolution — refine or add to the existing design only where it adds
+  *real* value; do not break or rip out what already works (the bespoke MCN resolver, the
+  current merge's correct-for-create behaviour, the typed-schema idea). Bias toward
+  additive B1/B2/B6 over the wholesale B4 rewrite unless a concrete benefit demands it.
+  *(Confirm next session which "elegant solution" the user meant if ambiguous — typed-schema
+  enforcement vs. the existing bespoke MCN resolver.)*
