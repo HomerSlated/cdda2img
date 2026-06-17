@@ -279,3 +279,121 @@ merge works for the common path; fix only OPT-3-class issues ad hoc); **(ii)** m
 ship C1/C2 enforcement + the §3.1 seed/merge decouple, skip the resolver; **(iii)** full
 collect→resolve with the 2-D table. The §5 decision chose (iii); §7 asks whether (ii) is
 the better cost/benefit point.
+
+---
+
+## 8. Optimisation-advisor refinement (2026-06-17)
+
+Full report: `private/optimiser/2026-06-17T18-27-02_trust-model-design-debate.md`.
+Its bottom line — **recommend (ii) minimal, plus a targeted rule §7/§9 missed** — and the
+load-bearing claim were both verified against the code here.
+
+1. **§7.1 is overstated — the catalogue inversion is latent, not live.** Verified:
+   `RBIDisc` (`rbi_format.py:305-335`) has **no** `catalog_number` / `label` / `country`
+   fields. MB (`mb_lookup.py:302-304`) and Discogs (`discogs_lookup.py`) both populate them
+   on their transient `DiscMeta`, the menu *displays* them, and `_merge_into_disc` /
+   `_overwrite_disc` then **drop them** (they aren't in either `replace()` call). The
+   MB-vs-Discogs "inversion" therefore has **zero committed effect**. The 1-D-enum mechanism
+   critique is logically valid but its motivating example evaporates.
+
+2. **Zero live cross-field inversions among *persisted* fields.** Walking `RBIDisc`'s
+   actual fields: `album`/`artist`/`track.title` share one consistent ranking (no flip);
+   `catalog` (MCN) is the only genuinely contested persisted field, and it already has a
+   bespoke check-digit-ranked resolver (`_collect_barcode_candidates` /
+   `_pick_canonical_mcn`, `cdda2img.py:987-1049`), not order-by-position. So the 1-D-vs-2-D
+   question is **moot for the code as it stands** — removing (iii)'s defining advantage.
+
+3. **The real harm is narrow and non-interactive.** The order-dependent merge is the
+   *committed* result under three triggers — `--auto`, a STRONG match (which *requires* a
+   `+0.50` disc-ID hit), and non-TTY/scripted runs (`menu_state.py:1023`). Within those, the
+   only wrong outcome is a **present-but-wrong CD-Text baseline disagreeing with a
+   disc-ID-matched MB release, committed with no human in the loop.** Interactively, the
+   user arbitrates and precedence is irrelevant. (This widens §7.3, which named only
+   `--auto`.)
+
+4. **The missed option (the most coherent fix for that harm).** A **single pipeline-aware
+   rule**: a disc-ID-matched MB release **overwrites a *present* baseline** album / artist /
+   track-title **on the rip path only** (CD-Text baseline is poor); fill-blank everywhere
+   else (the create path's baseline is the user's curated mutagen tags, which *should* keep
+   winning). One conditional in `_run_metadata_lookups`; no framework, no table, create path
+   untouched. Captured as **B2** in §9.
+
+5. **§7.2 / §7.4 confirmed.** C1/C2 should ship first and the *standalone* fix is a
+   chokepoint + invariant tests — the typed schema only pays off once the resolver exists.
+   The accreted edge cases to pin first are real and the list is longer than §7.4 had:
+   add the **inconsistent presence semantics** (`disc.album if disc.album` falsiness vs
+   `disc_number ... is not None`, `mb_lookup.py:753-758`) and the **unconditional MCN
+   override** in Discogs phase A (`cdda2img.py:1102-1103`, *not* fill-blank).
+
+6. **Separate bug surfaced (orthogonal to the trust model).** The menu shows the user
+   Discogs `label` / `catalog_number` / `country` that are then silently discarded (no
+   `RBIDisc` fields hold them). Either persist them (a format/spec change) or stop showing
+   them. Captured as **B6 / Decision D4** in §9. *Not yet independently confirmed at the menu
+   display path — verify before acting.*
+
+7. **The one honest payoff of (iii).** Menu *alternatives* ("MB says X, CDDB says Y — pick
+   one") — a genuine UX feature, the only thing (iii) buys that (ii) cannot. It is a
+   *feature, not a fix*, retrofittable later, and `metadata_over_engineered` weighs against
+   paying a full-rewrite price for it now. Captured as **B5 / Decision D2**.
+
+---
+
+## 9. Open design decisions — for discussion (NO decision yet)
+
+This section is the live agenda. Nothing here is decided; §5's earlier choices are
+explicitly reopened (see §5 banner). The work decomposes into independent **building
+blocks**; the three options (i)/(ii)/(iii) are bundles of them.
+
+### 9.1 Building blocks
+
+| ID | Block | Fixes | Cost | Depends on |
+|----|-------|-------|------|-----------|
+| **B0** | Characterization tests pinning current merge behaviour (sentinel, ISRC fallback order, presence semantics, MCN override) | Nothing directly — *de-risks* every other block | Low | — |
+| **B1** | C1/C2 enforcement: a single `replace`-based metadata-merge chokepoint + `_strip_pressing_mbid` + invariant tests | C1 (dropped physical fields), C2 (leaked pressing MBID) — *proven recurring* | Low | B0 |
+| **B2** | Pipeline-aware rule: disc-ID MB overwrites *present* CD-Text baseline on **rip** only | The narrow auto-mode harm (§8.3) | Low | B0 |
+| **B3** | §3.1 seed/merge decouple: let CDDB seed stage-7's search while merge order is unchanged | The OPT-3 CDDB-only-seed tradeoff | Low–Med | — |
+| **B4** | Full collect→resolve resolver + `(source,field)` trust (1-D or 2-D) + `disc_from_resolution` assembler | Order-dependence *as a class*; subsumes B1/B2 via construction | **High** | B0 |
+| **B5** | Menu alternatives UI (surface near-ties for user pick) | — (new feature) | Med | B4 |
+| **B6** | Dropped Discogs catalogue fields: persist, or stop showing | The shown-then-discarded bug (§8.6) | Low (stop-show) / Med (persist + spec) | — |
+
+### 9.2 Option bundles
+
+- **(i) Do-nothing** — none (optionally B0 opportunistically). Accept the auto-mode harm
+  and the latent C1/C2 reintroduction risk. MCN resolver + OPT-3 reorder already in place.
+- **(ii) Minimal** — **B0 + B1 + B2** (+ optionally **B3**). Fixes every *proven/real* harm
+  with no framework. Defers menu alternatives.
+- **(iii) Full** — **B0 + B4 + B5** (B1/B2 subsumed by construction). Larger change; its
+  unique payoff is B5 (menu alternatives); the 2-D table is moot (§8.2) unless B6-persist is
+  also chosen (see D5).
+
+### 9.3 Decisions to take
+
+- **D1 — Direction.** (i) / (ii) / (iii). *Leaning (ii) per §8; recommendation not binding.*
+- **D2 — Menu alternatives (B5).** Defer (retrofit later) vs. build now. This is the swing
+  factor for (iii): if B5 is wanted, (iii) becomes justifiable; if not, (ii) dominates.
+  *Open sub-question:* is B5 genuinely retrofittable onto the current merge later, or does
+  deferring make it materially harder? (Working assumption: retrofittable via a small
+  near-tie side structure — to be confirmed.)
+- **D3 — §3.1 seed/merge decouple (B3).** Worth it, or leave OPT-3's tradeoff as the
+  accepted rare case? *Open sub-question:* how often does a CDDB-only-seed disc actually
+  occur (no CD-Text, no MB/Discogs/AcoustID, CDDB hit)? If ~never, skip B3.
+- **D4 — Dropped catalogue fields (B6).** Track-for-later / persist-now / stop-showing.
+  *Prerequisite:* confirm the fields are actually shown-then-discarded at the menu display
+  path (not yet independently verified). *Spec note:* persist = spec-before-code (bump
+  `rbi_spec.md`, add fields to `RBIDisc`, merge + emit).
+- **D5 — Coupling between D4 and D1.** If D4 = persist, the MB-vs-Discogs catalogue
+  inversion becomes **live** again, which (a) revives part of §7.1's argument and (b) needs
+  *either* a one-line "Discogs wins these three" rule (cheap, fits (ii)) *or* the 2-D table
+  (only justified inside (iii)). So D4-persist slightly strengthens — but does not by itself
+  justify — (iii). Decide D4 before finalising D1.
+
+### 9.4 Points still needing deeper consideration (flagged by the user, 2026-06-17)
+
+- Whether B2's "overwrite present baseline" is always right for a disc-ID match, or whether
+  there are pressing-variant cases where CD-Text formatting is preferable (low risk —
+  disc-ID is pressing-specific — but worth a worked example).
+- The exact `--auto` / STRONG / non-TTY tie-break policy if any future block introduces
+  equal-trust contests (the "order-independent" asterisk, §7.4).
+- Whether `metadata_over_engineered` should veto B5 outright, or whether menu alternatives
+  are the rare UX feature that *does* improve the guess (the user is the arbiter, and
+  alternatives improve what the arbiter sees).
