@@ -2,6 +2,32 @@
 
 ## Open
 
+### Structural — consolidate recurring RBIDisc / MBID defect classes (2026-06-17) — FOR DISCUSSION
+
+Two defect *classes* have each been fixed at multiple independent call sites across
+separate audits — strong evidence the current pattern invites reintroduction at
+every new site, rather than being a set of isolated one-off bugs. Proposed
+structural fix (design before code):
+
+1. **Hand-rebuilt `RBIDisc` drops physical fields.** Constructing a fresh `RBIDisc`
+   field-by-field silently resets physical disc properties — `pre_emphasis` (the R14
+   ≤1986 year-cap signal), and arguably `discogs_release_id` — to their defaults.
+   Sites fixed so far: **C1** (`_merge_into_disc` / `_overwrite_disc`, `mb_lookup.py`)
+   and **BUG-5** (`_clear_disc`, `metadata_menu.py`) — the same defect, two audits
+   apart. Fix: a single canonical helper that merges/clears *metadata* via
+   `dataclasses.replace`, preserving physical fields by construction, so no call site
+   can drop them.
+
+2. **Recording-level `mb_release_id` leaks as authoritative.** Sources that identify
+   a *recording* (AcoustID, ISRC tally, duration match) must not bake a pressing-level
+   `mb_release_id` into `disc.mb_release_id` as if it were disc-ID-proven. Sites fixed
+   so far: **C2** (`_resolve_via_isrc_tally`) and **BUG-7** (stage-7 duration matcher).
+   Fix: a single "strip pressing MBID" chokepoint on the non-disc-ID merge path (keep
+   `mb_release_group_id`) so the invariant holds everywhere.
+
+Discuss: a typed wrapper / dedicated merge API, vs. a documented chokepoint + an
+invariant test asserted at each known site. Decide scope before implementing.
+
 ### Agent audit — metadata pipeline (2026-06-15)
 
 Sources:
@@ -158,6 +184,11 @@ landed (`make check` + py3.10 green). Detail retained below for reference.
 
 ### ⭐ Priority #1 — Agent-audit remediation (2026-05-31)
 
+**STATUS: COMPLETE — audited 2026-06-17.** All units S/C/P/Q landed. The two non-`[x]`
+items are closed by design, not pending: **C3** was reverted (`e9866eb`, do not redo —
+the `discids` include makes `/discid` return HTTP 400); **P3** is moot (the R7 cache it
+would extend was removed entirely in `559b84a`; OPT-1/OPT-2 replace it). Safe to archive.
+
 Single plan covering **every** issue raised by the four background agents run on
 2026-05-31 (bug-hunter, optimisation-advisor, guardian-security, flow-doc), across
 security / correctness / performance / clarity. Sources:
@@ -240,6 +271,9 @@ checkpoint (run `make check` + tests + py3.10 at each). Do units in order
 
 ### ⭐ Priority #2 — Disc-test findings (2026-05-31, investigate tomorrow)
 
+**STATUS: COMPLETE — audited 2026-06-17.** P2-A fixed (`12f3ebc`); P2-B resolved
+(folded into the #3-a plan, Units M/G/A). Both `[x]`. Safe to archive.
+
 Surfaced by a real-disc rip (Green Day — *American Idiot*, original 2004 commercial
 pressing). Both are the "a null/blank/odd value blamed on 'no record' is actually a bad
 calculation" pattern — now hit 3× (R3 duration field, AcoustID pressing, and these).
@@ -295,6 +329,9 @@ calculation" pattern — now hit 3× (R3 duration field, AcoustID pressing, and 
           here (the `Preview changes` page already proposed `American Idiot` / 2004-08-10 / GB).
 
 ### ⭐ Priority #3 — CDDB → gnudb + lookup-precedence rework (2026-06-01)
+
+**STATUS: COMPLETE — audited 2026-06-17.** #3-a..#3-d all `[x]`, and the #3-a sub-plan
+(Units M/G/A) all `[x]`. Safe to archive.
 
 Decided after the P2-B investigation (above) and a provenance deep-dive. Diagnostic tools
 committed `233fa2b` (`tools/trace_album.py` static model + `tools/trace_album_live.py` live).
