@@ -63,9 +63,12 @@ def derive_album_info(tracks: list[Path], autoaccept: bool = False) -> dict[str,
 
         break  # only need the first readable track
 
-    cwd_album = Path.cwd().name
+    # Album fallback is the audio files' parent directory name (per the docstring),
+    # not the process CWD — `create /music/Album` run from /home/user must fall back
+    # to "Album", not "user".
+    dir_album = tracks[0].parent.name if tracks else Path.cwd().name
 
-    final_album = metadata_album or cwd_album
+    final_album = metadata_album or dir_album
     final_artist = metadata_artist or "Unknown Artist"
 
     if not autoaccept:

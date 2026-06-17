@@ -12,7 +12,7 @@ from unittest.mock import patch
 import pytest
 
 from cdda2img.lookup_result import DiscMeta, TrackMeta
-from cdda2img.metadata_menu import _show_diff, _trunc, run_metadata_menu
+from cdda2img.metadata_menu import _clear_disc, _show_diff, _trunc, run_metadata_menu
 from cdda2img.rbi_format import RBIDisc, RBITocEntry
 
 # ---------------------------------------------------------------------------
@@ -171,6 +171,16 @@ def test_clear_disc_preserves_timing():
         assert new.start_frame == orig.start_frame
         assert new.duration_frames == orig.duration_frames
         assert new.pregap_frames == orig.pregap_frames
+
+
+def test_clear_disc_preserves_pre_emphasis():
+    # BUG-5 regression: clearing metadata must not reset the physical pre_emphasis
+    # flag (read from the subchannel, not guessed).
+    disc = _disc()
+    disc.pre_emphasis = True
+    cleared = _clear_disc(disc)
+    assert cleared.album == ""
+    assert cleared.pre_emphasis is True
 
 
 # ---------------------------------------------------------------------------
@@ -609,7 +619,7 @@ def _mb_recording_response(
             "id": recording_id,
             "title": title,
             "artist-credit": [{"artist": {"name": artist_name}, "joinphrase": ""}],
-            "isrc-list": ["USTEST000001"],
+            "isrc-list": ["USTES1700001"],
             "release-list": [
                 {
                     "id": release_id,
@@ -657,8 +667,31 @@ def test_acoustid_fingerprint_chains_to_mb():
     assert r.mb_release_id == "rel-1"
     assert r.country == "BE"
     assert r.release_date == "1989"
-    assert r.tracks[0].isrc == "USTEST000001"
+    assert r.tracks[0].isrc == "USTES1700001"
     assert r.source == "acoustid"
+
+
+def test_acoustid_chain_drops_malformed_isrc():
+    """BUG-4: AcoustID-sourced ISRCs pass through validate_isrc; a malformed value
+    (year field not 2 digits) is dropped, not propagated to the TOC ISRC line."""
+    from pathlib import Path
+
+    from cdda2img import acoustid_lookup
+
+    match_data = [(0.9, "rec-uuid-1", "Song", "Artist")]
+    mb_resp = _mb_recording_response(
+        "rec-uuid-1", "Song", "Artist", "rel-1", "Album", "1989"
+    )
+    mb_resp["recording"]["isrc-list"] = ["USTEST000001"]  # malformed: "T0" year
+
+    with (
+        patch.dict("os.environ", {"ACOUSTID_API_KEY": "fake"}),
+        patch("acoustid.match", return_value=iter(match_data)),
+        patch("musicbrainzngs.get_recording_by_id", return_value=mb_resp),
+    ):
+        results = acoustid_lookup.fingerprint_and_lookup(Path("/fake/track.wav"))
+
+    assert results[0].tracks[0].isrc is None
 
 
 def test_acoustid_chain_uses_only_valid_recording_includes():

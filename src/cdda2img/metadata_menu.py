@@ -493,6 +493,9 @@ def _clear_disc(disc: RBIDisc) -> RBIDisc:
         disc_total=disc.disc_total,
         set_title=disc.set_title,
         tracks=cleared_tracks,
+        # Clearing *metadata* must not reset a *physical* disc property: pre_emphasis
+        # is read from the subchannel (R14 year-cap signal), not guessed.
+        pre_emphasis=disc.pre_emphasis,
     )
 
 

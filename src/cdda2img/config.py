@@ -309,6 +309,7 @@ def load_config() -> Config:
     preview = bool(data.get("preview", True))
     tui = bool(data.get("tui", True))
     auto = bool(data.get("auto", False))
+    embedart = bool(data.get("embedart", False))
 
     raw_low_dr = data.get("low_dr_threshold", 5.0)
     try:
@@ -339,6 +340,7 @@ def load_config() -> Config:
         tui=tui,
         low_dr_threshold=low_dr_threshold,
         auto=auto,
+        embedart=embedart,
     )
 
 

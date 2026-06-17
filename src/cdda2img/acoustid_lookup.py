@@ -16,6 +16,7 @@ import os
 from pathlib import Path
 
 from cdda2img.lookup_result import DiscMeta
+from cdda2img.validators import validate_isrc
 
 log = logging.getLogger(__name__)
 
@@ -125,7 +126,10 @@ def _chain_to_mb(top: list, *, verbose: bool = False) -> list[DiscMeta]:
         )
         rec_title = recording.get("title") or fallback_title or None
         isrc_list = recording.get("isrc-list") or []
-        isrc = isrc_list[0] if isrc_list else None
+        # Validate at the AcoustID ingress: this DiscMeta is applied directly on
+        # single-track discs (no re-parse through the validated MB path), so a
+        # malformed value would otherwise reach the TOC ISRC line.
+        isrc = validate_isrc(isrc_list[0]) if isrc_list else None
         releases = recording.get("release-list") or []
 
         if verbose:

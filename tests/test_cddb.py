@@ -155,3 +155,11 @@ def test_query_cddb_succeeds_after_transient_flake(monkeypatch):
     result = cddb.query_cddb([0, 18000], 40000)
     assert [m.album for m in result] == ["OK"]
     assert calls["n"] == 2  # one flake, then success
+
+
+def test_query_nsecs_includes_lead_in() -> None:
+    # BUG-1 regression: the `cddb query` nsecs field is the absolute lead-out in
+    # seconds, including the 150-frame lead-in. Reference clients (cd-discid,
+    # freedb, whipper) emit 3608 for Sheryl Crow; the old lead-in-omitting
+    # `(disc_last_lsn - track_lsns[0] + 1) // 75` emitted 3605.
+    assert cddb._query_nsecs(_SHERYL_CROW_LAST_LSN) == 3608

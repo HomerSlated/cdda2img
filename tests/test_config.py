@@ -288,6 +288,25 @@ def test_save_drive_atomic_temp_file_cleaned_up(tmp_path: Path) -> None:
     assert not tmp.exists()
 
 
+def test_embedart_read_from_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # BUG-6 regression: load_config must read embedart from the TOML.
+    cfg = tmp_path / "cfg.toml"
+    cfg.write_text("embedart = true\n")
+    monkeypatch.setattr("cdda2img.config.config_path", lambda: cfg)
+    assert load_config().embedart is True
+
+
+def test_embedart_defaults_false(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cfg = tmp_path / "cfg.toml"
+    cfg.write_text("")
+    monkeypatch.setattr("cdda2img.config.config_path", lambda: cfg)
+    assert load_config().embedart is False
+
+
 # ---------------------------------------------------------------------------
 # save_drive_read_offset — merge-safe partial update
 # ---------------------------------------------------------------------------

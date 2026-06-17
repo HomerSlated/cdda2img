@@ -197,6 +197,18 @@ def _collect_candidates(
     return candidates
 
 
+def _query_nsecs(disc_last_lsn: int) -> int:
+    """Total disc length in seconds for the ``cddb query`` *nsecs* field.
+
+    The absolute lead-out position in seconds, including the 150-frame (2 s)
+    lead-in — the value cd-discid / freedb / whipper all emit. This is distinct
+    from the disc-ID's own per-endpoint rounding in ``compute_cddb_disc_id``;
+    the earlier ``(disc_last_lsn - track_lsns[0] + 1) // 75`` omitted the lead-in
+    and ran ~2-3 s short (e.g. 3605 where reference clients emit 3608).
+    """
+    return (disc_last_lsn + 1 + 150) // 75
+
+
 def query_cddb(
     track_lsns: list[int],
     disc_last_lsn: int,
@@ -212,7 +224,7 @@ def query_cddb(
     host, port = _resolve_server(server)
     n = len(track_lsns)
     offsets = [lsn + 150 for lsn in track_lsns]
-    total_secs = (disc_last_lsn - track_lsns[0] + 1) // 75
+    total_secs = _query_nsecs(disc_last_lsn)
     offset_str = " ".join(str(o) for o in offsets)
     version = importlib.metadata.version("cdda2img")
 

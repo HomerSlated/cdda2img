@@ -1328,11 +1328,14 @@ def _r6_tally_and_merge(
         for rid in all_rids
         if all(any(h.mb_release_id == rid for h in hits) for hits in per_track_hits)
     ]
-    top_rid = consistent_rids[0] if consistent_rids else None
 
     if disc.mb_release_id:
+        # Membership, not equality with consistent_rids[0]: the list is derived
+        # from a set (nondeterministic order), so when AcoustID converges on more
+        # than one consistent release, indexing [0] could miss the disc's own MBID
+        # even though AcoustID corroborates it.
         provenance["acoustid_corroborates"] = (
-            "YES" if top_rid == disc.mb_release_id else "NO"
+            "YES" if disc.mb_release_id in consistent_rids else "NO"
         )
         return disc
 
@@ -1342,7 +1345,7 @@ def _r6_tally_and_merge(
     # release title. Merging album-level metadata here routinely picks the wrong
     # compilation when MB disc-ID found nothing. Preserve the +0.25 confidence
     # signal (acoustid_corroborates) but let CDDB / stage-7 supply the title.
-    if top_rid is not None:
+    if consistent_rids:
         provenance["acoustid_corroborates"] = "YES"
     return disc
 
@@ -1574,8 +1577,12 @@ def _run_metadata_lookups(
 
         dm = duration_match_lookup(disc, verbose=mb_verbose)
         if dm is not None:
+            # Record which release matched for provenance, but do NOT bake its
+            # (text+duration-matched, non-disc-ID) pressing MBID into disc as if
+            # authoritative — strip it before merging, keeping the release group,
+            # exactly as the ISRC-tally fallback does.
             provenance["duration_match_release"] = dm.mb_release_id or "?"
-            disc = _merge_into_disc(dm, disc)
+            disc = _merge_into_disc(replace(dm, mb_release_id=None), disc)
 
     return disc, mb_result
 
