@@ -28,6 +28,12 @@ structural fix (design before code):
 Discuss: a typed wrapper / dedicated merge API, vs. a documented chokepoint + an
 invariant test asserted at each known site. Decide scope before implementing.
 
+**Unified with OPT-4 in `docs/reference/trust_model_design.md` (2026-06-17)** — the
+collect→resolve trust model closes C1 (physical fields proposed at `OBJECTIVE` by one
+producer, resolved via one `replace`-based assembler) and C2 (recording-level sources'
+proposal schema omits disc-level `mb_release_id`) by construction. Decision §5.2 there
+is exactly this item's "typed API vs. chokepoint + invariant test" choice.
+
 ### Remaining metadata-pipeline work (2026-06-15)
 
 Sources: bug-hunter `private/bugs/2026-06-15_163056_metadata-pipeline.md`,
@@ -42,6 +48,9 @@ log below. OPT-4 is the only live item from this audit.
       field, the highest-trust proposal wins, and near-ties surface as alternatives in the menu.
       Extend the existing `match_distance` / `build_match_distance` scaffold rather than adding a
       new framework. This is a substantial rework; design before implementing.
+      **Design proposal drafted 2026-06-17: `docs/reference/trust_model_design.md`** —
+      unifies OPT-4 with the Structural C1/C2 item below (collect→resolve, per-(source,field)
+      trust). Awaiting a scope decision (§5) before any code.
 
 ---
 
