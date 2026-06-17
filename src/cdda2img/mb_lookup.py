@@ -325,6 +325,15 @@ def _parse_release(
 # ---------------------------------------------------------------------------
 
 
+# OPT-1: process-lifetime cache for MB disc-ID lookups. The pre-rip banner
+# (_preview_worker) and finalization (prepopulate_from_mb) query the *same* disc-ID
+# seconds apart; this dedups that round-trip. Only **definitive** answers are cached
+# — a successful response, including a legitimate empty list / 404 "not in MB".
+# Transient network/HTTP errors are never cached, so a blip can't poison the second
+# call. No TTL; discarded on process exit. Clearable via _DISC_ID_CACHE.clear().
+_DISC_ID_CACHE: dict[str, list[DiscMeta]] = {}
+
+
 def lookup_disc_id(disc: RBIDisc) -> list[DiscMeta]:
     """Look up releases on MusicBrainz by Disc ID computed from the disc TOC.
 
@@ -333,6 +342,10 @@ def lookup_disc_id(disc: RBIDisc) -> list[DiscMeta]:
     disc_id_str = disc_id_from_rbi(disc)
     if not disc_id_str:
         return []
+    cached = _DISC_ID_CACHE.get(disc_id_str)
+    if cached is not None:
+        log.debug("MusicBrainz disc ID lookup: %s (cached)", disc_id_str)
+        return cached
     _setup_useragent()
     log.debug("MusicBrainz disc ID lookup: %s", disc_id_str)
     try:
@@ -362,19 +375,22 @@ def lookup_disc_id(disc: RBIDisc) -> list[DiscMeta]:
         code = getattr(getattr(exc, "cause", None), "code", None)
         if code == 404:
             log.debug("MusicBrainz disc ID %s not found (404)", disc_id_str)
-        else:
-            log.warning(
-                "MusicBrainz disc ID lookup error (HTTP %s) — treating as no "
-                "match, but this is not a clean negative: %s",
-                code,
-                exc,
-            )
-        return []
+            _DISC_ID_CACHE[disc_id_str] = []  # legitimate negative — cache it
+            return []
+        log.warning(
+            "MusicBrainz disc ID lookup error (HTTP %s) — treating as no "
+            "match, but this is not a clean negative: %s",
+            code,
+            exc,
+        )
+        return []  # transient/unknown error — do NOT cache
     except musicbrainzngs.NetworkError as exc:
         log.debug("MusicBrainz network error: %s", exc)
-        return []
+        return []  # transient — do NOT cache
     releases = (result.get("disc") or {}).get("release-list") or []
-    return [_parse_release(r, _disc_id=disc_id_str) for r in releases]
+    parsed = [_parse_release(r, _disc_id=disc_id_str) for r in releases]
+    _DISC_ID_CACHE[disc_id_str] = parsed
+    return parsed
 
 
 def _fetch_release_raw(release_id: str) -> dict | None:

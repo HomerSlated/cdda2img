@@ -186,3 +186,48 @@ class TestArtBlockRoundtrip:
         assert art_entry.checksum == blake3.blake3(block_bytes).digest()
 
         assert verify_container(out_path) is True
+
+
+# ---------------------------------------------------------------------------
+# OPT-2 — in-process cover fetch cache
+# ---------------------------------------------------------------------------
+
+
+def test_fetch_cover_caches_success(monkeypatch) -> None:
+    # A successful fetch is memoised per source; the second fetch_cover with the
+    # same IDs is served from cache (no re-download).
+    from cdda2img import album_art
+
+    album_art._COVER_CACHE.clear()
+    calls = {"n": 0}
+    art = CoverArt(
+        data=b"x", fmt="jpeg", width=1, height=1, source="caa:release-group:rg-x"
+    )
+
+    def _fake_try(_entity, _mbid):
+        calls["n"] += 1
+        return art
+
+    monkeypatch.setattr(album_art, "_try_caa", _fake_try)
+    disc = RBIDisc(album="a", artist="b", mb_release_group_id="rg-x")
+    assert album_art.fetch_cover(disc) is art
+    assert album_art.fetch_cover(disc) is art
+    assert calls["n"] == 1  # second call served from cache
+
+
+def test_fetch_cover_does_not_cache_miss(monkeypatch) -> None:
+    # A miss (None) is a cheap 404 and is NOT cached — the next call retries.
+    from cdda2img import album_art
+
+    album_art._COVER_CACHE.clear()
+    calls = {"n": 0}
+
+    def _fake_try(_entity, _mbid):
+        calls["n"] += 1
+        return None
+
+    monkeypatch.setattr(album_art, "_try_caa", _fake_try)
+    disc = RBIDisc(album="a", artist="b", mb_release_group_id="rg-x")
+    assert album_art.fetch_cover(disc) is None
+    assert album_art.fetch_cover(disc) is None
+    assert calls["n"] == 2  # miss not cached

@@ -207,25 +207,56 @@ def _try_discogs(release_id: int) -> CoverArt | None:
 # Public fetch entry points
 # ---------------------------------------------------------------------------
 
+# OPT-2: process-lifetime cache for successful cover fetches, keyed on the
+# CoverArt.source string (caa:{entity}:{mbid} / discogs:{id}). The pre-rip banner
+# (_preview_worker) and finalization (_finalize_import) both call fetch_cover; when
+# the pre- and post-menu IDs coincide (the common path) this avoids re-downloading
+# the same image bytes. Only **successful** fetches are cached — a miss (None) is a
+# cheap 404, and not caching it means a transient failure is retried, never frozen.
+# No TTL; discarded on process exit. Clearable via _COVER_CACHE.clear().
+_COVER_CACHE: dict[str, CoverArt] = {}
+
+
+def _caa_cached(entity: str, mbid: str) -> CoverArt | None:
+    key = f"caa:{entity}:{mbid}"
+    hit = _COVER_CACHE.get(key)
+    if hit is not None:
+        return hit
+    art = _try_caa(entity, mbid)
+    if art is not None:
+        _COVER_CACHE[key] = art
+    return art
+
+
+def _discogs_cached(release_id: int) -> CoverArt | None:
+    key = f"discogs:{release_id}"
+    hit = _COVER_CACHE.get(key)
+    if hit is not None:
+        return hit
+    art = _try_discogs(release_id)
+    if art is not None:
+        _COVER_CACHE[key] = art
+    return art
+
 
 def fetch_cover(disc: RBIDisc) -> CoverArt | None:
     """Fetch the best available front cover for disc.
 
     Chain: CAA release-group → CAA release → Discogs. Best-effort — returns
-    None on network failure.
+    None on network failure. Successful fetches are memoised per source (OPT-2).
     """
     if disc.mb_release_group_id:
-        art = _try_caa("release-group", disc.mb_release_group_id)
+        art = _caa_cached("release-group", disc.mb_release_group_id)
         if art is not None:
             return art
 
     if disc.mb_release_id:
-        art = _try_caa("release", disc.mb_release_id)
+        art = _caa_cached("release", disc.mb_release_id)
         if art is not None:
             return art
 
     if disc.discogs_release_id and os.environ.get("DISCOGS_TOKEN"):
-        art = _try_discogs(disc.discogs_release_id)
+        art = _discogs_cached(disc.discogs_release_id)
         if art is not None:
             return art
 

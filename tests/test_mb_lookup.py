@@ -36,6 +36,21 @@ from cdda2img.mb_lookup import (
 )
 from cdda2img.rbi_format import RBIDisc, RBITocEntry
 
+
+@pytest.fixture(autouse=True)
+def _clear_mb_caches():
+    """Reset the process-lifetime disc-ID cache between tests (OPT-1).
+
+    The cache is meant to persist for a process; in a test session it would
+    otherwise leak a cached result into later tests that reuse the same disc-ID.
+    """
+    from cdda2img import mb_lookup
+
+    mb_lookup._DISC_ID_CACHE.clear()
+    yield
+    mb_lookup._DISC_ID_CACHE.clear()
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -1858,3 +1873,82 @@ def test_duration_match_lookup_rejects_when_no_candidate_in_tolerance():
         patch("cdda2img.mb_lookup._fetch_release_raw", return_value=raw_off),
     ):
         assert duration_match_lookup(disc) is None
+
+
+# ---------------------------------------------------------------------------
+# OPT-1 — in-process disc-ID lookup cache
+# ---------------------------------------------------------------------------
+
+
+def test_lookup_disc_id_caches_success(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A successful disc-ID lookup is cached process-wide; the second call (banner
+    # then finalize) is served without a network round-trip.
+    from cdda2img import mb_lookup
+
+    mb_lookup._DISC_ID_CACHE.clear()
+    calls = {"n": 0}
+
+    def _fake(*_a, **_k):
+        calls["n"] += 1
+        return {"disc": {"release-list": [{"id": "rel-1"}]}}
+
+    monkeypatch.setattr(mb_lookup, "disc_id_from_rbi", lambda _d: "DISCID-OK")
+    monkeypatch.setattr(mb_lookup, "_setup_useragent", lambda: None)
+    monkeypatch.setattr(
+        mb_lookup, "_parse_release", lambda _r, _disc_id=None: DiscMeta(album="A")
+    )
+    monkeypatch.setattr(mb_lookup.musicbrainzngs, "get_releases_by_discid", _fake)
+
+    disc = RBIDisc(album="x", artist="y")
+    r1 = mb_lookup.lookup_disc_id(disc)
+    r2 = mb_lookup.lookup_disc_id(disc)
+    assert calls["n"] == 1  # second call served from cache
+    assert r1 == r2 == [DiscMeta(album="A")]
+
+
+def test_lookup_disc_id_caches_404_negative(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A 404 ("not in MB") is a definitive answer — the empty list is cached.
+    import musicbrainzngs
+
+    from cdda2img import mb_lookup
+
+    mb_lookup._DISC_ID_CACHE.clear()
+    calls = {"n": 0}
+
+    def _raise_404(*_a, **_k):
+        calls["n"] += 1
+        raise musicbrainzngs.ResponseError(cause=type("C", (), {"code": 404})())
+
+    monkeypatch.setattr(mb_lookup, "disc_id_from_rbi", lambda _d: "DISCID-404")
+    monkeypatch.setattr(mb_lookup, "_setup_useragent", lambda: None)
+    monkeypatch.setattr(mb_lookup.musicbrainzngs, "get_releases_by_discid", _raise_404)
+
+    disc = RBIDisc(album="x", artist="y")
+    assert mb_lookup.lookup_disc_id(disc) == []
+    assert mb_lookup.lookup_disc_id(disc) == []
+    assert calls["n"] == 1  # 404 cached, not re-queried
+
+
+def test_lookup_disc_id_does_not_cache_network_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A transient network error must NOT be cached — the next call retries.
+    import musicbrainzngs
+
+    from cdda2img import mb_lookup
+
+    mb_lookup._DISC_ID_CACHE.clear()
+    calls = {"n": 0}
+
+    def _raise_net(*_a, **_k):
+        calls["n"] += 1
+        raise musicbrainzngs.NetworkError("boom")
+
+    monkeypatch.setattr(mb_lookup, "disc_id_from_rbi", lambda _d: "DISCID-NET")
+    monkeypatch.setattr(mb_lookup, "_setup_useragent", lambda: None)
+    monkeypatch.setattr(mb_lookup.musicbrainzngs, "get_releases_by_discid", _raise_net)
+
+    disc = RBIDisc(album="x", artist="y")
+    assert mb_lookup.lookup_disc_id(disc) == []
+    assert mb_lookup.lookup_disc_id(disc) == []
+    assert calls["n"] == 2  # transient error not cached
