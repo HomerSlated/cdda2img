@@ -1,6 +1,10 @@
 # Design proposal — per-field trust model (OPT-4 + Structural C1/C2)
 
-Status: **DRAFT — design only, awaiting decision.** No code until scope is approved.
+Status: **DRAFT — under review, no code yet.** §5 records two scope decisions, but the
+self-review in **§7 (2026-06-17)** reopens them: it finds the §2.1 trust model
+self-contradictory, argues C1/C2 should ship *before* OPT-4, and questions whether the
+full rewrite earns its keep at all. Treat §7 as the live debate; §2–§4 are the original
+proposal, annotated where §7 supersedes them.
 Date: 2026-06-17.
 
 This proposal unifies three open items that are all symptoms of one root cause:
@@ -55,6 +59,13 @@ per field and all three defects close by construction.
 Replace "fold each `DiscMeta` into `disc` in order" with a two-phase pipeline.
 
 ### 2.1 Trust levels (per *(source, field)*, not per source)
+
+> ⚠️ **Superseded by §7.1.** The 1-D `IntEnum` below is named after *sources*, so it
+> can only express a single global source ranking — it cannot say "Discogs > MB for
+> `catalog_number` but MB > Discogs for `album`", which is a real requirement (MB
+> populates catalogue fields at mb_lookup.py:302‑304). The corrected model is a 2-D
+> `(source, field) → trust` table; see §7.1. The enum is retained here as the original
+> proposal for the record.
 
 ```python
 class Trust(IntEnum):
@@ -148,7 +159,13 @@ instead of sniffing `prov` keys.
 
 ## 5. Decision points
 
-1. **Scope** — ✅ **DECIDED 2026-06-17: full collect→resolve (Phases A–C).**
+> **Reopened by §7.** The two decisions below were taken before the self-review. They
+> are not reversed, but §7.2 (resequencing — C1/C2 first) and §7.5 (is the full rewrite
+> justified?) put their *timing and scope* back in play pending the debate. The
+> enforcement decision (typed schema) is unaffected and stands.
+
+1. **Scope** — ✅ **DECIDED 2026-06-17: full collect→resolve (Phases A–C)** — *timing
+   under review, see §7.2/§7.5.*
 2. **Enforcement of C1/C2** — ✅ **DECIDED 2026-06-17: typed proposal schema.** A source
    may only emit its allowed fields; reintroducing C1/C2 becomes a type/validation error,
    not a silent bug. `FieldProposal` is `frozen`; `field` is an enum; OBJECTIVE-only
@@ -174,3 +191,91 @@ instead of sniffing `prov` keys.
   *create* paths they come from the foreign image / tags and are **not** objective. Trust
   assignment must be per-pipeline, not hard-wired to the field. (This is a real subtlety
   the current model dodges by accident; the trust model must handle it explicitly.)
+
+---
+
+## 7. Review findings (2026-06-17) — open questions before Phase A
+
+Self-review of §1–§6 against the code. Verdict: the collect→resolve *shape* is sound and
+§3.1 (decouple search-seed from merge-precedence) is the strongest idea, but the central
+trust mechanism in §2.1 is self-contradictory, two of the three bundled problems don't
+need the rewrite, and the payoff is narrower than §1 implies. Do not start Phase A until
+§7.1, §7.2 and §7.5 are settled.
+
+### 7.1 The trust model must be 2-D `(source, field) → trust`, not a 1-D source enum
+
+§2.1 calls trust "per (source, field)" but defines a 1-D `IntEnum` whose levels *are*
+sources. "Per-field" is then faked by which fields a source proposes. That breaks on a
+verified real case: **MB populates `country` / `label` / `catalog_number`**
+(mb_lookup.py:302‑304) and would sit at `DISC_ID=80`, while **Discogs — the catalogue
+authority — sits at `DISCOGS=55`.** Global source rank makes MB win catalogue fields over
+Discogs, which is wrong; the only 1-D escape is to artificially forbid MB from proposing
+catalogue data it genuinely has (R16 barcode hints). The honest model is a 2-D table with
+per-source defaults and explicit per-field overrides:
+
+| field                 | Objective (rip) | MB disc-ID | Discogs | AcoustID | stage-7 | CD-Text | CDDB |
+|-----------------------|:---------------:|:----------:|:-------:|:--------:|:-------:|:-------:|:----:|
+| `album` / `artist`    | –               | 80         | 50      | –        | 40      | 35      | 20   |
+| `track.title`         | –               | 80         | –       | –        | 40      | 35      | 20   |
+| `catalog_number`/`label`/`country` | –  | 60         | **80**  | –        | –       | –       | –    |
+| `catalog` (MCN)       | **100**         | 55         | 50      | –        | –       | (CDTEXT)| –    |
+| `track.isrc`          | **100**         | 70         | –       | –        | –       | –       | –    |
+| `mb_release_id`       | –               | 80         | –       | –        | –       | –       | –    |
+| `mb_release_group_id` | –               | 80         | –       | 60       | 40      | –       | –    |
+| `pre_emphasis`, `disc_id`, `low_dynamic_range`, `original_release_*` | **100** | – | – | – | – | – | – |
+
+Note the **inversion** the 1-D enum can't express: MB > Discogs for `album`, Discogs > MB
+for `catalog_number`. A `dict[(source, field), Trust]` with a `dict[source, Trust]`
+fallback is barely more code than the enum and is *correct*. **Open question:** adopt the
+2-D table, or accept the catalogue inversion and stay 1-D for simplicity?
+
+### 7.2 C1/C2 are enforcement bugs and should ship *before* OPT-4
+
+C1 ("use `replace`, don't hand-build `RBIDisc`") and C2 ("strip pressing `mb_release_id`")
+are *proven, recurring* bugs (each fixed at ≥2 sites). They need a **typed objective-vs-
+metadata field classification + an invariant test** — a small, self-contained change that
+does **not** require the resolver. §4 sequences them behind the *speculative* OPT-4
+precedence rework. That is backwards. **Proposed resequencing:** land C1/C2 enforcement as
+a standalone first step (real bug-class closure, low risk), then do OPT-4 deliberately.
+
+### 7.3 OPT-4's payoff is concentrated in `--auto`; §1's framing overstates it
+
+Per the project ethos (the user is the final arbiter in the menu; PCM verbatim is the real
+guarantee), in the **interactive** path the user fixes any field regardless of merge
+precedence — so OPT-4's precedence correctness changes the *final result* only in
+`--auto` mode, plus the new menu-alternatives feature. §1 leads with "wrong CD-Text blocks
+better MB," implying pervasive interactive harm the menu already neutralises. Honest
+scope: this rework buys **(a)** elimination of an order-dependence *bug class*, **(b)**
+`--auto` correctness, **(c)** menu alternatives — *not* better interactive guesses.
+
+### 7.4 "Low-risk, tests are the gate" is too optimistic — pin edge cases first
+
+Phase B rewires the merge every rip/import/create path depends on, gated by "reproduce
+current behaviour." But current behaviour includes accreted edge logic the existing suite
+may not pin: the `"Unknown Artist"` sentinel treated as blank (mb_lookup.py:711); the ISRC
+validate-and-fallback chokepoint (R13, lines 726/789); empty-string-vs-`None` "presence"
+semantics; and the rip-vs-import `OBJECTIVE` distinction (§6). A clean resolver tends to
+drop exactly these and rediscover them as bugs. **Mitigation:** write characterization
+tests pinning these *before* any rewrite, so the gate has teeth. Also: `--auto` needs a
+deterministic tie-break for equal-trust/different-value (no menu), which reintroduces a
+stable source order — so "order-independent" has an asterisk.
+
+### 7.5 The "if it ain't broke" test — is the full rewrite justified?
+
+Against the project's `metadata_over_engineered` principle (guard against cost/complexity
+that doesn't improve the guess), the full collect→resolve rewrite must clear a bar: does it
+*improve outcomes*, or just *re-implement the same outcomes differently*? Honest tally:
+
+- **Genuinely better:** closes the order-dependence bug class for good (no more OPT-3-style
+  manual precedence edits); enforces C1/C2 by construction; enables menu alternatives;
+  fixes the catalogue inversion (only with the 2-D table); dissolves the OPT-3 seed/merge
+  tradeoff (§3.1).
+- **Not better:** the interactive final result (user already arbitrates); everyday discs
+  where one disc-ID match supplies everything (the resolver and the current merge produce
+  identical output).
+
+Decision to put to the optimisation-advisor and the user: **(i)** do nothing (current
+merge works for the common path; fix only OPT-3-class issues ad hoc); **(ii)** minimal —
+ship C1/C2 enforcement + the §3.1 seed/merge decouple, skip the resolver; **(iii)** full
+collect→resolve with the 2-D table. The §5 decision chose (iii); §7 asks whether (ii) is
+the better cost/benefit point.
