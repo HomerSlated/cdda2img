@@ -146,16 +146,18 @@ instead of sniffing `prov` keys.
 
 ---
 
-## 5. Decision points (need answers before Phase A)
+## 5. Decision points
 
-1. **Scope.** Full collect→resolve (Phases A–C) — the clean fix, larger change — vs. a
-   lighter "trust-tagged overwrite" that only lets a higher-trust source overwrite a
-   lower-trust *non-blank* field, keeping the imperative `_merge_into_disc` structure.
-2. **Enforcement of C1/C2.** Typed proposal schema (a source can only emit its allowed
-   fields — strongest) vs. documented chokepoint + invariant tests (the Structural item's
-   lighter alternative).
-3. **Trust source.** Fixed enum table in code vs. tunable via `Config`.
-4. **Menu alternatives.** In-scope for the first cut, or deferred to a later pass?
+1. **Scope** — ✅ **DECIDED 2026-06-17: full collect→resolve (Phases A–C).**
+2. **Enforcement of C1/C2** — ✅ **DECIDED 2026-06-17: typed proposal schema.** A source
+   may only emit its allowed fields; reintroducing C1/C2 becomes a type/validation error,
+   not a silent bug. `FieldProposal` is `frozen`; `field` is an enum; OBJECTIVE-only
+   fields are rejected from metadata sources at construction.
+3. **Trust source** — *default taken:* fixed enum table in code for the first cut (tune
+   only after Phase B reproduces current behaviour); `Config` override deferred. Revisit
+   if the user wants it configurable sooner.
+4. **Menu alternatives** — *default taken:* deferred to **Phase C** (the resolver retains
+   near-ties from Phase A, but the menu UI consumes them only in C).
 
 ---
 
