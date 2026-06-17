@@ -9,10 +9,20 @@ State machine:
     TOC   → (Leadout line)   → READY
     READY → (Copying line)   → RIPPING
     RIPPING — emits ProgressUpdate on each Track/MSF line
+
+The displayed track number is *derived from the monotonic disc position* (the
+absolute MSF lines bisected against the per-track start offsets parsed from the
+TOC table), not taken from cdrdao's "Track N..." lines. Those lines are an
+unreliable display signal: on a damaged disc cdrdao stalls re-reading, then emits
+a burst of "Track N..." lines faster than the UI repaints, collapsing e.g.
+"Track 3 ... Track 13" into a single jump; a corrupt-but-CRC-valid Q-frame can
+also emit a spurious far-ahead track. Tying the number to position keeps it
+monotonic and always consistent with the progress bar.
 """
 
 from __future__ import annotations
 
+import bisect
 import re
 from dataclasses import dataclass
 from enum import Enum, auto
@@ -50,9 +60,9 @@ class _St(Enum):
 
 # "----...---" separator before the track table
 _SEP = re.compile(r"^-{3,}\s*$")
-# " 1  AUDIO  0  00:00:00(   0)  04:04:45(18345)"
+# " 1  AUDIO  0  00:00:00(   0)  04:04:45(18345)"  → track, start LBA, length
 _TOC_ROW = re.compile(
-    r"^\s*(\d+)\s+AUDIO\s+\d+\s+[\d:]+\(\s*\d+\)\s+[\d:]+\(\s*(\d+)\)"
+    r"^\s*(\d+)\s+AUDIO\s+\d+\s+[\d:]+\(\s*(\d+)\)\s+[\d:]+\(\s*(\d+)\)"
 )
 # "Leadout AUDIO  0  45:21:68(204143)"
 _LEADOUT = re.compile(r"^Leadout\s+\S+\s+\d+\s+[\d:]+\(\s*(\d+)\)")
@@ -71,8 +81,9 @@ class CdrdaoProgress:
         self._st = _St.INIT
         self._n_tracks = 0
         self._total_frames = 0
-        self._current_track = 0
-        self._elapsed = 0  # last absolute disc position seen, in frames
+        self._current_track = 0  # last "Track N..." line; gates MSF + is a fallback
+        self._elapsed = 0  # last absolute disc position seen, in frames (monotonic)
+        self._track_starts: list[int] = []  # absolute start frame per track, from TOC
 
     @property
     def n_tracks(self) -> int:
@@ -86,8 +97,10 @@ class CdrdaoProgress:
                 self._st = _St.TOC
 
         elif self._st == _St.TOC:
-            if _TOC_ROW.match(line):
+            m = _TOC_ROW.match(line)
+            if m:
                 self._n_tracks += 1
+                self._track_starts.append(int(m.group(2)))
                 return None
             m = _LEADOUT.match(line)
             if m:
@@ -112,15 +125,28 @@ class CdrdaoProgress:
         if m and self._current_track > 0:
             # cdrdao prints the *absolute* disc position (MM:SS:FF measured from
             # frame 0), not a track-relative offset — use it directly as elapsed.
-            self._elapsed = _msf_to_frames(m.group(1), m.group(2), m.group(3))
+            # max() keeps it monotonic against a stray backward position.
+            frames = _msf_to_frames(m.group(1), m.group(2), m.group(3))
+            self._elapsed = max(self._elapsed, frames)
             return self._make()
         return None
+
+    def _track_at(self, frames: int) -> int:
+        """1-based track containing absolute disc position *frames*.
+
+        Derived by bisecting the TOC start offsets, so it is monotonic and
+        immune to cdrdao's unreliable "Track N..." ordering. Falls back to the
+        last seen "Track N..." line if the TOC table was never parsed.
+        """
+        if not self._track_starts:
+            return self._current_track
+        return bisect.bisect_right(self._track_starts, frames)
 
     def done(self) -> ProgressUpdate | None:
         """Call when cdrdao exits; closes the last track to 100%."""
         if self._current_track == 0 or self._total_frames == 0:
             return None
-        t = self._current_track
+        t = self._track_at(self._total_frames)
         self._current_track = 0
         return ProgressUpdate(
             track=t,
@@ -130,9 +156,10 @@ class CdrdaoProgress:
         )
 
     def _make(self) -> ProgressUpdate:
+        elapsed = min(self._elapsed, self._total_frames)
         return ProgressUpdate(
-            track=self._current_track,
+            track=self._track_at(elapsed),
             n_tracks=self._n_tracks,
-            elapsed_frames=min(self._elapsed, self._total_frames),
+            elapsed_frames=elapsed,
             total_frames=self._total_frames,
         )

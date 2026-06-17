@@ -119,12 +119,17 @@ def _ext_for(fmt: str) -> str:
 # HTTP helpers
 # ---------------------------------------------------------------------------
 
+# Per-request socket timeout for all cover fetches. Any caller that waits on a
+# fetch (e.g. the pre-rip banner's worker join) must allow at least this long,
+# or a slow-but-successful fetch is abandoned before it can be displayed.
+HTTP_TIMEOUT = 30
+
 
 def _http_get(url: str, max_bytes: int, headers: dict[str, str] | None = None) -> bytes:
     req = urllib.request.Request(  # noqa: S310
         url, headers={"User-Agent": _USER_AGENT, **(headers or {})}
     )
-    with urllib.request.urlopen(req, timeout=30) as resp:  # noqa: S310
+    with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT) as resp:  # noqa: S310
         data = resp.read(max_bytes + 1)
     if len(data) > max_bytes:
         msg = f"response exceeds {max_bytes} bytes"

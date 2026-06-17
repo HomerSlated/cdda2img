@@ -2129,9 +2129,15 @@ def rip_image(  # noqa: C901
 
         _t = threading.Thread(target=_preview_worker, daemon=True)
         _t.start()
-        _t.join(timeout=15.0)
+        # Wait at least one full HTTP socket timeout (plus a margin for the MB
+        # disc-ID lookup that precedes the fetch), so a slow-but-successful cover
+        # fetch is displayed rather than abandoned. A shorter cap embedded the art
+        # but silently skipped the banner render. The worker is a daemon thread, so
+        # an overrun never blocks the rip past this bound.
+        from cdda2img.album_art import HTTP_TIMEOUT, render_cover
+
+        _t.join(timeout=HTTP_TIMEOUT + 5.0)
         # Main thread renders — race-free (thread is done or timed out; no concurrent stdout).
-        from cdda2img.album_art import render_cover
 
         _banner_art = _preview_result.get("art")
         _banner_label = _preview_result.get("label", "(unknown)")
