@@ -10,7 +10,10 @@ Sources:
 
 #### Bug fixes
 
-- [ ] **BUG-1** · MEDIUM — `cddb.py:228` — `nsecs` in the `cddb query` command is computed as
+**All BUG-1..7 DONE 2026-06-17 (commit `d5d055e`)** — fixes + regression tests
+landed (`make check` + py3.10 green). Detail retained below for reference.
+
+- [x] **BUG-1** · MEDIUM — `cddb.py:228` — `nsecs` in the `cddb query` command is computed as
       `(disc_last_lsn - track_lsns[0] + 1) // 75` (subtract-then-floor, omits lead-in), producing
       a value ~3 s short of the correct absolute lead-out in seconds that every reference client
       emits (`(disc_last_lsn + 1 + 150) // 75`). Worked example from the module's own comment:
@@ -19,13 +22,13 @@ Sources:
       Fix: compute `total_secs = (disc_last_lsn + 1 + _LEAD_IN) // 75` in `query_cddb`.
       Add a regression test pinning the existing worked example.
 
-- [ ] **BUG-2** · MEDIUM — `metadata.py:66` — `derive_album_info` album fallback reads
+- [x] **BUG-2** · MEDIUM — `metadata.py:66` — `derive_album_info` album fallback reads
       `Path.cwd().name` instead of the audio files' parent directory name. Docstring promises
       "parent directory name"; for `cdda2img create /music/Album` run from `/home/user`, the
       fallback is "user", not "Album". With `--auto` the wrong name is written silently.
       Fix: `tracks[0].parent.name if tracks else Path.cwd().name`.
 
-- [ ] **BUG-3** · MEDIUM — `cdda2img.py:1334-1344` — R6 AcoustID corroboration flag picks
+- [x] **BUG-3** · MEDIUM — `cdda2img.py:1334-1344` — R6 AcoustID corroboration flag picks
       `consistent_rids[0]` from a list derived from a `set` (nondeterministic order). When
       AcoustID converges on more than one consistent release (e.g., the disc release plus a
       compilation sharing the same recordings), `consistent_rids[0]` is arbitrary; if the disc's
@@ -33,7 +36,7 @@ Sources:
       corroborates it. Feeds the +0.25 match-confidence signal.
       Fix: `"YES" if disc.mb_release_id in consistent_rids else "NO"`.
 
-- [ ] **BUG-4** · MEDIUM — `acoustid_lookup.py:135` — AcoustID-sourced ISRCs (`_chain_to_mb`)
+- [x] **BUG-4** · MEDIUM — `acoustid_lookup.py:135` — AcoustID-sourced ISRCs (`_chain_to_mb`)
       bypass `validators.validate_isrc`. The merge sites (`_merge_into_disc`, `_overwrite_disc`)
       validate only the disc-side ISRC and trust that `meta.isrc` was validated at MB ingress —
       true for `_parse_release` but not for the AcoustID path, which constructs `DiscMeta`
@@ -43,20 +46,20 @@ Sources:
       Fix: call `validate_isrc` on the recording ISRC inside `_chain_to_mb`, or add meta-side
       validation at the merge sites alongside the existing disc-side check.
 
-- [ ] **BUG-5** · LOW — `metadata_menu.py:489-496` — `_clear_disc` reconstructs `RBIDisc` by
+- [x] **BUG-5** · LOW — `metadata_menu.py:489-496` — `_clear_disc` reconstructs `RBIDisc` by
       hand, silently dropping `pre_emphasis` (the physical R14 year-cap signal) to `None`.
       Clearing metadata should not reset physical disc properties.
       Fix: use `dataclasses.replace(disc, album="", artist="", catalog=None, disc_id=None,
       tracks=cleared_tracks, ...)` so only metadata fields are cleared and physical fields
       (`pre_emphasis`) are preserved.
 
-- [ ] **BUG-6** · LOW — `config.py` — `Config.embedart` is declared but `load_config()` never
+- [x] **BUG-6** · LOW — `config.py` — `Config.embedart` is declared but `load_config()` never
       reads it from the TOML data dict or passes it to the `Config(...)` constructor, so
       `embedart = true` in the user's config file has no effect.
       Fix: add `embedart = bool(data.get("embedart", False))` and include it in the constructor,
       mirroring how `auto` is handled (line 346 / line 377).
 
-- [ ] **BUG-7** · LOW — `cdda2img.py:1580-1586` — the stage-7 duration matcher returns a
+- [x] **BUG-7** · LOW — `cdda2img.py:1580-1586` — the stage-7 duration matcher returns a
       `DiscMeta` with `mb_release_id` set (to the text+duration-matched release), and
       `_merge_into_disc` writes it to `disc.mb_release_id`. This is a non-disc-ID, possibly-
       wrong pressing MBID baked into PROV as if authoritative. It feeds `populate_original_release`
