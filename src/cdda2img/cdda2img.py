@@ -1557,21 +1557,25 @@ def _run_metadata_lookups(
         errored=False,
     )
 
-    # CDDB applied LAST — zero-trust gap-filler. By now CD-Text, MB, Discogs
-    # and AcoustID have all had their turn, so this only fills fields none of
-    # them provided.
+    # CDDB status is recorded here regardless of merge order; the attempt and
+    # its outcome are independent of when its fields are folded in.
     if do_cddb:
         provenance["lookup_status_cddb"] = _r12_status(
             attempted=True, has_data=cddb_meta is not None, errored=False
         )
-    if cddb_meta is not None:
-        disc = _merge_into_disc(cddb_meta, disc)
 
-    # Stage 7: last-resort duration match. Fires only when nothing above
-    # identified the release in MusicBrainz (no release id) but we still have an
-    # album/artist to search with. Applied dead last via fill-blank — the lowest
-    # precedence of any source, below even CDDB — so it only supplies fields no
-    # richer guess provided. The user remains the final arbiter in the menu.
+    # Stage 7: last-resort duration match (OPT-3 — now runs BEFORE CDDB). Fires
+    # only when nothing above identified the release in MusicBrainz (no release
+    # id) but we still have an album/artist to search with. A duration-matched
+    # MB release is a stronger guess than CDDB's flat "Artist / Title" string,
+    # so it is given the higher precedence of the two by merging first.
+    #
+    # Tradeoff (the cost of this reorder): stage-7's gate needs disc.album or
+    # disc.artist already populated as a search seed. On a disc whose ONLY
+    # album/artist source is CDDB (no CD-Text, no MB/Discogs/AcoustID hit),
+    # stage-7 now sees an empty seed and does not fire — the old CDDB-first
+    # order would have seeded it. That CDDB-only-seed disc is the rare case we
+    # give up to make the duration matcher outrank CDDB on every other disc.
     if disc.mb_release_id is None and (disc.album or disc.artist):
         from cdda2img.mb_lookup import duration_match_lookup
 
@@ -1583,6 +1587,13 @@ def _run_metadata_lookups(
             # exactly as the ISRC-tally fallback does.
             provenance["duration_match_release"] = dm.mb_release_id or "?"
             disc = _merge_into_disc(replace(dm, mb_release_id=None), disc)
+
+    # CDDB applied DEAD LAST — zero-trust gap-filler, now the absolute lowest
+    # precedence (below even stage-7). By now CD-Text, MB, Discogs, AcoustID and
+    # the stage-7 duration match have all had their turn, so this only fills
+    # fields none of them provided.
+    if cddb_meta is not None:
+        disc = _merge_into_disc(cddb_meta, disc)
 
     return disc, mb_result
 

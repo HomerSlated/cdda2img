@@ -202,3 +202,93 @@ def test_mb_meta_is_none_on_no_match() -> None:
     with patch("cdda2img.mb_lookup.lookup_disc_id", return_value=[]):
         result = prepopulate_from_mb(disc, verbose=False)
     assert result.meta is None
+
+
+# ---------------------------------------------------------------------------
+# OPT-3 — stage-7 duration match now runs BEFORE CDDB
+# ---------------------------------------------------------------------------
+
+
+def _seeded_disc() -> RBIDisc:
+    """A disc carrying embedded (CD-Text) album/artist — a stage-7 search seed."""
+    return RBIDisc(
+        album="Seed Album",
+        artist="Seed Artist",
+        tracks=[
+            RBITocEntry(
+                track_number=1,
+                title="",
+                performer="",
+                start_frame=0,
+                duration_frames=18000,
+            )
+        ],
+    )
+
+
+def test_stage7_outranks_cddb_on_contested_field() -> None:
+    """When stage-7 and CDDB both fill the same blank field, stage-7 wins.
+
+    OPT-3 reorder: the duration matcher merges before CDDB, so its
+    release_date survives and CDDB's (applied dead last via fill-blank) does
+    not overwrite it. MB returns no match, so disc.mb_release_id stays None and
+    the embedded seed lets stage-7 fire.
+    """
+    disc = _seeded_disc()
+    cddb_meta = DiscMeta(album="From CDDB", release_date="2009", source="cddb")
+    dur_meta = DiscMeta(
+        album="From DurMatch",
+        mb_release_id="rid-dur",
+        release_date="2004",
+        source="musicbrainz",
+    )
+    prov: dict[str, str] = {}
+    with (
+        patch("cdda2img.cddb.query_cddb", return_value=[cddb_meta]),
+        patch("cdda2img.mb_lookup.lookup_disc_id", return_value=[]),
+        patch("cdda2img.mb_lookup.duration_match_lookup", return_value=dur_meta),
+        patch(
+            "cdda2img.cdda2img._prepopulate_from_discogs",
+            side_effect=lambda d, *a, **k: d,
+        ),
+        patch(
+            "cdda2img.cdda2img._r6_acoustid_corroborate",
+            side_effect=lambda d, *a, **k: d,
+        ),
+    ):
+        result, _mb_result = _run(disc, prov)
+
+    # Stage-7 merged first, so its release_date wins the contested field.
+    assert result.release_date == "2004"
+    # Provenance records the matched release; the pressing MBID is NOT baked in.
+    assert prov["duration_match_release"] == "rid-dur"
+    assert result.mb_release_id is None
+
+
+def test_stage7_skipped_when_only_cddb_seeds_album() -> None:
+    """Documented OPT-3 tradeoff: a CDDB-only-seed disc never reaches stage-7.
+
+    The blank disc has no album/artist when stage-7's gate is checked (CDDB is
+    merged afterwards), so the duration matcher is never invoked. CDDB still
+    fills the field at the very end.
+    """
+    disc = _disc()  # blank album/artist
+    cddb_meta = DiscMeta(album="From CDDB", artist="From CDDB", source="cddb")
+    prov: dict[str, str] = {}
+    with (
+        patch("cdda2img.cddb.query_cddb", return_value=[cddb_meta]),
+        patch("cdda2img.mb_lookup.lookup_disc_id", return_value=[]),
+        patch("cdda2img.mb_lookup.duration_match_lookup") as mock_dur,
+        patch(
+            "cdda2img.cdda2img._prepopulate_from_discogs",
+            side_effect=lambda d, *a, **k: d,
+        ),
+        patch(
+            "cdda2img.cdda2img._r6_acoustid_corroborate",
+            side_effect=lambda d, *a, **k: d,
+        ),
+    ):
+        result, _mb_result = _run(disc, prov)
+
+    mock_dur.assert_not_called()
+    assert result.album == "From CDDB"

@@ -28,6 +28,39 @@ structural fix (design before code):
 Discuss: a typed wrapper / dedicated merge API, vs. a documented chokepoint + an
 invariant test asserted at each known site. Decide scope before implementing.
 
+### Remaining metadata-pipeline work (2026-06-15)
+
+Sources: bug-hunter `private/bugs/2026-06-15_163056_metadata-pipeline.md`,
+optimiser `private/optimiser/2026-06-15_metadata-consensus.md`.
+BUG-1..7, OPT-1/2/3 and the superseded P3 are complete — archived in the DONE
+log below. OPT-4 is the only live item from this audit.
+
+- [ ] **OPT-4** · **Per-field trust score model** — The current fill-blank / first-writer-wins
+      model lets a wrong-but-non-blank CD-Text or CDDB value permanently block a stronger MB
+      value; the only escape is the interactive menu's "Overwrite All". The recommended fix is an
+      explicit `(field, value, trust)` proposal model: each source proposes a trust level per
+      field, the highest-trust proposal wins, and near-ties surface as alternatives in the menu.
+      Extend the existing `match_distance` / `build_match_distance` scaffold rather than adding a
+      new framework. This is a substantial rework; design before implementing.
+
+---
+
+### Minor / pre-existing
+
+- **AcoustID `_chain_to_mb` reads an empty release-group stub.** On the recording
+  endpoint, `inc=releases` does *not* embed the release-group's fields, so
+  `rg.get("id")` and `rg.get("first-release-date")` are always None on the AcoustID
+  path — `mb_release_group_id` and `original_release_date` have never populated there.
+  (Confirmed live 2026-06-09 while fixing the invalid-include regression.) Low impact:
+  the full-release fetch on select recovers this via the release endpoint. Fix would
+  need a per-release follow-up call — deferred (same per-row cost we declined for Trk).
+
+---
+
+## ✅ DONE — Metadata-pipeline audit BUG-1..7 + OPT-1/2/3, follow-ups, and 2026-05/06 priorities (archived 2026-06-17)
+
+Relocated from `## Open` 2026-06-17 — all items complete; retained for reference.
+
 ### Agent audit — metadata pipeline (2026-06-15)
 
 Sources:
@@ -97,7 +130,7 @@ landed (`make check` + py3.10 green). Detail retained below for reference.
 
 #### Performance / architecture
 
-- [ ] **OPT-1** · **In-process session cache for MB disc-ID lookups** — The Phase-1 banner
+- [x] **OPT-1** · DONE 2026-06-17 (`c35c9d8`) — **In-process session cache for MB disc-ID lookups** — The Phase-1 banner
       (`_preview_worker`) and Phase-2 finalization (`prepopulate_from_mb`) both call
       `lookup_disc_id` with the same disc-ID (identical by construction after the SILENCE fix).
       Previously the R7 SQLite cache de-duplicated this; that cache is now removed. Replace with a
@@ -106,7 +139,7 @@ landed (`make check` + py3.10 green). Detail retained below for reference.
       stale-data risk — the dict is discarded on process exit. Scope: `lookup_disc_id` only;
       separate dicts for ISRC and by-release-id lookups can follow if needed.
 
-- [ ] **OPT-2** · **In-process session cache for album art fetches** — `fetch_cover` in
+- [x] **OPT-2** · DONE 2026-06-17 (`c35c9d8`) — **In-process session cache for album art fetches** — `fetch_cover` in
       `album_art.py` has no caching. Phase 1 (banner, `_preview_worker:2137`) and Phase 2
       (`_finalize_import:1687`) both call it; when the pre- and post-menu MB/Discogs IDs coincide
       (the common path — strong auto-match or user accepts the guess), it re-downloads the same
@@ -114,22 +147,15 @@ landed (`make check` + py3.10 green). Detail retained below for reference.
       (`caa:{entity}:{mbid}` / `discogs:{id}`) in `album_art.py`. Phase 2 returns the cached
       bytes when IDs match; only re-downloads on an actual ID change (user corrected metadata).
 
-- [ ] **OPT-3** · **CDDB vs stage-7 ordering** — Stage-7 (`duration_match_lookup`) is
-      track-count- and ±15 s-duration-verified against MB. CDDB is unverified gnudb free text.
-      Yet CDDB is applied before stage-7 in `_run_metadata_lookups`, so a contested album/artist
-      field goes to the weaker source. Both targets fire only on disc-ID-miss discs, where CDDB
-      is at its least trustworthy. Options: (a) run stage-7 before CDDB; (b) allow a verified
-      stage-7 result to overwrite (not just fill-blank) a CDDB value; (c) drop CDDB as a
-      metadata source and retain only its disc-ID for fingerprint lookup. Recommend (a) as the
-      minimum; (c) as the cleanest.
-
-- [ ] **OPT-4** · **Per-field trust score model** — The current fill-blank / first-writer-wins
-      model lets a wrong-but-non-blank CD-Text or CDDB value permanently block a stronger MB
-      value; the only escape is the interactive menu's "Overwrite All". The recommended fix is an
-      explicit `(field, value, trust)` proposal model: each source proposes a trust level per
-      field, the highest-trust proposal wins, and near-ties surface as alternatives in the menu.
-      Extend the existing `match_distance` / `build_match_distance` scaffold rather than adding a
-      new framework. This is a substantial rework; design before implementing.
+- [x] **OPT-3** · DONE 2026-06-17 — **CDDB vs stage-7 ordering** — Implemented option (a):
+      stage-7 (`duration_match_lookup`) now merges *before* CDDB in `_run_metadata_lookups`, so a
+      contested field goes to the track-count + ±15 s-duration-verified source rather than CDDB's
+      unverified gnudb free text. CDDB is now the absolute lowest precedence (applied dead last,
+      fill-blank). Documented tradeoff: stage-7's gate needs an album/artist seed, so a
+      CDDB-only-seed disc never reaches stage-7 (accepted — the rare case, in exchange for the
+      duration matcher outranking CDDB everywhere else). 2 regression tests in
+      `test_parallel_pre_menu.py`; CLAUDE.md precedence note updated. Options (b)/(c) not taken —
+      (a) is the minimal correct fix and preserves CDDB's value as a last-resort gap-filler.
 
 #### P3 superseded
 
@@ -533,18 +559,6 @@ behaviour, not a regression.
   approach to the multi-source merge problem that R1/R8/R9 address, and
   whether its conflict-resolution UI is worth porting. Write findings to
   `private/research/incoming/beets-comparison.md`.
-
-### Minor / pre-existing
-
-- **AcoustID `_chain_to_mb` reads an empty release-group stub.** On the recording
-  endpoint, `inc=releases` does *not* embed the release-group's fields, so
-  `rg.get("id")` and `rg.get("first-release-date")` are always None on the AcoustID
-  path — `mb_release_group_id` and `original_release_date` have never populated there.
-  (Confirmed live 2026-06-09 while fixing the invalid-include regression.) Low impact:
-  the full-release fetch on select recovers this via the release endpoint. Fix would
-  need a per-release follow-up call — deferred (same per-row cost we declined for Trk).
-
----
 
 ## ✅ DONE — Stage 7: last-resort duration match (2026-06-08)
 
