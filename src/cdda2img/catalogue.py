@@ -70,6 +70,12 @@ CREATE TABLE IF NOT EXISTS catalogue (
     original_release_found     INTEGER NOT NULL DEFAULT 0,
     original_release_title     TEXT,
     original_release_year      INTEGER,
+    -- v6.0 catalogue intelligence (PROV keys label / country / catalog_number;
+    -- see docs/reference/rbi_spec.md §6.3.1). `mcn` above is the EAN-13 barcode;
+    -- `catalog_number` is the label's own alphanumeric number (e.g. "CID U2 6").
+    label                      TEXT,
+    country                    TEXT,
+    catalog_number             TEXT,
     b3sum                      TEXT
 );
 
@@ -420,6 +426,9 @@ def _register_impl(  # noqa: C901
     original_release_found = 1 if prov.get("original_release_found") == "YES" else 0
     original_release_title = prov.get("original_release_title")
     original_release_year = _parse_year(prov.get("original_release_year"))
+    label = prov.get("label")
+    country = prov.get("country")
+    catalog_number = prov.get("catalog_number")
     created_by = prov.get("creator", "")
     mode = prov.get("mode", "?")
     source = prov.get("source")
@@ -498,8 +507,9 @@ def _register_impl(  # noqa: C901
                     file_basename, file_path, file_size,
                     registered_at, created_by, mode, source, ripper, drive,
                     low_dynamic_range, original_release_found,
-                    original_release_title, original_release_year, b3sum)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    original_release_title, original_release_year,
+                    label, country, catalog_number, b3sum)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (
                     mcn,
                     album,
@@ -524,6 +534,9 @@ def _register_impl(  # noqa: C901
                     original_release_found,
                     original_release_title,
                     original_release_year,
+                    label,
+                    country,
+                    catalog_number,
                     b3sum,
                 ),
             )

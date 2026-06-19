@@ -290,7 +290,10 @@ def _build_disc(
 ) -> RBIDisc:
     """Build RBIDisc from pre-computed track layout. No I/O."""
     disc = RBIDisc(
-        album=disc_title, artist=disc_performer, catalog=catalog, disc_id=disc_id
+        album=disc_title,
+        artist=disc_performer,
+        catalog=catalog,
+        cdtext_catalog_ref=disc_id,
     )
     pcm_frame = 0
     for n, row in enumerate(layout, start=1):

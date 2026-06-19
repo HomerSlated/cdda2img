@@ -10,7 +10,7 @@ from cdda2img.toc_parser import parse_toc
 
 # ---------------------------------------------------------------------------
 # Shared fixture — covers the full optional-field surface:
-#   catalog set, disc_id set,
+#   catalog set, cdtext_catalog_ref set,
 #   track 1: ISRC + no pregap
 #   track 2: pregap only
 #   track 3: ISRC + pregap
@@ -25,7 +25,7 @@ def _make_disc() -> RBIDisc:
         album="Test Album",
         artist="Test Artist",
         catalog="0724383697724",
-        disc_id="CAT-001",
+        cdtext_catalog_ref="CAT-001",
     )
     disc.tracks = [
         RBITocEntry(
@@ -91,7 +91,7 @@ def test_toc_fields_round_trip() -> None:
     assert parsed.title == sanitize_title(disc.album)
     assert parsed.performer == sanitize_title(disc.artist)
     assert parsed.catalog == disc.catalog
-    assert parsed.disc_id == disc.disc_id
+    assert parsed.disc_id == disc.cdtext_catalog_ref
     assert len(parsed.tracks) == len(disc.tracks)
 
     for pt, rt in zip(parsed.tracks, disc.tracks):

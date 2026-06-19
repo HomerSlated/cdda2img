@@ -24,8 +24,7 @@ from cdda2img.rbi_format import (
     PCM_SAMPLE_RATE,
     RBIDisc,
     RBITocEntry,
-    format_original,
-    year_of,
+    format_disc_metadata,
 )
 
 _W = 78  # display width
@@ -87,23 +86,31 @@ def _prompt_search_fields(artist: str, title: str) -> tuple[str, str]:
 
 
 def _print_disc_summary(disc: RBIDisc) -> None:
-    # "Album:" carries THIS release's year; "Original:" (immediately below)
-    # answers whether this disc is the original. Labels are padded to the
-    # width of "Original:" so the values align.
-    y = year_of(disc.release_date)
-    album_year = y if y is not None else "unknown"
-    print(f"  {'Album:':<9} {disc.album or '(none)'} ({album_year})")
+    # The canonical disc-metadata header (Album/Artist/Label/Country/Cat. no./
+    # MCN/Original/Tracks) is rendered by the shared rbi_format.format_disc_metadata
+    # so the menu, `list`, and catalogue are byte-identical (rbi_spec.md §6.3.2);
+    # the menu only prepends its 2-space chrome indent. Set / Disc / Low DR are
+    # menu-local ancillary lines outside the canonical block.
+    for line in format_disc_metadata(
+        album=disc.album,
+        artist=disc.artist,
+        release_date=disc.release_date,
+        label=disc.label,
+        country=disc.country,
+        catalog_number=disc.catalog_number,
+        mcn=disc.catalog,
+        original_release_found=disc.original_release_found,
+        original_release_title=disc.original_release_title,
+        original_release_year=disc.original_release_year,
+        track_count=len(disc.tracks),
+    ):
+        print(f"  {line}")
     if disc.set_title:
-        print(f"  {'Set:':<9} {disc.set_title}")
-    _orig_value = format_original(disc).split(":", 1)[1].lstrip()
-    print(f"  {'Original:':<9} {_orig_value}")
-    print(f"  {'Artist:':<9} {disc.artist or '(none)'}")
-    print(f"  {'MCN:':<9} {disc.catalog or '(none)'}")
+        print(f"  {'Set:':<10} {disc.set_title}")
     if disc.disc_total > 1 or disc.disc_number != 1:
-        print(f"  {'Disc:':<9} {disc.disc_number} of {disc.disc_total}")
-    print(f"  {'Tracks:':<9} {len(disc.tracks)}")
+        print(f"  {'Disc:':<10} {disc.disc_number} of {disc.disc_total}")
     if disc.low_dynamic_range is not None:
-        print(f"  {'Low DR:':<9} {'YES' if disc.low_dynamic_range else 'NO'}")
+        print(f"  {'Low DR:':<10} {'YES' if disc.low_dynamic_range else 'NO'}")
     if disc.tracks:
         print()
         print(f"  {'#':>2}  {'Title':<40}  {'ISRC'}")

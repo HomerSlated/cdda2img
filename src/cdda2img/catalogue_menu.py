@@ -8,7 +8,7 @@ import re
 import sys
 from pathlib import Path
 
-from cdda2img.rbi_format import format_original_fields
+from cdda2img.rbi_format import format_disc_metadata
 
 # ---------------------------------------------------------------------------
 # Terminal helpers (same conventions as metadata_menu.py)
@@ -297,6 +297,7 @@ def _show_record(conn: object, catalogue_id: int) -> None:  # noqa: C901
         "SELECT album, artist, year, disc_number, disc_total, "
         "track_count, mcn, low_dynamic_range, original_release_found, "
         "original_release_title, original_release_year, "
+        "label, country, catalog_number, "
         "mode, source, ripper, drive, "
         "rg_album_gain, rg_album_peak, rg_album_range, "
         "file_basename, file_path, file_size, registered_at, created_by "
@@ -313,12 +314,15 @@ def _show_record(conn: object, catalogue_id: int) -> None:  # noqa: C901
         year,
         disc_number,
         disc_total,
-        _track_count,
+        track_count,
         mcn,
         low_dynamic_range,
         original_release_found,
         original_release_title,
         original_release_year,
+        label,
+        country,
+        catalog_number,
         mode,
         source,
         ripper,
@@ -339,18 +343,25 @@ def _show_record(conn: object, catalogue_id: int) -> None:  # noqa: C901
     year_str = f" ({year})" if year else ""
 
     _header(f"{artist} — {album}{year_str}{disc_str}")
-    if mcn:
-        print(f"  MCN:           {mcn}")
+    # Canonical disc-metadata header — byte-identical to the menu and `list`
+    # (rbi_format.format_disc_metadata; rbi_spec.md §6.3.2). The catalogue prepends
+    # its 2-space chrome indent; Low DR is a catalogue-local ancillary line.
+    for line in format_disc_metadata(
+        album=album,
+        artist=artist,
+        release_date=str(year) if year else None,
+        label=label,
+        country=country,
+        catalog_number=catalog_number,
+        mcn=mcn,
+        original_release_found=bool(original_release_found),
+        original_release_title=original_release_title,
+        original_release_year=original_release_year,
+        track_count=track_count or 0,
+    ):
+        print(f"  {line}")
     if low_dynamic_range is not None:
-        print(f"  Low DR:        {'YES' if low_dynamic_range else 'NO'}")
-    if original_release_found:
-        # Extract value from the canonical "Original:  <value>" form and re-align
-        # to the 15-char label column used by all other fields in this view.
-        orig_text = format_original_fields(
-            year, True, original_release_title, original_release_year
-        )
-        _, _, orig_value = orig_text.partition(":  ")
-        print(f"  {'Original:':<15}{orig_value}")
+        print(f"  {'Low DR:':<10} {'YES' if low_dynamic_range else 'NO'}")
     if mode and mode != "?":
         print(f"  Mode:          {mode}")
     if source:

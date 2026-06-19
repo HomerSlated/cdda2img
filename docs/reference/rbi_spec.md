@@ -1,6 +1,6 @@
 # RBI Format Specification
 ## Red Book Image — CD-DA Archive Container
-### Version 5.0 · Format version `major=5, minor=0`
+### Version 6.0 · Format version `major=6, minor=0`
 
 ---
 
@@ -12,7 +12,7 @@ RBI is deliberately CD-DA-only. It does not attempt to represent raw physical se
 
 ### Backwards compatibility
 
-**RBI v4.0 is not backwards-compatible with v3.0.** The fixed header is redesigned (40 bytes vs. 169 bytes) around an extensible block-directory model; v3.0 files use hard-coded per-block offsets in the header. A v5.0 reader **MUST** reject any file with `version_major < 4 or version_major > 5`.
+**RBI v6.0 is a clean break — no backwards compatibility.** A v6.0 reader **MUST** reject any file whose `version_major != 6`. Unlike the v4→v5 transition (which kept a dual-checksum read path), v6.0 carries **no** compatibility shim: earlier containers are not migrated or read. The motivating change is the disc-level field rename (`disc_id` → `cdtext_catalog_ref`, §6.2) and the new catalogue fields (§6.3.1); a reader that accepted older files would have to recognise both field shapes indefinitely. (Historical: the fixed header was redesigned at v4.0 — 40 bytes vs. the 169-byte v3.0 header — around an extensible block-directory model.)
 
 **Version history:**
 
@@ -24,6 +24,7 @@ RBI is deliberately CD-DA-only. It does not attempt to represent raw physical se
 | v4.0    | Redesigned around extensible block directory; provenance moved out of TOC; new PROV, ARIP, RLOG block types |
 | v4.1    | Added optional ART block (embedded front-cover image, JPEG) and the `art_source` / `lookup_status_art` PROV keys; backwards-compatible minor bump |
 | v5.0    | Block checksums changed from SHA-256 to BLAKE3; RLOG self-seal changed from `SHA-256:` to `BLAKE3:` label; PROV key `arip_dbar_sha256` renamed to `arip_dbar_b3sum`; breaking change from v4.x |
+| v6.0    | Disc-level field `disc_id` renamed to `cdtext_catalog_ref` (in-memory; the cdrdao `DISC_ID` TOC keyword is unchanged); added `catalog_number` / `label` / `country` PROV keys (catalogue intelligence); clean break — no read shim for v5.x or earlier |
 
 ---
 
@@ -269,7 +270,7 @@ Sanitisation is applied to both `TITLE` and `PERFORMER` values in disc-level and
 
 #### 6.1.7 DISC_ID field
 
-The `DISC_ID` field in the disc-level `LANGUAGE 0` block corresponds to CD-Text PTI `0x86` — a label catalogue reference string. It is optional; omitted when no `disc_id` is available. Double-quote characters within the value are replaced with single quotes before embedding.
+The `DISC_ID` field in the disc-level `LANGUAGE 0` block corresponds to CD-Text PTI `0x86` — a label catalogue reference string. It is optional; omitted when no value is available. Double-quote characters within the value are replaced with single quotes before embedding. The TOC keyword stays `DISC_ID` (cdrdao grammar); the in-memory `RBIDisc` field that carries it is named `cdtext_catalog_ref` as of v6.0 (it was `disc_id` in v5.x — renamed to remove the collision with the *MusicBrainz Disc ID* and `mb_release_id`). This is a label string, **not** the numeric MCN (`CATALOG`) and **not** the alphanumeric label catalogue number (`catalog_number`, §6.3.1).
 
 Field ordering within `LANGUAGE 0`: `TITLE`, `PERFORMER`, `DISC_ID` (if present).
 
@@ -341,6 +342,13 @@ The PROV block stores provenance and extended metadata that has no natural home 
 | `original_release_title`   | Title of the earliest known release of the same logical album. Present only when `original_release_found = YES`. Surfaced via the canonical rendering described in §6.3.2 |
 | `original_release_year`    | Year of that earliest release as a 4-digit integer string; present only when `original_release_found = YES` |
 | `release_date`             | Release date of this specific release (YYYY, YYYY-MM, or YYYY-MM-DD) |
+| `catalog_number`           | The record label's own catalogue number for this release, e.g. `CID U2 6`. Distinct from `CATALOG` (the MCN/EAN-13 barcode in the TOC); this is the alphanumeric sleeve/spine catalogue number. Sourced from MusicBrainz (Discogs corroborates barcode only). |
+| `label`                    | Record label / imprint name for this release, e.g. `Island Records`. From MusicBrainz. |
+| `country`                  | Release country as an ISO-3166 alpha-2 code, or MusicBrainz pseudo-codes `XE` (Europe) / `XW` (Worldwide). From MusicBrainz. |
+| `release_selected_via`     | When MB disc-ID returned >1 album-consistent pressing and the lexicographic release-selection rung picked one, the key that broke the tie: `mcn` \| `barcode_plurality` \| `preferred_country` \| `date` \| `mbid`. Absent when no rung selection ran (single match, or an earlier ISRC/MCN disambiguator already won). |
+| `preferred_country_applied` | The `preferred_country` config value (comma-joined) that influenced `release_selected_via=preferred_country`. Records the user preference that shaped a config-dependent choice, for R10 reproducibility. Absent unless that key actually broke the tie. |
+| `acoustid_gate`            | `failed`. Emitted only when the post-selection AcoustID gate ran and the disc audio did **not** corroborate the selected release's album (catches wrong disc-ID / TOC-collision / mispress). Absent on pass or when the gate did not run. A `failed` gate suppresses `--auto` auto-commit. |
+| `discogs_barcode_conflict` | `mb:<barcode>\|discogs:<barcode>`. Emitted when the selected release's MB→Discogs url-relation resolved a Discogs release whose barcode disagreed with MB's. Absent on agreement or when no Discogs corroboration ran. |
 | `mb_release_id`            | MusicBrainz release UUID, e.g. `9d8f7a02-3851-4c49-9dc4-b08e7cb0ad7c` |
 | `mb_release_group_id`      | MusicBrainz release-group UUID (used to re-run the original-release lookup from an existing RBI without redoing the disc-ID query) |
 | `discogs_release_id`       | Discogs release ID (integer as decimal string) |
@@ -407,6 +415,26 @@ Original: <Yes|No|Unknown>, <this release|<earlier title>|unknown release> (<yea
   but `release_date` is present it falls back to a bare `Released:  <date>` — the only place
   a `list` dump surfaces the disc's own release date. The menu and catalogue show that year
   elsewhere and emit nothing extra in that case.
+
+**Canonical disc-metadata rendering (v6.0).** The v6.0 catalogue fields (`catalog_number`,
+`label`, `country`) and the already-stored `release_date` are surfaced through a single core
+formatter (`rbi_format.format_disc_metadata`, which subsumes `format_original_fields` for the
+original-release line). Three invariants bind the three display surfaces — the interactive
+metadata menu, the `list`/`--info` dump, and the catalogue browser:
+
+1. **stored ⟺ displayed** — the rendered field set is exactly the set persisted to PROV /
+   catalogue, in both directions: no field is shown that is not stored (closing the prior
+   "shown-then-discarded" gap for `catalog_number`), and no stored field is hidden (surfacing
+   `release_date`, previously persisted but shown only on `list`).
+2. **same set in all three** — all three surfaces call `format_disc_metadata`; divergence is
+   not possible without editing the one function.
+3. **identical format / spacing / order** — defined once in the formatter.
+
+These invariants govern the **disc-level header block** only. The per-track table (#, Title,
+Duration, ISRC) is out of scope: only the menu and `list` render it; the catalogue summary does
+not, and that asymmetry is intentional. Canonical field order: Album (+ this-release year from
+`release_date`) · Artist · Label · Country · Catalogue no. (`catalog_number`) · MCN (`CATALOG`) ·
+Original release · Tracks.
 
 #### 6.3.3 Lookup status and conflict surfaces
 
@@ -556,7 +584,7 @@ BLAKE3: <64 lowercase hex chars>
 ```
 The hash is computed over all preceding bytes of the RLOG block (everything before this final line, including the preceding `\n`). A reader verifying the log integrity strips the last line, computes BLAKE3 of the remainder, and compares against the stored hex string.
 
-The self-seal is independent of the block-level checksum in the directory entry. The directory checksum covers the entire RLOG block (including the BLAKE3 line) and protects against accidental corruption. The in-log BLAKE3 hash protects against deliberate modification after insertion. (v4.x used SHA-256 for the self-seal; the v5.0 reader accepts either label, version-gated on `version_major`.)
+The self-seal is independent of the block-level checksum in the directory entry. The directory checksum covers the entire RLOG block (including the BLAKE3 line) and protects against accidental corruption. The in-log BLAKE3 hash protects against deliberate modification after insertion. (Historical: v4.x used a `SHA-256:` self-seal label. The v6.0 reader accepts only `BLAKE3:` — earlier containers are rejected at the version gate, §1, so no dual-label handling is needed.)
 
 ---
 
@@ -622,8 +650,8 @@ never persisted.
 A conforming reader **MUST** enforce (30 rules):
 
 1. `magic == b'RBIMAGE\x00'`
-2. `version_major == 4` (reject if not equal)
-3. `version_minor` known to this revision is `0`–`1`; a reader **MUST** warn (not reject) when `version_minor` exceeds the highest minor it understands, and **MAY** attempt to read, since minor increments are intended to be backwards-compatible
+2. `version_major == 6` (reject if not equal — v6.0 is a clean break, §1)
+3. `version_minor` known to this revision is `0`; a reader **MUST** warn (not reject) when `version_minor` exceeds the highest minor it understands, and **MAY** attempt to read, since minor increments are intended to be backwards-compatible
 4. `flags & ~0x00000004 == 0` (all bits except `FLAG_MASTER_MODE` reserved; reject if any unknown odd-position flag bit is set)
 5. `reserved == b'\x00' × 7`
 6. `1 <= track_count <= 99`
@@ -640,14 +668,14 @@ A conforming reader **MUST** enforce (30 rules):
 17. For every directory entry: `offset >= 40` (blocks do not overlap the fixed header)
 18. No two directory entries have overlapping byte ranges
 19. Number of `TRACK AUDIO` entries in the TOC block **MUST** equal `track_count` in the fixed header
-20. `blake3(block_content) == directory_entry.checksum` for every block (v5.0+; SHA-256 for v4.x); readers **SHOULD** warn on mismatch rather than hard-failing by default, unless policy requires strict verification
+20. `blake3(block_content) == directory_entry.checksum` for every block; readers **SHOULD** warn on mismatch rather than hard-failing by default, unless policy requires strict verification
 21. TOC block decodes as valid UTF-8
 22. PROV block (if present) decodes as valid UTF-8
 23. RLOG block (if present) decodes as valid UTF-8
 24. RGDB block (if present): `length == 17 + 12 × track_count`
 25. ARIP block (if present): `length == 13 + 15 × track_count`
 26. ARIP block (if present): all `status` values are in the range `0`–`2`
-27. RLOG block (if present): last line matches `BLAKE3: [0-9a-f]{64}` for v5.0+, or `SHA-256: [0-9a-f]{64}` for v4.x (optional integrity check; warn on mismatch)
+27. RLOG block (if present): last line matches `BLAKE3: [0-9a-f]{64}` (optional integrity check; warn on mismatch)
 28. ART block (if present): `length >= 10` (room for the fixed ART header)
 29. ART block (if present): `image_length == length − 10`
 30. ART block (if present): `image_format` is a recognised value (`1` = JPEG); a reader **SHOULD** warn and skip the block on an unrecognised value rather than reject the file (the block carries `BLOCK_FLAG_SKIP`)

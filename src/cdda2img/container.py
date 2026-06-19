@@ -49,6 +49,7 @@ from cdda2img.rbi_format import (
     RBIDisc,
     RBIHeader,
     RBIReplayGain,
+    format_disc_metadata,
     format_original_fields,
     year_of,
 )
@@ -1064,8 +1065,6 @@ def _list_info(rbi_file: Path) -> str:  # noqa: C901
         lines.append(f"Drive:     {drive_name}  (offset {offset_str})")
     if ldr := prov.get("low_dynamic_range"):
         lines.append(f"Low DR:    {ldr}")
-    if line := _release_intelligence_line(prov):
-        lines.append(line)
 
     lines.append("")
 
@@ -1141,7 +1140,25 @@ def _list_info(rbi_file: Path) -> str:  # noqa: C901
         f.seek(toc_entry.offset)
         toc_bytes = f.read(toc_entry.length)
     disc = parse_toc(toc_bytes)
-    lines.append(f"Tracks:  {disc.performer} — {disc.title}")
+    oyear = prov.get("original_release_year", "")
+    # Canonical disc-metadata header — byte-identical to the menu and catalogue
+    # (rbi_format.format_disc_metadata; rbi_spec.md §6.3.2). `list` prints it
+    # flush-left (its own chrome convention).
+    lines.extend(
+        format_disc_metadata(
+            album=disc.title,
+            artist=disc.performer,
+            release_date=prov.get("release_date"),
+            label=prov.get("label"),
+            country=prov.get("country"),
+            catalog_number=prov.get("catalog_number"),
+            mcn=disc.catalog,
+            original_release_found=prov.get("original_release_found") == "YES",
+            original_release_title=prov.get("original_release_title") or None,
+            original_release_year=int(oyear) if oyear.isdigit() else None,
+            track_count=len(disc.tracks),
+        )
+    )
     lines.append("")
     for track in disc.tracks:
         dur = _fmt_duration(track.duration_frames / CD_FRAMES_PER_SECOND)

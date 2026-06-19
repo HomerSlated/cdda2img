@@ -16,8 +16,8 @@ from dataclasses import dataclass, field
 # ---------------------------------------------------------------------------
 
 MAGIC: bytes = b"RBIMAGE\x00"  # 8 bytes; null byte prevents text false-matches
-VERSION_MAJOR: int = 5
-VERSION_MINOR: int = 0  # v5.0: block checksums use BLAKE3 (was SHA-256 in v4.x)
+VERSION_MAJOR: int = 6
+VERSION_MINOR: int = 0  # v6.0: disc_id->cdtext_catalog_ref rename + catalogue fields; clean break, no read shim
 
 # ---------------------------------------------------------------------------
 # Red Book audio constraints (IEC 60908:1999)
@@ -309,10 +309,18 @@ class RBIDisc:
     artist: str
     disc_number: int = 1
     disc_total: int = 1
-    catalog: str | None = None  # MCN / EAN-13; None if not available
-    disc_id: str | None = None  # PTI 0x86 catalogue/label reference; None if absent
+    catalog: str | None = None  # MCN / EAN-13 barcode; None if not available
+    cdtext_catalog_ref: str | None = (
+        None  # CD-Text PTI 0x86 catalogue/label reference string; None if absent.
+        # Renamed from `disc_id` at v6.0 to remove the collision with the
+        # MusicBrainz Disc ID and `mb_release_id`. Distinct from `catalog`
+        # (MCN) and `catalog_number` (the label's own alphanumeric number).
+    )
     tracks: list[RBITocEntry] = field(default_factory=list)
     release_date: str | None = None  # YYYY, YYYY-MM, or YYYY-MM-DD
+    catalog_number: str | None = None  # label's own catalogue number, e.g. "CID U2 6"
+    label: str | None = None  # record label / imprint name
+    country: str | None = None  # ISO-3166 alpha-2, or MB pseudo-code XE / XW
     original_release_date: str | None = None  # release-group first-release-date
     low_dynamic_range: bool | None = (
         None  # set after EBU R128 analysis; None if RG skipped
@@ -410,6 +418,69 @@ def format_original_fields(
     disp_title = title or "unknown release"
     year_disp = orig_year if orig_year is not None else "unknown year"
     return f"Original:  No, {disp_title} ({year_disp})"
+
+
+def format_disc_metadata(
+    *,
+    album: str | None,
+    artist: str | None,
+    release_date: str | None,
+    label: str | None = None,
+    country: str | None = None,
+    catalog_number: str | None = None,
+    mcn: str | None = None,
+    original_release_found: bool = False,
+    original_release_title: str | None = None,
+    original_release_year: int | None = None,
+    track_count: int = 0,
+) -> list[str]:
+    """Render the canonical disc-level metadata header as a list of lines.
+
+    This is the single shared formatter behind every disc-metadata display: the
+    interactive metadata menu, the ``list`` / ``--info`` dump, and the catalogue
+    browser (docs/reference/rbi_spec.md §6.3.2). Three invariants hold:
+
+    1. **stored ⟺ displayed** — the field set equals the persisted catalogue set,
+       both ways (no shown-but-unstored field, no stored-but-hidden field).
+    2. **same set in all three** surfaces (all call this function).
+    3. **identical format / spacing / order** — defined once here.
+
+    Lines are returned **un-indented** with the value column at index 11 (matching
+    :func:`format_original_fields`). Callers MAY prepend their own leading indent
+    (site chrome) but **MUST NOT** alter the labels, order, column width, or value
+    formatting — that identity is the entire point. Optional catalogue fields are
+    omitted when absent (no data gap); Album / Artist / Original / Tracks always
+    render. The per-track table is a separate, site-local concern (out of scope).
+    """
+    w = 10  # label width; value starts at column 11 (w + one space)
+
+    def _row(label_text: str, value: str) -> str:
+        return f"{label_text:<{w}} {value}"
+
+    disc_year = year_of(release_date)
+    year_disp = disc_year if disc_year is not None else "unknown"
+    lines = [
+        _row("Album:", f"{album or '(none)'} ({year_disp})"),
+        _row("Artist:", artist or "(none)"),
+    ]
+    if label:
+        lines.append(_row("Label:", label))
+    if country:
+        lines.append(_row("Country:", country))
+    if catalog_number:
+        lines.append(_row("Cat. no.:", catalog_number))
+    if mcn:
+        lines.append(_row("MCN:", mcn))
+    lines.append(
+        format_original_fields(
+            disc_year,
+            original_release_found,
+            original_release_title,
+            original_release_year,
+        )
+    )
+    lines.append(_row("Tracks:", str(track_count)))
+    return lines
 
 
 def format_original(disc: RBIDisc) -> str:

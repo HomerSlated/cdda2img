@@ -215,7 +215,7 @@ def _build_disc(
         album=disc_title,
         artist=disc_performer,
         catalog=catalog or None,
-        disc_id=disc_id,
+        cdtext_catalog_ref=disc_id,
     )
     for n in range(1, track_count + 1):
         t_idx = idx.get(n, {})

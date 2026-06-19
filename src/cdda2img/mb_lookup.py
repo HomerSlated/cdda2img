@@ -744,8 +744,8 @@ def _merge_into_disc(meta: DiscMeta, disc: RBIDisc) -> RBIDisc:
 
     # F-001: build with dataclasses.replace so disc-only fields (pre_emphasis —
     # which gates the R14 ≤1986 cap — low_dynamic_range, original_release_*,
-    # disc_id) are carried over verbatim and can never be silently dropped when
-    # RBIDisc gains a field. Only the merged fields are named.
+    # cdtext_catalog_ref) are carried over verbatim and can never be silently
+    # dropped when RBIDisc gains a field. Only the merged fields are named.
     return replace(
         disc,
         album=album,
@@ -759,6 +759,9 @@ def _merge_into_disc(meta: DiscMeta, disc: RBIDisc) -> RBIDisc:
         catalog=catalog,
         tracks=new_tracks,
         release_date=disc.release_date or meta.release_date or None,
+        catalog_number=disc.catalog_number or meta.catalog_number or None,
+        label=disc.label or meta.label or None,
+        country=disc.country or meta.country or None,
         original_release_date=disc.original_release_date
         or meta.original_release_date
         or None,
@@ -818,6 +821,9 @@ def _overwrite_disc(meta: DiscMeta, disc: RBIDisc) -> RBIDisc:
         catalog=meta.catalog or disc.catalog,
         tracks=new_tracks,
         release_date=meta.release_date or disc.release_date or None,
+        catalog_number=meta.catalog_number or disc.catalog_number or None,
+        label=meta.label or disc.label or None,
+        country=meta.country or disc.country or None,
         original_release_date=meta.original_release_date
         or disc.original_release_date
         or None,

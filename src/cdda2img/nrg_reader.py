@@ -182,7 +182,7 @@ def _build_disc(
         album=disc_title,
         artist=disc_performer,
         catalog=catalog,
-        disc_id=disc_id,
+        cdtext_catalog_ref=disc_id,
     )
 
     pcm_frame = 0  # running frame position in the output PCM stream

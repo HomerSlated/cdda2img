@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from cdda2img.rbi_format import (
     RBIDisc,
+    format_disc_metadata,
     format_original,
     format_original_fields,
     year_of,
@@ -140,3 +141,67 @@ def test_format_original_delegates_to_core():
         disc.original_release_title,
         disc.original_release_year,
     )
+
+
+# ---------------------------------------------------------------------------
+# format_disc_metadata — the canonical disc-level header (menu/list/catalogue)
+# ---------------------------------------------------------------------------
+
+
+def test_format_disc_metadata_full_golden():
+    # Every value column starts at index 11 (== format_original_fields), and the
+    # order is fixed: Album, Artist, Label, Country, Cat. no., MCN, Original,
+    # Tracks. Pinned so the three surfaces cannot drift.
+    assert format_disc_metadata(
+        album="The Joshua Tree",
+        artist="U2",
+        release_date="1987-03-09",
+        label="Island Records",
+        country="GB",
+        catalog_number="CID U2 6",
+        mcn="0042284229821",
+        original_release_found=True,
+        original_release_title="The Joshua Tree",
+        original_release_year=1987,
+        track_count=11,
+    ) == [
+        "Album:     The Joshua Tree (1987)",
+        "Artist:    U2",
+        "Label:     Island Records",
+        "Country:   GB",
+        "Cat. no.:  CID U2 6",
+        "MCN:       0042284229821",
+        "Original:  Yes, this release (1987)",
+        "Tracks:    11",
+    ]
+
+
+def test_format_disc_metadata_omits_absent_optionals():
+    # Optional catalogue fields are dropped when None (no data gap); Album,
+    # Artist, Original, Tracks always render. No duration -> bare track count.
+    assert format_disc_metadata(
+        album="X", artist="Y", release_date=None, track_count=3
+    ) == [
+        "Album:     X (unknown)",
+        "Artist:    Y",
+        "Original:  Unknown, unknown release (unknown year)",
+        "Tracks:    3",
+    ]
+
+
+def test_format_disc_metadata_value_column_aligned():
+    # The cross-surface guarantee: every rendered line places its value at the
+    # same column, so the menu, list, and catalogue are visually interchangeable.
+    lines = format_disc_metadata(
+        album="A",
+        artist="B",
+        release_date="2000",
+        label="L",
+        country="US",
+        catalog_number="C",
+        mcn="M",
+        track_count=1,
+    )
+    for line in lines:
+        assert line[11] != " ", line  # value char present at the fixed column
+        assert ":" in line[:11], line  # label (with colon) occupies the prefix

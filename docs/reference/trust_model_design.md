@@ -417,3 +417,331 @@ blocks**; the three options (i)/(ii)/(iii) are bundles of them.
   additive B1/B2/B6 over the wholesale B4 rewrite unless a concrete benefit demands it.
   *(Confirm next session which "elegant solution" the user meant if ambiguous — typed-schema
   enforcement vs. the existing bespoke MCN resolver.)*
+
+### 9.5 Worked example for D4 + a release-selection rung (2026-06-19)
+
+The D4 worked example §9.4 asked for now exists: `docs/reference/DISAMBIGUATION.md` — an
+18-step manual interrogation of a real disc (U2 *The Joshua Tree*) against all five services.
+**No decision taken here; this records findings to refine against.**
+
+**D4 verdict from the worked example.** Catalogue data (`barcode`/`country`/`catalog_number`)
+**cannot identify** a pressing — byte-identical same-master pressings are fundamentally
+indistinguishable from the disc, *even with* on-disc metadata (the disc resolved to 5
+byte-identical 1987 releases differing only in packaging/catalogue). It **can** drive a
+deterministic, user-controllable, reproducible *preference* among indistinguishable candidates.
+So **persist (D4=persist) is justified for labelling + provenance, not disambiguation power** —
+it sharpens the *label*, not the match. This answers §9.4's "assist disambiguation vs add
+conflict?": neither — it enables a *preference*, which is a third thing.
+
+**User proposal (2026-06-19) — a release-selection rung (Layer 1).** A gap this surfaces: §2
+resolves per-*field* but has **no release-selection step** for multiple disc-ID matches with
+differing catalogue values (MB returns 5 countries, not one). Proposed last-resort rung, below
+the existing `_disambiguate_by_isrcs` → `_resolve_via_isrc_tally` → `duration_match_lookup`
+cascade (all return None on this disc):
+1. **plurality barcode** (most common normalised barcode scores highest), then
+2. **`preferred_country`** config (ordered MB country codes; priority ranking, *not* a filter;
+   unlisted = lowest equal priority), then
+3. terminal tiebreak (proposed: earliest date, then MB release-ID).
+Output is a **scored candidate set** (no discards) feeding the consensus model.
+
+**How it fits the landscape:**
+- **Pure scoring, not hard-narrow** (advisor-reviewed): a hard barcode cut would drop the only
+  uniquely-barcoded release before `preferred_country` could rescue it. Popularity must weight,
+  never gate.
+- Fits **(ii)-minimal + B6-persist**; it is **additive, not a rewrite** — aligns with the
+  "refine, don't replace" preference above. ⚠ **Corrected in §10.3:** the rung is **not** a
+  refinement of `_pick_canonical_mcn`. That helper only has *barcodes* in scope, so it
+  structurally cannot host keys (2) `preferred_country` / (3) date / (4) MB-ID — those need full
+  release records. The rung is a **new terminal rung in the `mb_lookup` disambiguation cascade**
+  (operating on the full `DiscMeta` candidate records); `_pick_canonical_mcn`'s `candidates[0]`
+  default only fires on the **no-MB-release path** (on-disc / Discogs-only). The overlap is just
+  key (1) barcode-plurality, which the rung subsumes upstream.
+- Answers the §9.4 **equal-trust tiebreak** open point: all disc-ID matches are equal `DISC_ID`
+  trust, so trust can't separate them; this cascade is the tiebreak.
+- `preferred_country` is **not a trust level** (those rank source reliability) — it's an
+  orthogonal user-preference prior applied only at release-selection. Config-dependent output ⇒
+  record the applied preference in PROV (R10 reproducibility).
+
+**Refinements (2026-06-19, confirmed with user):**
+
+- **Pure lexicographic scoring** (no hard cuts). Release-selection key chain, each breaking
+  ties left by the one above: **(0) on-disc MCN match [objective] → (1) barcode-plurality
+  [popularity prior] → (2) preferred_country [user pref] → (3) earliest date → (4) MB
+  release-ID [terminal]**. MCN-above-plurality = evidence outranks proxy (mirrors `OBJECTIVE >
+  everything`). Endorsed consequence: a uniquely-barcoded region pressing ranks *below* the
+  common-barcode tier even for a matching `preferred_country` (preferred_country arbitrates
+  only *within* a barcode tier).
+
+- **B6 scope is larger than "catalogue fields" and partly a display gap.** Verified against
+  `RBIDisc` (rbi_format.py:304-335):
+  - `release_date` (this release) **already exists and is populated** — but `list`/`catalogue`
+    only surface `original_release_*`. **Display gap, no spec change** — just render it.
+  - `label`, `country` are **genuinely missing** → add (spec-before-code).
+  - label catalogue number: field `disc_id` exists but is **CD-Text PTI 0x86 only** and its
+    name collides with "MB Disc ID" / `mb_release_id`. Add `catalog_number` (from MB/Discogs)
+    and **rename `disc_id`** (e.g. `cdtext_catalog_ref`) to kill the ambiguity.
+  - `catalog` (MCN/EAN-13 barcode) vs `catalog_number` (label's own number, e.g. `CID U2 6`)
+    are distinct → separate fields.
+
+- **Provider-role model (precedence = granularity, not flat trust).** Disambiguation is a
+  cascade through granularities; each provider sits at one. **(1) TOC/local** defines the
+  candidate set (disc) → **(2) AccurateRip** excludes wrong masters (master/era; high but
+  coarse) → **(3) ISRC/duration** (from MB) narrow recording/timing *when discriminating* →
+  **(4) MB catalogue scoring** (barcode-plurality → preferred_country) picks a *preference* →
+  **(5) age/MBID** terminal. Roles: **MB** = release enumerator + catalogue substrate (primary;
+  everything scores *its* candidates); **Discogs** = per-candidate corroborator via the
+  MB→Discogs url-rel (raises field confidence / surfaces conflict; feeds cross-source barcode
+  plurality) — *not* a selector; **AcoustID** = recording/track labeller + gross-mismatch
+  sanity (≈0 edition power, remaster-robust); **CDDB** = free-text fallback (≈0 edition power).
+  **Key finding:** for byte-identical pressings the non-MB providers add ~nothing to
+  *edition* disambiguation — the edition choice rests on MB catalogue data + preference config.
+  That is the knowability ceiling, not a fixable gap. (Worked example: DISAMBIGUATION.md §4.)
+
+**Locked decisions (2026-06-19) — feed these into B6/§10 when written:**
+
+- **Barcode > country** (preponderance-of-evidence; the guess is most defensible from the
+  weight of evidence). Lexicographic, confirmed.
+- **AcoustID = gate, not selector.** Add an audio-corroboration gate over the MB candidate set
+  ("does the audio match the claimed album at all?"); ~0 edition power, but catches wrong
+  disc-ID / TOC-collision / mispress. Distinct from the selection cascade.
+- **`preferred_country` = TOML array** `["GB","XE","US"]`; empty/unset ⇒ skip the key.
+- **Rename `disc_id` → `cdtext_catalog_ref`** (collides with "MB Disc ID"/`mb_release_id`) and
+  add `catalog_number`. spec-before-code (`rbi_spec.md`). Plus add `label`,
+  `country`; surface the already-stored `release_date` in `list`/`catalogue`.
+- **Migration = clean break (user, 2026-06-19).** Bump the RBI format version, but **no read
+  shim / no backwards compatibility** — old `disc_id`-bearing containers are *not* migrated or
+  read. A breaking field rename with no compat path conventionally implies a **major** bump
+  (v5.0 → v6.0); confirm major-vs-minor when writing §10. Rationale: prototype, Rust reimpl
+  pending, no production `.rbi` corpus to preserve. Removes the entire dual-name read path from
+  scope — `read_header`/TOC/PROV parse only the new field name.
+- **(a) Discogs role: CLOSED 2026-06-19 → barcode-only corroboration.** Built
+  `tools/compare_mb_discogs.py` (MB↔Discogs field-mismatch tally via the url-rel join) and ran a
+  broad corpus (95 seed albums → 74 comparable; raw at
+  `private/research/incoming/mb_discogs_corpus_2026-06-19.txt`). Normalised mismatch rates:
+
+  | field | mismatch | reading |
+  |-------|:--------:|---------|
+  | **barcode** | **0/63** | perfect agreement — the gold standard, confirmed at scale |
+  | label | 15/71 (21%) | **genuine structural** disagreement (imprint vs parent `Capitol`/`Beastie Boys Records`; reissue labels `Atlantic`/`Rhino`, `Columbia House`, `DeAgostini`; sublabels `Skam`/`Warp`) — *not* vocabulary |
+  | catalog_number | 13/71 (18%) | noisy (multiple sleeve codes; the two services pick different ones — see catalogue-code taxonomy) |
+  | country | 34/70 (49%) | half vocabulary the normaliser misses (`CA`/`Canada`, `JP`/`Japan`, `BR`/`Brazil`), half genuine multi-region scoping (`GB`/`Europe`, `US`/`Europe`) |
+  | year | 3/54 (6%) | mostly agree; sparse |
+
+  **The broad run overturns the earlier 5-release sample on `label`** (then 0/5, now 21%
+  structural). ⇒ **Discogs gets selection weight on `barcode` only** — feeds cross-source
+  barcode-plurality (disambiguator key (1)). `label`/`country`/`catalog_number` are still
+  *persisted + displayed* (B6) for labelling/provenance, but carry **no** disambiguation weight
+  and trigger no cross-source corroboration. Decision (a) is settled; no further corpus run
+  needed.
+
+**Metadata-presentation invariant (2026-06-19).** Expanding stored fields must be paired with a
+**single canonical renderer** shared by the metadata menu (creation landing), `catalogue`, and
+`list`: (1) stored ⟺ displayed (no gaps both ways); (2) the same field set in all three;
+(3) identical format/spacing/order so the three are visually interchangeable. This is a
+display-layer requirement riding alongside B6-persist (relevant to D4, and to §8.6's
+shown-then-discarded bug — the fix is "persist *and* render consistently", not "stop showing").
+
+---
+
+## 10. Implementation specification (B6-persist + release-selection rung + canonical renderer)
+
+Status: **SPEC — ready to implement once `rbi_spec.md` is bumped (spec-before-code).** Every
+gating decision in §9.5 is locked; this section turns them into a buildable unit. Advisor-reviewed
+2026-06-19 (integration architecture + scope discipline). Grounded against the current code at the
+call sites named below.
+
+### 10.0 Scope
+
+In: **(a)** expanded catalogue fields + the `disc_id` rename + RBI version bump (clean break);
+**(b)** the lexicographic release-selection rung + `preferred_country` config; **(c)** the AcoustID
+gate; **(d)** the single canonical metadata renderer across menu / `catalogue` / `list`.
+
+Out (unchanged from §9): the full B4 collect→resolve resolver; B5 menu *alternatives* (no consumer
+under (ii) — the rung picks a single top candidate and does **not** build scored-set machinery);
+the 2-D trust table (moot — only `catalog` (MCN) is a contested *persisted* field and it keeps its
+bespoke check-digit resolver). B1/B2 (C1/C2 enforcement) are independent and may land separately;
+§10 does not depend on them.
+
+### 10.1 Format change — RBI v6.0 (spec-before-code)
+
+**Version bump: v5.0 → v6.0** (major; breaking field rename, no read shim — §9.5). The reader
+**rejects** a container whose major version ≠ 6 rather than translating old fields. Update
+`rbi_format.py:VERSION_MAJOR = 6`, `VERSION_MINOR = 0`, and `docs/reference/rbi_spec.md`
+**before** any code.
+
+**`RBIDisc` field changes (`rbi_format.py:305-335`):**
+- **Rename** `disc_id` → `cdtext_catalog_ref` (PTI 0x86 CD-Text catalogue/label ref). *Python
+  attribute only* — the cdrdao TOC keyword stays `DISC_ID` (cdrdao grammar; `toc.py:128`,
+  `cdrdao_reader.py:93`, `toc_parser`). The rename kills the collision with "MB Disc ID" /
+  `mb_release_id`.
+- **Add** `catalog_number: str | None = None` — the label's own catalogue number (e.g. `CID U2 6`),
+  distinct from `catalog` (the MCN/EAN-13 barcode). From MB/Discogs.
+- **Add** `label: str | None = None`, `country: str | None = None` — from MB (Discogs corroborates
+  barcode only — §9.5(a)).
+- `release_date` (this release) **already exists and is persisted** (`_add_release_provenance`,
+  `cdda2img.py:534`) — no field change; it is a *display* gap only (§10.5).
+
+**Three persistence surfaces must move together** (this is the C1-style invariant restated for the
+new fields — every stored field needs a write site, a read site, and a catalogue column):
+1. **PROV block** — `_add_release_provenance` (`cdda2img.py:519`) gains
+   `catalog_number`/`label`/`country` keys (same `if disc.X:` pattern); the read side in
+   `container.py` (~963) reconstructs them onto `RBIDisc`. `cdtext_catalog_ref` is unaffected (it
+   rides the TOC, not PROV).
+2. **Catalogue SQLite schema** — `catalogue.py` schema (`62-72`) + `register_rbi` (`415-524`) +
+   the `_show_record` SELECT (`catalogue_menu.py:298-321`) gain `label`/`country`/`catalog_number`
+   columns. (Clean break ⇒ no DB migration; document that an existing catalogue.db must be
+   recreated, consistent with the RBI clean-break policy.)
+3. **`rbi_spec.md`** — document the new PROV keys, the rename, and the v6.0 bump.
+
+### 10.2 Config — `preferred_country`
+
+`Config.preferred_country: list[str] = field(default_factory=list)` (`config.py`). TOML array,
+e.g. `preferred_country = ["GB", "XE", "US"]`. Semantics: an **ordered priority ranking, not a
+filter** — listed codes rank in order; unlisted codes share the lowest equal rank; empty/unset ⇒
+key (2) is skipped entirely. Add a commented entry to `conf/cdda2img.toml.example`. Because output
+becomes config-dependent, the applied preference is **recorded in PROV** (R10 reproducibility — see
+§10.3).
+
+### 10.3 Release-selection rung (Layer 1) — lexicographic cascade rung
+
+**Where it lives (verified):** a new terminal rung inside `_prepop_multimatch` (`mb_lookup.py:1195`),
+reached when `_resolve_multimatch` returns `winner is None` — i.e. the existing ISRC/MCN cascade
+(`_disambiguate_by_isrcs` → `_resolve_via_isrc_tally`) could not pin a pressing. The cascade site
+already holds the **full `DiscMeta` candidate records** (`matches: list[DiscMeta]`, carrying
+`catalog`/`country`/`release_date`/`mb_release_id`), so the rung is one more call with the same
+argument — **no plumbing**.
+
+**Candidate set — score the album-consistent subset, NOT all `matches` (advisor-corrected,
+load-bearing).** The branch being refined does more than "decline to pin": before the agreed-facts
+merge it narrows to `subset = mcn_hits-or-all` then to the **plurality release-group**
+(`mb_lookup.py:1240-1247`). That narrowing is **TOC-collision protection** — a disc-ID can match
+different *albums* (the `_albums_match` "Eliminator" / "Afterburner / Eliminator" case), and on an
+MCN/ISRC-less disc the `_is_consistent` gate passes a minority wrong-album candidate vacuously.
+Scoring all `matches` would let key (3)/(4) pin that wrong-album collision (distinct barcodes ⇒ no
+plurality ⇒ falls to earliest-date/lowest-MBID, which the collision can win). The AcoustID gate is
+too coarse to backstop an *album-level* error (it only suppresses `--auto`; interactive still
+pre-fills wrong). **The rung therefore scores within `subset ∩ plurality-RG`** — the same
+album-consistent set the agreed-facts logic already establishes — and pins the best *pressing of the
+album the code already identified*. JT target case unaffected: all 5 finalists share the Joshua Tree
+RG → all 5 scored.
+
+**Behaviour change (call out + test):** the rung **refines the agreed-facts path** — instead of
+"merge only the facts every candidate agrees on" over that set, it "picks the best pressing within
+that set" (pins `mb_release_id` + that release's catalogue fields). Today `mb_release_id` stays
+unset on this branch; the rung pins it. Defensible under the best-guess authority model
+([[project_metadata_authority_model]]): preference-driven, PROV-recorded, user-correctable in the
+menu. But it changes *committed* output on the `--auto` / non-TTY path → **characterization test
+required** (§10.7).
+
+**The scoring (pure lexicographic, no discards — pick top):** key chain, each breaking ties left by
+the one above:
+0. **on-disc MCN match** [objective] — a candidate whose `catalog` positively matches the disc's
+   own MCN (`barcode.mcn_matches`) ranks first. Evidence outranks proxy (mirrors `OBJECTIVE >
+   everything`).
+1. **barcode-plurality** [popularity prior] — the most common normalised barcode across the
+   album-consistent subset scores highest. **MB-internal plurality is the default** (on the JT disc this alone
+   discriminates: `042284229821` ×3). Discogs corroboration (§10.3.1) is a *light* signal on the
+   chosen release, **not** N per-candidate url-rel fetches.
+2. **`preferred_country`** [user pref] — rank by position in the config array; arbitrates only
+   *within* a barcode tier (a uniquely-barcoded regional pressing stays below the common-barcode
+   tier even if its country is preferred — endorsed consequence, §9.5).
+3. **earliest `release_date`**.
+4. **MB release-ID** [terminal] — guarantees a unique deterministic winner. "Arbitrary but
+   reproducible" is acceptable here (user-confirmed).
+
+On selecting `winner`, merge via `_merge_into_disc(winner, disc)` (same as the ISRC-winner path) and
+return it as `meta`. **C2 is satisfied, not violated:** setting `mb_release_id` here is
+pressing-level-legitimate — every candidate shares the disc-ID fingerprint (unlike the
+AcoustID/duration paths that must null it).
+
+**PROV:** record `release_selected_via` (the key that broke the tie: `mcn`/`barcode_plurality`/
+`preferred_country`/`date`/`mbid`) and, when key (2) fired, `preferred_country_applied`.
+
+### 10.3.1 Discogs corroboration (barcode-only, light)
+
+Per §9.5(a) (closed: barcode 0/63; label/country/catalog_number unreliable). On the **selected**
+release only, follow the MB→Discogs url-rel and compare `barcode`; on agreement raise a confidence
+note, on conflict surface it (PROV `discogs_barcode_conflict`). This feeds cross-source barcode
+plurality only if a worked example shows MB-internal plurality *tying* where cross-source breaks it
+— otherwise MB-internal plurality stands alone (≈0 extra network; `metadata_over_engineered`).
+
+### 10.4 AcoustID gate (corroboration, not selection)
+
+Role: a **post-selection, set-level** sanity check — "does the disc audio match the album the
+disc-ID matched at all?" — to catch wrong disc-ID / TOC-collision / mispress. AcoustID is
+remaster-robust and has ≈0 *edition* power, so it cannot rank pressings; it gates the *trust in the
+disc-ID match as a whole*. Reuse the existing `_r6_acoustid_corroborate` machinery (tracks 1 and
+ceil(N/2)).
+
+**Ordering (verified):** the rung lives inside `prepopulate_from_mb`
+(`_run_metadata_lookups:1496/1503`); `_r6_acoustid_corroborate` already runs **after** it, at
+`_run_metadata_lookups:1553`. So the gate corroborates the **already-chosen** release and gates the
+auto-commit decision — it runs *after* selection, **not** before scoring. Do **not** plumb
+fingerprinting into `prepopulate_from_mb` (that would be a far larger change); the gate is a check
+applied **once** at the existing R6 site, against the selected release — not a per-candidate filter.
+
+Semantics (mirrors the AccurateRip precedent — informational, never fails the rip):
+- **Pass** → proceed with selection. **Fail** (audio does not corroborate the matched album) →
+  emit a WARNING + PROV `acoustid_gate=failed`, and **suppress `--auto`** (do not auto-commit a
+  release the audio contradicts; fall through to the menu / leave fields for manual entry). On a
+  non-TTY run with no menu, leave the disc-ID result unapplied rather than committing it.
+- Threshold: corroboration counts as pass when ≥1 probed track's AcoustID recordings include the
+  matched release-group; otherwise fail. (Tune after a worked example; default conservative =
+  warn-only unless `--auto`.)
+
+### 10.5 Canonical metadata renderer (the three presentation invariants)
+
+The three sites render **different field sets from different sources** today:
+- **menu** (`metadata_menu.py:90-143`) — from transient `DiscMeta`; already shows `release_date`
+  ("Released:") and `catalog_number` — the most complete.
+- **`list`** (dispatch `cdda2img.py:2633`; cf. the `_print_source_info` ad-hoc block at `763`) —
+  from `RBIDisc` (via PROV on read); the least.
+- **`catalogue`** (`catalogue_menu.py:_show_record`, `291`) — from **SQLite columns**; shows
+  `original_release_*` + year + MCN.
+
+**Scope of the three invariants:** they govern the **disc-level header block** only. The per-track
+table (#, Title, Duration, ISRC) is explicitly out of scope — only menu + `list` render it, the
+`catalogue` summary does not, and that asymmetry is intentional (so invariant (2) is not
+self-contradictory).
+
+"One canonical renderer" is therefore **a shared formatter fed a normalised dict**, not one
+function reading one object (the three data sources differ). Define:
+`format_disc_metadata(fields: DiscDisplayFields) -> list[str]` — a single pure function returning
+the formatted lines; each site builds the `DiscDisplayFields` from its own source (RBIDisc / DiscMeta
+/ SQLite row) and prints the shared output. Invariants enforced by construction:
+1. **stored ⟺ displayed** — the field set is exactly the persisted set from §10.1 (no shown-then-
+   discarded fields → closes §8.6; no stored-but-hidden fields → surfaces `release_date`).
+2. **same set in all three** — all three call `format_disc_metadata`; divergence becomes impossible
+   without editing the one function.
+3. **identical format/spacing/order** — defined once in `format_disc_metadata`.
+
+The canonical field set (order): Album (+ this-release year from `release_date`) · Artist · Label ·
+Country · Catalogue no. (`catalog_number`) · MCN (`catalog`) · Original release (`original_release_*`)
+· Tracks (count + duration). Per-track table (#, Title, Duration, ISRC) stays site-local (only menu
++ list show it; not the catalogue summary).
+
+### 10.6 Test plan
+
+- **Characterization (write first, per §7.4/§8.5):** pin current `_prepop_multimatch` agreed-facts
+  behaviour on a multi-match-no-winner fixture **before** adding the rung, so the behaviour change is
+  intentional and visible in the diff.
+- **Rung unit tests:** key (0)–(4) each decisive in isolation; the JT-shaped fixture (3× shared
+  barcode + 2 unique) → barcode-plurality tier → `preferred_country` GB → expected MBID; empty
+  `preferred_country` skips key (2); terminal MB-ID guarantees determinism.
+- **Round-trip:** v6.0 container with `catalog_number`/`label`/`country` set → `build_container` →
+  `read_header` → fields reconstructed; `cdtext_catalog_ref` survives the TOC round-trip.
+- **Renderer:** `format_disc_metadata` golden-output test; assert menu / `list` / `catalogue` all
+  call it (no residual ad-hoc field printing).
+- **Gate:** pass and fail fixtures; assert `--auto` suppressed on fail.
+- Run on min Python (3.10) per [[feedback_verify_min_python]].
+
+### 10.7 Build sequence
+
+1. `rbi_spec.md` bump + `RBIDisc` field changes + PROV write/read + catalogue schema (§10.1) — the
+   format foundation, spec-first.
+2. `format_disc_metadata` + wire all three sites (§10.5) — makes the new fields visible everywhere.
+3. `preferred_country` config (§10.2).
+4. The rung + characterization test + PROV provenance (§10.3).
+5. Discogs barcode corroboration (§10.3.1) + AcoustID gate (§10.4).
+
+Steps 1–2 are pure B6 (fields + display) and independently shippable; 3–5 are the disambiguator.

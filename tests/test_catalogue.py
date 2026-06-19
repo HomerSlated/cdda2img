@@ -624,7 +624,7 @@ def test_show_record_original_yes_this_release(tmp_path, capsys):
             _show_record(conn, rid)
     finally:
         conn.close()
-    assert "Original:      Yes, this release (1983)" in capsys.readouterr().out
+    assert "Original:  Yes, this release (1983)" in capsys.readouterr().out
 
 
 def test_show_record_original_no_names_earlier(tmp_path, capsys):
@@ -644,10 +644,10 @@ def test_show_record_original_no_names_earlier(tmp_path, capsys):
             _show_record(conn, rid)
     finally:
         conn.close()
-    assert "Original:      No, Thriller (1982)" in capsys.readouterr().out
+    assert "Original:  No, Thriller (1982)" in capsys.readouterr().out
 
 
-def test_show_record_not_found_emits_no_original_line(tmp_path, capsys):
+def test_show_record_not_found_shows_unknown_original(tmp_path, capsys):
     from cdda2img.catalogue_menu import _show_record
 
     conn = open_catalogue_db(tmp_path / "c.db")
@@ -657,7 +657,9 @@ def test_show_record_not_found_emits_no_original_line(tmp_path, capsys):
             _show_record(conn, rid)
     finally:
         conn.close()
-    # Header carries the disc year; no original-release line when not found.
+    # The canonical disc-metadata block (rbi_spec.md §6.3.2) always renders the
+    # Original line; when the lookup found nothing it reads "Unknown". The disc
+    # year still surfaces via the canonical "Album: … (1983)" line.
     out = capsys.readouterr().out
-    assert "Original:" not in out
+    assert "Original:  Unknown, unknown release (unknown year)" in out
     assert "(1983)" in out

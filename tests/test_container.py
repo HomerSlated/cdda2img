@@ -111,6 +111,55 @@ def built_containers(tmp_path_factory, wav_tracks):
 
 
 # ---------------------------------------------------------------------------
+# v6.0 catalogue fields: PROV write -> read -> canonical render (end-to-end)
+# ---------------------------------------------------------------------------
+
+
+def test_list_renders_canonical_catalogue_fields(tmp_path, wav_tracks):
+    """End-to-end: catalogue fields set on RBIDisc survive the PROV write side
+    (_add_release_provenance) and the read side, and surface in the `list`
+    canonical disc-metadata block (rbi_spec.md §6.3.2). This exercises the full
+    path a unit test on the formatter alone cannot — and pins the new fields'
+    rendered form so the three surfaces cannot drift on it.
+    """
+    from cdda2img.cdda2img import _add_release_provenance
+    from cdda2img.container import _list_info
+
+    disc = RBIDisc(
+        album="The Joshua Tree",
+        artist="U2",
+        release_date="1987-03-09",
+        label="Island Records",
+        country="GB",
+        catalog_number="CID U2 6",
+        catalog="0042284229821",
+    )
+    durations = get_track_durations(wav_tracks)
+    disc.tracks = build_toc_entries(_EXAMPLE_TRACKS, durations, disc)
+    toc_data = generate_toc(disc)
+
+    concat = tmp_path / "all.wav"
+    pcm = tmp_path / "all.pcm"
+    concat_wav(wav_tracks, concat)
+    wav_to_raw_pcm(concat, pcm)
+
+    prov = {"mode": "create", "source": "/test", "ripper": "file"}
+    _add_release_provenance(prov, disc)  # write side: disc fields -> PROV keys
+    rbi = tmp_path / "jt.rbi"
+    build_container(pcm, toc_data, disc, rbi, prov_data=prov)
+
+    out = _list_info(rbi)  # read side: PROV + TOC -> canonical render
+    assert "Album:     The Joshua Tree (1987)" in out
+    assert "Artist:    U2" in out
+    assert "Label:     Island Records" in out
+    assert "Country:   GB" in out
+    assert "Cat. no.:  CID U2 6" in out
+    assert "MCN:       0042284229821" in out
+    # Tracks line carries only the count (no per-site duration -> no divergence).
+    assert f"Tracks:    {len(_EXAMPLE_TRACKS)}" in out
+
+
+# ---------------------------------------------------------------------------
 # Header round-trip
 # ---------------------------------------------------------------------------
 

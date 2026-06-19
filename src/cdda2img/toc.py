@@ -125,8 +125,10 @@ def generate_toc(
         disc_text_lines.append(f'    TITLE "{album}"')
     if artist:
         disc_text_lines.append(f'    PERFORMER "{artist}"')
-    if disc.disc_id:
-        disc_text_lines.append(f'    DISC_ID "{escape_toc_string(disc.disc_id)}"')
+    if disc.cdtext_catalog_ref:
+        disc_text_lines.append(
+            f'    DISC_ID "{escape_toc_string(disc.cdtext_catalog_ref)}"'
+        )
 
     if disc_text_lines:
         lines += [
