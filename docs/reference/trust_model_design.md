@@ -587,10 +587,15 @@ new fields — every stored field needs a write site, a read site, and a catalog
    `catalog_number`/`label`/`country` keys (same `if disc.X:` pattern); the read side in
    `container.py` (~963) reconstructs them onto `RBIDisc`. `cdtext_catalog_ref` is unaffected (it
    rides the TOC, not PROV).
-2. **Catalogue SQLite schema** — `catalogue.py` schema (`62-72`) + `register_rbi` (`415-524`) +
-   the `_show_record` SELECT (`catalogue_menu.py:298-321`) gain `label`/`country`/`catalog_number`
-   columns. (Clean break ⇒ no DB migration; document that an existing catalogue.db must be
-   recreated, consistent with the RBI clean-break policy.)
+2. **Catalogue SQLite schema** — `catalogue.py` schema + `register_rbi` + the `_show_record`
+   SELECT (`catalogue_menu.py`) gain `label`/`country`/`catalog_number` columns. **The catalogue
+   is a derived index, NOT an RBI container — it self-migrates additively** (the RBI clean-break
+   does *not* apply here). Bump `_SCHEMA_VERSION` and add a `_migrate_v4_to_v5` (`ALTER TABLE ADD
+   COLUMN`) chained in `_check_schema_version`, exactly like the existing `_migrate_v3_to_v4`.
+   *(Lesson learned, 2026-06-20: the first cut added the columns to the DDL but forgot the
+   version bump + migration; `CREATE TABLE IF NOT EXISTS` is a no-op on an existing DB, so the
+   columns silently never appeared — crashing the catalogue browser and silently breaking rip-time
+   registration. An existing catalogue.db must never be invalidated by a schema change.)*
 3. **`rbi_spec.md`** — document the new PROV keys, the rename, and the v6.0 bump.
 
 ### 10.2 Config — `preferred_country`

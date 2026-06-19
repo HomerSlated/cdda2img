@@ -63,7 +63,7 @@ def test_open_catalogue_db_sets_meta(tmp_path):
             "SELECT value FROM db_meta WHERE key='schema_version'"
         ).fetchone()
         assert row is not None
-        assert row[0] == "4"
+        assert row[0] == "5"
     finally:
         conn.close()
 
@@ -88,7 +88,7 @@ def test_open_catalogue_db_too_new_raises(tmp_path):
 
 
 def test_migrate_v3_to_v4(tmp_path):
-    """Opening a v3 catalogue auto-migrates to v4 and adds the b3sum column."""
+    """Opening a v3 catalogue auto-migrates (v3->v4->v5) and adds the b3sum column."""
     import sqlite3 as _sqlite3
 
     db_path = tmp_path / "v3.db"
@@ -129,7 +129,7 @@ def test_migrate_v3_to_v4(tmp_path):
         ver = conn.execute(
             "SELECT value FROM db_meta WHERE key='schema_version'"
         ).fetchone()[0]
-        assert ver == "4"
+        assert ver == "5"  # chained: v3 -> v4 -> v5 in a single open
         # b3sum column must now exist and accept values
         conn.execute(
             "INSERT INTO catalogue "
@@ -139,6 +139,69 @@ def test_migrate_v3_to_v4(tmp_path):
         )
         b3 = conn.execute("SELECT b3sum FROM catalogue").fetchone()[0]
         assert b3 == "deadbeef"
+    finally:
+        conn.close()
+
+
+def test_migrate_v4_to_v5(tmp_path):
+    """Opening a v4 catalogue auto-migrates to v5, adding the RBI v6.0 catalogue
+    intelligence columns (label/country/catalog_number). Reproduces the real bug:
+    a catalogue.db created before v6.0 must not crash the catalogue browser."""
+    import sqlite3 as _sqlite3
+
+    db_path = tmp_path / "v4.db"
+    # The v4 schema = v3 + b3sum, *without* label/country/catalog_number.
+    old_ddl = """
+    CREATE TABLE db_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+    CREATE TABLE catalogue (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        mcn TEXT, album TEXT NOT NULL, artist TEXT NOT NULL,
+        year INTEGER, disc_number INTEGER NOT NULL DEFAULT 1,
+        disc_total INTEGER NOT NULL DEFAULT 1, track_count INTEGER NOT NULL,
+        rg_album_gain REAL, rg_album_peak REAL, rg_album_range REAL,
+        file_basename TEXT NOT NULL, file_path TEXT NOT NULL,
+        file_size INTEGER NOT NULL, registered_at TEXT NOT NULL,
+        created_by TEXT NOT NULL, mode TEXT NOT NULL,
+        source TEXT, ripper TEXT, drive TEXT,
+        low_dynamic_range INTEGER,
+        original_release_found INTEGER NOT NULL DEFAULT 0,
+        original_release_title TEXT, original_release_year INTEGER,
+        b3sum TEXT
+    );
+    CREATE TABLE catalogue_tracks (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        catalogue_id INTEGER NOT NULL,
+        track_number INTEGER NOT NULL, title TEXT NOT NULL,
+        duration_frames INTEGER NOT NULL,
+        rg_track_gain REAL, rg_track_peak REAL, rg_track_range REAL,
+        ar_v1_crc TEXT, ar_v2_crc TEXT, ar_status TEXT, ar_confidence INTEGER,
+        UNIQUE (catalogue_id, track_number)
+    );
+    INSERT INTO db_meta (key, value) VALUES ('schema_version', '4');
+    INSERT INTO catalogue
+        (mcn, album, artist, year, track_count, file_basename, file_path,
+         file_size, registered_at, created_by, mode)
+        VALUES ('0042284229821', 'The Joshua Tree', 'U2', 1987, 11, 'jt.rbi',
+                '/jt.rbi', 0, '2026-06-19', 'test', 'rip');
+    """
+    conn0 = _sqlite3.connect(db_path)
+    conn0.executescript(old_ddl)
+    conn0.commit()
+    conn0.close()
+
+    conn = open_catalogue_db(db_path)
+    try:
+        ver = conn.execute(
+            "SELECT value FROM db_meta WHERE key='schema_version'"
+        ).fetchone()[0]
+        assert ver == "5"
+        # New columns exist; the existing row survives with NULLs for them.
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(catalogue)")}
+        assert {"label", "country", "catalog_number"} <= cols
+        label, country, catno = conn.execute(
+            "SELECT label, country, catalog_number FROM catalogue WHERE album='The Joshua Tree'"
+        ).fetchone()
+        assert (label, country, catno) == (None, None, None)
     finally:
         conn.close()
 

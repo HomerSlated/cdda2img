@@ -18,7 +18,7 @@ from pathlib import Path
 
 log = logging.getLogger(__name__)
 
-_SCHEMA_VERSION = "4"
+_SCHEMA_VERSION = "5"
 _APP_NAME = "cdda2img"
 
 
@@ -160,6 +160,20 @@ def _migrate_v3_to_v4(conn: sqlite3.Connection) -> None:
     log.info("Catalogue schema migrated v3 → v4 (added b3sum column)")
 
 
+def _migrate_v4_to_v5(conn: sqlite3.Connection) -> None:
+    # RBI v6.0 catalogue intelligence: label / country / catalog_number. The
+    # catalogue is a derived index, so it self-migrates additively (unlike the
+    # RBI container clean break) — an existing catalogue is never invalidated.
+    conn.execute("ALTER TABLE catalogue ADD COLUMN label TEXT")
+    conn.execute("ALTER TABLE catalogue ADD COLUMN country TEXT")
+    conn.execute("ALTER TABLE catalogue ADD COLUMN catalog_number TEXT")
+    conn.execute(
+        "INSERT OR REPLACE INTO db_meta (key, value) VALUES ('schema_version', '5')"
+    )
+    conn.commit()
+    log.info("Catalogue schema migrated v4 → v5 (added label/country/catalog_number)")
+
+
 def _check_schema_version(conn: sqlite3.Connection) -> None:
     row = conn.execute(
         "SELECT value FROM db_meta WHERE key='schema_version'"
@@ -167,8 +181,6 @@ def _check_schema_version(conn: sqlite3.Connection) -> None:
     if row is None:
         return
     db_ver = row[0]
-    if db_ver == _SCHEMA_VERSION:
-        return
     if db_ver > _SCHEMA_VERSION:
         log.warning(
             "Catalogue schema v%s is newer than supported v%s; "
@@ -178,8 +190,15 @@ def _check_schema_version(conn: sqlite3.Connection) -> None:
         )
         msg = f"catalogue schema v{db_ver} > supported v{_SCHEMA_VERSION}"
         raise RuntimeError(msg)
+    # Apply additive migrations in sequence so any older DB reaches the current
+    # schema (e.g. v3 -> v4 -> v5 in one open).
     if db_ver == "3":
         _migrate_v3_to_v4(conn)
+        db_ver = "4"
+    if db_ver == "4":
+        _migrate_v4_to_v5(conn)
+        db_ver = "5"
+    if db_ver == _SCHEMA_VERSION:
         return
     msg = (
         f"catalogue schema v{db_ver} predates current v{_SCHEMA_VERSION}; "
