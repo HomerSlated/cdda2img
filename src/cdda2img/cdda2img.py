@@ -699,18 +699,19 @@ def create_image(
                 attempted=True, has_data=_art_raw is not None, errored=False
             )
 
-            from cdda2img.match_distance import (
-                MatchRecommendation,
-                build_match_distance,
-            )
+            from cdda2img.match_distance import build_match_distance
             from cdda2img.metadata_menu import run_metadata_menu
 
             match_dist = build_match_distance(disc, provenance)
             provenance["match_confidence"] = f"{match_dist.score:.3f}"
             provenance["match_recommendation"] = match_dist.recommendation.value
-            auto_apply = auto or (
-                match_dist.recommendation == MatchRecommendation.STRONG
-            )
+            # Menu shown unless --auto; confidence is informational (see
+            # _finalize_import for the same policy).
+            auto_apply = auto
+            if auto_apply:
+                print(f"  Metadata auto-confirmed — {match_dist.summary()}")
+            else:
+                print(f"  Metadata: {match_dist.summary()}")
             disc = run_metadata_menu(
                 disc, source_wavs=source_wavs, tui=tui, auto_apply=auto_apply
             )
@@ -1703,20 +1704,24 @@ def _finalize_import(
     _r11_corroborate_with_discogs_master(disc, provenance)
 
     # Compute match confidence after all lookup signals are baked into prov.
-    from cdda2img.match_distance import MatchRecommendation, build_match_distance
+    from cdda2img.match_distance import build_match_distance
 
     match_dist = build_match_distance(disc, provenance)
     provenance["match_confidence"] = f"{match_dist.score:.3f}"
     provenance["match_recommendation"] = match_dist.recommendation.value
-    auto_apply = auto or (match_dist.recommendation == MatchRecommendation.STRONG)
+    # The interactive menu is shown unless --auto (or config auto=true). Match
+    # confidence is informational only — it is surfaced as a hint but never
+    # skips the menu on its own (user decision, 2026-06-20).
+    auto_apply = auto
 
     # Hand the terminal over to the interactive metadata menu. The
     # ar_summary kwarg is passed through for completeness (rip pipeline only).
     if ui is not None:
         ui.pause()
     if auto_apply:
-        _diag = f"  Metadata auto-confirmed — {match_dist.summary()}"
-        print(_diag)
+        print(f"  Metadata auto-confirmed — {match_dist.summary()}")
+    else:
+        print(f"  Metadata: {match_dist.summary()}")
     disc = run_metadata_menu(
         disc, source_pcm=pcm_file, ar_summary=ar_summary, tui=tui, auto_apply=auto_apply
     )
