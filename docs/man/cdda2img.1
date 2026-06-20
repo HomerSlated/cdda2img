@@ -1,6 +1,6 @@
 .\" cdda2img.1 — manual page for cdda2img
 .\" Install: doas install -m 644 docs/man/cdda2img.1 /usr/local/share/man/man1/
-.TH CDDA2IMG 1 "2026\-05\-25" "cdda2img 0.1.7" "User Commands"
+.TH CDDA2IMG 1 "2026\-06\-20" "cdda2img 0.1.7" "User Commands"
 .\"
 .SH NAME
 cdda2img \- create and extract RBI audio CD archive images
@@ -43,9 +43,6 @@ cdda2img \- create and extract RBI audio CD archive images
 .RI [ options ]
 .br
 .B "cdda2img \-\-version"
-.br
-.B "cdda2img \-\-no\-network\-services"
-.RI < subcommand >
 .\"
 .SH DESCRIPTION
 .B cdda2img
@@ -54,8 +51,8 @@ as RBI (Red Book Image) container images.
 An RBI file stores the disc\(cqs raw PCM audio (signed 16\-bit little\-endian,
 44100\~Hz stereo), an embedded cdrdao\-format TOC, optional blocks for EBU\~R128
 ReplayGain data, AccurateRip verification results, rip provenance, and rip log,
-and per\-block SHA\-256 integrity checksums in a single self\-contained file.
-The current format version is RBI v4.0.
+and per\-block BLAKE3 integrity checksums in a single self\-contained file.
+The current format version is RBI v6.0.
 .PP
 Metadata \(em album title, artist, per\-track titles, ISRC codes, and original\-release
 provenance \(em is sourced interactively from MusicBrainz, AcoustID, and Discogs
@@ -472,7 +469,8 @@ done
 .SS test \(em Test
 Verifies the integrity and spec\-conformance of an RBI image.
 Runs 27 checks covering magic bytes, format version, flags, block directory
-structure, file size, UTF\-8 metadata, SHA\-256 checksums for all blocks,
+structure, file size, UTF\-8 metadata, BLAKE3 checksums for all blocks
+(SHA\-256 for legacy v4.x containers),
 TOC parse, and track\-count consistency.
 Exits with status 1 if any check fails.
 .PP
@@ -680,10 +678,8 @@ Duration match only, no disc ID (+0.20), AcoustID corroborated (+0.25).
 Typical for a disc not yet catalogued in MusicBrainz by disc ID.
 .TP
 .B 0.00 (NONE)
-No remote lookup returned a usable result (network down, disc not in any
-database, or
-.B \-\-no\-network\-services
-active without a cache hit).
+No remote lookup returned a usable result (network down, no API
+credentials configured, or disc not in any database).
 .SS Effect of \-\-auto
 Passing
 .B \-\-auto

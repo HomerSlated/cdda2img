@@ -1443,24 +1443,33 @@ in `tests/fixtures/foreign/README.md`.
 
 ### Formats
 
-All formats below are read targets. The developer-only write path (step 5 above)
-is implemented only as far as needed for round-trip validation and is never
+All formats below are read (import) targets. The developer-only write path (step 5
+above) is implemented only as far as needed for round-trip validation and is never
 distributed. See `TOOLING.md` for the authoritative Windows tools used to create
 sample images.
+
+**Supported in `import` today** (an in-repo reader exists):
+
+| Format | Authoritative tool | In-repo reader | Sample | Notes |
+|--------|--------------------|----------------|--------|-------|
+| DDP 2.0 | GEAR Pro Mastering Edition | `ddp_reader.py` | ✅ `private/images/Gear/` | GEAR s16le byte order verified (no swap) |
+| TOC/BIN (cdrdao) | cdrdao | `cdrdao_reader.py` + `toc_parser.py` | ✅ `private/images/cdrdao/` | s16be BIN → s16le swap |
+| NRG | Nero Burning ROM | `nrg_reader.py` | ✅ `private/images/Nero/` | NER5 (64-bit) + NERO (32-bit); s16le (no swap) |
+| CCD/IMG/SUB | CloneCD | `ccd_reader.py` | ✅ `private/images/CloneCD/` | s16be IMG → s16le swap |
+
+**Deferred / future import targets** (sample images on hand, no reader yet — parser
+reference is libmirage unless noted):
 
 | Format | Authoritative tool | Parser reference | Sample | Status |
 |--------|--------------------|-----------------|--------|--------|
 | CUE/BIN | ImgBurn, EAC | libmirage | ❌ | `[ ]` |
-| CCD/IMG/SUB | CloneCD | libmirage | ✅ | `[ ]` |
-| MDS/MDF | Alcohol 120% | libmirage | ✅ | `[ ]` |
-| MDX | Alcohol 120% (v6+) | libmirage | ❌ | `[ ]` |
-| NRG | Nero Burning ROM | libmirage | ✅ | `[ ]` |
-| CDI | DiscJuggler | libmirage | ❌ | `[ ]` |
-| B6T/B6I | BlindWrite 5/6 (*.b5t/*.b6t) | libmirage | ✅ | `[ ]` |
-| C2D | WinOnCD 6 | libmirage | ✅ | `[ ]` |
-| CIF/GI | Easy CD Creator / Roxio Creator | libmirage | ❌ | `[ ]` |
-| DDP 2.0 | GEAR Pro Mastering Edition | ddp_reader.py | ✅ | `[x]` `i` subcommand complete; GEAR s16le byte order verified |
-| TOC (cdrdao) | cdrdao | toc_parser.py + cdrdao_reader.py | ✅ | `[x]` `i` subcommand complete |
+| MDS/MDF | Alcohol 120% | libmirage | ✅ `private/images/Alcohol120/`, `Alcohol120PC/` | `[ ]` |
+| MDX (+ MDS/MDF/APE) | Daemon Tools / Alcohol 120% (v6+) | libmirage | ✅ `private/images/Daemon Tools/` | `[ ]` |
+| B5T/B6T/B5I/B6I | BlindWrite 5/6 | libmirage | ✅ `private/images/Blindwrite/` | `[ ]` |
+| C2D | WinOnCD 6 | libmirage | ✅ `private/images/WinOnCD/` | `[ ]` |
+| CDI | DiscJuggler | libmirage | ✅ `private/images/DiscJuggler/` | `[ ]` |
+| CIF | Easy CD Creator / Roxio Creator | libmirage | ✅ `private/images/EasyCD/` | `[ ]` |
+| BIN/CUE/XMD/XMF | CDRWIN | libmirage | ✅ `private/images/CDRWIN/` | `[ ]` |
 | READCD | readcd (cdrtools/schily) | libmirage | ❌ | `[ ]` |
 | M3U | — | trivial | ❌ | `[ ]` playlist paired with audio files |
 

@@ -54,13 +54,24 @@ This is an active prototype. A Rust reimplementation is planned once the design 
 - **Automatic metadata lookup** — disc is identified before the interactive menu fires:
   1. *CDDB* — TCP query (default: gnudb.gnudb.org:8880); pre-populates album, artist, year,
      and track titles from the disc TOC fingerprint
-  2. *MusicBrainz disc ID* — SHA-1 TOC fingerprint lookup; single matches are auto-applied;
-     multiple are presented for selection; barcode hints from MB feed Discogs lookup
+  2. *MusicBrainz disc ID* — SHA-1 TOC fingerprint lookup; a single match is applied;
+     multiple matches are resolved by ISRC tally, then a deterministic release-selection
+     ladder over the album's plurality release-group (on-disc MCN match, then barcode
+     plurality, then `preferred_country` priority, then earliest release date, then a
+     terminal MBID tie-break); barcode hints from MB feed the Discogs lookup
   3. *Discogs* — two-phase barcode lookup: the raw MCN/barcode is matched by substring to a
      canonical 13-digit EAN and written to `disc.catalog` (always, even without enrichment);
-     if exactly one Discogs result matches the album title, full metadata is merged
-  4. *Interactive menu* — confirm or correct all fields; can invoke AcoustID/Chromaprint
-     per-track acoustic fingerprinting for discs not in the MB disc database
+     if exactly one Discogs result matches the album title, full metadata is merged. The
+     selected MusicBrainz release's Discogs link is also followed and its barcode compared
+     against MusicBrainz's as a cross-source corroboration recorded in provenance
+  4. *AcoustID gate* — after the release is selected, per-track Chromaprint fingerprints are
+     checked against the chosen release's album; a non-corroborating result records
+     `acoustid_gate=failed` and suppresses `--auto` for that disc (informational; never fails
+     the rip)
+  5. *Interactive menu* — opens on every rip, import, and create unless `--auto` (or
+     `auto = true` in config); confirm or correct all fields. A match-confidence
+     recommendation (STRONG/MEDIUM/LOW/NONE) is shown for context but is display-only and
+     never skips the menu on its own
 - **Release intelligence** — two factual signals captured at archive time and recorded
   in both the RBI provenance block and the disc catalogue:
   - *Low dynamic range* — boolean derived from the measured EBU R128 album LRA against
@@ -87,34 +98,36 @@ This is an active prototype. A Rust reimplementation is planned once the design 
   cdemu virtual slot; the mounted disc is then visible to cdrdao, whipper, or any other
   ripper for re-ripping, verification, or playback
 - **List and verify** — `list` prints container structure, track index, and optional block
-  content (`--info`, `--rg`, `--ar`, `--log` flags); `test` verifies all SHA-256 block
-  checksums and structural invariants, exits non-zero on failure
+  content (`--info`, `--rg`, `--ar`, `--log`, `--prov` flags; `--prov` dumps every decoded
+  provenance `key=value`, including keys no other view surfaces such as `acoustid_gate` and
+  `release_selected_via`); `test` verifies all block checksums and structural invariants,
+  exits non-zero on failure
 - **Disc catalogue** — SQLite database at `$XDG_DATA_HOME/cdda2img/cdda2img.db`; populated
   automatically after every rip, import, or create; browsable via `cdda2img catalogue` with
   a summary page, full-text search across artist and album, and a per-disc track listing
   with AccurateRip status and confidence per track
-- **SHA-256 checksums** for all blocks — stored in the block directory, verified on every
-  extract and test
+- **BLAKE3 checksums** for all blocks — stored in the block directory, verified on every
+  extract and test (SHA-256 in legacy v4.x containers)
 - **Open, documented format** — `docs/reference/rbi_spec.md` fully specifies every field
 
 ## RBI Format
 
 A single binary file. 40-byte fixed header containing the magic bytes `RBIMAGE\x00`,
-format version (v4.0), track count, disc number/total, PCM parameters, and a pointer
+format version (v6.0), track count, disc number/total, PCM parameters, and a pointer
 to the block directory appended at the end of the file. Variable-length blocks:
 
 | Block | Contents |
 |-------|----------|
 | TOC   | cdrdao-format text TOC; per-track pre-gap durations, ISRC, and CATALOG (MCN) |
-| PROV  | Provenance key=value text: creator, mode, source, ripper, drive |
+| PROV  | Provenance key=value text: creator, mode, source, ripper, drive; release-selection, AcoustID-gate, and Discogs-barcode corroboration surfaces |
 | RGDB  | 17 + 12×N bytes: per-track and album EBU R128 gain, peak, and LRA values |
 | ARIP  | AccurateRip v1/v2 checksums and confidence per track |
-| RLOG  | Structured rip log: drive, engine, offsets, per-track AR results, SHA-256 self-seal |
+| RLOG  | Structured rip log: drive, engine, offsets, per-track AR results, BLAKE3 self-seal |
 | PCM   | Raw s16le — no WAV wrapper; parameters stored in the fixed header |
 
-Each block has a SHA-256 checksum stored in the block directory. All blocks except TOC
-and PCM are optional. Pre-gap audio is stored contiguously in the PCM block; the TOC
-records the pre-gap duration separately so extraction skips it cleanly.
+Each block has a BLAKE3 checksum stored in the block directory (SHA-256 in v4.x containers).
+All blocks except TOC and PCM are optional. Pre-gap audio is stored contiguously in the PCM
+block; the TOC records the pre-gap duration separately so extraction skips it cleanly.
 Full specification: `docs/reference/rbi_spec.md`.
 
 ## Installation
@@ -162,9 +175,10 @@ uv run python -m cdda2img burn album.rbi
 uv run python -m cdda2img burn album.rbi --device /dev/sr0 --speed 8
 uv run python -m cdda2img burn album.rbi --write-offset -30 --yes
 
-# Inspect a container; show AccurateRip report; verify all checksums
+# Inspect a container; show AccurateRip report; dump full provenance; verify all checksums
 uv run python -m cdda2img list album.rbi
 uv run python -m cdda2img list album.rbi --ar
+uv run python -m cdda2img list album.rbi --prov
 uv run python -m cdda2img test album.rbi
 
 # Browse the disc catalogue

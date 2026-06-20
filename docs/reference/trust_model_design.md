@@ -304,8 +304,11 @@ load-bearing claim were both verified against the code here.
    question is **moot for the code as it stands** — removing (iii)'s defining advantage.
 
 3. **The real harm is narrow and non-interactive.** The order-dependent merge is the
-   *committed* result under three triggers — `--auto`, a STRONG match (which *requires* a
-   `+0.50` disc-ID hit), and non-TTY/scripted runs (`menu_state.py:1023`). Within those, the
+   *committed* result under two triggers — `--auto` and non-TTY/scripted runs
+   (`menu_state.py:1023`: skip when `not isatty() or auto_apply`). (Historical note: an
+   earlier design also auto-skipped the menu on a STRONG confidence match; that was retired
+   on 2026-06-20 — match confidence is now display-only and never skips the menu, so STRONG is
+   no longer an auto-commit trigger.) Within those, the
    only wrong outcome is a **present-but-wrong CD-Text baseline disagreeing with a
    disc-ID-matched MB release, committed with no human in the loop.** Interactively, the
    user arbitrates and precedence is irrelevant. (This widens §7.3, which named only
@@ -392,8 +395,9 @@ blocks**; the three options (i)/(ii)/(iii) are bundles of them.
 - Whether B2's "overwrite present baseline" is always right for a disc-ID match, or whether
   there are pressing-variant cases where CD-Text formatting is preferable (low risk —
   disc-ID is pressing-specific — but worth a worked example).
-- The exact `--auto` / STRONG / non-TTY tie-break policy if any future block introduces
-  equal-trust contests (the "order-independent" asterisk, §7.4).
+- The exact `--auto` / non-TTY tie-break policy if any future block introduces
+  equal-trust contests (the "order-independent" asterisk, §7.4). (STRONG is no longer a
+  trigger — match confidence became display-only on 2026-06-20.)
 - Whether `metadata_over_engineered` should veto B5 outright, or whether menu alternatives
   are the rare UX feature that *does* improve the guess (the user is the arbiter, and
   alternatives improve what the arbiter sees).
@@ -632,8 +636,9 @@ RG → all 5 scored.
 
 **Behaviour change (call out + test):** the rung **refines the agreed-facts path** — instead of
 "merge only the facts every candidate agrees on" over that set, it "picks the best pressing within
-that set" (pins `mb_release_id` + that release's catalogue fields). Today `mb_release_id` stays
-unset on this branch; the rung pins it. Defensible under the best-guess authority model
+that set" (pins `mb_release_id` + that release's catalogue fields). Previously `mb_release_id`
+stayed unset on this branch (the agreed-facts merge); the rung now pins it (implemented in
+`_prepop_multimatch`). Defensible under the best-guess authority model
 ([[project_metadata_authority_model]]): preference-driven, PROV-recorded, user-correctable in the
 menu. But it changes *committed* output on the `--auto` / non-TTY path → **characterization test
 required** (§10.7).
@@ -688,8 +693,11 @@ applied **once** at the existing R6 site, against the selected release — not a
 Semantics (mirrors the AccurateRip precedent — informational, never fails the rip):
 - **Pass** → proceed with selection. **Fail** (audio does not corroborate the matched album) →
   emit a WARNING + PROV `acoustid_gate=failed`, and **suppress `--auto`** (do not auto-commit a
-  release the audio contradicts; fall through to the menu / leave fields for manual entry). On a
-  non-TTY run with no menu, leave the disc-ID result unapplied rather than committing it.
+  release the audio contradicts; on a TTY this drops through to the interactive menu for review).
+  (Implemented policy, finalised 2026-06-20: **warn-only** — the disc-ID result is always kept and
+  flagged in PROV, never reverted. On a headless `--auto` / non-TTY run with no menu the flagged
+  result is still committed, not left unapplied; revisit if a real failing disc shows a better
+  policy. See `_gate_adjusted_auto`, `cdda2img.py:1391`.)
 - Threshold: corroboration counts as pass when ≥1 probed track's AcoustID recordings include the
   matched release-group; otherwise fail. (Tune after a worked example; default conservative =
   warn-only unless `--auto`.)
