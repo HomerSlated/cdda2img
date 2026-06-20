@@ -1267,6 +1267,46 @@ def _r11_corroborate_with_discogs_master(
         disc.original_release_year = discogs_year
 
 
+def _discogs_barcode_corroborate(disc: RBIDisc, provenance: dict[str, str]) -> None:
+    """§10.3.1 Discogs barcode corroboration — cross-source, light, PROV-only.
+
+    On the **selected** release only: follow the MB→Discogs url-relation, fetch
+    the linked Discogs release, and compare its barcode to MusicBrainz's.
+    Agreement → ``discogs_barcode_corroborates=YES``; disagreement →
+    ``discogs_barcode_conflict=mb:<bc>|discogs:<bc>``.
+
+    Deliberately does **not** feed release selection (the rung has already
+    chosen) and skips cleanly — no fetch, no PROV key — when there is no MB
+    disc-ID match, no Discogs link, no barcode on either side, or no token.
+
+    Low-yield by design: the MB-vs-Discogs corpus showed barcode agreement is
+    near-universal (0/63 conflicts), so this is mostly a provenance record and a
+    deliberate foothold for a future Discogs-primary experiment — not a decision
+    signal. Costs up to two network round-trips (one MB url-rels fetch, one
+    Discogs release fetch), both skipped when no Discogs token is configured.
+    """
+    if not disc.mb_release_id:
+        return
+    from cdda2img import discogs_lookup as _discogs
+
+    if not _discogs.is_available():
+        return
+    from cdda2img.mb_lookup import discogs_link_and_barcode
+
+    discogs_id, mb_barcode = discogs_link_and_barcode(disc.mb_release_id)
+    if discogs_id is None or not mb_barcode:
+        return
+    d_meta = _discogs.fetch_release(discogs_id)
+    if d_meta is None or not d_meta.catalog:
+        return
+    if d_meta.catalog == mb_barcode:
+        provenance["discogs_barcode_corroborates"] = "YES"
+    else:
+        provenance["discogs_barcode_conflict"] = (
+            f"mb:{mb_barcode}|discogs:{d_meta.catalog}"
+        )
+
+
 _R9_DISAGREE_THRESH = 0.15
 
 
@@ -1640,6 +1680,8 @@ def _run_metadata_lookups(
         has_data=bool(disc.catalog) and disc.catalog != pre_discogs_catalog,
         errored=False,
     )
+    # §10.3.1: cross-source barcode corroboration on the rung-selected release.
+    _discogs_barcode_corroborate(disc, provenance)
 
     # AcoustID per-track corroboration (tracks 1 and ceil(N/2)).
     from cdda2img import acoustid_lookup as _acoustid

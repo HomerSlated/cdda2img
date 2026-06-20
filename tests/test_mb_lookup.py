@@ -29,6 +29,7 @@ from cdda2img.mb_lookup import (
     _select_release_lexicographic,
     compute_disc_id,
     disc_id_from_rbi,
+    discogs_link_and_barcode,
     lookup_disc_id,
     prepopulate_from_mb,
 )
@@ -2027,3 +2028,68 @@ def test_prepopulate_rung_preferred_country_threads_through():
         r2 = prepopulate_from_mb(disc2, verbose=False, preferred_country=[])
     assert r2.release_selected_via == "mbid"
     assert r2.disc.mb_release_id == "de"  # lexicographically smallest id
+
+
+# ---------------------------------------------------------------------------
+# §10.3.1 discogs_link_and_barcode — MB->Discogs url-rel + barcode (one fetch)
+# ---------------------------------------------------------------------------
+
+
+def _rel_response(barcode, url_rels):
+    return {"release": {"barcode": barcode, "url-relation-list": url_rels}}
+
+
+def test_discogs_link_and_barcode_extracts_id_and_barcode():
+    resp = _rel_response(
+        "042284229821",
+        [
+            {"type": "amazon asin", "target": "https://www.amazon.com/x"},
+            {"type": "discogs", "target": "https://www.discogs.com/release/1198146"},
+        ],
+    )
+    with patch("musicbrainzngs.get_release_by_id", return_value=resp):
+        discogs_id, barcode = discogs_link_and_barcode("some-mbid")
+    assert discogs_id == 1198146
+    assert barcode == "0042284229821"
+
+
+def test_discogs_link_and_barcode_release_url_with_slug():
+    # Discogs release URLs may carry a trailing slug; the id is still extracted.
+    resp = _rel_response(
+        "042284229821",
+        [{"type": "discogs", "target": "https://www.discogs.com/release/1198146-U2"}],
+    )
+    with patch("musicbrainzngs.get_release_by_id", return_value=resp):
+        discogs_id, _ = discogs_link_and_barcode("some-mbid")
+    assert discogs_id == 1198146
+
+
+def test_discogs_link_and_barcode_no_discogs_release_link():
+    # A discogs *master* URL has no /release/<id> -> no id (but barcode stands).
+    resp = _rel_response(
+        "042284229821",
+        [{"type": "discogs", "target": "https://www.discogs.com/master/12345"}],
+    )
+    with patch("musicbrainzngs.get_release_by_id", return_value=resp):
+        discogs_id, barcode = discogs_link_and_barcode("some-mbid")
+    assert discogs_id is None
+    assert barcode == "0042284229821"
+
+
+def test_discogs_link_and_barcode_no_barcode():
+    resp = _rel_response(
+        None,
+        [{"type": "discogs", "target": "https://www.discogs.com/release/1198146"}],
+    )
+    with patch("musicbrainzngs.get_release_by_id", return_value=resp):
+        discogs_id, barcode = discogs_link_and_barcode("some-mbid")
+    assert discogs_id == 1198146
+    assert barcode is None
+
+
+def test_discogs_link_and_barcode_network_error_returns_none_none():
+    import musicbrainzngs
+
+    err = musicbrainzngs.NetworkError("timeout")
+    with patch("musicbrainzngs.get_release_by_id", side_effect=err):
+        assert discogs_link_and_barcode("some-mbid") == (None, None)

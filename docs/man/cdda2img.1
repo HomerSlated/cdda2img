@@ -715,6 +715,21 @@ The rip is never failed; absence of the key means the gate passed or did not
 run.
 Inspect failures across a library with
 .BR "list \-\-prov" .
+.SS Discogs barcode corroboration
+After the release is selected, the MusicBrainz\(->Discogs url\-relation of the
+selected release is followed and the linked Discogs release's barcode is
+compared with MusicBrainz's (a cross\-source check on the same release).
+Agreement records
+.BR discogs_barcode_corroborates=YES ;
+disagreement records
+.B discogs_barcode_conflict=mb:<barcode>|discogs:<barcode>
+in provenance.
+This is informational only \(em it does not affect release selection or
+confidence \(em and is skipped entirely when there is no Discogs link, no
+.B DISCOGS_TOKEN
+configured, or no barcode to compare.
+Inspect the result with
+.BR "list \-\-prov" .
 .\"
 .SH ENVIRONMENT
 .TP

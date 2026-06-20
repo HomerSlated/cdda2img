@@ -25,6 +25,7 @@ import hashlib
 import importlib.metadata
 import logging
 import math
+import re
 from collections import Counter
 from dataclasses import replace
 from typing import NamedTuple
@@ -430,6 +431,45 @@ def lookup_release(release_id: str, disc_number: int | None = None) -> DiscMeta 
     if not release:
         return None
     return _parse_release(release, _disc_number=disc_number)
+
+
+_DISCOGS_RELEASE_RE = re.compile(r"/release/(\d+)")
+
+
+def discogs_link_and_barcode(release_id: str) -> tuple[int | None, str | None]:
+    """Return ``(discogs_release_id, mb_barcode)`` for an MB release.
+
+    One ``inc=url-rels`` fetch yields both halves of the §10.3.1 cross-source
+    barcode check: the release's own (normalised) ``barcode`` is a top-level
+    field returned regardless of includes, and the ``discogs`` url-relation's
+    target URL carries the linked Discogs release id (``…/release/<id>``).
+
+    Returns ``(None, ...)`` when there is no Discogs *release* link (a master /
+    artist / label URL has no ``/release/<id>`` and is skipped), and
+    ``(..., None)`` when MB has no barcode. ``(None, None)`` on network/response
+    error. Callers compare the two barcodes only when both ids are present.
+    """
+    _setup_useragent()
+    log.debug("MusicBrainz url-rels lookup: %s", release_id)
+    try:
+        result = musicbrainzngs.get_release_by_id(release_id, includes=["url-rels"])
+    except (musicbrainzngs.ResponseError, musicbrainzngs.NetworkError) as exc:
+        log.debug("MusicBrainz url-rels lookup for %s failed: %s", release_id, exc)
+        return None, None
+
+    from cdda2img.barcode import normalize_barcode
+
+    release = result.get("release") or {}
+    mb_barcode = normalize_barcode(release.get("barcode") or "")
+    discogs_id: int | None = None
+    for rel in release.get("url-relation-list") or []:
+        if (rel.get("type") or "").lower() != "discogs":
+            continue
+        m = _DISCOGS_RELEASE_RE.search(rel.get("target") or "")
+        if m:
+            discogs_id = int(m.group(1))
+            break
+    return discogs_id, mb_barcode
 
 
 def _mb_lucene_escape(value: str) -> str:

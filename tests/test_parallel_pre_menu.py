@@ -20,12 +20,25 @@ import time
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
 from cdda2img.cdda2img import _run_metadata_lookups
 from cdda2img.lookup_result import DiscMeta, TrackMeta
 from cdda2img.mb_lookup import prepopulate_from_mb
 from cdda2img.rbi_format import RBIDisc, RBITocEntry
 
 _PCM = Path("/nonexistent.pcm")  # never read: Discogs/AcoustID are stubbed out
+
+
+@pytest.fixture(autouse=True)
+def _stub_discogs_barcode_corroborate():
+    """Neutralise the §10.3.1 Discogs barcode corroboration — a network seam in
+    _run_metadata_lookups (one MB url-rels fetch + one Discogs fetch). These
+    tests cover CDDB/MB precedence and parallelism, not Discogs, and must stay
+    network-free regardless of whether DISCOGS_TOKEN is set in the environment.
+    """
+    with patch("cdda2img.cdda2img._discogs_barcode_corroborate", lambda *a, **k: None):
+        yield
 
 
 def _disc() -> RBIDisc:
