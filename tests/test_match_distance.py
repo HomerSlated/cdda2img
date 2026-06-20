@@ -66,6 +66,28 @@ def test_disc_id_plus_acoustid_plus_isrc_is_strong():
     assert md.recommendation == MatchRecommendation.STRONG
 
 
+def test_rung_pinned_release_alone_is_low():
+    # §10.3: a disc-ID multi-match pinned by the rung is weaker than a unique
+    # disc-ID hit (0.30 vs 0.50) — album identified, pressing a best guess.
+    disc = _disc(mb_release_id="some-mbid")
+    md = build_match_distance(disc, {"release_selected_via": "preferred_country"})
+    assert pytest.approx(md.score) == 0.30
+    assert md.recommendation == MatchRecommendation.LOW
+    assert "mb_disc_id_multi" in md.contributors
+    assert "mb_disc_id" not in md.contributors
+
+
+def test_rung_pinned_plus_acoustid_is_medium_not_strong():
+    # The reported regression: before this, a rung-pinned release + AcoustID hit
+    # 0.75 (STRONG) and auto-skipped the menu without --auto. Now 0.30 + 0.25 =
+    # 0.55 (MEDIUM) so the menu is shown for the user to confirm the pressing.
+    disc = _disc(mb_release_id="some-mbid")
+    prov = {"release_selected_via": "date", "acoustid_corroborates": "YES"}
+    md = build_match_distance(disc, prov)
+    assert pytest.approx(md.score) == 0.55
+    assert md.recommendation == MatchRecommendation.MEDIUM
+
+
 def test_disagreement_penalty_reduces_score():
     disc = _disc(mb_release_id="some-mbid")
     prov = {"disagreement_cddb_mb": "album"}
