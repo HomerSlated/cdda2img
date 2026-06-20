@@ -410,14 +410,30 @@ def format_original_fields(
     use :func:`format_original`; callers holding a provenance dict (RBI ``list``)
     or a catalogue DB row pass their already-extracted values here directly. The
     same string is emitted everywhere so the representation is identical.
+
+    The ``"Original:  "`` label here is padded to the value column at index 11,
+    matching the list-provenance / extract dumps. The :func:`format_disc_metadata`
+    canonical block re-uses the *value* (via :func:`_original_value`) at its own
+    wider label column, so the two contexts share the logic without coupling width.
     """
+    return f"Original:  {_original_value(disc_year, found, title, orig_year)}"
+
+
+def _original_value(
+    disc_year: int | None,
+    found: bool,
+    title: str | None,
+    orig_year: int | None,
+) -> str:
+    """Return just the original-release value (no label), shared by the width-11
+    :func:`format_original_fields` and the width-15 :func:`format_disc_metadata`."""
     if disc_year is None or not found:
-        return "Original:  Unknown, unknown release (unknown year)"
+        return "Unknown, unknown release (unknown year)"
     if disc_year == orig_year:
-        return f"Original:  Yes, this release ({disc_year})"
+        return f"Yes, this release ({disc_year})"
     disp_title = title or "unknown release"
     year_disp = orig_year if orig_year is not None else "unknown year"
-    return f"Original:  No, {disp_title} ({year_disp})"
+    return f"No, {disp_title} ({year_disp})"
 
 
 def format_disc_metadata(
@@ -445,17 +461,19 @@ def format_disc_metadata(
     2. **same set in all three** surfaces (all call this function).
     3. **identical format / spacing / order** — defined once here.
 
-    Lines are returned **un-indented** with the value column at index 11 (matching
-    :func:`format_original_fields`). Callers MAY prepend their own leading indent
-    (site chrome) but **MUST NOT** alter the labels, order, column width, or value
-    formatting — that identity is the entire point. Optional catalogue fields are
-    omitted when absent (no data gap); Album / Artist / Original / Tracks always
-    render. The per-track table is a separate, site-local concern (out of scope).
+    Lines are returned **un-indented** with the value column at index 15 — the
+    same column the metadata-menu candidate preview and the catalogue provenance
+    lines already use, so the disc-metadata block aligns with them. Callers MAY
+    prepend their own leading indent (site chrome) but **MUST NOT** alter the
+    labels, order, column width, or value formatting — that identity is the entire
+    point. Optional catalogue fields are omitted when absent (no data gap); Album /
+    Artist / Original / Tracks always render. The per-track table is a separate,
+    site-local concern (out of scope).
     """
-    w = 10  # label width; value starts at column 11 (w + one space)
+    w = 15  # label width; value column aligns with menu preview + catalogue prov
 
     def _row(label_text: str, value: str) -> str:
-        return f"{label_text:<{w}} {value}"
+        return f"{label_text:<{w}}{value}"
 
     disc_year = year_of(release_date)
     year_disp = disc_year if disc_year is not None else "unknown"
@@ -472,11 +490,14 @@ def format_disc_metadata(
     if mcn:
         lines.append(_row("MCN:", mcn))
     lines.append(
-        format_original_fields(
-            disc_year,
-            original_release_found,
-            original_release_title,
-            original_release_year,
+        _row(
+            "Original:",
+            _original_value(
+                disc_year,
+                original_release_found,
+                original_release_title,
+                original_release_year,
+            ),
         )
     )
     lines.append(_row("Tracks:", str(track_count)))

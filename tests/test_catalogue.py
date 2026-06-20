@@ -687,7 +687,7 @@ def test_show_record_original_yes_this_release(tmp_path, capsys):
             _show_record(conn, rid)
     finally:
         conn.close()
-    assert "Original:  Yes, this release (1983)" in capsys.readouterr().out
+    assert "Original:      Yes, this release (1983)" in capsys.readouterr().out
 
 
 def test_show_record_original_no_names_earlier(tmp_path, capsys):
@@ -707,7 +707,7 @@ def test_show_record_original_no_names_earlier(tmp_path, capsys):
             _show_record(conn, rid)
     finally:
         conn.close()
-    assert "Original:  No, Thriller (1982)" in capsys.readouterr().out
+    assert "Original:      No, Thriller (1982)" in capsys.readouterr().out
 
 
 def test_show_record_not_found_shows_unknown_original(tmp_path, capsys):
@@ -724,5 +724,5 @@ def test_show_record_not_found_shows_unknown_original(tmp_path, capsys):
     # Original line; when the lookup found nothing it reads "Unknown". The disc
     # year still surfaces via the canonical "Album: … (1983)" line.
     out = capsys.readouterr().out
-    assert "Original:  Unknown, unknown release (unknown year)" in out
+    assert "Original:      Unknown, unknown release (unknown year)" in out
     assert "(1983)" in out

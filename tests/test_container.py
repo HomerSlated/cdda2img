@@ -149,14 +149,14 @@ def test_list_renders_canonical_catalogue_fields(tmp_path, wav_tracks):
     build_container(pcm, toc_data, disc, rbi, prov_data=prov)
 
     out = _list_info(rbi)  # read side: PROV + TOC -> canonical render
-    assert "Album:     The Joshua Tree (1987)" in out
-    assert "Artist:    U2" in out
-    assert "Label:     Island Records" in out
-    assert "Country:   GB" in out
-    assert "Cat. no.:  CID U2 6" in out
-    assert "MCN:       0042284229821" in out
+    assert "Album:         The Joshua Tree (1987)" in out
+    assert "Artist:        U2" in out
+    assert "Label:         Island Records" in out
+    assert "Country:       GB" in out
+    assert "Cat. no.:      CID U2 6" in out
+    assert "MCN:           0042284229821" in out
     # Tracks line carries only the count (no per-site duration -> no divergence).
-    assert f"Tracks:    {len(_EXAMPLE_TRACKS)}" in out
+    assert f"Tracks:        {len(_EXAMPLE_TRACKS)}" in out
 
 
 # ---------------------------------------------------------------------------

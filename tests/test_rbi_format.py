@@ -165,14 +165,14 @@ def test_format_disc_metadata_full_golden():
         original_release_year=1987,
         track_count=11,
     ) == [
-        "Album:     The Joshua Tree (1987)",
-        "Artist:    U2",
-        "Label:     Island Records",
-        "Country:   GB",
-        "Cat. no.:  CID U2 6",
-        "MCN:       0042284229821",
-        "Original:  Yes, this release (1987)",
-        "Tracks:    11",
+        "Album:         The Joshua Tree (1987)",
+        "Artist:        U2",
+        "Label:         Island Records",
+        "Country:       GB",
+        "Cat. no.:      CID U2 6",
+        "MCN:           0042284229821",
+        "Original:      Yes, this release (1987)",
+        "Tracks:        11",
     ]
 
 
@@ -182,10 +182,10 @@ def test_format_disc_metadata_omits_absent_optionals():
     assert format_disc_metadata(
         album="X", artist="Y", release_date=None, track_count=3
     ) == [
-        "Album:     X (unknown)",
-        "Artist:    Y",
-        "Original:  Unknown, unknown release (unknown year)",
-        "Tracks:    3",
+        "Album:         X (unknown)",
+        "Artist:        Y",
+        "Original:      Unknown, unknown release (unknown year)",
+        "Tracks:        3",
     ]
 
 
@@ -203,5 +203,5 @@ def test_format_disc_metadata_value_column_aligned():
         track_count=1,
     )
     for line in lines:
-        assert line[11] != " ", line  # value char present at the fixed column
-        assert ":" in line[:11], line  # label (with colon) occupies the prefix
+        assert line[15] != " ", line  # value char present at the fixed column
+        assert ":" in line[:15], line  # label (with colon) occupies the prefix

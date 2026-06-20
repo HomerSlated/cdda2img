@@ -106,11 +106,11 @@ def _print_disc_summary(disc: RBIDisc) -> None:
     ):
         print(f"  {line}")
     if disc.set_title:
-        print(f"  {'Set:':<10} {disc.set_title}")
+        print(f"  {'Set:':<15}{disc.set_title}")
     if disc.disc_total > 1 or disc.disc_number != 1:
-        print(f"  {'Disc:':<10} {disc.disc_number} of {disc.disc_total}")
+        print(f"  {'Disc:':<15}{disc.disc_number} of {disc.disc_total}")
     if disc.low_dynamic_range is not None:
-        print(f"  {'Low DR:':<10} {'YES' if disc.low_dynamic_range else 'NO'}")
+        print(f"  {'Low DR:':<15}{'YES' if disc.low_dynamic_range else 'NO'}")
     if disc.tracks:
         print()
         print(f"  {'#':>2}  {'Title':<40}  {'ISRC'}")

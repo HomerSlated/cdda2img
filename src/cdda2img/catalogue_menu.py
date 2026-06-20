@@ -361,7 +361,7 @@ def _show_record(conn: object, catalogue_id: int) -> None:  # noqa: C901
     ):
         print(f"  {line}")
     if low_dynamic_range is not None:
-        print(f"  {'Low DR:':<10} {'YES' if low_dynamic_range else 'NO'}")
+        print(f"  {'Low DR:':<15}{'YES' if low_dynamic_range else 'NO'}")
     if mode and mode != "?":
         print(f"  Mode:          {mode}")
     if source:
@@ -376,7 +376,9 @@ def _show_record(conn: object, catalogue_id: int) -> None:  # noqa: C901
         )
     print(f"  File:          {file_basename}  ({_fmt_size(file_size)})")
     print(f"  Path:          {file_path}")
-    print(f"  Registered:    {registered_at[:19]}")
+    from cdda2img.catalogue import _fmt_datetime
+
+    print(f"  Registered:    {_fmt_datetime(registered_at)}")
     if created_by:
         print(f"  Created by:    {created_by}")
 
