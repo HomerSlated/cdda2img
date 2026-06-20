@@ -983,6 +983,7 @@ def import_image(
             tui=tui,
             duplicate_policy=duplicate_policy,
             auto=auto,
+            preferred_country=cfg.preferred_country,
         )
     finally:
         if ui is not None:
@@ -1454,6 +1455,28 @@ def _r6_acoustid_corroborate_wavs(
     return disc
 
 
+def _emit_mb_provenance(
+    provenance: dict[str, str],
+    mb_result: MBPrepopResult,
+    preferred_country: list[str],
+) -> None:
+    """Write the MB-disc-ID-derived provenance keys (multi-match resolution +
+    §10.3 release-selection provenance + Unit-G rejection count)."""
+    if mb_result.isrc_disambiguated:
+        provenance["multi_match_isrc_disambiguated"] = "YES"
+    if mb_result.release_selected_via:
+        # §10.3: which lexicographic key pinned the release among several
+        # album-consistent pressings. Records the config-dependent preference
+        # that shaped the choice (R10 reproducibility).
+        provenance["release_selected_via"] = mb_result.release_selected_via
+        if mb_result.release_selected_via == "preferred_country" and preferred_country:
+            provenance["preferred_country_applied"] = ",".join(preferred_country)
+    if mb_result.rejected_inconsistent:
+        # Unit G: record that N MB candidates were discarded for contradicting a
+        # gospel on-disc MCN/ISRC — preserves the *why* behind a blanked field.
+        provenance["mb_rejected_inconsistent"] = str(mb_result.rejected_inconsistent)
+
+
 def _run_metadata_lookups(
     disc: RBIDisc,
     pcm_file: Path,
@@ -1465,6 +1488,7 @@ def _run_metadata_lookups(
     cddb_server: str | None,
     cddb_verbose: bool,
     mb_verbose: bool,
+    preferred_country: list[str],
     ui: TerminalUI | None,
 ) -> tuple[RBIDisc, MBPrepopResult]:
     """Run every remote metadata lookup and merge results into *disc* in
@@ -1499,14 +1523,21 @@ def _run_metadata_lookups(
             cddb_future = ex.submit(
                 query_cddb, cddb_track_lsns, cddb_disc_last_lsn, cddb_server
             )
-            mb_future = ex.submit(prepopulate_from_mb, disc, verbose=mb_verbose)
+            mb_future = ex.submit(
+                prepopulate_from_mb,
+                disc,
+                verbose=mb_verbose,
+                preferred_country=preferred_country,
+            )
             try:
                 cddb_matches = cddb_future.result()
             except Exception as exc:
                 log.warning("CDDB query failed; continuing without it: %s", exc)
             mb_result = mb_future.result()
     else:
-        mb_result = prepopulate_from_mb(disc, verbose=mb_verbose)
+        mb_result = prepopulate_from_mb(
+            disc, verbose=mb_verbose, preferred_country=preferred_country
+        )
 
     cddb_meta = cddb_matches[0] if cddb_matches else None
     if cddb_meta is not None and cddb_verbose:
@@ -1523,12 +1554,7 @@ def _run_metadata_lookups(
     # independent of the merge order.
     pre_mb_album = (cddb_meta.album if cddb_meta else None) or original_album
     pre_mb_artist = (cddb_meta.artist if cddb_meta else None) or original_artist
-    if mb_result.isrc_disambiguated:
-        provenance["multi_match_isrc_disambiguated"] = "YES"
-    if mb_result.rejected_inconsistent:
-        # Unit G: record that N MB candidates were discarded for contradicting a
-        # gospel on-disc MCN/ISRC — preserves the *why* behind a blanked field.
-        provenance["mb_rejected_inconsistent"] = str(mb_result.rejected_inconsistent)
+    _emit_mb_provenance(provenance, mb_result, preferred_country)
     _emit_r9_disagreement(
         provenance,
         pre_mb_album,
@@ -1622,6 +1648,7 @@ def _finalize_import(
     tui: bool = True,
     duplicate_policy: str | None = None,
     auto: bool = False,
+    preferred_country: list[str] | None = None,
 ) -> Path:
     """Shared post-rip/import pipeline: lookups → metadata menu → TOC → RG → container.
 
@@ -1654,6 +1681,7 @@ def _finalize_import(
         cddb_server=cddb_server,
         cddb_verbose=cddb_verbose,
         mb_verbose=mb_verbose,
+        preferred_country=preferred_country or [],
         ui=ui,
     )
 
@@ -2387,6 +2415,7 @@ def rip_image(  # noqa: C901
             tui=tui,
             duplicate_policy=duplicate_policy,
             auto=auto,
+            preferred_country=cfg.preferred_country,
         )
     finally:
         _stop_preview(track_preview)

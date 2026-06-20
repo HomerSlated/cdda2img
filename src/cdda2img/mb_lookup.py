@@ -1167,6 +1167,12 @@ class MBPrepopResult(NamedTuple):
     # parallel pre-menu pipeline re-apply ``_merge_into_disc(meta, ...)``
     # on top of a CDDB-merged disc.
     meta: DiscMeta | None = None
+    # §10.3: the key that broke the tie when the lexicographic release-selection
+    # rung pinned one of several album-consistent pressings — ``mcn`` |
+    # ``barcode_plurality`` | ``preferred_country`` | ``date`` | ``mbid``. None
+    # when no rung selection ran (single match / ISRC / MCN winner upstream).
+    # Surfaces in PROV as ``release_selected_via``.
+    release_selected_via: str | None = None
 
 
 def _prepop_zero_match(
@@ -1198,6 +1204,69 @@ def _prepop_zero_match(
     return MBPrepopResult(disc, hints, 0, isrc_disambiguated=False)
 
 
+def _select_release_lexicographic(
+    candidates: list[DiscMeta],
+    disc: RBIDisc,
+    preferred_country: list[str],
+) -> tuple[DiscMeta | None, str | None]:
+    """Pick one pressing from several album-consistent candidates by a pure
+    lexicographic key chain (trust_model_design.md §10.3). Returns
+    ``(winner, via)`` where *via* names the key that put the winner ahead of the
+    runner-up:
+
+      (0) ``mcn``               — barcode positively matches the on-disc MCN
+      (1) ``barcode_plurality`` — the most common normalised barcode wins
+      (2) ``preferred_country`` — user config ranking (priority, NOT a filter)
+      (3) ``date``              — earliest ``release_date``
+      (4) ``mbid``              — terminal, deterministic tiebreak
+
+    No candidate is discarded; the top of the ranking is pinned. *candidates*
+    must already be the album-consistent set (the plurality release-group), so
+    this only chooses the *pressing*, never the album — pinning ``mb_release_id``
+    here is legitimate (every candidate shares the disc-ID fingerprint).
+    """
+    from cdda2img.barcode import mcn_matches, normalize_barcode
+
+    if not candidates:
+        return None, None
+
+    def _norm(cat: str | None) -> str | None:
+        return normalize_barcode(cat, require_check_digit=False) if cat else None
+
+    counts: Counter[str] = Counter()
+    for c in candidates:
+        nb = _norm(c.catalog)
+        if nb:
+            counts[nb] += 1
+
+    pref = [code.upper() for code in preferred_country]
+
+    def _key(c: DiscMeta) -> tuple[int, int, int, str, str]:
+        nb = _norm(c.catalog)
+        k_mcn = 0 if (disc.catalog and mcn_matches(disc.catalog, c.catalog)) else 1
+        k_plur = -(counts[nb] if nb else 0)  # more common -> smaller -> first
+        country = (c.country or "").upper()
+        k_country = pref.index(country) if country in pref else len(pref)
+        k_date = c.release_date or "9999"  # missing date sorts last
+        k_mbid = c.mb_release_id or "~"  # '~' (0x7e) sorts after digits/letters
+        return (k_mcn, k_plur, k_country, k_date, k_mbid)
+
+    keys = [_key(c) for c in candidates]
+    winner = candidates[keys.index(min(keys))]
+    # *via* = the highest-priority key on which the candidates actually vary. The
+    # winner is the lexicographic minimum, so at the first key with any variation
+    # it necessarily holds the best value — that key is what decided the ranking.
+    # When nothing varies above the terminal id, report "mbid" (arbitrary but
+    # deterministic).
+    via_names = ("mcn", "barcode_plurality", "preferred_country", "date", "mbid")
+    via = via_names[-1]
+    for i, name in enumerate(via_names):
+        if len({k[i] for k in keys}) > 1:
+            via = name
+            break
+    return winner, via
+
+
 def _prepop_multimatch(
     matches: list[DiscMeta],
     disc: RBIDisc,
@@ -1205,9 +1274,11 @@ def _prepop_multimatch(
     rejected: int,
     *,
     verbose: bool,
+    preferred_country: list[str],
 ) -> MBPrepopResult:
-    """Resolve a consistent MB disc-ID multi-match: ISRC/MCN winner, else
-    agreed-facts over the plurality release-group (no single pressing pinned)."""
+    """Resolve a consistent MB disc-ID multi-match: ISRC/MCN winner, else the
+    lexicographic release-selection rung over the album's plurality release-group
+    (§10.3) — pins the best pressing rather than declining to choose."""
     winner, method = _resolve_multimatch(matches, disc)
     if winner is not None:
         updated = _merge_into_disc(winner, disc)
@@ -1228,19 +1299,26 @@ def _prepop_multimatch(
             mb_candidate_artist=winner.artist,
             meta=winner,
         )
-    # No single pressing could be resolved. Rather than guess one, merge only the
-    # facts every candidate agrees on — album/artist, year, shared per-track
-    # ISRCs/titles, and the release-group itself (so original-release can still
-    # resolve). Returned as ``meta`` so the parallel pre-menu path
-    # (_finalize_import) re-applies it onto the CDDB-merged disc like a single.
+    # No ISRC/MCN winner. Identify the album by plurality release-group, then pin
+    # the best *pressing* within it via the lexicographic rung (§10.3). This
+    # replaces the older "decline to pin" agreed-facts merge: the choice is a
+    # defensible best guess (preference-driven, PROV-recorded, user-correctable),
+    # and the pinned release still carries its release-group so original-release
+    # resolution is unaffected. ``meta=winner`` lets the parallel pre-menu path
+    # (_finalize_import) re-apply it onto the CDDB-merged disc like a single.
     #
-    # Unit A: when the disc carries an MCN, narrow the agreed-facts population to
-    # the candidates whose barcode positively matches it — identity proven, so
-    # widening album/artist/title over them is safe. Survivors with a *blank*
-    # barcode passed the Unit-G gate only vacuously (blank = no contradiction)
-    # and are not identity-proven; drop them once a positively-matching subset
-    # exists. Fall back to the full consistent set when none positively match
-    # (e.g. MB carries no barcodes for this disc) — RG plurality still holds.
+    # Accepted reduction in conservatism (advisor, 2026-06-20): the old agreed-
+    # facts merge blanked album/title on *intra-group* disagreement (a deluxe /
+    # reissue title variant within the same RG); the rung instead commits the
+    # winner's title unconditionally. Acceptable under the best-guess model — the
+    # menu corrects it interactively and the pick is deterministic in --auto —
+    # but it IS a real change for the no-human-in-the-loop path.
+    #
+    # Unit A: when the disc carries an MCN, narrow to the candidates whose barcode
+    # positively matches it — identity proven. Survivors with a *blank* barcode
+    # passed the Unit-G gate only vacuously and are dropped once a positively-
+    # matching subset exists. Fall back to the full consistent set when none match
+    # (e.g. MB carries no barcodes) — RG plurality still holds.
     from cdda2img.barcode import mcn_matches
 
     subset = matches
@@ -1250,28 +1328,38 @@ def _prepop_multimatch(
             subset = mcn_hits
     rg = _plurality_release_group(subset)
     if rg is not None:
-        agreed = _build_agreed_facts_meta(subset, rg)
-        disc = _merge_into_disc(agreed, disc)
-        log.debug(
-            "MB multi-match (%d): merged agreed facts (year=%s, %d ISRCs, rg=%s)",
-            len(matches),
-            agreed.release_date,
-            len(agreed.tracks),
-            rg,
-        )
-        return MBPrepopResult(
-            disc,
-            hints,
-            len(matches),
-            rejected_inconsistent=rejected,
-            isrc_disambiguated=False,
-            meta=agreed,
-        )
+        rg_subset = [m for m in subset if m.mb_release_group_id == rg]
+        winner, via = _select_release_lexicographic(rg_subset, disc, preferred_country)
+        if winner is not None:
+            disc = _merge_into_disc(winner, disc)
+            log.debug(
+                "MB multi-match (%d): pinned release %s via %s (rg=%s)",
+                len(matches),
+                winner.mb_release_id,
+                via,
+                rg,
+            )
+            return MBPrepopResult(
+                disc,
+                hints,
+                len(matches),
+                rejected_inconsistent=rejected,
+                isrc_disambiguated=False,
+                mb_candidate_album=winner.album,
+                mb_candidate_artist=winner.artist,
+                meta=winner,
+                release_selected_via=via,
+            )
     log.debug("MB disc ID returned %d matches; no plurality RG", len(matches))
     return MBPrepopResult(disc, hints, len(matches), rejected_inconsistent=rejected)
 
 
-def prepopulate_from_mb(disc: RBIDisc, *, verbose: bool = True) -> MBPrepopResult:
+def prepopulate_from_mb(
+    disc: RBIDisc,
+    *,
+    verbose: bool = True,
+    preferred_country: list[str] | None = None,
+) -> MBPrepopResult:
     """Attempt a silent MusicBrainz Disc ID lookup and fill in missing fields.
 
     If exactly one match is found, missing fields in *disc* are filled from
@@ -1325,7 +1413,14 @@ def prepopulate_from_mb(disc: RBIDisc, *, verbose: bool = True) -> MBPrepopResul
             disc, hints, 0, rejected_inconsistent=rejected, isrc_disambiguated=False
         )
     if len(matches) > 1:
-        return _prepop_multimatch(matches, disc, hints, rejected, verbose=verbose)
+        return _prepop_multimatch(
+            matches,
+            disc,
+            hints,
+            rejected,
+            verbose=verbose,
+            preferred_country=preferred_country or [],
+        )
     meta = matches[0]
     updated = _merge_into_disc(meta, disc)
     if verbose:

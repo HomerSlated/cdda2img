@@ -29,6 +29,7 @@ from cdda2img.mb_lookup import (
     _parse_year,
     _plurality_release_group,
     _resolve_via_isrc_tally,
+    _select_release_lexicographic,
     compute_disc_id,
     disc_id_from_rbi,
     lookup_disc_id,
@@ -768,9 +769,11 @@ def test_prepopulate_multimatch_unique_mcn_picks_pressing():
     assert r.isrc_disambiguated is False
 
 
-def test_prepopulate_multimatch_shared_barcode_agreed_facts_only():
-    """A barcode shared by two pressings is not uniquely identifying. Fill only
-    the agreed year + release-group; leave exact date / release id blank."""
+def test_prepopulate_multimatch_rung_pins_earliest_in_shared_barcode_rg():
+    """§10.3 rung: when a barcode is shared across MCN-matched pressings and no
+    higher key separates them, the earliest release_date breaks the tie and that
+    pressing is pinned (date key). The 'us' candidate lacks the MCN and is dropped
+    by the subset narrowing."""
     disc = _make_disc(tracks=[(1, 0, 18000)])
     disc.catalog = _ELIMINATOR_MCN
     matches = [
@@ -792,16 +795,17 @@ def test_prepopulate_multimatch_shared_barcode_agreed_facts_only():
     ]
     with patch("cdda2img.mb_lookup.lookup_disc_id", return_value=matches):
         r = prepopulate_from_mb(disc, verbose=False)
-    assert r.disc.release_date == "1983"  # agreed YEAR only, not "1983-11-18"
+    assert r.disc.release_date == "1983"  # the pinned 'xe' pressing's own date
     assert r.disc.mb_release_group_id == "rg-e"
-    assert r.disc.mb_release_id is None  # specific pressing left undetermined
+    assert r.disc.mb_release_id == "xe"  # earliest date wins the tie
+    assert r.release_selected_via == "date"
     assert r.isrc_disambiguated is False
 
 
-def test_prepopulate_multimatch_agreed_facts_fills_year_and_shared_isrcs():
-    """The Eliminator case: no disc MCN, no ISRC winner, but all candidates in
-    the plurality release-group agree on the year and per-track ISRCs → fill
-    those, leave the pressing (date / release id) blank."""
+def test_prepopulate_multimatch_rung_pins_earliest_and_fills_shared_isrcs():
+    """The Eliminator case: no disc MCN, no ISRC winner. The rung narrows to the
+    plurality release-group and pins the earliest pressing; its per-track ISRCs
+    (shared across the group) fill the disc."""
     disc = _make_disc(tracks=[(1, 0, 18000), (2, 18000, 20000)])
     # No disc.catalog (this pressing has no Q-channel MCN).
     shared_tracks = [
@@ -833,9 +837,10 @@ def test_prepopulate_multimatch_agreed_facts_fills_year_and_shared_isrcs():
     ]
     with patch("cdda2img.mb_lookup.lookup_disc_id", return_value=matches):
         r = prepopulate_from_mb(disc, verbose=False)
-    assert r.disc.release_date == "1983"  # both Eliminator pressings agree
+    assert r.disc.release_date == "1983-03-23"  # pinned 'us' (earliest) pressing
     assert r.disc.mb_release_group_id == "rg-e"
-    assert r.disc.mb_release_id is None  # no pressing fabricated
+    assert r.disc.mb_release_id == "us"  # earliest date over the comp's 2008
+    assert r.release_selected_via == "date"
     assert r.disc.tracks[0].isrc == "USRHD0709703"  # shared ISRCs filled
     assert r.disc.tracks[1].isrc == "USWB10301935"
 
@@ -1468,8 +1473,8 @@ def test_prepopulate_consistent_single_still_merges():
 
 
 def test_prepopulate_multimatch_drops_inconsistent_then_resolves():
-    """Two pressings share the disc MCN (→ agreed-facts year); a reissue with a
-    different barcode is dropped and counted."""
+    """Two pressings share the disc MCN; a reissue with a different barcode is
+    dropped (Unit-G) and counted, then the rung pins the earliest survivor."""
     disc = _make_disc(tracks=[(1, 0, 18000)])
     disc.catalog = "093624877721"
     s1 = DiscMeta(
@@ -1497,9 +1502,10 @@ def test_prepopulate_multimatch_drops_inconsistent_then_resolves():
         r = prepopulate_from_mb(disc, verbose=False)
     assert r.rejected_inconsistent == 1
     assert r.match_count == 2
-    assert r.disc.release_date == "1983"  # agreed year over the 2 survivors
+    assert r.disc.release_date == "1983-04-26"  # pinned earliest survivor ('a')
     assert r.disc.mb_release_group_id == "rg-e"
-    assert r.disc.mb_release_id is None
+    assert r.disc.mb_release_id == "a"
+    assert r.release_selected_via == "date"
 
 
 def test_prepopulate_r4_tally_winner_gated_by_consistency():
@@ -1651,8 +1657,11 @@ def test_prepop_multimatch_mcn_subset_excludes_blank_barcode_variant():
     assert r.rejected_inconsistent == 0  # blank barcode is not a contradiction
     assert r.match_count == 3  # all three survive Unit G
     assert r.disc.album == "American Idiot"  # narrowing excluded the variant
-    assert r.disc.release_date == "2004"  # agreed year over the two originals
-    assert r.disc.mb_release_id is None
+    # The TOC-collision variant is excluded from selection; the rung pins the
+    # earliest MCN-matched original, not the 2015 variant.
+    assert r.disc.release_date == "2004-09-20"  # pinned 'o1' (earliest original)
+    assert r.disc.mb_release_id == "o1"
+    assert r.release_selected_via == "date"
 
 
 def test_prepop_multimatch_no_positive_mcn_falls_back_to_full_set():
@@ -1952,3 +1961,150 @@ def test_lookup_disc_id_does_not_cache_network_error(
     assert mb_lookup.lookup_disc_id(disc) == []
     assert mb_lookup.lookup_disc_id(disc) == []
     assert calls["n"] == 2  # transient error not cached
+
+
+# ---------------------------------------------------------------------------
+# §10.3 — lexicographic release-selection rung
+# ---------------------------------------------------------------------------
+
+
+def _cand(mbid, *, catalog=None, country=None, date=None, rg="rg"):
+    """Terse DiscMeta candidate for rung tests (all share one release-group)."""
+    return DiscMeta(
+        album="A",
+        artist="B",
+        catalog=catalog,
+        country=country,
+        release_date=date,
+        mb_release_id=mbid,
+        mb_release_group_id=rg,
+    )
+
+
+def test_rung_empty_returns_none():
+    disc = RBIDisc(album="A", artist="B")
+    assert _select_release_lexicographic([], disc, []) == (None, None)
+
+
+def test_rung_key0_on_disc_mcn_wins():
+    # A candidate whose barcode matches the on-disc MCN outranks all others,
+    # even a more-popular barcode / earlier date.
+    disc = RBIDisc(album="A", artist="B", catalog="0042284229821")
+    cands = [
+        _cand("other1", catalog="0075992377423", date="1980"),
+        _cand("other2", catalog="0075992377423", date="1981"),
+        _cand("mcn", catalog="0042284229821", date="1999"),
+    ]
+    winner, via = _select_release_lexicographic(cands, disc, [])
+    assert winner is not None
+    assert winner.mb_release_id == "mcn"
+    assert via == "mcn"
+
+
+def test_rung_key1_barcode_plurality_wins():
+    disc = RBIDisc(album="A", artist="B")
+    cands = [
+        _cand("a", catalog="0042284229821"),  # shared barcode (x2)
+        _cand("b", catalog="0042284229821"),
+        _cand("c", catalog="0099999999996"),  # unique barcode
+    ]
+    winner, via = _select_release_lexicographic(cands, disc, [])
+    assert winner is not None
+    assert winner.mb_release_id in {"a", "b"}  # plurality tier
+    assert via == "barcode_plurality"
+
+
+def test_rung_key2_preferred_country_within_barcode_tier():
+    # All share a barcode (plurality tie); preferred_country breaks it.
+    disc = RBIDisc(album="A", artist="B")
+    cands = [
+        _cand("us", catalog="0042284229821", country="US"),
+        _cand("gb", catalog="0042284229821", country="GB"),
+        _cand("de", catalog="0042284229821", country="DE"),
+    ]
+    winner, via = _select_release_lexicographic(cands, disc, ["GB", "XE", "US"])
+    assert winner is not None
+    assert winner.mb_release_id == "gb"
+    assert via == "preferred_country"
+
+
+def test_rung_preferred_country_only_within_barcode_tier():
+    # Endorsed consequence (§9.5): a uniquely-barcoded preferred-country pressing
+    # still ranks BELOW the common-barcode tier — plurality outranks country.
+    disc = RBIDisc(album="A", artist="B")
+    cands = [
+        _cand("common1", catalog="0042284229821", country="US"),
+        _cand("common2", catalog="0042284229821", country="US"),
+        _cand("rareGB", catalog="0099999999996", country="GB"),  # unique barcode
+    ]
+    winner, _ = _select_release_lexicographic(cands, disc, ["GB"])
+    assert winner is not None
+    assert winner.mb_release_id in {"common1", "common2"}  # not rareGB
+
+
+def test_rung_key3_earliest_date_wins():
+    disc = RBIDisc(album="A", artist="B")
+    cands = [
+        _cand("late", date="1987-06-01"),
+        _cand("early", date="1987-03-09"),
+        _cand("nodate"),
+    ]
+    winner, via = _select_release_lexicographic(cands, disc, [])
+    assert winner is not None
+    assert winner.mb_release_id == "early"
+    assert via == "date"
+
+
+def test_rung_key4_mbid_terminal_deterministic():
+    # Nothing distinguishes the candidates but the release-id; the result is
+    # deterministic (lexicographically smallest mbid) and via == "mbid".
+    disc = RBIDisc(album="A", artist="B")
+    cands = [_cand("zzz"), _cand("aaa"), _cand("mmm")]
+    winner, via = _select_release_lexicographic(cands, disc, [])
+    assert winner is not None
+    assert winner.mb_release_id == "aaa"
+    assert via == "mbid"
+
+
+def test_prepopulate_rung_preferred_country_threads_through():
+    """End-to-end (advisor #1): a Config.preferred_country value, threaded through
+    prepopulate_from_mb → _prepop_multimatch → the rung, actually changes the
+    pinned release among shared-barcode pressings and records the via. Guards the
+    whole threading chain — a dropped kwarg would still type-check but fail here.
+    """
+    disc = _make_disc(tracks=[(1, 0, 18000)])  # no on-disc MCN
+    bc = "0042284229821"
+    matches = [
+        DiscMeta(
+            album="A",
+            catalog=bc,
+            country="US",
+            mb_release_id="us",
+            mb_release_group_id="rg",
+        ),
+        DiscMeta(
+            album="A",
+            catalog=bc,
+            country="GB",
+            mb_release_id="gb",
+            mb_release_group_id="rg",
+        ),
+        DiscMeta(
+            album="A",
+            catalog=bc,
+            country="DE",
+            mb_release_id="de",
+            mb_release_group_id="rg",
+        ),
+    ]
+    with patch("cdda2img.mb_lookup.lookup_disc_id", return_value=matches):
+        r = prepopulate_from_mb(disc, verbose=False, preferred_country=["GB"])
+    assert r.disc.mb_release_id == "gb"  # GB preference broke the barcode tie
+    assert r.disc.country == "GB"
+    assert r.release_selected_via == "preferred_country"
+    # Same candidates, no preference -> falls through to the terminal mbid key.
+    disc2 = _make_disc(tracks=[(1, 0, 18000)])
+    with patch("cdda2img.mb_lookup.lookup_disc_id", return_value=matches):
+        r2 = prepopulate_from_mb(disc2, verbose=False, preferred_country=[])
+    assert r2.release_selected_via == "mbid"
+    assert r2.disc.mb_release_id == "de"  # lexicographically smallest id

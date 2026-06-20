@@ -57,6 +57,7 @@ def _run(disc: RBIDisc, prov: dict[str, str]):
         cddb_server=None,
         cddb_verbose=False,
         mb_verbose=False,
+        preferred_country=[],
         ui=None,
     )
 
@@ -292,3 +293,30 @@ def test_stage7_skipped_when_only_cddb_seeds_album() -> None:
 
     mock_dur.assert_not_called()
     assert result.album == "From CDDB"
+
+
+# ---------------------------------------------------------------------------
+# §10.3 — release-selection provenance emission
+# ---------------------------------------------------------------------------
+
+
+def test_emit_mb_provenance_records_preferred_country_selection():
+    from cdda2img.cdda2img import _emit_mb_provenance
+    from cdda2img.mb_lookup import MBPrepopResult
+
+    prov: dict[str, str] = {}
+    result = MBPrepopResult(_disc(), [], 3, release_selected_via="preferred_country")
+    _emit_mb_provenance(prov, result, ["GB", "US"])
+    assert prov["release_selected_via"] == "preferred_country"
+    assert prov["preferred_country_applied"] == "GB,US"
+
+
+def test_emit_mb_provenance_other_key_omits_country_applied():
+    from cdda2img.cdda2img import _emit_mb_provenance
+    from cdda2img.mb_lookup import MBPrepopResult
+
+    prov: dict[str, str] = {}
+    result = MBPrepopResult(_disc(), [], 2, release_selected_via="date")
+    _emit_mb_provenance(prov, result, ["GB"])
+    assert prov["release_selected_via"] == "date"
+    assert "preferred_country_applied" not in prov
