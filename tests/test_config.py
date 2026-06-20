@@ -11,8 +11,10 @@ import pytest
 
 from cdda2img.config import (
     DriveConfig,
+    _overlay,
     _parse_drives,
     _parse_preferred_country,
+    _render_scalar,
     _rewrite_config_drives,
     _toml_quote,
     load_config,
@@ -28,6 +30,39 @@ from cdda2img.config import (
 
 def test_toml_quote_plain() -> None:
     assert _toml_quote("PLEXTOR DVDR PX-716A") == '"PLEXTOR DVDR PX-716A"'
+
+
+# ---------------------------------------------------------------------------
+# _render_scalar / _overlay — list (array) values must round-trip as TOML arrays
+# ---------------------------------------------------------------------------
+
+
+def test_render_scalar_renders_list_as_toml_array() -> None:
+    # Regression: a list value was stringified to "['GB', 'XE', 'US']" (a quoted
+    # Python repr) instead of a TOML array, corrupting preferred_country on
+    # `setup --update-config`.
+    assert (
+        _render_scalar("preferred_country", ["GB", "XE", "US"])
+        == 'preferred_country = ["GB", "XE", "US"]'
+    )
+
+
+def test_render_scalar_scalars_unchanged() -> None:
+    assert _render_scalar("enable_catalogue", True) == "enable_catalogue = true"
+    assert _render_scalar("low_dr_threshold", 5.0) == "low_dr_threshold = 5.0"
+    assert _render_scalar("cddb_server", "gnudb.org") == 'cddb_server = "gnudb.org"'
+
+
+def test_overlay_list_value_reparses_as_list() -> None:
+    # End-to-end: a list user value survives the template overlay and parses back
+    # as a list (not a string) — the exact path `setup --update-config` runs.
+    from cdda2img.config import tomllib  # stdlib on 3.11+, tomli on 3.10
+
+    example = "# preferred_country = []\nenable_catalogue = true\n"
+    merged = _overlay(example, {"preferred_country": ["GB", "XE", "US"]})
+    parsed = tomllib.loads(merged)
+    assert parsed["preferred_country"] == ["GB", "XE", "US"]
+    assert _parse_preferred_country(parsed["preferred_country"]) == ["GB", "XE", "US"]
 
 
 def test_toml_quote_backslash() -> None:

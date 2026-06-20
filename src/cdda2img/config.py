@@ -52,12 +52,25 @@ _COMMENTED_DRIVE_LINE_RE = re.compile(
 )
 
 
-def _render_scalar(key: str, value: object) -> str:
+def _render_value(value: object) -> str:
+    """Render a single Python value as a TOML literal.
+
+    Handles the value types that appear in this config: bool (lowercase
+    ``true``/``false``), int/float, str (double-quoted with escapes), and
+    *arrays* of those (e.g. ``preferred_country``). Bool is checked before
+    int because ``bool`` is a subclass of ``int``.
+    """
     if isinstance(value, bool):
-        return f"{key} = {'true' if value else 'false'}"
+        return "true" if value else "false"
     if isinstance(value, (int, float)):
-        return f"{key} = {value}"
-    return f'{key} = "{value}"'
+        return str(value)
+    if isinstance(value, (list, tuple)):
+        return "[" + ", ".join(_render_value(v) for v in value) + "]"
+    return _toml_quote(str(value))
+
+
+def _render_scalar(key: str, value: object) -> str:
+    return f"{key} = {_render_value(value)}"
 
 
 def _render_drive(drive: dict) -> str:
