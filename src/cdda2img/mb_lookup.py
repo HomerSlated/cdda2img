@@ -26,7 +26,6 @@ import importlib.metadata
 import logging
 import math
 from collections import Counter
-from collections.abc import Iterable
 from dataclasses import replace
 from typing import NamedTuple
 
@@ -1054,88 +1053,6 @@ def _resolve_multimatch(
     if winner is not None:
         return winner, "mcn"
     return None, ""
-
-
-def _agreed_value(values: Iterable[str | None]) -> str | None:
-    """Return the single distinct non-blank value across *values*, else None.
-
-    The unanimity primitive behind agreed-facts: 0 distinct (all blank) or >1
-    distinct (disagreement) ⇒ None; exactly one ⇒ that value. Used for album,
-    artist, year, and per-track ISRC/title — never fabricate a value the
-    candidates do not unanimously share.
-    """
-    distinct = {v for v in values if v}
-    return distinct.pop() if len(distinct) == 1 else None
-
-
-def _agreed_tracks(group: list[DiscMeta]) -> list[TrackMeta]:
-    """Per-track ISRC + title where the *group* unanimously agrees on each.
-
-    ISRC and title are decided independently per track number (a track may have
-    a unanimous ISRC but a split title, or vice versa). A track contributes a
-    ``TrackMeta`` only if at least one of the two fields is agreed.
-    """
-    isrc_by_track: dict[int, set[str]] = {}
-    title_by_track: dict[int, set[str]] = {}
-    for m in group:
-        for t in m.tracks:
-            if t.number is None:
-                continue
-            if t.isrc:
-                isrc_by_track.setdefault(t.number, set()).add(t.isrc)
-            if t.title:
-                title_by_track.setdefault(t.number, set()).add(t.title)
-    tracks: list[TrackMeta] = []
-    for n in sorted(set(isrc_by_track) | set(title_by_track)):
-        isrc = _agreed_value(isrc_by_track.get(n, set()))
-        title = _agreed_value(title_by_track.get(n, set()))
-        if isrc or title:
-            tracks.append(TrackMeta(number=n, title=title, isrc=isrc))
-    return tracks
-
-
-def _build_agreed_facts_meta(matches: list[DiscMeta], rg_id: str) -> DiscMeta:
-    """Synthesise a DiscMeta of ONLY the facts every candidate in *rg_id* agrees on.
-
-    Used when an MB disc-ID multi-match cannot be resolved to a single pressing
-    (no ISRC winner, no unique MCN hit). Rather than fabricate a specific
-    pressing's details, we populate the unambiguous facts shared by every
-    candidate in the (already consistency-filtered, and — when the disc has an
-    MCN — MCN-matched) subset passed in:
-
-      * ``mb_release_group_id`` — always (lets original-release resolve);
-      * ``album`` / ``artist`` — only when every candidate agrees on one value
-        (Unit A: safe to widen because the subset is identity-proven by MCN or
-        plurality-corroborated by RG, and unanimity gates out any disagreement);
-      * ``release_date`` — a 4-digit **year** only when every dated candidate
-        agrees on it (the disc's own year, e.g. four 1983 pressings ⇒ "1983");
-      * per-track ``isrc`` / ``title`` — only where every candidate listing that
-        track agrees on a single value.
-
-    Deliberately left None: country, catalogue number, exact date, and
-    ``mb_release_id`` — genuinely undetermined across the multi-match, so we do
-    not guess them. ``_merge_into_disc`` fills blanks only, so this never
-    overwrites a value the disc already carries (disc-baked CD-Text still wins).
-
-    Q2 — why the R3 track-count gate is unreachable here (by design): because
-    ``mb_release_id`` is None, ``original_release._verify_rg_path_for_disc``
-    returns True without fetching, so the R3 tracklist verify (track-count /
-    sum-duration / ISRC / title gates) never runs for this path. That is
-    correct, not a gap: the RG itself is plurality-corroborated
-    (``_plurality_release_group``) and the year is a group-level fact every
-    dated candidate agreed on — only the specific *pressing* is undetermined, and
-    there is no single release to verify a tracklist against. Verifying against
-    an arbitrarily-chosen pressing would be the bug, not the absence of it.
-    """
-    group = [m for m in matches if m.mb_release_group_id == rg_id]
-    return DiscMeta(
-        album=_agreed_value(m.album for m in group),
-        artist=_agreed_value(m.artist for m in group),
-        mb_release_group_id=rg_id,
-        release_date=_agreed_value(m.release_date[:4] for m in group if m.release_date),
-        tracks=_agreed_tracks(group),
-        source="musicbrainz",
-    )
 
 
 class MBPrepopResult(NamedTuple):

@@ -1,5 +1,13 @@
 # Metadata Pipeline Overview
 
+> **⚠ STALE (2026-06-20)**: This document describes the old auto-apply behaviour
+> where a **STRONG** confidence score (≥ 0.70) skipped the metadata menu without
+> `--auto`. That is no longer true: the menu now opens on **every** rip/import/create
+> unless `--auto` (or `auto = true`) is set, and the recommendation level is
+> display-only. The auto-apply gate is now simply `auto_apply = auto`. Every
+> reference below to "STRONG → menu skipped" / "auto-apply gate fires on ≥ 0.70" is
+> obsolete. Regenerate via the `flow-doc-generator` agent before relying on this doc.
+
 > **Purpose**: Cross-cutting view of how album, artist, track, and release-intelligence metadata are sourced, merged, and ultimately written into an RBI container — across the create, rip, and import pipelines.
 
 ## Audience

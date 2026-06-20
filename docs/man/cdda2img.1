@@ -626,11 +626,15 @@ disc is a re\-press with different metadata.
 .TP
 .B STRONG  (score \(>= 0.70)
 The pipeline is highly confident.
-The metadata menu is skipped automatically and the result is accepted
-without user interaction, even without
-.BR \-\-auto .
-A message is printed:
-.IR "Metadata auto-confirmed \(em <score summary>" .
+The recommendation is informational only: the metadata menu is still shown
+so the result can be confirmed, with a STRONG recommendation and a one\-line
+.IR "Metadata: <score summary>"
+hint.
+Only
+.B \-\-auto
+(or
+.BR "auto = true" )
+skips the menu.
 .TP
 .B MEDIUM  (score \(>= 0.40)
 Two or more independent signals agree.
@@ -666,8 +670,9 @@ Passing
 in the configuration) forces
 .B auto_apply
 unconditionally, regardless of the score.
-A STRONG score auto\-applies without
-.BR \-\-auto .
+This is the only way to skip the menu: the recommendation level
+.RB ( STRONG ,
+MEDIUM, LOW, NONE) never skips it on its own.
 .\"
 .SH ENVIRONMENT
 .TP

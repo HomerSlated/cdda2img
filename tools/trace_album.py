@@ -20,10 +20,13 @@ The load-bearing logic for the album title is *merge precedence*, nothing else:
     replaced: Edit-album (direct set), Clear (set ""), Reset/undo (restore the
     menu-start snapshot), and Fetch with the "Overwrite all" mode
     (``mb_lookup._overwrite_disc``, which prefers ``meta.album`` when set).
-  * An unresolved MB disc-ID multi-match contributes NO album: the agreed-facts
-    meta leaves ``album=None`` (``mb_lookup._build_agreed_facts_meta``), so MB's
-    title only flows on a resolved single pressing (single match, R1 ISRC/MCN
-    disambiguation, or R4 ISRC tally).
+  * An MB disc-ID multi-match no longer abstains: the lexicographic release-
+    selection rung (``mb_lookup._select_release_lexicographic``) pins a single
+    pressing from the consistent subset, and its ``album`` flows through
+    ``_merge_into_disc`` like any single match. ``release_selected_via`` records
+    which key (MCN, barcode plurality, preferred country, date, or MB id)
+    decided the pick. (Single match and R1 ISRC/MCN disambiguation still apply
+    above the rung; R4 ISRC tally is the zero-disc-ID-match fallback.)
 
 Pipeline divergence (album seed origin and which lookups run):
 

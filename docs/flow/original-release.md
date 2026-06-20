@@ -1,5 +1,13 @@
 # Original-Release Lookup
 
+> **⚠ STALE (2026-06-20)**: The risk-analysis note about the MusicBrainz
+> "agreed-facts path deliberately leaving the release identity blank" (so the
+> release-group verification cannot fire on the multi-match path) is obsolete. That
+> path is gone: the lexicographic release-selection rung now **pins a specific
+> pressing** (with a non-blank `mb_release_id`) on a disc-ID multi-match, so the R3
+> tracklist verification **does** run on that path. Regenerate via the
+> `flow-doc-generator` agent before relying on this doc.
+
 > **Purpose**: Determine the earliest known release year and title of the album on a disc, preferring no answer over a wrong answer.
 
 ## Overview

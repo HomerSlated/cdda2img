@@ -16,9 +16,6 @@ from cdda2img.lookup_result import (
     TrackMeta,
 )
 from cdda2img.mb_lookup import (
-    _agreed_tracks,
-    _agreed_value,
-    _build_agreed_facts_meta,
     _disambiguate_by_isrcs,
     _disambiguate_by_mcn,
     _find_disc_medium,
@@ -1531,86 +1528,8 @@ def test_prepopulate_r4_tally_winner_gated_by_consistency():
 
 
 # ---------------------------------------------------------------------------
-# #3-a Unit A — agreed-facts widening (album/artist/title) + MCN-matched subset
+# #3-a Unit A — MCN-matched subset narrowing (multi-match selection)
 # ---------------------------------------------------------------------------
-
-
-def test_agreed_value_unanimous_returns_value():
-    assert _agreed_value(["A", "A", "A"]) == "A"
-
-
-def test_agreed_value_ignores_blanks_among_agreers():
-    """A blank/None is no evidence: a single distinct non-blank still wins."""
-    assert _agreed_value(["A", None, "", "A"]) == "A"
-
-
-def test_agreed_value_disagreement_returns_none():
-    assert _agreed_value(["A", "B"]) is None
-
-
-def test_agreed_value_all_blank_returns_none():
-    assert _agreed_value([None, "", None]) is None
-
-
-def test_agreed_tracks_isrc_and_title_decided_independently():
-    """A track with a unanimous ISRC but a split title keeps the ISRC, drops the
-    title (and vice versa) — the two fields are gated separately per track."""
-    group = [
-        DiscMeta(
-            tracks=[
-                TrackMeta(number=1, title="Song One", isrc="USRHD0709703"),
-                TrackMeta(number=2, title="Song Two", isrc="USWB10301935"),
-            ]
-        ),
-        DiscMeta(
-            tracks=[
-                TrackMeta(number=1, title="Song One", isrc="USRHD0709703"),
-                TrackMeta(number=2, title="Song 2 (remaster)", isrc="USWB10301935"),
-            ]
-        ),
-    ]
-    tracks = {t.number: t for t in _agreed_tracks(group)}
-    assert tracks[1].title == "Song One"  # unanimous title kept
-    assert tracks[1].isrc == "USRHD0709703"
-    assert tracks[2].title is None  # split title dropped
-    assert tracks[2].isrc == "USWB10301935"  # unanimous ISRC kept
-
-
-def test_build_agreed_facts_widens_album_artist_and_titles():
-    """The Unit A widening: album, artist and per-track title now populate when
-    the whole group agrees (previously only RG/year/ISRC were extracted)."""
-    group = [
-        DiscMeta(
-            album="American Idiot",
-            artist="Green Day",
-            release_date="2004-09-20",
-            mb_release_group_id="rg-ai",
-            tracks=[TrackMeta(number=1, title="American Idiot")],
-        ),
-        DiscMeta(
-            album="American Idiot",
-            artist="Green Day",
-            release_date="2004-09-21",  # different exact date, same year
-            mb_release_group_id="rg-ai",
-            tracks=[TrackMeta(number=1, title="American Idiot")],
-        ),
-    ]
-    meta = _build_agreed_facts_meta(group, "rg-ai")
-    assert meta.album == "American Idiot"
-    assert meta.artist == "Green Day"
-    assert meta.release_date == "2004"  # year only, not the split exact date
-    assert meta.tracks[0].title == "American Idiot"
-    assert meta.mb_release_id is None  # pressing still undetermined
-
-
-def test_build_agreed_facts_album_disagreement_stays_none():
-    """Disagreement on a field ⇒ that field is left None, never fabricated."""
-    group = [
-        DiscMeta(album="American Idiot", mb_release_group_id="rg-ai"),
-        DiscMeta(album="American Idiot (Deluxe)", mb_release_group_id="rg-ai"),
-    ]
-    meta = _build_agreed_facts_meta(group, "rg-ai")
-    assert meta.album is None
 
 
 def test_prepop_multimatch_mcn_subset_excludes_blank_barcode_variant():

@@ -1,5 +1,14 @@
 # MusicBrainz Metadata Lookup
 
+> **⚠ STALE (2026-06-20)**: This doc describes the retired **agreed-facts** path for
+> unresolved disc-ID multi-matches ("commit only agreed facts, claim no pressing",
+> the `### Agreed-facts synthesis` section, and the related flowchart node/table row).
+> That mechanism (`_build_agreed_facts_meta`) has been **deleted**. A disc-ID
+> multi-match is now resolved by the lexicographic release-selection rung
+> (`_select_release_lexicographic`), which deterministically **pins a single pressing**
+> from the consistent subset and records the deciding key in `release_selected_via`.
+> Regenerate via the `flow-doc-generator` agent before relying on this doc.
+
 > **Purpose**: Identify the disc against the MusicBrainz metadata service and fill in missing album, artist, track-title, ISRC, barcode, and release-grouping facts — without ever guessing a specific pressing it cannot prove.
 
 ## Overview
