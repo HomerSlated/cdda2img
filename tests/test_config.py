@@ -12,6 +12,7 @@ import pytest
 from cdda2img.config import (
     DriveConfig,
     _parse_drives,
+    _parse_preferred_country,
     _rewrite_config_drives,
     _toml_quote,
     load_config,
@@ -39,6 +40,31 @@ def test_toml_quote_double_quote() -> None:
 
 def test_toml_quote_newline() -> None:
     assert _toml_quote("a\nb") == '"a\\nb"'
+
+
+# ---------------------------------------------------------------------------
+# _parse_preferred_country
+# ---------------------------------------------------------------------------
+
+
+def test_parse_preferred_country_order_and_upper() -> None:
+    assert _parse_preferred_country(["gb", "XE", "us"]) == ["GB", "XE", "US"]
+
+
+def test_parse_preferred_country_strips_and_dedups() -> None:
+    assert _parse_preferred_country([" gb ", "GB", "", "  "]) == ["GB"]
+
+
+def test_parse_preferred_country_drops_non_strings() -> None:
+    assert _parse_preferred_country(["GB", 42, None, "US"]) == ["GB", "US"]
+
+
+def test_parse_preferred_country_empty() -> None:
+    assert _parse_preferred_country([]) == []
+
+
+def test_parse_preferred_country_non_list() -> None:
+    assert _parse_preferred_country("GB") == []
 
 
 # ---------------------------------------------------------------------------
@@ -296,6 +322,24 @@ def test_embedart_read_from_config(
     cfg.write_text("embedart = true\n")
     monkeypatch.setattr("cdda2img.config.config_path", lambda: cfg)
     assert load_config().embedart is True
+
+
+def test_preferred_country_read_from_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cfg = tmp_path / "cfg.toml"
+    cfg.write_text('preferred_country = ["gb", "XE", "us"]\n')
+    monkeypatch.setattr("cdda2img.config.config_path", lambda: cfg)
+    assert load_config().preferred_country == ["GB", "XE", "US"]
+
+
+def test_preferred_country_defaults_empty(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cfg = tmp_path / "cfg.toml"
+    cfg.write_text('cddb_server = "example.com:888"\n')
+    monkeypatch.setattr("cdda2img.config.config_path", lambda: cfg)
+    assert load_config().preferred_country == []
 
 
 def test_embedart_defaults_false(

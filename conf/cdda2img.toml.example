@@ -44,6 +44,15 @@
 # Default: "ask"
 # duplicate_catalogue_entry = "ask"
 
+# Preferred release country, as an ordered priority ranking used by the
+# release-selection step when MusicBrainz returns several pressings of the same
+# album that the disc/ISRC data cannot tell apart. This is NOT a filter: listed
+# codes rank in the order given, any unlisted country shares the lowest rank, and
+# it only breaks ties *within* the same barcode tier (barcode plurality wins
+# first). Leave unset/empty to skip the country preference entirely. Codes are
+# ISO-3166 alpha-2, plus MusicBrainz pseudo-codes "XE" (Europe) / "XW" (Worldwide).
+# preferred_country = ["GB", "XE", "US"]
+
 # Default CD drive device used when no --device argument is supplied.
 # Default: /dev/sr0
 # default_device = "/dev/sr0"

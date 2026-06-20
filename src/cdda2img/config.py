@@ -184,6 +184,31 @@ class Config:
     low_dr_threshold: float = 5.0  # album LRA (LU) below which low_dynamic_range=YES
     auto: bool = False
     embedart: bool = False
+    # Ordered priority ranking of release-country codes for the release-selection
+    # rung (rbi_spec.md §6.3.2; trust_model_design.md §10.2). NOT a filter: listed
+    # codes rank in order, unlisted codes share the lowest rank, empty = key skipped.
+    preferred_country: list[str] = field(default_factory=list)
+
+
+def _parse_preferred_country(raw: object) -> list[str]:
+    """Parse the ``preferred_country`` TOML array into an ordered list of
+    uppercased country codes (a priority ranking, not a filter). Non-string or
+    empty entries are dropped and order is preserved; duplicates are collapsed.
+    A non-list value degrades to an empty list with a warning.
+    """
+    if not isinstance(raw, list):
+        if raw:
+            log.warning(
+                "Invalid preferred_country %r in config; expected a list of codes", raw
+            )
+        return []
+    out: list[str] = []
+    for item in raw:
+        if isinstance(item, str) and item.strip():
+            code = item.strip().upper()
+            if code not in out:
+                out.append(code)
+    return out
 
 
 def _parse_drives(raw_drives: object) -> list[DriveConfig]:
@@ -311,6 +336,8 @@ def load_config() -> Config:
     auto = bool(data.get("auto", False))
     embedart = bool(data.get("embedart", False))
 
+    preferred_country = _parse_preferred_country(data.get("preferred_country", []))
+
     raw_low_dr = data.get("low_dr_threshold", 5.0)
     try:
         low_dr_threshold = float(raw_low_dr)
@@ -341,6 +368,7 @@ def load_config() -> Config:
         low_dr_threshold=low_dr_threshold,
         auto=auto,
         embedart=embedart,
+        preferred_country=preferred_country,
     )
 
 
