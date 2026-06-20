@@ -159,6 +159,55 @@ def test_list_renders_canonical_catalogue_fields(tmp_path, wav_tracks):
     assert f"Tracks:        {len(_EXAMPLE_TRACKS)}" in out
 
 
+def test_list_prov_dumps_noncurated_keys(tmp_path, wav_tracks):
+    """`list --prov` dumps every PROV key=value, including non-curated keys that
+    `_list_info` never renders (e.g. acoustid_gate) — restoring read/write
+    symmetry so the gate's output is greppable."""
+    from cdda2img.container import _list_prov
+
+    disc = RBIDisc(album="A", artist="B")
+    durations = get_track_durations(wav_tracks)
+    disc.tracks = build_toc_entries(_EXAMPLE_TRACKS, durations, disc)
+    toc_data = generate_toc(disc)
+
+    concat = tmp_path / "all.wav"
+    pcm = tmp_path / "all.pcm"
+    concat_wav(wav_tracks, concat)
+    wav_to_raw_pcm(concat, pcm)
+
+    prov = {
+        "mode": "rip",
+        "acoustid_gate": "failed",
+        "release_selected_via": "date",
+    }
+    rbi = tmp_path / "g.rbi"
+    build_container(pcm, toc_data, disc, rbi, prov_data=prov)
+
+    out = _list_prov(rbi)
+    assert "Provenance (PROV):" in out
+    assert "acoustid_gate=failed" in out
+    assert "release_selected_via=date" in out
+
+
+def test_list_prov_no_block(tmp_path, wav_tracks):
+    """`list --prov` reports cleanly when the container has no PROV block."""
+    from cdda2img.container import _list_prov
+
+    disc = RBIDisc(album="A", artist="B")
+    durations = get_track_durations(wav_tracks)
+    disc.tracks = build_toc_entries(_EXAMPLE_TRACKS, durations, disc)
+    toc_data = generate_toc(disc)
+
+    concat = tmp_path / "all.wav"
+    pcm = tmp_path / "all.pcm"
+    concat_wav(wav_tracks, concat)
+    wav_to_raw_pcm(concat, pcm)
+
+    rbi = tmp_path / "np.rbi"
+    build_container(pcm, toc_data, disc, rbi, prov_data=None)
+    assert "No provenance block" in _list_prov(rbi)
+
+
 # ---------------------------------------------------------------------------
 # Header round-trip
 # ---------------------------------------------------------------------------

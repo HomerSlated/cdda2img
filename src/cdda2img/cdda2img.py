@@ -289,6 +289,11 @@ def parse_args() -> argparse.Namespace:
     l_cmd.add_argument("--rg", action="store_true", help="Show ReplayGain data")
     l_cmd.add_argument("--ar", action="store_true", help="Show AccurateRip report")
     l_cmd.add_argument("--log", action="store_true", help="Show rip log")
+    l_cmd.add_argument(
+        "--prov",
+        action="store_true",
+        help="Dump the raw provenance (PROV) block as decoded key=value lines",
+    )
 
     t_cmd = sub.add_parser("test", help="Test/validate an RBI image against the spec")
     t_cmd.add_argument("rbi_file", type=Path, help="RBI file to validate")
@@ -706,8 +711,10 @@ def create_image(
             provenance["match_confidence"] = f"{match_dist.score:.3f}"
             provenance["match_recommendation"] = match_dist.recommendation.value
             # Menu shown unless --auto; confidence is informational (see
-            # _finalize_import for the same policy).
-            auto_apply = auto
+            # _finalize_import for the same policy). A failed §10.4 AcoustID gate
+            # additionally suppresses --auto (warn-only) — a no-op in create,
+            # which has no MB disc-ID match to gate, but kept for symmetry.
+            auto_apply = _gate_adjusted_auto(auto, provenance)
             if auto_apply:
                 print(f"  Metadata auto-confirmed — {match_dist.summary()}")
             else:
@@ -1308,6 +1315,60 @@ def _emit_r9_disagreement(
         provenance["disagreement_cddb_mb"] = ",".join(fields)
 
 
+def _acoustid_gate(
+    disc: RBIDisc,
+    per_track_hits: list[list],
+    provenance: dict[str, str],
+) -> None:
+    """§10.4 AcoustID gate — post-selection, set-level corroboration check.
+
+    Asks "does the disc audio match the *album* the disc-ID/rung selected?" to
+    catch a wrong disc-ID, a TOC collision, or a mispress. Matched at the
+    **release-group** level, not the release-id: AcoustID is edition-blind
+    (it identifies recordings, not pressings), so a release-id comparison would
+    false-fail whenever the disc-ID pressing differs from AcoustID's pressing of
+    the same album. A single probed track suffices (union membership across all
+    fingerprinted tracks == "appears in >= 1 track").
+
+    Only writes ``acoustid_gate=failed`` on a genuine miss, and only when there
+    was evidence on both sides to compare (the disc carries a matched
+    release-group AND AcoustID supplied at least one release-group). Absence of
+    the key means pass / not-evaluated — both treated as "do not suppress" by
+    ``_gate_adjusted_auto`` (per spec: the key is fail-only).
+    """
+    if not disc.mb_release_group_id:
+        return
+    rg_seen = {
+        h.mb_release_group_id
+        for hits in per_track_hits
+        for h in hits
+        if h.mb_release_group_id
+    }
+    if rg_seen and disc.mb_release_group_id not in rg_seen:
+        provenance["acoustid_gate"] = "failed"
+
+
+def _gate_adjusted_auto(auto: bool, provenance: dict[str, str]) -> bool:
+    """Return the effective ``auto_apply`` after applying the §10.4 gate.
+
+    Warn-only policy (user decision 2026-06-20): on a failed gate the disc-ID
+    result is still produced and the failure is recorded in PROV
+    (``acoustid_gate=failed``) for later auditing (``list --prov | grep
+    acoustid_gate``); we only refuse to *auto-commit* it. On a TTY this drops to
+    the interactive menu so the user can review; on a headless ``--auto`` run the
+    result is committed but flagged (revisit if a real failing disc shows a
+    better policy). A WARNING is printed whenever the gate failed, so the user
+    sees why the menu opened even without ``--auto``.
+    """
+    if provenance.get("acoustid_gate") == "failed":
+        print(
+            "  Warning: AcoustID gate — disc audio does not corroborate the "
+            "matched release (album level); not auto-confirming, please review."
+        )
+        return False
+    return auto
+
+
 def _r6_tally_and_merge(
     per_track_hits: list[list],
     disc: RBIDisc,
@@ -1345,6 +1406,7 @@ def _r6_tally_and_merge(
         provenance["acoustid_corroborates"] = (
             "YES" if disc.mb_release_id in consistent_rids else "NO"
         )
+        _acoustid_gate(disc, per_track_hits, provenance)
         return disc
 
     # No disc-ID match from MB. AcoustID identifies *recordings*, not pressings;
@@ -1711,8 +1773,10 @@ def _finalize_import(
     provenance["match_recommendation"] = match_dist.recommendation.value
     # The interactive menu is shown unless --auto (or config auto=true). Match
     # confidence is informational only — it is surfaced as a hint but never
-    # skips the menu on its own (user decision, 2026-06-20).
-    auto_apply = auto
+    # skips the menu on its own (user decision, 2026-06-20). A failed §10.4
+    # AcoustID gate additionally suppresses --auto (warn-only): the disc-ID
+    # result is kept and flagged in PROV, but not auto-committed.
+    auto_apply = _gate_adjusted_auto(auto, provenance)
 
     # Hand the terminal over to the interactive metadata menu. The
     # ar_summary kwarg is passed through for completeness (rip pipeline only).
@@ -2673,9 +2737,14 @@ def _dispatch_utility(args: argparse.Namespace) -> None:
     if args.cmd == "list":
         from cdda2img.container import list_container
 
-        show_info = args.info or not (args.rg or args.ar or args.log)
+        show_info = args.info or not (args.rg or args.ar or args.log or args.prov)
         list_container(
-            args.rbi_file, info=show_info, rg=args.rg, ar=args.ar, log=args.log
+            args.rbi_file,
+            info=show_info,
+            rg=args.rg,
+            ar=args.ar,
+            log=args.log,
+            prov=args.prov,
         )
     elif args.cmd == "test":
         from cdda2img.container import verify_container

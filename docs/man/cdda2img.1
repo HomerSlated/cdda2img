@@ -446,6 +446,28 @@ Renders the AccurateRip verification report.
 .TP
 .B \-\-log
 Renders the rip log.
+.TP
+.B \-\-prov
+Dumps the raw provenance (PROV) block as decoded
+.I key=value
+lines, one per line, in file order.
+Unlike
+.BR \-\-info ,
+which renders only a curated subset of provenance, this shows
+.I every
+key \(em including ones no other view surfaces, such as
+.BR acoustid_gate ,
+.BR release_selected_via ,
+and
+.BR multi_match_isrc_disambiguated .
+Useful for auditing a library, e.g.
+.IP
+.EX
+for f in *.rbi; do
+  cdda2img list "$f" \-\-prov | grep \-q 'acoustid_gate=failed' \e
+    && echo "$f"
+done
+.EE
 .\"
 .SS test \(em Test
 Verifies the integrity and spec\-conformance of an RBI image.
@@ -673,6 +695,26 @@ unconditionally, regardless of the score.
 This is the only way to skip the menu: the recommendation level
 .RB ( STRONG ,
 MEDIUM, LOW, NONE) never skips it on its own.
+.SS AcoustID gate
+After the release is selected, a post\-selection AcoustID check fingerprints
+tracks 1 and \(lcN/2\(rc and asks whether the disc audio matches the selected
+release's
+.I album
+(matched at the MusicBrainz release\-group level, since AcoustID identifies
+recordings rather than pressings).
+If the audio does
+.I not
+corroborate the album \(em a likely wrong disc\-ID match, TOC collision, or
+mispress \(em the gate fails:
+.B acoustid_gate=failed
+is written to provenance, a warning is printed, and
+.B \-\-auto
+is suppressed for that disc so the result is reviewed rather than
+auto\-committed.
+The rip is never failed; absence of the key means the gate passed or did not
+run.
+Inspect failures across a library with
+.BR "list \-\-prov" .
 .\"
 .SH ENVIRONMENT
 .TP

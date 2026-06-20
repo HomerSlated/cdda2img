@@ -1168,6 +1168,29 @@ def _list_info(rbi_file: Path) -> str:  # noqa: C901
     return "\n".join(lines)
 
 
+def _list_prov(rbi_file: Path) -> str:
+    """Build the --prov section: every PROV key=value pair, decoded, in file order.
+
+    The write path (``build_prov_block``) is general — any key round-trips — but
+    ``_list_info`` only renders a curated subset, so non-curated keys (e.g.
+    ``acoustid_gate``, ``release_selected_via``) are otherwise invisible. This
+    dump restores read/write symmetry and makes every key greppable:
+    ``cdda2img list disc.rbi --prov | grep acoustid_gate``.
+    """
+    header = read_header(rbi_file)
+    prov_entry = header.find_block(BLOCK_TYPE_PROV)
+    if prov_entry is None:
+        return "(No provenance block in this container)"
+    with open(rbi_file, "rb") as f:
+        f.seek(prov_entry.offset)
+        prov = _parse_provenance(f.read(prov_entry.length))
+    if not prov:
+        return "Provenance (PROV):\n  (empty)"
+    lines = ["Provenance (PROV):"]
+    lines.extend(f"  {k}={v}" for k, v in prov.items())
+    return "\n".join(lines)
+
+
 def list_container(  # noqa: C901
     rbi_file: Path,
     *,
@@ -1175,16 +1198,20 @@ def list_container(  # noqa: C901
     rg: bool = False,
     ar: bool = False,
     log: bool = False,
+    prov: bool = False,
 ) -> None:
     """Print a human-readable listing of an RBI file.
 
-    Flags are additive. If none of rg/ar/log are set, info defaults to True.
+    Flags are additive. If none of rg/ar/log/prov are set, info defaults to True.
     All output goes to stdout; pipe to a pager yourself if needed.
     """
     parts: list[str] = []
 
     if info:
         parts.append(_list_info(rbi_file))
+
+    if prov:
+        parts.append(_list_prov(rbi_file))
 
     if rg:
         header = read_header(rbi_file)
