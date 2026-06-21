@@ -132,7 +132,15 @@ Full specification: `docs/reference/rbi_spec.md`.
 
 ## Installation
 
-**Requirements:** Python 3.10+, [ffmpeg](https://ffmpeg.org/) (system install)
+**Requirements:** Python 3.10+, [ffmpeg](https://ffmpeg.org/) (system install). Ripping
+additionally needs [cdrdao](https://github.com/cdrdao/cdrdao) (primary path) and
+cd-paranoia (fallback path).
+
+> **cdrdao note:** correct per-track ISRCs require a cdrdao built with the fix for
+> [bug #75](https://github.com/cdrdao/cdrdao/issues/79) — an ISRC stale-latch in `read-cd`.
+> Affected versions misread a track's ISRC as the *previous* track's code when the ISRC
+> lies in the track's first sectors, which can silently prevent automatic release
+> identification.
 
 ```bash
 uv sync

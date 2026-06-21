@@ -83,6 +83,19 @@ running at full paranoia.
 Disc metadata captured during the original cdrdao pass (MCN, ISRC, CD\-Text) is
 preserved even when the audio is re-ripped.
 .PP
+.B Note:
+correct per\-track ISRCs require a
+.B cdrdao
+built with the fix for bug #75 (an ISRC stale\-latch in
+.BR read\-cd ).
+Affected versions misread a track's ISRC as the
+.I previous
+track's code when the ISRC lies in the track's first sectors, which can
+silently prevent automatic release identification.
+See
+.UR https://github.com/cdrdao/cdrdao/issues/79
+.UE .
+.PP
 Before each rip,
 .B cdda2img rip
 automatically resolves the correct drive sample offset.
