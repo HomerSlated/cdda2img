@@ -758,3 +758,88 @@ Country · Catalogue no. (`catalog_number`) · MCN (`catalog`) · Original relea
 5. Discogs barcode corroboration (§10.3.1) + AcoustID gate (§10.4).
 
 Steps 1–2 are pure B6 (fields + display) and independently shippable; 3–5 are the disambiguator.
+
+---
+
+## 11. B4 authoritative build plan (DECIDED 2026-06-21)
+
+**Decision: build B4 (full collect→resolve, resolver as sole committer) — the
+authoritative path, true order-independence as a class.** User chose it over the
+cheaper "shadow-collect for B5 only" fork, eyes-open that the *behavioural* payoff
+beyond B5 is ~nil (the order-dependence only bites the B2-dead case: CD-Text
+present *and* disagreeing with MB) — the value is the architecture + B5.
+
+**Scope: Layer 2 (per-field value merge) only.** §10's release *selection* (the
+lexicographic rung, `_pick_canonical_mcn`, AcoustID gate, catalogue fields, the
+canonical renderer) already shipped and stays untouched. B4 replaces the
+`_merge_into_disc` fold *beneath* it. "Refine, don't replace."
+
+### 11.1 The entanglement (why this is not "replace a fold")
+
+The merge is **mutate-as-you-go**, distributed across `prepopulate_from_mb` (4
+`_merge_into_disc` sites), `_prepopulate_from_discogs`, `_r6_acoustid_corroborate`,
+then stage-7 and CDDB in `_run_metadata_lookups` — and later stages **read
+accumulated disc state mid-pipeline**:
+- stage-7 gate (`cdda2img.py:1717`): `if disc.mb_release_id is None and (disc.album
+  or disc.artist)`.
+- AcoustID corroboration compares against `disc.mb_release_id`.
+
+A naïve "collect every `DiscMeta`, resolve once" breaks these gates.
+
+### 11.2 The decoupling (the crux)
+
+`mb_release_id` is *both* an eager **gating signal** (Layer-1 "which release") and
+a deferred **resolved field** (Layer-2). Cut it cleanly:
+- **Layer-1 selection stays eager** — `prepopulate_from_mb` decides the release and
+  exposes it as `mb_result.selected_release_id`. The stage-7 gate and AcoustID
+  corroboration read *that result*, not a mutated `disc`.
+- **Layer-2 field values defer** — each source contributes `FieldProposal`s to an
+  accumulator; one `resolve()` + `disc_from_resolution()` commits at the end. The
+  single `Resolution` carries cross-source alternatives → B5.
+
+### 11.3 "Reproduce today" trust mapping (the gate's foundation)
+
+Today's behaviour is **fill-blank / baseline-wins-when-present**, which is *not* a
+trust contest. Reproduce it as: the baseline (CD-Text on rip / mutagen on create)
+contributes proposals **at max trust for the fields it actually has**, and
+contributes **nothing** for the meta-priority quirk fields (`disc_number`,
+`disc_total` — where `_merge_into_disc` is meta-first). Network sources rank in
+today's call order (MB → Discogs/AcoustID → stage-7 → CDDB). The "Unknown Artist"
+sentinel is cleaned to empty by the adapter so it never wins. `resolve()` then
+reproduces `_merge_into_disc` field-for-field — **proven by the B0 characterization
++ `test_parallel_pre_menu` as the byte-identical gate.** B-6 flips the baseline low
+(CDTEXT < DISC_ID) for the corrected ranking — the *only* behaviour change, with
+its own characterization.
+
+### 11.4 Strangler staging (each step keeps all tests green)
+
+- **B-1** — `trust_for(source, field, pipeline)` (reproduce-today map) +
+  `meta_to_proposals(meta, source, pipeline)` + `baseline_proposals(disc, pipeline)`.
+  Add the missing `Field.ORIGINAL_RELEASE_DATE` (Phase A omission — `_merge_into_disc`
+  merges it). Unit **equivalence test**: `disc_from_resolution(resolve(baseline +
+  meta proposals)) == _merge_into_disc(meta, disc)` per field. Additive, unwired.
+- **B-2** — `selected_release_id` exposed on `MBPrepopResult`; stage-7 gate +
+  AcoustID corroboration switch to reading it (behaviour identical — it equals
+  today's `disc.mb_release_id` at those points).
+- **B-3** — **shadow mode**: in `_run_metadata_lookups`, collect proposals from every
+  source alongside the live merge; at the end assert `disc_from_resolution(resolve(
+  acc)) == live_disc`. Ships nothing; the assertion (in tests, and optionally a
+  debug log) proves equivalence across the corpus.
+- **B-4** — **flip**: the resolver output becomes the committed disc; the
+  per-source `_merge_into_disc` calls are removed (lookups keep running for their
+  side-effects + proposals). De-risked by B-3.
+- **B-5** — convert the interactive menu-apply paths (`menu_state.py:672–726`,
+  Update vs Overwrite-All → MANUAL-trust proposals) and `_clear_disc`.
+- **B-6** — tune the ranking to the corrected order (baseline low). The single
+  intentional behaviour change; its own characterization diff.
+- **B-7** — B5 menu alternatives UI (the confirmed destination), fed by
+  `Resolution.alternatives`; feed the structured resolution into
+  `build_match_distance` (replaces PROV string-sniffing); the §3.1 seed/merge
+  decouple (B3) falls out for free.
+
+### 11.5 Gates / invariants
+- B0 (`test_merge_characterization`) + `test_parallel_pre_menu` stay byte-identical
+  through B-5; only B-6 changes them, deliberately.
+- B1 invariants (`test_merge_invariants`) become the resolver's C1/C2 regression gate.
+- `_pick_canonical_mcn`, the §10 rung, the AcoustID gate, the renderer: untouched.
+- Run on min Python (3.10) per [[feedback_verify_min_python]]; ship via `scripts/sync.py`.
