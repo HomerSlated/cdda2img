@@ -310,6 +310,13 @@ needed (see AccurateRip validation below).
 **Primary path — cdrdao** (`cdrdao_ripper.py:rip_cdrdao()`):
 - Captures full subchannel data: MCN (Q-ch Mode 2), per-track ISRC (Q-ch Mode 3), CD-Text
   (R-W subchannels). This is the main advantage over cd-paranoia.
+- Forces `--driver generic-mmc:0x0014` (`_DRIVER`): the `0x0004` bit is `OPT_MMC_READ_ISRC`,
+  which makes read-cd read each ISRC via a dedicated per-track `READ SUB-CHANNEL` SCSI query
+  instead of inline from the streaming audio subchannel. This is the fix for **cdrdao bug #75**
+  (open upstream since 2002): the default inline read stale-latches the *previous* track's ISRC
+  when a track's ISRC sits in its first sectors. Pinning the driver overrides cdrdao's per-drive
+  auto-detection (accepted — `--driver name:opts` replaces options wholesale, so the bit cannot
+  be added without naming the driver). Same reliable path `read-toc`/`cdda2wav` use.
 - BIN output is s16be — always byte-swapped to s16le by `convert_cdrdao_bin()`.
 - No sample offset correction at rip time; AccurateRip validation detects whether correction
   is needed post-rip.

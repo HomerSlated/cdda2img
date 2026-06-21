@@ -21,7 +21,26 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
-_CMD_BASE = ["cdrdao", "read-cd"]  # LINT-013
+# Force the generic-mmc driver with OPT_MMC_READ_ISRC (0x0004) set.
+#
+# By default cdrdao read-cd extracts each track's ISRC inline from the
+# subchannel as it streams the audio. When a track's ISRC sits in its first
+# sectors, the Q-channel still carries the *previous* track's ISRC (a stale
+# latch), so the wrong code is recorded — cdrdao bug #75, open upstream since
+# 2002 (https://sourceforge.net/p/cdrdao/bugs/75/). OPT_MMC_READ_ISRC forces a
+# dedicated per-track READ SUB-CHANNEL SCSI query instead (GenericMMC.cc:
+# readAudioRange / analyzeTrack), the same reliable path read-toc and cdda2wav
+# use. Empirically verified on the dev PX-716A: tracks whose ISRC is in the
+# first sectors flip from the predecessor's code to the correct one.
+#
+# 0x0010 (OPT_MMC_CD_TEXT) mirrors the option set cdrdao auto-selects for
+# generic-mmc on this drive; 0x0004 is the fix. Pinning the driver overrides
+# cdrdao's per-drive auto-detection (accepted trade-off — generic-mmc covers
+# modern MMC drives; --driver name:opts replaces options wholesale, so the bit
+# cannot be added without naming the driver).
+_DRIVER = "generic-mmc:0x0014"
+
+_CMD_BASE = ["cdrdao", "read-cd", "--driver", _DRIVER]  # LINT-013
 
 
 def rip_cdrdao(
