@@ -38,7 +38,8 @@ log = logging.getLogger(__name__)
 # cdrdao's per-drive auto-detection (accepted trade-off — generic-mmc covers
 # modern MMC drives; --driver name:opts replaces options wholesale, so the bit
 # cannot be added without naming the driver).
-_DRIVER = "generic-mmc:0x0014"
+# _DRIVER = "generic-mmc:0x0014" <- disabled, as testing cdrdao patch
+_DRIVER = "generic-mmc"
 
 _CMD_BASE = ["cdrdao", "read-cd", "--driver", _DRIVER]  # LINT-013
 
