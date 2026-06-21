@@ -1714,16 +1714,16 @@ def _run_metadata_lookups(
     # order would have seeded it. That CDDB-only-seed disc is the rare case we
     # give up to make the duration matcher outrank CDDB on every other disc.
     if disc.mb_release_id is None and (disc.album or disc.artist):
-        from cdda2img.mb_lookup import duration_match_lookup
+        from cdda2img.mb_lookup import duration_match_lookup, strip_pressing_mbid
 
         dm = duration_match_lookup(disc, verbose=mb_verbose)
         if dm is not None:
             # Record which release matched for provenance, but do NOT bake its
             # (text+duration-matched, non-disc-ID) pressing MBID into disc as if
-            # authoritative — strip it before merging, keeping the release group,
-            # exactly as the ISRC-tally fallback does.
+            # authoritative — route through the C2 chokepoint before merging,
+            # keeping the release group, exactly as the ISRC-tally fallback does.
             provenance["duration_match_release"] = dm.mb_release_id or "?"
-            disc = _merge_into_disc(replace(dm, mb_release_id=None), disc)
+            disc = _merge_into_disc(strip_pressing_mbid(dm), disc)
 
     # CDDB applied DEAD LAST — zero-trust gap-filler, now the absolute lowest
     # precedence (below even stage-7). By now CD-Text, MB, Discogs, AcoustID and

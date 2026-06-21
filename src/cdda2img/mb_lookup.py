@@ -875,6 +875,23 @@ def _overwrite_disc(meta: DiscMeta, disc: RBIDisc) -> RBIDisc:
     )
 
 
+def strip_pressing_mbid(meta: DiscMeta) -> DiscMeta:
+    """C2 chokepoint: null a *recording-level* match's pressing ``mb_release_id``.
+
+    Sources that identify a *recording* rather than a disc-ID-verified pressing —
+    the per-track ISRC tally (R4), the stage-7 duration matcher, and AcoustID —
+    must not bake their ``mb_release_id`` into ``disc`` as if it were
+    disc-ID-proven (defect class C2). This is the single place that strips it;
+    every non-disc-ID merge path routes its ``DiscMeta`` through here before
+    ``_merge_into_disc``. ``mb_release_group_id`` is deliberately preserved — the
+    original-release lookup needs it, and a release *group* is not pressing-level.
+
+    Disc-ID matches must NOT use this: their ``mb_release_id`` is legitimately
+    pressing-level (every candidate shares the disc-ID fingerprint).
+    """
+    return replace(meta, mb_release_id=None)
+
+
 # R1: minimum number of agreeing per-track ISRC pairs required to commit a
 # multi-match disambiguation. Below this we prefer no-auto-merge (blank but
 # correctable) over a confident-but-possibly-wrong choice.
@@ -952,12 +969,11 @@ def _resolve_via_isrc_tally(disc: RBIDisc) -> DiscMeta | None:
     if len(ranked) > 1 and ranked[1][1] == top_count:
         log.debug("R4: tied top tally %d — no auto-merge", top_count)
         return None
-    # F-002: the tally key (and thus candidate.mb_release_id) is a *recording*'s
-    # release, reached via ISRC — not a disc-ID-verified release for THIS disc.
-    # Null it so it is never written as authoritative release provenance (the
-    # same invariant as the AcoustID path); the release-group id, which the
-    # original-release lookup needs, is kept.
-    return replace(candidates[top_rid], mb_release_id=None)
+    # F-002 / C2: the tally key (and thus candidate.mb_release_id) is a
+    # *recording*'s release, reached via ISRC — not a disc-ID-verified release
+    # for THIS disc. Route through the C2 chokepoint so it is never written as
+    # authoritative release provenance; the release-group id is kept.
+    return strip_pressing_mbid(candidates[top_rid])
 
 
 def _disambiguate_by_isrcs(matches: list[DiscMeta], disc: RBIDisc) -> DiscMeta | None:

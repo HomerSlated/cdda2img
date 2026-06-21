@@ -28,11 +28,24 @@ structural fix (design before code):
 Discuss: a typed wrapper / dedicated merge API, vs. a documented chokepoint + an
 invariant test asserted at each known site. Decide scope before implementing.
 
+**LANDED 2026-06-21 (B1) — chokepoint + invariant tests chosen over the typed API.**
+- **C2:** a single `mb_lookup.strip_pressing_mbid(meta)` chokepoint nulls the
+  pressing-level `mb_release_id` (keeps `mb_release_group_id`); both non-disc-ID merge
+  paths route through it (`_resolve_via_isrc_tally`, and the stage-7 duration-match call
+  site in `cdda2img.py`). AcoustID needs no change — it corroborates, never merges.
+- **C1:** the merge/clear sites already use `dataclasses.replace`; `tests/test_merge_invariants.py`
+  now asserts `_merge_into_disc` / `_overwrite_disc` / `_clear_disc` preserve the
+  physical/derived fields (`pre_emphasis`, `low_dynamic_range`, `cdtext_catalog_ref`,
+  disc layout, track timing) — the regression guard against a future hand-built site.
+- The **typed proposal schema** (the stronger enforcement) remains the deferred OPT-4
+  option (B4); it only fully pays off once the collect→resolve resolver exists, which is
+  not being built. See trust_model_design.md §9 and the recap below.
+
 **Unified with OPT-4 in `docs/reference/trust_model_design.md` (2026-06-17)** — the
-collect→resolve trust model closes C1 (physical fields proposed at `OBJECTIVE` by one
-producer, resolved via one `replace`-based assembler) and C2 (recording-level sources'
-proposal schema omits disc-level `mb_release_id`) by construction. Decision §5.2 there
-is exactly this item's "typed API vs. chokepoint + invariant test" choice.
+collect→resolve trust model would close C1/C2 by construction (physical fields proposed
+at `OBJECTIVE` by one producer; recording-level sources' proposal schema omits disc-level
+`mb_release_id`). Decision §5.2 there is this item's "typed API vs. chokepoint + invariant
+test" choice — **resolved in favour of the chokepoint (B1, above)**.
 
 ### Remaining metadata-pipeline work (2026-06-15)
 
