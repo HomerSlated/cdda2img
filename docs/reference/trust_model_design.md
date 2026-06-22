@@ -837,7 +837,36 @@ its own characterization.
   `build_match_distance` (replaces PROV string-sniffing); the §3.1 seed/merge
   decouple (B3) falls out for free.
 
-### 11.5 Gates / invariants
+### 11.5 Traceability (per-field decision provenance) — user requirement 2026-06-21
+
+"If both B5 choices are wrong, which item in the scoring system caused it?" The
+resolver must answer this. The fill-blank merge discards losers (only R9 logs
+album/artist disagreement); the resolver retains everything by construction, so
+the requirement is to *expose* it, spanning both layers:
+
+- **Resolver retains the full contender set per field**, not just the winner +
+  de-duped alternatives. `resolve()` already groups proposals by key internally;
+  surface it as `Resolution.contenders[key] -> tuple[FieldProposal, ...]`
+  (all non-empty, trust-desc). The B5-facing `alternatives` (distinct-valued
+  losers) stays a derived view.
+- **Skipped proposals are recorded with a reason** (empty value, "Unknown Artist"
+  sentinel, etc.) — so a *silently dropped* correct value (failure mode 2) becomes
+  visible rather than invisible. Capture as e.g. `Resolution.skipped[key] ->
+  tuple[(FieldProposal, reason), ...]`.
+- **A per-field provenance dump** exposes it: extend `list --prov` (and/or a
+  `--explain` mode) to print, per field, `winner (source@trust)`, the contenders,
+  the skipped+reason, and the Layer-1 `release_selected_via`. This localises any
+  wrong result to exactly one of: source/data gap · a drop · Layer-1 selection ·
+  the trust ranking.
+- **Honest limit:** the trace explains *where the value came from and what
+  competed*; it cannot invent a value no source proposed — but it makes that case
+  unambiguous (points at the data gap, not a phantom code bug).
+
+Implication for B-1: `FieldProposal` is already the carrier; the resolver gains
+`contenders` + `skipped` from the start (cheap — the data is in hand at resolve
+time), so the trace is never a retrofit. The dump UI lands with B-7.
+
+### 11.6 Gates / invariants
 - B0 (`test_merge_characterization`) + `test_parallel_pre_menu` stay byte-identical
   through B-5; only B-6 changes them, deliberately.
 - B1 invariants (`test_merge_invariants`) become the resolver's C1/C2 regression gate.

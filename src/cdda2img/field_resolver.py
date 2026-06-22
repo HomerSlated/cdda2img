@@ -100,6 +100,9 @@ class Field(Enum):
     LABEL = "label"
     COUNTRY = "country"
     RELEASE_DATE = "release_date"
+    ORIGINAL_RELEASE_DATE = (
+        "original_release_date"  # release-group first date (from MB)
+    )
     DISC_NUMBER = "disc_number"
     DISC_TOTAL = "disc_total"
     SET_TITLE = "set_title"
@@ -157,13 +160,21 @@ ProposalKey = tuple[Field, int | None]
 class Resolution:
     """The outcome of :func:`resolve`.
 
-    ``winners`` maps each contested key to the highest-trust proposal. ``alternatives``
-    maps a key to the *other* distinct-valued proposals (highest trust per distinct
-    value, descending) — losers retained for provenance and the future B5 menu.
+    ``winners`` maps each contested key to the highest-trust proposal.
+    ``alternatives`` maps a key to the *other* distinct-valued proposals (highest
+    trust per distinct value, descending) — the B5 menu view.
+    ``contenders`` maps a key to **every** non-empty proposal it received (trust
+    descending, including the winner and same-valued agreers) — the full decision
+    trace for "why did this field resolve to X?" (§11.5 traceability). When two
+    menu choices are both wrong, this is what shows whether the right value was
+    never proposed, or proposed-but-outranked, and by which source/trust.
     """
 
     winners: dict[ProposalKey, FieldProposal] = dc_field(default_factory=dict)
     alternatives: dict[ProposalKey, tuple[FieldProposal, ...]] = dc_field(
+        default_factory=dict
+    )
+    contenders: dict[ProposalKey, tuple[FieldProposal, ...]] = dc_field(
         default_factory=dict
     )
 
@@ -193,14 +204,20 @@ def resolve(proposals: Iterable[FieldProposal]) -> Resolution:
 
     winners: dict[ProposalKey, FieldProposal] = {}
     alternatives: dict[ProposalKey, tuple[FieldProposal, ...]] = {}
+    contenders: dict[ProposalKey, tuple[FieldProposal, ...]] = {}
     for key, props in by_key.items():
+        # Full trace: every non-empty proposal for this key, trust descending.
+        ranked = sorted(props, key=lambda p: p.trust, reverse=True)
+        contenders[key] = tuple(ranked)
+
         # max() returns the first element achieving the max trust, so equal-trust
         # ties break by first-seen — deterministic, and lets Phase B reproduce
         # today's order by encoding it as distinct trust values.
         winner = max(props, key=lambda p: p.trust)
         winners[key] = winner
 
-        # Alternatives: distinct values other than the winner's, best trust each.
+        # Alternatives (B5 view): distinct values other than the winner's, best
+        # trust each.
         best_by_value: dict[object, FieldProposal] = {}
         for p in props:
             if p.value == winner.value:
@@ -213,7 +230,7 @@ def resolve(proposals: Iterable[FieldProposal]) -> Resolution:
                 sorted(best_by_value.values(), key=lambda p: p.trust, reverse=True)
             )
 
-    return Resolution(winners=winners, alternatives=alternatives)
+    return Resolution(winners=winners, alternatives=alternatives, contenders=contenders)
 
 
 def disc_from_resolution(resolution: Resolution, base: RBIDisc) -> RBIDisc:

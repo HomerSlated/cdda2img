@@ -113,6 +113,46 @@ def test_alternatives_dedupe_by_value_keep_best_trust():
     assert alts[0].value == "Other" and alts[0].trust == Trust.DISCOGS
 
 
+# === resolve() — contenders: the full per-field decision trace (§11.5) =======
+
+
+def test_contenders_keep_every_nonempty_proposal_trust_descending():
+    # Unlike alternatives, contenders includes the winner AND same-valued agreers.
+    winner = _p(Field.ALBUM, "Winner", Trust.DISC_ID, Source.MB_DISC_ID)
+    agreer = _p(Field.ALBUM, "Winner", Trust.DISCOGS, Source.DISCOGS)  # same value
+    loser = _p(Field.ALBUM, "Other", Trust.CDDB, Source.CDDB)
+    res = resolve([loser, agreer, winner])  # deliberately unsorted input
+    trace = res.contenders[(Field.ALBUM, None)]
+    # All three retained (alternatives would have dropped winner + the agreer).
+    assert [c.trust for c in trace] == [Trust.DISC_ID, Trust.DISCOGS, Trust.CDDB]
+    assert trace[0] is winner
+    # The agreer (same value, lower trust) survives in the trace but not in alts.
+    assert any(c is agreer for c in trace)
+    assert all(a.value != "Winner" for a in res.alternatives[(Field.ALBUM, None)])
+
+
+def test_contenders_exclude_empty_proposals():
+    # An empty/None proposal is skipped before grouping, so it never appears in
+    # the trace (the §11.5 `skipped` map — a B-1 adapter concern — records those).
+    res = resolve([
+        _p(Field.ALBUM, "Real", Trust.CDTEXT, Source.BASELINE),
+        _p(Field.ALBUM, "", Trust.DISC_ID, Source.MB_DISC_ID),
+        _p(Field.ALBUM, None, Trust.DISCOGS, Source.DISCOGS),
+    ])
+    trace = res.contenders[(Field.ALBUM, None)]
+    assert [c.value for c in trace] == ["Real"]
+
+
+def test_contenders_keyed_per_track():
+    res = resolve([
+        _p(Field.TRACK_TITLE, "One", Trust.DISC_ID, Source.MB_DISC_ID, 1),
+        _p(Field.TRACK_TITLE, "Uno", Trust.CDTEXT, Source.BASELINE, 1),
+        _p(Field.TRACK_TITLE, "Two", Trust.DISC_ID, Source.MB_DISC_ID, 2),
+    ])
+    assert [c.value for c in res.contenders[(Field.TRACK_TITLE, 1)]] == ["One", "Uno"]
+    assert [c.value for c in res.contenders[(Field.TRACK_TITLE, 2)]] == ["Two"]
+
+
 def test_track_level_keys_resolve_independently():
     res = resolve([
         _p(Field.TRACK_TITLE, "One", Trust.DISC_ID, Source.MB_DISC_ID, 1),
