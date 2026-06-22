@@ -256,6 +256,47 @@ def test_equiv_isrc_disc_normalised_form_proposed():
     assert _equiv(meta, disc).tracks[0].isrc == "GBAYE0000123"
 
 
+# === KNOWN B-1 DIVERGENCES from _merge_into_disc (must resolve before B-4 flip)
+# Root cause (advisor 2026-06-22): _merge *rebuilds* a meta-matched track entry,
+# so a disc-side value that validates-to-empty gets nulled; the resolver *patches*
+# only proposed fields and otherwise keeps the base. These are pinned as
+# strict-xfail equivalence assertions so they (a) stay visible, (b) keep the suite
+# green, and (c) self-trip the moment a fix or a conscious documented divergence
+# (matching the discogs_release_id==0 treatment) lands and makes them pass.
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="B-1 divergence: invalid disc ISRC + matched meta track w/ empty ISRC. "
+    "_merge rebuilds and nulls the bad ISRC; resolver patches and keeps it. "
+    "Resolve before the B-4 flip.",
+)
+def test_equiv_isrc_invalid_disc_matched_meta_empty_isrc_DIVERGES():
+    disc = _disc(tracks=[_toc(1, title="D1", isrc="GARBAGE")])
+    # meta matches track 1 (so _merge rebuilds it) but carries no ISRC.
+    meta = DiscMeta(tracks=[TrackMeta(number=1, title="M1", isrc=None)])
+    # _merge -> isrc None (scrubbed); resolver -> "GARBAGE" (kept).
+    _equiv(meta, disc)
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="B-1 divergence: duplicate track numbers in meta.tracks. _merge's "
+    "meta_by_num dict is last-wins; resolver's equal-trust max is first-wins. "
+    "Resolve before the B-4 flip.",
+)
+def test_equiv_duplicate_meta_track_number_DIVERGES():
+    disc = _disc(tracks=[_toc(1, isrc=None)])
+    meta = DiscMeta(
+        tracks=[
+            TrackMeta(number=1, isrc="AAAA10400486"),  # first
+            TrackMeta(number=1, isrc="BBBB10400487"),  # last (merge picks this)
+        ]
+    )
+    # _merge -> "BBBB10400487" (last); resolver -> "AAAA10400486" (first).
+    _equiv(meta, disc)
+
+
 # === sentinel + track-verbatim quirks via the equivalence path ==============
 
 

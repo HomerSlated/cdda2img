@@ -3,8 +3,9 @@ resolver_adapter.py — B4 B-1: the "reproduce today" adapter (still UNWIRED).
 
 Bridges the lookup result types (``DiscMeta`` / ``RBIDisc``) to
 :class:`~cdda2img.field_resolver.FieldProposal`, so the collect->resolve resolver
-in ``field_resolver.py`` can reproduce ``mb_lookup._merge_into_disc`` *exactly*,
-with no behaviour change. This is the strangler keystone: the equivalence test
+in ``field_resolver.py`` reproduces ``mb_lookup._merge_into_disc`` with no
+behaviour change *except two documented divergences* (see below). This is the
+strangler keystone: the equivalence test
 
     disc_from_resolution(
         resolve(baseline_proposals(disc) + meta_to_proposals(meta, src)), disc
@@ -32,10 +33,28 @@ where the merge would silently leak it. That strictness is the C2 win, not a
 divergence to paper over — hence :func:`meta_to_proposals` skips empties *before*
 constructing (an empty ``mb_release_id`` must never reach the raising constructor).
 
-Known out-of-domain edge: ``discogs_release_id == 0``. ``_merge`` uses ``or``
-truthiness (``0`` is falsy -> dropped); the resolver's ``_is_empty`` treats ``0``
-as a real value. A Discogs release id is never ``0``, so this is documented here,
-not special-cased.
+Known divergences from ``_merge_into_disc`` (advisor 2026-06-22). Root cause: the
+merge *rebuilds* a meta-matched track entry (so a disc-side value that
+validates-to-empty gets nulled), whereas the resolver *patches* only proposed
+fields and keeps the base otherwise. Both are pinned as strict-xfail equivalence
+tests in ``test_resolver_adapter.py`` and **must be resolved — fixed, or made a
+conscious documented divergence — before the B-4 flip** (where the resolver
+becomes the sole committer and the gap becomes live behaviour):
+
+1. **Invalid disc ISRC + matched meta track with empty ISRC.** ``_merge``
+   re-validates the disc-side ISRC on the rebuilt entry and nulls a malformed one
+   (R13); with no meta ISRC to fall back to, the result is ``None``. The resolver
+   skips the invalid baseline ISRC and the empty meta ISRC, so the base
+   (malformed) value survives. NB the merge only scrubs ISRCs on *matched* tracks
+   — unmatched tracks keep their raw value either way — so the merge's own
+   scrubbing is already match-dependent (a quirk, not a clean invariant).
+2. **Duplicate track numbers in ``meta.tracks``.** ``_merge``'s ``meta_by_num``
+   dict is last-wins; the resolver emits both at equal trust and ``resolve``'s
+   ``max`` is first-wins. Low-reachability (malformed meta).
+
+Out-of-domain edge (documented, not special-cased): ``discogs_release_id == 0``.
+``_merge`` uses ``or`` truthiness (``0`` is falsy -> dropped); the resolver's
+``_is_empty`` treats ``0`` as a real value. A Discogs release id is never ``0``.
 """
 
 from __future__ import annotations
