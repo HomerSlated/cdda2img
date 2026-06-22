@@ -72,6 +72,7 @@ class Source(Enum):
     DISCOGS = "discogs"
     DURATION = "duration"  # stage-7 text+duration — recording-level
     CDDB = "cddb"
+    CANONICAL_MCN = "canonical_mcn"  # §10 _pick_canonical_mcn verdict (catalog only)
 
 
 # Sources that identify a *recording*, not a disc-ID-verified pressing. They must

@@ -327,21 +327,31 @@ def test_equiv_track_title_disc_priority_blank_filled():
     assert [t.title for t in out.tracks] == ["On Disc", "MB2"]
 
 
-# === trust_for — the flat two-tier reproduce map ============================
+# === trust_for — the reproduce-today ladder =================================
 
 
-def test_trust_for_baseline_outranks_meta():
-    assert trust_for(Source.BASELINE, Field.ALBUM, "rip") == Trust.MANUAL
-    assert trust_for(Source.MB_DISC_ID, Field.ALBUM, "rip") < Trust.MANUAL
+def test_trust_for_baseline_outranks_network():
+    # Baseline is OBJECTIVE (B-3): above every network source, below the §10
+    # canonical MCN and genuine MANUAL user input.
+    assert trust_for(Source.BASELINE, Field.ALBUM, "rip") == Trust.OBJECTIVE
+    assert trust_for(Source.MB_DISC_ID, Field.ALBUM, "rip") < Trust.OBJECTIVE
 
 
-def test_trust_for_all_meta_sources_equal_in_b1():
-    pipe = "create"
-    levels = {
-        trust_for(s, Field.ALBUM, pipe)
-        for s in (Source.MB_DISC_ID, Source.DISCOGS, Source.CDDB, Source.DURATION)
-    }
-    assert len(levels) == 1  # flat: every meta source at the same tier (until B-6)
+def test_trust_for_network_sources_distinct_call_order():
+    # B-3: distinct descending trust in call order, so a multi-source merge
+    # reproduces first-writer-wins order-independently.
+    mb = trust_for(Source.MB_DISC_ID, Field.ALBUM, "rip")
+    discogs = trust_for(Source.DISCOGS, Field.ALBUM, "rip")
+    stage7 = trust_for(Source.DURATION, Field.ALBUM, "rip")
+    cddb = trust_for(Source.CDDB, Field.ALBUM, "rip")
+    assert mb > discogs > stage7 > cddb
+
+
+def test_trust_for_canonical_mcn_outranks_baseline():
+    # The §10 canonical MCN overwrites the baseline catalog -> must outrank it.
+    canonical = trust_for(Source.CANONICAL_MCN, Field.CATALOG, "rip")
+    baseline = trust_for(Source.BASELINE, Field.CATALOG, "rip")
+    assert canonical > baseline
 
 
 # === §11.5 skip trace — silently-dropped values become visible ==============
@@ -355,15 +365,20 @@ def test_baseline_skips_recorded_with_reasons():
         tracks=[_toc(1, title="", performer="Unknown Artist", isrc="NOTVALID")],
     )
     skips: list = []
-    baseline_proposals(disc, skips=skips)
+    props = baseline_proposals(disc, skips=skips)
     reasons = {(s.field, s.reason) for s in skips}
     assert (Field.ALBUM, "empty") in reasons
-    assert (Field.ARTIST, "unknown-artist-sentinel") in reasons
     assert (Field.DISC_NUMBER, "abstain-meta-priority") in reasons
     assert (Field.DISC_TOTAL, "abstain-meta-priority") in reasons
     assert (Field.TRACK_TITLE, "empty") in reasons
-    assert (Field.TRACK_PERFORMER, "unknown-artist-sentinel") in reasons
     assert (Field.TRACK_ISRC, "invalid-isrc") in reasons
+    # The "Unknown Artist" sentinel is NOT skipped — it is emitted as a low-trust
+    # proposal (so a later real value can outrank it, yet it survives alone).
+    assert (Field.ARTIST, "unknown-artist-sentinel") not in reasons
+    artist_props = [p for p in props if p.field is Field.ARTIST]
+    assert len(artist_props) == 1
+    assert artist_props[0].value == "Unknown Artist"
+    assert artist_props[0].trust == Trust.BASELINE  # _SENTINEL_TRUST
 
 
 def test_meta_skips_empty_recorded():

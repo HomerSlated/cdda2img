@@ -843,12 +843,26 @@ its own characterization.
   `test_discogs_corroborate`, `test_original_release` R6, `test_parallel_pre_menu`
   asserts `selected_release_id == disc.mb_release_id`). Verified: `_prepopulate_from_discogs`
   never writes `mb_release_id`, so nothing mutates it between the prepop and the gates.
-- **B-3** — **shadow mode**: in `_run_metadata_lookups`, collect proposals from every
-  source alongside the live merge; at the end assert `disc_from_resolution(resolve(
-  acc)) == live_disc`. Ships nothing; the assertion (in tests, and optionally a
-  debug log) proves equivalence across the corpus. **Must allow-list the two
-  strict-xfail divergences** (invalid-disc-ISRC scrub; duplicate track numbers) so a
-  live disc hitting them does not fire the assertion before B-6 resolves them.
+- **B-3** — **shadow mode**, split in two:
+  - **Part 1 — model + proof — LANDED 2026-06-22** (`test_merge_sequence.py`). The
+    reproduce-today trust map went flat→distinct (per-source call-order ladder;
+    baseline lowered OBJECTIVE so the §10 canonical MCN can sit above it; the
+    "Unknown Artist" sentinel emitted at a sub-CDDB `_SENTINEL_TRUST`). A Hypothesis
+    property test proves `resolve(accumulated) == ` the full live merge *sequence*
+    (baseline → MB → canonical-MCN overwrite → Discogs → stage-7 → CDDB) on the live
+    in-domain space. It found a real divergence on its first run — a *meta*-sourced
+    sentinel (the skip-based handling only covered the baseline) — now fixed. Greps
+    settled the two predicted complications: (C) disc_number last-writer is
+    **unreachable** (Discogs lacks it, MB⊕stage-7 exclusive, CDDB has none);
+    (B) catalog **is** §10-owned (canonical MCN overrides) → the trust-ladder fix.
+    AcoustID confirmed to merge no fields (asserted), hence absent from the sequence.
+  - **Part 2 — production accumulator (pending)**: thread the proposal accumulator
+    through `_run_metadata_lookups` (expose the Discogs `hit` + chosen MCN from
+    `_prepopulate_from_discogs`), and assert `disc_from_resolution(resolve(acc)) ==
+    live_disc` riding the existing integration tests. This is the B-4 committer set
+    up early. **Must allow-list the two strict-xfail divergences** (invalid-disc-ISRC
+    scrub; duplicate track numbers) so a live disc hitting them does not fire the
+    assertion before B-6 resolves them.
 - **B-4** — **flip**: the resolver output becomes the committed disc; the
   per-source `_merge_into_disc` calls are removed (lookups keep running for their
   side-effects + proposals). De-risked by B-3. **GATED (2026-06-22 decision):** the
