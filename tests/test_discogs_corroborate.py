@@ -32,7 +32,7 @@ def _run(*, link, mb_barcode, discogs_meta, available=True):
             "cdda2img.discogs_lookup.fetch_release", return_value=discogs_meta
         ) as fetch_fn,
     ):
-        _discogs_barcode_corroborate(disc, prov)
+        _discogs_barcode_corroborate(disc, prov, selected_release_id=disc.mb_release_id)
     return prov, link_fn, fetch_fn
 
 
@@ -60,7 +60,7 @@ def test_skips_without_mb_release_id():
     disc = RBIDisc(album="A", artist="B")  # no mb_release_id
     prov: dict[str, str] = {}
     with patch("cdda2img.discogs_lookup.is_available", return_value=True) as avail:
-        _discogs_barcode_corroborate(disc, prov)
+        _discogs_barcode_corroborate(disc, prov, selected_release_id=disc.mb_release_id)
     assert prov == {}
     avail.assert_not_called()  # short-circuits before touching Discogs
 

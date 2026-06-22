@@ -208,6 +208,10 @@ def test_mb_winning_meta_exposed_on_result() -> None:
         result = prepopulate_from_mb(disc, verbose=False)
     assert result.meta is not None
     assert result.meta.mb_release_id == "rid-1"
+    # B-2: the Layer-1 selected pressing is exposed as an explicit gating signal,
+    # equal by construction to the merged disc.mb_release_id.
+    assert result.selected_release_id == "rid-1"
+    assert result.selected_release_id == result.disc.mb_release_id
 
 
 def test_mb_meta_is_none_on_no_match() -> None:
@@ -216,6 +220,9 @@ def test_mb_meta_is_none_on_no_match() -> None:
     with patch("cdda2img.mb_lookup.lookup_disc_id", return_value=[]):
         result = prepopulate_from_mb(disc, verbose=False)
     assert result.meta is None
+    # B-2: no pressing pinned -> selected_release_id None (the condition the
+    # stage-7 duration-match gate fires on).
+    assert result.selected_release_id is None
 
 
 # ---------------------------------------------------------------------------

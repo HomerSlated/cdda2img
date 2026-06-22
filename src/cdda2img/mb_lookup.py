@@ -1146,6 +1146,16 @@ class MBPrepopResult(NamedTuple):
     # when no rung selection ran (single match / ISRC / MCN winner upstream).
     # Surfaces in PROV as ``release_selected_via``.
     release_selected_via: str | None = None
+    # B-2 (trust_model_design.md §11.2): the Layer-1 *selected pressing* release id,
+    # exposed as an explicit eager gating signal decoupled from the mutated disc.
+    # Set at the ``prepopulate_from_mb`` chokepoint to the merged
+    # ``disc.mb_release_id`` (so it equals what the mid-pipeline gates read today,
+    # by construction). The stage-7 gate, AcoustID corroboration and the §10.3.1
+    # Discogs-barcode check read THIS instead of ``disc.mb_release_id`` so they keep
+    # working once B-4 stops the mutate-as-you-go merge. ``None`` when no pressing
+    # was pinned (zero/inconsistent match, or a recording-level fallback that routed
+    # through ``strip_pressing_mbid``) — exactly the condition the stage-7 gate fires on.
+    selected_release_id: str | None = None
 
 
 def _prepop_zero_match(
@@ -1328,6 +1338,29 @@ def _prepop_multimatch(
 
 
 def prepopulate_from_mb(
+    disc: RBIDisc,
+    *,
+    verbose: bool = True,
+    preferred_country: list[str] | None = None,
+) -> MBPrepopResult:
+    """Public entry: run the MB disc-ID prepop, then expose the Layer-1 selected
+    pressing as ``selected_release_id`` (B-2, §11.2).
+
+    The capture is done **once here**, from the merged ``result.disc.mb_release_id``,
+    so it equals what the mid-pipeline gates read today across *every* sub-path
+    (single match, lexicographic multimatch winner, the ISRC-tally fallback which
+    returns ``strip_pressing_mbid(...)`` → ``None``, and the
+    baseline-already-had-an-mbid case). That is the whole point of the chokepoint:
+    no need to thread the value through the four ``MBPrepopResult`` construction
+    sites, and no risk of a sub-path setting it inconsistently.
+    """
+    result = _prepopulate_from_mb(
+        disc, verbose=verbose, preferred_country=preferred_country
+    )
+    return result._replace(selected_release_id=result.disc.mb_release_id)
+
+
+def _prepopulate_from_mb(
     disc: RBIDisc,
     *,
     verbose: bool = True,

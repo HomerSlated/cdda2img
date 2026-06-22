@@ -24,7 +24,9 @@ def test_corroborates_by_membership_not_first_element() -> None:
         [_hit("R-DISC"), _hit("R-OTHER")],
     ]
     prov: dict[str, str] = {}
-    _r6_tally_and_merge(per_track_hits, disc, prov)
+    _r6_tally_and_merge(
+        per_track_hits, disc, prov, selected_release_id=disc.mb_release_id
+    )
     assert prov["acoustid_corroborates"] == "YES"
 
 
@@ -36,7 +38,9 @@ def test_does_not_corroborate_when_disc_mbid_inconsistent() -> None:
         [_hit("R-OTHER")],
     ]
     prov: dict[str, str] = {}
-    _r6_tally_and_merge(per_track_hits, disc, prov)
+    _r6_tally_and_merge(
+        per_track_hits, disc, prov, selected_release_id=disc.mb_release_id
+    )
     assert prov["acoustid_corroborates"] == "NO"
 
 
@@ -55,7 +59,9 @@ def test_gate_passes_when_release_group_present() -> None:
         [_hit("R-DISC", "RG-DISC")],
     ]
     prov: dict[str, str] = {}
-    _r6_tally_and_merge(per_track_hits, disc, prov)
+    _r6_tally_and_merge(
+        per_track_hits, disc, prov, selected_release_id=disc.mb_release_id
+    )
     assert "acoustid_gate" not in prov
 
 
@@ -71,7 +77,9 @@ def test_gate_passes_edition_blind_release_id_mismatch() -> None:
         [_hit("R-PRESSING-2", "RG-DISC")],
     ]
     prov: dict[str, str] = {}
-    _r6_tally_and_merge(per_track_hits, disc, prov)
+    _r6_tally_and_merge(
+        per_track_hits, disc, prov, selected_release_id=disc.mb_release_id
+    )
     assert prov["acoustid_corroborates"] == "NO"  # different release-id
     assert "acoustid_gate" not in prov  # but same album -> gate passes
 
@@ -86,7 +94,9 @@ def test_gate_passes_when_release_group_in_one_track() -> None:
         [_hit("R-DISC", "RG-DISC")],
     ]
     prov: dict[str, str] = {}
-    _r6_tally_and_merge(per_track_hits, disc, prov)
+    _r6_tally_and_merge(
+        per_track_hits, disc, prov, selected_release_id=disc.mb_release_id
+    )
     assert "acoustid_gate" not in prov
 
 
@@ -100,7 +110,9 @@ def test_gate_fails_when_album_absent_from_acoustid() -> None:
         [_hit("R-OTHER", "RG-OTHER")],
     ]
     prov: dict[str, str] = {}
-    _r6_tally_and_merge(per_track_hits, disc, prov)
+    _r6_tally_and_merge(
+        per_track_hits, disc, prov, selected_release_id=disc.mb_release_id
+    )
     assert prov["acoustid_gate"] == "failed"
 
 
@@ -109,7 +121,9 @@ def test_gate_not_evaluated_without_disc_release_group() -> None:
     disc = RBIDisc(album="A", artist="B", mb_release_id="R-DISC")
     per_track_hits = [[_hit("R-OTHER", "RG-OTHER")]]
     prov: dict[str, str] = {}
-    _r6_tally_and_merge(per_track_hits, disc, prov)
+    _r6_tally_and_merge(
+        per_track_hits, disc, prov, selected_release_id=disc.mb_release_id
+    )
     assert "acoustid_gate" not in prov
 
 
@@ -121,7 +135,9 @@ def test_gate_not_evaluated_without_acoustid_release_group_evidence() -> None:
     )
     per_track_hits = [[_hit("R-OTHER", None)], [_hit("R-OTHER", None)]]
     prov: dict[str, str] = {}
-    _r6_tally_and_merge(per_track_hits, disc, prov)
+    _r6_tally_and_merge(
+        per_track_hits, disc, prov, selected_release_id=disc.mb_release_id
+    )
     assert "acoustid_gate" not in prov
 
 

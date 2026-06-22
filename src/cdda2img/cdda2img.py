@@ -1267,7 +1267,9 @@ def _r11_corroborate_with_discogs_master(
         disc.original_release_year = discogs_year
 
 
-def _discogs_barcode_corroborate(disc: RBIDisc, provenance: dict[str, str]) -> None:
+def _discogs_barcode_corroborate(
+    disc: RBIDisc, provenance: dict[str, str], *, selected_release_id: str | None
+) -> None:
     """§10.3.1 Discogs barcode corroboration — cross-source, light, PROV-only.
 
     On the **selected** release only: follow the MB→Discogs url-relation, fetch
@@ -1285,7 +1287,9 @@ def _discogs_barcode_corroborate(disc: RBIDisc, provenance: dict[str, str]) -> N
     signal. Costs up to two network round-trips (one MB url-rels fetch, one
     Discogs release fetch), both skipped when no Discogs token is configured.
     """
-    if not disc.mb_release_id:
+    # B-2: gate on the Layer-1 selected pressing, not the mutated disc — identical
+    # today, survives the B-4 flip.
+    if not selected_release_id:
         return
     from cdda2img import discogs_lookup as _discogs
 
@@ -1293,7 +1297,7 @@ def _discogs_barcode_corroborate(disc: RBIDisc, provenance: dict[str, str]) -> N
         return
     from cdda2img.mb_lookup import discogs_link_and_barcode
 
-    discogs_id, mb_barcode = discogs_link_and_barcode(disc.mb_release_id)
+    discogs_id, mb_barcode = discogs_link_and_barcode(selected_release_id)
     if discogs_id is None or not mb_barcode:
         return
     d_meta = _discogs.fetch_release(discogs_id)
@@ -1413,6 +1417,8 @@ def _r6_tally_and_merge(
     per_track_hits: list[list],
     disc: RBIDisc,
     provenance: dict[str, str],
+    *,
+    selected_release_id: str | None,
 ) -> RBIDisc:
     """Tally AcoustID release MBIDs across fingerprinted tracks; merge winner.
 
@@ -1438,13 +1444,16 @@ def _r6_tally_and_merge(
         if all(any(h.mb_release_id == rid for h in hits) for hits in per_track_hits)
     ]
 
-    if disc.mb_release_id:
+    if selected_release_id:
+        # B-2: read the Layer-1 selected pressing (mb_result.selected_release_id),
+        # not the mutated disc.mb_release_id — identical today, but survives the B-4
+        # flip that stops the mutate-as-you-go merge.
         # Membership, not equality with consistent_rids[0]: the list is derived
         # from a set (nondeterministic order), so when AcoustID converges on more
         # than one consistent release, indexing [0] could miss the disc's own MBID
         # even though AcoustID corroborates it.
         provenance["acoustid_corroborates"] = (
-            "YES" if disc.mb_release_id in consistent_rids else "NO"
+            "YES" if selected_release_id in consistent_rids else "NO"
         )
         _acoustid_gate(disc, per_track_hits, provenance)
         return disc
@@ -1465,6 +1474,8 @@ def _r6_acoustid_corroborate(
     pcm_file: Path,
     provenance: dict[str, str],
     ui: TerminalUI | None,
+    *,
+    selected_release_id: str | None,
 ) -> RBIDisc:
     """R6: pre-menu AcoustID fingerprint of tracks 1 and ceil(N/2).
 
@@ -1515,7 +1526,9 @@ def _r6_acoustid_corroborate(
                 w.writeframes(pcm)
             per_track_hits.append(acoustid_lookup.fingerprint_and_lookup(wav_path))
 
-    return _r6_tally_and_merge(per_track_hits, disc, provenance)
+    return _r6_tally_and_merge(
+        per_track_hits, disc, provenance, selected_release_id=selected_release_id
+    )
 
 
 def _r6_acoustid_corroborate_wavs(
@@ -1549,7 +1562,12 @@ def _r6_acoustid_corroborate_wavs(
             acoustid_lookup.fingerprint_and_lookup(source_wavs[idx - 1])
         )
 
-    disc = _r6_tally_and_merge(per_track_hits, disc, provenance)
+    # Create path: no Layer-1 MB disc-ID selection runs, so the disc's own
+    # mb_release_id (e.g. from a mutagen musicbrainz_albumid tag) is the gating
+    # signal — pass it through explicitly.
+    disc = _r6_tally_and_merge(
+        per_track_hits, disc, provenance, selected_release_id=disc.mb_release_id
+    )
     provenance["lookup_status_acoustid"] = _r12_status(
         attempted=True,
         has_data="acoustid_corroborates" in provenance,
@@ -1681,13 +1699,21 @@ def _run_metadata_lookups(
         errored=False,
     )
     # §10.3.1: cross-source barcode corroboration on the rung-selected release.
-    _discogs_barcode_corroborate(disc, provenance)
+    _discogs_barcode_corroborate(
+        disc, provenance, selected_release_id=mb_result.selected_release_id
+    )
 
     # AcoustID per-track corroboration (tracks 1 and ceil(N/2)).
     from cdda2img import acoustid_lookup as _acoustid
 
     acoustid_attempted = _acoustid.is_available()
-    disc = _r6_acoustid_corroborate(disc, pcm_file, provenance, ui)
+    disc = _r6_acoustid_corroborate(
+        disc,
+        pcm_file,
+        provenance,
+        ui,
+        selected_release_id=mb_result.selected_release_id,
+    )
     provenance["lookup_status_acoustid"] = _r12_status(
         attempted=acoustid_attempted,
         has_data="acoustid_corroborates" in provenance,
@@ -1713,7 +1739,9 @@ def _run_metadata_lookups(
     # stage-7 now sees an empty seed and does not fire — the old CDDB-first
     # order would have seeded it. That CDDB-only-seed disc is the rare case we
     # give up to make the duration matcher outrank CDDB on every other disc.
-    if disc.mb_release_id is None and (disc.album or disc.artist):
+    # B-2: gate on the Layer-1 selected pressing, not the mutated disc. Identical
+    # today (selected_release_id == disc.mb_release_id here); survives the B-4 flip.
+    if mb_result.selected_release_id is None and (disc.album or disc.artist):
         from cdda2img.mb_lookup import duration_match_lookup, strip_pressing_mbid
 
         dm = duration_match_lookup(disc, verbose=mb_verbose)

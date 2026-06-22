@@ -944,7 +944,9 @@ def test_r6_no_op_when_acoustid_unavailable(tmp_path):
     pcm.write_bytes(bytes(75 * 2352))
     prov: dict[str, str] = {}
     with patch("cdda2img.acoustid_lookup.is_available", return_value=False):
-        result = _r6_acoustid_corroborate(disc, pcm, prov, ui=None)
+        result = _r6_acoustid_corroborate(
+            disc, pcm, prov, ui=None, selected_release_id=disc.mb_release_id
+        )
     assert result is disc
     assert "acoustid_corroborates" not in prov
 
@@ -966,7 +968,9 @@ def test_r6_yes_when_acoustid_agrees_with_prepop(tmp_path):
             return_value=[DiscMeta(mb_release_id="rid-match")],
         ),
     ):
-        _r6_acoustid_corroborate(disc, pcm, prov, ui=None)
+        _r6_acoustid_corroborate(
+            disc, pcm, prov, ui=None, selected_release_id=disc.mb_release_id
+        )
     assert prov.get("acoustid_corroborates") == "YES"
 
 
@@ -987,7 +991,9 @@ def test_r6_no_when_acoustid_disagrees_with_prepop(tmp_path):
             return_value=[DiscMeta(mb_release_id="rid-different")],
         ),
     ):
-        _r6_acoustid_corroborate(disc, pcm, prov, ui=None)
+        _r6_acoustid_corroborate(
+            disc, pcm, prov, ui=None, selected_release_id=disc.mb_release_id
+        )
     assert prov.get("acoustid_corroborates") == "NO"
 
 
@@ -1024,7 +1030,9 @@ def test_r6_merge_never_sets_pressing_mb_release_id(tmp_path):
             return_value=[acoustid_hit],
         ),
     ):
-        result = _r6_acoustid_corroborate(disc, pcm, prov, ui=None)
+        result = _r6_acoustid_corroborate(
+            disc, pcm, prov, ui=None, selected_release_id=disc.mb_release_id
+        )
     # The invariant: album corroborated, pressing never claimed.
     assert result.mb_release_id is None
     assert result.mb_release_group_id == "rg-from-disc-id"

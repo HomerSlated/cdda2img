@@ -779,20 +779,26 @@ canonical renderer) already shipped and stays untouched. B4 replaces the
 The merge is **mutate-as-you-go**, distributed across `prepopulate_from_mb` (4
 `_merge_into_disc` sites), `_prepopulate_from_discogs`, `_r6_acoustid_corroborate`,
 then stage-7 and CDDB in `_run_metadata_lookups` — and later stages **read
-accumulated disc state mid-pipeline**:
-- stage-7 gate (`cdda2img.py:1717`): `if disc.mb_release_id is None and (disc.album
+accumulated disc state mid-pipeline**. There are **three** such Layer-1-dependent
+reads of `disc.mb_release_id`, all running *before* the (future) final resolve:
+- stage-7 gate (`cdda2img.py`): `if disc.mb_release_id is None and (disc.album
   or disc.artist)`.
-- AcoustID corroboration compares against `disc.mb_release_id`.
+- AcoustID corroboration (`_r6_tally_and_merge`) compares against `disc.mb_release_id`.
+- §10.3.1 Discogs-barcode corroboration (`_discogs_barcode_corroborate`) follows the
+  selected release's MB→Discogs link via `disc.mb_release_id`.
 
-A naïve "collect every `DiscMeta`, resolve once" breaks these gates.
+(§11.1 originally listed only the first two; the Discogs check is the third —
+enumerated here as of B-2.) A naïve "collect every `DiscMeta`, resolve once" breaks
+all three.
 
 ### 11.2 The decoupling (the crux)
 
 `mb_release_id` is *both* an eager **gating signal** (Layer-1 "which release") and
 a deferred **resolved field** (Layer-2). Cut it cleanly:
 - **Layer-1 selection stays eager** — `prepopulate_from_mb` decides the release and
-  exposes it as `mb_result.selected_release_id`. The stage-7 gate and AcoustID
-  corroboration read *that result*, not a mutated `disc`.
+  exposes it as `mb_result.selected_release_id`. The stage-7 gate, AcoustID
+  corroboration **and the §10.3.1 Discogs-barcode check** read *that result*, not a
+  mutated `disc`.
 - **Layer-2 field values defer** — each source contributes `FieldProposal`s to an
   accumulator; one `resolve()` + `disc_from_resolution()` commits at the end. The
   single `Resolution` carries cross-source alternatives → B5.
@@ -825,9 +831,18 @@ its own characterization.
   duplicate track numbers) and one representational class (falsy-but-present `""`/`0`)
   excluded by the property strategy. Per the 2026-06-22 decision these are **deferred
   to B-6** — which gates the B-4 flip (below).
-- **B-2** — `selected_release_id` exposed on `MBPrepopResult`; stage-7 gate +
-  AcoustID corroboration switch to reading it (behaviour identical — it equals
-  today's `disc.mb_release_id` at those points).
+- **B-2** — **LANDED 2026-06-22.** `selected_release_id` exposed on `MBPrepopResult`,
+  captured once at the `prepopulate_from_mb` chokepoint from the merged
+  `disc.mb_release_id` (so it equals what the gates read today, by construction,
+  across every sub-path incl. the ISRC-tally `strip_pressing_mbid` → None case).
+  **All three** mid-pipeline gates switched to read it (not just the two §11.1
+  named): stage-7 gate, AcoustID corroboration (`_r6_tally_and_merge`, threaded via
+  `_r6_acoustid_corroborate`; create path passes `disc.mb_release_id`), and §10.3.1
+  `_discogs_barcode_corroborate`. Behaviour-neutral by construction — verified
+  empirically: the gates are exercised by direct unit tests (`test_r6_corroborate`,
+  `test_discogs_corroborate`, `test_original_release` R6, `test_parallel_pre_menu`
+  asserts `selected_release_id == disc.mb_release_id`). Verified: `_prepopulate_from_discogs`
+  never writes `mb_release_id`, so nothing mutates it between the prepop and the gates.
 - **B-3** — **shadow mode**: in `_run_metadata_lookups`, collect proposals from every
   source alongside the live merge; at the end assert `disc_from_resolution(resolve(
   acc)) == live_disc`. Ships nothing; the assertion (in tests, and optionally a
