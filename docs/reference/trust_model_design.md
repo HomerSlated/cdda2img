@@ -813,21 +813,36 @@ its own characterization.
 
 ### 11.4 Strangler staging (each step keeps all tests green)
 
-- **B-1** — `trust_for(source, field, pipeline)` (reproduce-today map) +
-  `meta_to_proposals(meta, source, pipeline)` + `baseline_proposals(disc, pipeline)`.
-  Add the missing `Field.ORIGINAL_RELEASE_DATE` (Phase A omission — `_merge_into_disc`
-  merges it). Unit **equivalence test**: `disc_from_resolution(resolve(baseline +
-  meta proposals)) == _merge_into_disc(meta, disc)` per field. Additive, unwired.
+- **B-1** — **LANDED 2026-06-22** (`resolver_adapter.py` + `test_resolver_adapter.py`,
+  commits `7299a2d`/`8b867c5` + the Hypothesis follow-up). `trust_for` (flat two-tier
+  reproduce map), `meta_to_proposals` (skip-before-construct, so an empty
+  recording-level `mb_release_id` never hits the C2-raising constructor),
+  `baseline_proposals` (max-trust disc accumulator; sentinel + ISRC-validate quirks;
+  `disc_number`/`disc_total` abstention reproduces meta-priority). `Field.ORIGINAL_RELEASE_DATE`
+  added. Equivalence test spans all 17 fields, both polarities, both collection orders,
+  + a Hypothesis property test over the live in-domain space. **Three documented
+  divergences** (see §11.6 gate): two strict-xfail (invalid-disc-ISRC scrub;
+  duplicate track numbers) and one representational class (falsy-but-present `""`/`0`)
+  excluded by the property strategy. Per the 2026-06-22 decision these are **deferred
+  to B-6** — which gates the B-4 flip (below).
 - **B-2** — `selected_release_id` exposed on `MBPrepopResult`; stage-7 gate +
   AcoustID corroboration switch to reading it (behaviour identical — it equals
   today's `disc.mb_release_id` at those points).
 - **B-3** — **shadow mode**: in `_run_metadata_lookups`, collect proposals from every
   source alongside the live merge; at the end assert `disc_from_resolution(resolve(
   acc)) == live_disc`. Ships nothing; the assertion (in tests, and optionally a
-  debug log) proves equivalence across the corpus.
+  debug log) proves equivalence across the corpus. **Must allow-list the two
+  strict-xfail divergences** (invalid-disc-ISRC scrub; duplicate track numbers) so a
+  live disc hitting them does not fire the assertion before B-6 resolves them.
 - **B-4** — **flip**: the resolver output becomes the committed disc; the
   per-source `_merge_into_disc` calls are removed (lookups keep running for their
-  side-effects + proposals). De-risked by B-3.
+  side-effects + proposals). De-risked by B-3. **GATED (2026-06-22 decision):** the
+  flip MUST NOT land while the B-1 divergences are unresolved — at the flip the
+  resolver becomes the sole committer and each divergence becomes live behaviour.
+  Resolution is deferred to B-6, so **B-6 must precede the flip, or land with it**
+  (the staging order is logical, not a hard sequence: pull the ISRC/dup-track fix
+  forward to immediately before B-4). The strict-xfail tests are the tripwire — they
+  flip to real passing tests the moment the divergence is resolved.
 - **B-5** — convert the interactive menu-apply paths (`menu_state.py:672–726`,
   Update vs Overwrite-All → MANUAL-trust proposals) and `_clear_disc`.
 - **B-6** — tune the ranking to the corrected order (baseline low). The single
@@ -870,5 +885,17 @@ time), so the trace is never a retrofit. The dump UI lands with B-7.
 - B0 (`test_merge_characterization`) + `test_parallel_pre_menu` stay byte-identical
   through B-5; only B-6 changes them, deliberately.
 - B1 invariants (`test_merge_invariants`) become the resolver's C1/C2 regression gate.
+- **B-4 flip gate (hard, 2026-06-22):** the two strict-xfail divergence tests in
+  `test_resolver_adapter.py` (`*_isrc_invalid_disc_matched_meta_empty_isrc_DIVERGES`,
+  `*_duplicate_meta_track_number_DIVERGES`) MUST be resolved — fixed, or converted to
+  a conscious documented divergence with a passing assertion — **before** the resolver
+  becomes the sole committer (B-4). They are `xfail(strict=True)`, so they self-trip
+  (the suite goes red) the moment a fix lands and they unexpectedly pass — a built-in
+  reminder to remove the mark and re-confirm. See the B-4 note in §11.4.
+- **Equivalence is property-gated:** `test_property_resolver_equals_merge_on_clean_domain`
+  (Hypothesis) fuzzes `(disc, meta)` over the live in-domain space (optional fields
+  None-or-nonempty, valid/None ISRCs, unique track numbers, non-zero discogs id) and
+  asserts `resolve == merge`. It found a third (representational) divergence on the
+  first run; keep it as the regression gate against new field-interaction drift.
 - `_pick_canonical_mcn`, the §10 rung, the AcoustID gate, the renderer: untouched.
 - Run on min Python (3.10) per [[feedback_verify_min_python]]; ship via `scripts/sync.py`.

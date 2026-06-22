@@ -2,15 +2,21 @@
 test_resolver_adapter.py — B4 B-1: the reproduce-today adapter (keystone).
 
 The central guarantee: ``disc_from_resolution(resolve(baseline + meta proposals))``
-reproduces ``_merge_into_disc`` EXACTLY, across **every** merged field — not just
-the B0 characterization subset. If this holds, the resolver can replace the merge
-fold without any behaviour change (the actual ranking change is deferred to B-6).
+reproduces ``_merge_into_disc`` across **every** merged field (not just the B0
+characterization subset) on the live in-domain space — so the resolver can replace
+the merge fold without behaviour change (the ranking change is deferred to B-6).
 
-Also pinned here: the C2 strictness boundary (recording-level source + non-empty
-mb_release_id raises, where the merge would leak) and the §11.5 skip trace.
+Three divergences are known and partitioned out of that space: two pinned as
+strict-xfail examples (invalid-disc-ISRC scrub; duplicate track numbers) and one
+representational class (falsy-but-present ``""``/``0`` on optional fields) excluded
+by the Hypothesis strategy, which models RBIDisc's None-when-absent invariant and
+is exact within it. Also pinned: the C2 strictness boundary (recording-level source
++ non-empty mb_release_id raises, where the merge would leak) and the §11.5 trace.
 """
 
 import pytest
+from hypothesis import given, settings
+from hypothesis import strategies as st
 
 from cdda2img.field_resolver import (
     Field,
@@ -367,3 +373,119 @@ def test_meta_skips_empty_recorded():
     assert (Field.ARTIST, "empty") in reasons
     # a present field is NOT skipped
     assert (Field.ALBUM, "empty") not in reasons
+
+
+# === Property-based equivalence (Hypothesis) ================================
+# Generate (disc, meta) pairs in the CLEAN in-domain space where the resolver must
+# reproduce _merge_into_disc EXACTLY, and assert it. The three documented
+# divergences are excluded by construction (so a failure here is a *new* bug):
+#   - ISRCs are valid-or-None         -> no invalid-disc-ISRC scrub divergence
+#   - track numbers are unique        -> no duplicate-track-number divergence
+#   - discogs_release_id is 1..N      -> no `or`-truthiness 0 edge
+#   - meta disc-level strings are None-or-nonempty (never "")
+#                                     -> no falsy-but-present edge on the three
+#                                        guard-less fields (catalog / set_title /
+#                                        discogs_release_id), where _merge keeps
+#                                        ""/0 but the resolver canonicalises to
+#                                        None. Representational, not behavioural.
+# Source is MB_DISC_ID throughout, so meta may carry mb_release_id (no C2 raise).
+# The excluded regions are pinned by the strict-xfail examples above; together they
+# partition the input space (fuzzed-exact where exact, example-pinned where it
+# knowingly diverges).
+
+_LETTERS2 = st.text(alphabet="ABCDEFGHIJKLMNOPQRSTUVWXYZ", min_size=2, max_size=2)
+_ALNUM3 = st.text(
+    alphabet="ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789", min_size=3, max_size=3
+)
+_DIGITS7 = st.text(alphabet="0123456789", min_size=7, max_size=7)
+_valid_isrc = st.builds(lambda a, b, c: a + b + c, _LETTERS2, _ALNUM3, _DIGITS7)
+_opt_isrc = st.none() | _valid_isrc
+
+_opt_text = st.none() | st.text(max_size=8)
+_int = st.integers(min_value=0, max_value=99)  # disc-side disc_number/total (int)
+_opt_int = st.none() | st.integers(min_value=0, max_value=99)  # meta-side (int|None)
+_opt_discogs = st.none() | st.integers(min_value=1, max_value=10**8)
+# disc-side album/artist + track strings are real strings (possibly ""), matching
+# RBIDisc's required str fields and how the rip/import builds tracks.
+_str_text = st.text(max_size=8)
+_str_artist = st.text(max_size=8) | st.just("Unknown Artist")
+# Optional disc-level merged strings are None-or-nonempty on BOTH sides: RBIDisc
+# defaults them to None (never "") so absent==None is the live invariant, and the
+# falsy-but-present "" would only exercise the documented representational edge.
+_opt_clean = st.none() | st.text(min_size=1, max_size=8)
+_opt_artist_meta = (
+    st.none() | st.text(min_size=1, max_size=8) | st.just("Unknown Artist")
+)
+
+
+@st.composite
+def _disc_and_meta(draw):
+    n = draw(st.integers(min_value=0, max_value=4))
+    disc_tracks = []
+    meta_tracks = []
+    for num in range(1, n + 1):
+        disc_tracks.append(
+            RBITocEntry(
+                track_number=num,
+                title=draw(_str_text),
+                performer=draw(_str_artist),
+                start_frame=0,
+                duration_frames=100,
+                pregap_frames=0,
+                isrc=draw(_opt_isrc),
+            )
+        )
+        if draw(st.booleans()):  # meta may or may not match this track number
+            meta_tracks.append(
+                TrackMeta(
+                    number=num,
+                    title=draw(_opt_text),
+                    performer=draw(_opt_text),
+                    isrc=draw(_opt_isrc),
+                )
+            )
+    disc = RBIDisc(
+        album=draw(_str_text),
+        artist=draw(_str_artist),
+        catalog=draw(_opt_clean),
+        disc_number=draw(_int),
+        disc_total=draw(_int),
+        release_date=draw(_opt_clean),
+        catalog_number=draw(_opt_clean),
+        label=draw(_opt_clean),
+        country=draw(_opt_clean),
+        original_release_date=draw(_opt_clean),
+        mb_release_id=draw(_opt_clean),
+        mb_release_group_id=draw(_opt_clean),
+        discogs_release_id=draw(_opt_discogs),
+        set_title=draw(_opt_clean),
+        tracks=disc_tracks,
+        pre_emphasis=draw(st.none() | st.booleans()),
+        low_dynamic_range=draw(st.none() | st.booleans()),
+        cdtext_catalog_ref=draw(_opt_text),  # physical: preserved, value irrelevant
+    )
+    meta = DiscMeta(
+        album=draw(_opt_clean),
+        artist=draw(_opt_artist_meta),
+        catalog=draw(_opt_clean),
+        disc_number=draw(_opt_int),
+        disc_total=draw(_opt_int),
+        release_date=draw(_opt_clean),
+        catalog_number=draw(_opt_clean),
+        label=draw(_opt_clean),
+        country=draw(_opt_clean),
+        original_release_date=draw(_opt_clean),
+        mb_release_id=draw(_opt_clean),
+        mb_release_group_id=draw(_opt_clean),
+        discogs_release_id=draw(_opt_discogs),
+        set_title=draw(_opt_clean),
+        tracks=meta_tracks,
+    )
+    return disc, meta
+
+
+@settings(max_examples=300)
+@given(_disc_and_meta())
+def test_property_resolver_equals_merge_on_clean_domain(dm):
+    disc, meta = dm
+    _equiv(meta, disc, source=Source.MB_DISC_ID)

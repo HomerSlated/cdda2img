@@ -52,9 +52,20 @@ becomes the sole committer and the gap becomes live behaviour):
    dict is last-wins; the resolver emits both at equal trust and ``resolve``'s
    ``max`` is first-wins. Low-reachability (malformed meta).
 
-Out-of-domain edge (documented, not special-cased): ``discogs_release_id == 0``.
-``_merge`` uses ``or`` truthiness (``0`` is falsy -> dropped); the resolver's
-``_is_empty`` treats ``0`` as a real value. A Discogs release id is never ``0``.
+Out-of-domain edge (documented, not special-cased): the *falsy-but-present* class.
+The resolver canonicalises an absent disc-level value to ``None`` (it skips empty
+proposals, leaving the base); ``_merge``'s ``or``-chains instead collapse a
+falsy-but-present value (``""`` for strings, ``0`` for ints) inconsistently —
+yielding ``None``, ``""`` or the other operand depending on which side carries it
+and whether the field has a trailing ``or None`` guard. So a disc-level merged
+optional whose value is ``""``/``0`` (rather than ``None``) can resolve to a
+different *representation* of "absent" than ``_merge`` produces. This never arises
+live: ``RBIDisc`` defaults every optional merged field to ``None`` (never ``""``),
+and ``album``/``artist`` are required ``str`` whose special merge formula falls
+back to the disc value, so it agrees. A Discogs release id is never ``0``. Hence
+documented, not special-cased; the resolver's canonical ``None`` is arguably
+cleaner. The property test in ``test_resolver_adapter.py`` models this live
+invariant (optional fields None-or-nonempty) and is exact within it.
 """
 
 from __future__ import annotations

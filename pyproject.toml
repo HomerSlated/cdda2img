@@ -42,6 +42,7 @@ Documentation = "https://github.com/HomerSlated/cdda2img"
 [dependency-groups]
 dev = [
     "pytest>=7.2.0",
+    "hypothesis>=6.0.0",
     "pre-commit>=2.20.0",
     "tox-uv>=1.11.3",
 
