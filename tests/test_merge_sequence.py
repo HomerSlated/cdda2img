@@ -159,7 +159,14 @@ def _scenario(draw):
         pre_emphasis=draw(st.none() | st.booleans()),
     )
 
-    def _disc_meta(*, mbid, disc_num, group_ok):
+    def _disc_meta(*, mbid, disc_num, group_ok, cat=True):
+        # B-6 carve-out: catalog_number / label are the one cell-class where the
+        # resolver now INTENTIONALLY diverges from the legacy merge (Discogs > MB). To
+        # keep this property a clean "resolver == legacy" check, Discogs does not
+        # supply that pair here (cat=False) — so MB's, if any, stands uncontested and
+        # matches legacy. The MB-vs-Discogs contest is asserted positively in test_b6_*
+        # below. `country` is NOT carved out: B-6 excludes it from the override (MB >
+        # Discogs, reproduce-today), so it never diverges — Discogs may supply it here.
         return DiscMeta(
             album=draw(_opt_clean),
             artist=draw(_opt_artist),
@@ -167,8 +174,8 @@ def _scenario(draw):
             disc_number=disc_num,
             disc_total=disc_num,
             release_date=draw(_opt_clean),
-            catalog_number=draw(_opt_clean),
-            label=draw(_opt_clean),
+            catalog_number=draw(_opt_clean) if cat else None,
+            label=draw(_opt_clean) if cat else None,
             country=draw(_opt_clean),
             original_release_date=draw(_opt_clean),
             mb_release_id=mbid,
@@ -194,8 +201,9 @@ def _scenario(draw):
         else None
     )
     # Discogs / CDDB never carry disc_number/disc_total or an MB release id.
+    # Discogs catalogue is carved out (cat=False) — see _disc_meta + the B-6 note.
     discogs = (
-        _disc_meta(mbid=None, disc_num=None, group_ok=False)
+        _disc_meta(mbid=None, disc_num=None, group_ok=False, cat=False)
         if draw(st.booleans())
         else None
     )
@@ -319,3 +327,47 @@ def test_stage7_supplies_title_when_mb_absent():
     out = _resolver_sequence(baseline, None, None, None, stage7, cddb)
     assert out.album == "Duration Match"  # stage-7 outranks CDDB
     assert out == _live_sequence(baseline, None, None, None, stage7, cddb)
+
+
+# === B-6 catalogue inversion — the one intentional divergence from legacy =====
+
+
+def test_b6_discogs_wins_catalogue_over_mb_diverges_from_legacy():
+    """B-6: when MB and Discogs BOTH supply a catalogue field, the resolver picks
+    Discogs (the catalogue authority) — the single intentional ranking change.
+
+    This is exactly where the resolver is MEANT to diverge from the legacy merge
+    sequence (which gives MB, since MB merges first / fill-blank), so we assert the
+    new value positively AND assert the divergence, rather than the usual
+    resolver == _live_sequence equality."""
+    baseline = _bare_disc()
+    mb = _meta(album="Album", catalog_number="MB-CAT", label="MB Label", country="US")
+    discogs = _meta(catalog_number="DISCOGS-CAT", label="Discogs Label", country="GB")
+    out = _resolver_sequence(baseline, mb, None, discogs, None, None)
+    legacy = _live_sequence(baseline, mb, None, discogs, None, None)
+
+    # Resolver: Discogs wins the catalogue PAIR (catalog_number / label).
+    assert out.catalog_number == "DISCOGS-CAT"
+    assert out.label == "Discogs Label"
+    # country is EXCLUDED from the override (couples with §10 preferred_country), so
+    # MB wins it — reproduce-today, same as legacy.
+    assert out.country == "US"
+    # Album is unaffected by B-6 — MB still wins it (reproduce-today).
+    assert out.album == "Album"
+    # The intended divergence: legacy gave MB's catalogue pair (merge order), resolver
+    # gives Discogs's. country agrees (both MB), so the divergence is the pair only.
+    assert legacy.catalog_number == "MB-CAT"
+    assert legacy.country == "US"
+    assert out != legacy
+
+
+def test_b6_mb_catalogue_uncontested_still_matches_legacy():
+    """When only MB supplies a catalogue field (no Discogs contest), the resolver
+    still agrees with the legacy merge — the B-6 override only flips the contested
+    case, MB-at-60 still wins uncontested among network sources."""
+    baseline = _bare_disc()
+    mb = _meta(album="Album", catalog_number="MB-CAT", label="MB Label")
+    out = _resolver_sequence(baseline, mb, None, None, None, None)
+    assert out.catalog_number == "MB-CAT"
+    assert out.label == "MB Label"
+    assert out == _live_sequence(baseline, mb, None, None, None, None)

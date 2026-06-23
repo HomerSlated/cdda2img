@@ -404,6 +404,28 @@ def test_trust_for_canonical_mcn_outranks_baseline():
     assert canonical > baseline
 
 
+def test_trust_for_b6_discogs_outranks_mb_for_catalogue_pair():
+    """B-6: the single intentional ranking change. Discogs (the catalogue authority)
+    outranks MB for catalog_number / label, while both stay below the OBJECTIVE
+    baseline (a present on-disc value still wins fill-blank)."""
+    for field in (Field.CATALOG_NUMBER, Field.LABEL):
+        mb = trust_for(Source.MB_DISC_ID, field, "rip")
+        discogs = trust_for(Source.DISCOGS, field, "rip")
+        baseline = trust_for(Source.BASELINE, field, "rip")
+        assert discogs > mb, field  # B-6 inversion
+        assert baseline > discogs, field  # on-disc value still wins fill-blank
+
+
+def test_trust_for_b6_country_excluded_and_album_unchanged():
+    """B-6 is field-scoped: `country` is NOT in the override (it couples with the §10
+    preferred_country selection), so MB > Discogs for country (reproduce-today),
+    honouring the selected pressing. `album` is likewise unchanged (MB > Discogs)."""
+    for field in (Field.COUNTRY, Field.ALBUM):
+        assert trust_for(Source.MB_DISC_ID, field, "rip") > trust_for(
+            Source.DISCOGS, field, "rip"
+        ), field
+
+
 # === §11.5 skip trace — silently-dropped values become visible ==============
 
 

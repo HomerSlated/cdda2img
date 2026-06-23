@@ -923,8 +923,33 @@ its own characterization.
   typed values as MANUAL proposals only earns its keep once the accumulator is carried
   into the menu. The C1 `_apply_original` / `_set_original_manually` stay direct
   mutation by design (those fields are not in the `Field` enum — the C1 enforcement).
-- **B-6** — tune the ranking to the corrected order (baseline low). The single
-  intentional behaviour change; its own characterization diff.
+- **B-6** — **LANDED 2026-06-23 — scoped down by user decision.** The single
+  intentional ranking change reduced to **one per-(source, field) override**: Discogs
+  outranks MB for the catalogue **pair** `catalog_number` / `label`
+  (`resolver_adapter._FIELD_TRUST_OVERRIDE`; Discogs=80 > MB=60, both below the
+  OBJECTIVE baseline so a present on-disc value still wins fill-blank). This fixes the
+  **live D5 inversion** that v6.0 created by persisting those fields — MB had won only
+  by merge call-order. Pipeline-independent; every other `(source, field)` falls
+  through to the reproduce-today map.
+  - **`country` is excluded** (user decision 2026-06-23). Unlike catalog_number/label
+    it couples across layers: §10 Layer-1 may select the MB pressing *because* its
+    country matched `preferred_country`, so a Layer-2 Discogs override would undo that
+    preference. `country` stays reproduce-today (MB > Discogs), honouring the §10
+    selection.
+  - **The old "baseline-low" / B2 rule was DROPPED.** B2 = "disc-ID MB overwrites a
+    *present* CD-Text album/artist/title on rip." Its §8.4 premise ("CD-Text baseline
+    is poor") was overturned by later research ([[reference_cdtext_reliability]]):
+    CD-Text's problem is *absence*, not wrongness — when present it is reliable, and
+    the online DBs are the error-prone source. Overwriting present CD-Text with MB
+    would be a regression, so the CD-Text/disc-baked baseline is **not** lowered. This
+    resolves the open §9.4 question in favour of CD-Text.
+  - **Characterization diff (authored, not discovered):** the resolver now
+    *intentionally* diverges from the legacy merge for the catalogue triple when MB and
+    Discogs both supply a value. `test_merge_sequence`'s reproduce-legacy property
+    carves Discogs catalogue out of its domain (still proves equivalence elsewhere);
+    the contested case is asserted positively in `test_b6_*` (unit, sequence, and the
+    real-pipeline `test_shadow_b6_discogs_catalogue_beats_mb_diverges_from_legacy`).
+    The `trust_for(source, field, pipeline)` *pipeline* seam is retained but unused.
 - **B-7** — B5 menu alternatives UI (the confirmed destination), fed by
   `Resolution.alternatives`; feed the structured resolution into
   `build_match_distance` (replaces PROV string-sniffing); the §3.1 seed/merge

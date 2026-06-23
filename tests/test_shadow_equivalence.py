@@ -295,3 +295,53 @@ def test_resolver_failure_falls_back_to_legacy_merge() -> None:
     # Confirm the except branch was taken: no resolution, empty proposals.
     assert shadow["resolution"] is None
     assert shadow["proposals"] == []
+
+
+def test_shadow_b6_discogs_catalogue_beats_mb_diverges_from_legacy() -> None:
+    """B-6 in the real pipeline: when MB and Discogs both supply a catalogue field
+    (label here), the committed (resolver) disc takes Discogs — and INTENTIONALLY
+    diverges from the legacy merge oracle, which took MB by call order. This is the
+    one case where ``returned != shadow["merged"]`` is correct, so it is asserted
+    directly, not via ``_assert_equiv``."""
+    mcn = "0075992377423"
+    disc = _disc("Eliminator", "ZZ Top", catalog=mcn)
+    mb_meta = DiscMeta(
+        album="Eliminator",
+        artist="ZZ Top",
+        mb_release_id="rid-mb",
+        mb_release_group_id="rg-mb",
+        label="MB Label",  # MB also carries a label …
+        country="DE",
+        source="musicbrainz",
+        tracks=[TrackMeta(number=1, title="Gimme All Your Lovin'")],
+    )
+    discogs_hit = DiscMeta(
+        album="Eliminator",
+        artist="ZZ Top",
+        label="Warner Bros.",  # … and Discogs disagrees (the catalogue authority)
+        country="GB",
+        catalog=mcn,
+    )
+    with (
+        patch("cdda2img.cddb.query_cddb", return_value=[]),
+        patch("cdda2img.mb_lookup.lookup_disc_id", return_value=[mb_meta]),
+        patch("cdda2img.acoustid_lookup.is_available", return_value=False),
+        patch("cdda2img.discogs_lookup.is_available", return_value=True),
+        patch("cdda2img.discogs_lookup.search_by_barcode", return_value=[discogs_hit]),
+        patch("cdda2img.mb_lookup.discogs_link_and_barcode", return_value=(None, None)),
+    ):
+        live, shadow = _run_with_shadow(disc)
+
+    merged = shadow["merged"]
+    assert isinstance(merged, RBIDisc)
+    # Resolver (committed): Discogs wins label (the catalogue pair).
+    assert live.label == "Warner Bros."
+    # Legacy oracle: MB won label by merge call order — the intended B-6 divergence.
+    assert merged.label == "MB Label"
+    assert live != merged
+    # country is EXCLUDED from the override (couples with §10 preferred_country), so
+    # MB wins it in BOTH paths — committed and oracle agree.
+    assert live.country == "DE"
+    assert merged.country == "DE"
+    # Non-catalogue fields are unaffected: MB still wins album.
+    assert live.album == "Eliminator"

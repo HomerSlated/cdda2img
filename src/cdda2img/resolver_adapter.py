@@ -1,5 +1,5 @@
 """
-resolver_adapter.py — B4 B-1: the "reproduce today" adapter (still UNWIRED).
+resolver_adapter.py — B4 collect->resolve adapter (the wired sole committer).
 
 Bridges the lookup result types (``DiscMeta`` / ``RBIDisc``) to
 :class:`~cdda2img.field_resolver.FieldProposal`, so the collect->resolve resolver
@@ -25,9 +25,13 @@ The trust model is the *reproduce-today* ladder (see :data:`_REPRODUCE_META_TRUS
 - the ``"Unknown Artist"`` sentinel sits BELOW every real source (it loses to any
   real value but survives alone).
 
-This reproduces today's behaviour. The corrected ranking — the *only* behaviour
-change in the whole refactor — is B-6, and it replaces :func:`trust_for`. Do not
-enrich it here.
+This reproduces today's behaviour except for B-6 (LANDED 2026-06-23), the *only*
+intentional ranking change in the whole refactor: a single per-(source, field)
+override making Discogs outrank MB for the catalogue pair ``catalog_number`` /
+``label`` (see :data:`_FIELD_TRUST_OVERRIDE`; ``country`` is excluded — it couples
+with the §10 ``preferred_country`` selection). The old B-6 "baseline-overwrite" rule
+was dropped (its CD-Text-is-poor premise was overturned). Do not add further ranking
+changes here without an explicit decision.
 
 Equivalence DOMAIN (advisor, 2026-06-22): equivalence holds on the *live*
 post-``strip_pressing_mbid`` domain, where recording-level metas (ISRC / AcoustID /
@@ -91,8 +95,9 @@ from cdda2img.lookup_result import DiscMeta
 from cdda2img.rbi_format import RBIDisc
 from cdda2img.validators import validate_isrc
 
-# Reproduce-today trust map (placeholder levels until B-6 installs the corrected
-# per-(source, field, pipeline) ranking). The ordering is load-bearing:
+# Reproduce-today per-source trust map. B-6 added exactly one per-(source, field)
+# override on top of this (catalogue: Discogs > MB — see _FIELD_TRUST_OVERRIDE); all
+# other (source, field) pairs use these defaults. The ordering is load-bearing:
 #
 # - baseline outranks every *network* source -> disc-priority fill-blank is exact;
 # - network sources take DISTINCT, descending levels in today's call order
@@ -128,6 +133,36 @@ _REPRODUCE_META_TRUST: dict[Source, Trust] = {
     Source.MENU: Trust.DISC_ID,
 }
 
+# B-6 (2026-06-23) — the single intentional ranking change of the whole B4 arc, and
+# the ONLY per-(source, field) override. Discogs is the catalogue authority, so it
+# outranks MB for the catalogue PAIR (catalog_number / label): per the §7.1 2-D table,
+# Discogs=80 > MB=60 for these fields (both still below the OBJECTIVE=100 baseline, so
+# a present on-disc catalogue value wins fill-blank). This fixes the live D5 inversion
+# that RBI v6.0 created by persisting these fields — MB had won only by merge
+# call-order accident. Pipeline-independent; every other (source, field) falls through
+# to the reproduce-today map above.
+#
+# `country` is DELIBERATELY EXCLUDED (user decision 2026-06-23). Unlike catalog_number
+# / label, it couples across layers: §10 Layer-1 release selection may pick the MB
+# pressing *because* its country matched the user's `preferred_country` config, so
+# letting Discogs override the committed country at Layer-2 would undo that preference.
+# country therefore stays reproduce-today (MB > Discogs), honouring the §10 selection.
+#
+# The old "B2" baseline-overwrite rule (disc-ID MB overwrites a present CD-Text
+# album/artist/title on rip) was DROPPED by user decision: its "CD-Text is poor"
+# premise was overturned — CD-Text-when-present is reliable; the online DBs are the
+# error-prone source. So the CD-Text/disc-baked baseline is NOT lowered here.
+_CATALOGUE_FIELDS: frozenset[Field] = frozenset({
+    Field.CATALOG_NUMBER,
+    Field.LABEL,
+})
+_FIELD_TRUST_OVERRIDE: dict[tuple[Source, Field], Trust] = {
+    **{(Source.DISCOGS, f): Trust.DISC_ID for f in _CATALOGUE_FIELDS},  # 80 — wins
+    **{
+        (Source.MB_DISC_ID, f): Trust.ACOUSTID for f in _CATALOGUE_FIELDS
+    },  # 60 — yields
+}
+
 # The "Unknown Artist" sentinel is NOT empty — _merge_into_disc treats it as absent
 # on the *accumulator* side at every step, so any real artist/performer from any
 # source overrides it, but it remains the final value if nothing else supplies one.
@@ -147,15 +182,23 @@ _R_ABSTAIN = "abstain-meta-priority"
 
 
 def trust_for(source: Source, field: Field, pipeline: str) -> Trust:
-    """Trust for a ``(source, field, pipeline)`` — the reproduce-today map.
+    """Trust for a ``(source, field, pipeline)``.
 
     Baseline at :data:`_BASELINE_TRUST`; network sources at distinct descending
-    levels in today's call order (see the module-level map). *field* and *pipeline*
-    are unused today; they are the seams B-6 will use to install the corrected
-    ranking (create=mutagen-high, rip=CD-Text-low, objective ISRC/MCN above network,
-    ...). They stay in the signature so the call sites do not change when that lands.
+    levels in today's call order (see :data:`_REPRODUCE_META_TRUST`). The **one**
+    per-field override is B-6's catalogue correction (:data:`_FIELD_TRUST_OVERRIDE`):
+    Discogs outranks MB for ``catalog_number`` / ``label`` / ``country``. Everything
+    else is the reproduce-today map.
+
+    *pipeline* is unused: B-6 dropped the per-pipeline baseline-overwrite rule (its
+    "CD-Text is poor" premise was overturned), so the CD-Text/disc-baked baseline is
+    not lowered. The parameter stays in the signature as a seam for any future
+    pipeline-specific tuning, so call sites do not change.
     """
-    del field, pipeline  # B-6 seam
+    del pipeline  # reserved seam; no per-pipeline rule today (B-2 was dropped)
+    override = _FIELD_TRUST_OVERRIDE.get((source, field))
+    if override is not None:
+        return override
     if source is Source.BASELINE:
         return _BASELINE_TRUST
     return _REPRODUCE_META_TRUST[source]
