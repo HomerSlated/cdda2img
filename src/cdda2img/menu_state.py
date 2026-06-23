@@ -653,8 +653,9 @@ class ResultsScreen(Screen):
             self._apply_original(ctl, selected)
 
     def _apply_mb(self, ctl: MenuController, selected: DiscMeta) -> None:
-        from cdda2img.mb_lookup import _merge_into_disc, _overwrite_disc, lookup_release
+        from cdda2img.mb_lookup import lookup_release
         from cdda2img.metadata_menu import _confirm_apply
+        from cdda2img.resolver_adapter import apply_menu_selection
 
         # Search hits are stubs (no track listing / ISRCs). Fetch the full
         # release BEFORE previewing so the diff reflects what will be applied.
@@ -668,18 +669,16 @@ class ResultsScreen(Screen):
         mode = _confirm_apply(selected, ctl.disc)
         if not mode:
             return
-        ctl.disc = (
-            _merge_into_disc(selected, ctl.disc)
-            if mode == "update"
-            else _overwrite_disc(selected, ctl.disc)
+        ctl.disc = apply_menu_selection(
+            ctl.disc, selected, overwrite=(mode == "overwrite")
         )
         ctl.mb_rg_id = selected.mb_release_group_id or ctl.mb_rg_id
         ctl.banner = "Applied."
 
     def _apply_discogs(self, ctl: MenuController, selected: DiscMeta) -> None:
         from cdda2img import discogs_lookup
-        from cdda2img.mb_lookup import _merge_into_disc, _overwrite_disc
         from cdda2img.metadata_menu import _confirm_apply
+        from cdda2img.resolver_adapter import apply_menu_selection
 
         # Fetch the full release (track listing) BEFORE previewing, so the
         # confirm diff shows the real track count — the visible payoff of
@@ -694,16 +693,15 @@ class ResultsScreen(Screen):
         mode = _confirm_apply(selected, ctl.disc)
         if not mode:
             return
-        ctl.disc = (
-            _merge_into_disc(selected, ctl.disc)
-            if mode == "update"
-            else _overwrite_disc(selected, ctl.disc)
+        ctl.disc = apply_menu_selection(
+            ctl.disc, selected, overwrite=(mode == "overwrite")
         )
         ctl.banner = "Applied."
 
     def _apply_acoustid(self, ctl: MenuController, selected: DiscMeta) -> None:
-        from cdda2img.mb_lookup import _merge_into_disc, _overwrite_disc, lookup_release
+        from cdda2img.mb_lookup import lookup_release
         from cdda2img.metadata_menu import _confirm_apply
+        from cdda2img.resolver_adapter import apply_menu_selection
 
         # AcoustID results are tagged with the track number before this frame
         # (see _acoustid_fingerprint). Fetch-full fires when the match is a
@@ -720,10 +718,8 @@ class ResultsScreen(Screen):
         mode = _confirm_apply(selected, ctl.disc)
         if not mode:
             return
-        ctl.disc = (
-            _merge_into_disc(selected, ctl.disc)
-            if mode == "update"
-            else _overwrite_disc(selected, ctl.disc)
+        ctl.disc = apply_menu_selection(
+            ctl.disc, selected, overwrite=(mode == "overwrite")
         )
         ctl.banner = "Applied."
 

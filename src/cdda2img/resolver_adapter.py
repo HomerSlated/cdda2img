@@ -79,7 +79,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 
-from cdda2img.field_resolver import Field, FieldProposal, Source, Trust
+from cdda2img.field_resolver import (
+    Field,
+    FieldProposal,
+    Source,
+    Trust,
+    disc_from_resolution,
+    resolve,
+)
 from cdda2img.lookup_result import DiscMeta
 from cdda2img.rbi_format import RBIDisc
 from cdda2img.validators import validate_isrc
@@ -111,6 +118,14 @@ _REPRODUCE_META_TRUST: dict[Source, Trust] = {
     Source.DURATION: Trust.DURATION,  # stage-7
     Source.CDDB: Trust.CDDB,
     Source.CANONICAL_MCN: Trust.MANUAL,  # §10 verdict overrides baseline catalog
+    # B-5: a menu "update" apply fills blanks only, so MENU sits BELOW the
+    # OBJECTIVE baseline (disc-priority, == _merge_into_disc). A menu "overwrite"
+    # apply passes trust_override=MANUAL instead (see apply_menu_selection), so this
+    # level is only ever used for update. DISC_ID is a high network level that still
+    # yields to the existing disc — the user picked the source but chose not to
+    # overwrite. Within one apply only baseline vs this meta compete, so the exact
+    # level below OBJECTIVE does not affect the result.
+    Source.MENU: Trust.DISC_ID,
 }
 
 # The "Unknown Artist" sentinel is NOT empty — _merge_into_disc treats it as absent
@@ -370,6 +385,7 @@ def meta_to_proposals(
     pipeline: str = "",
     *,
     skips: list[Skip] | None = None,
+    trust_override: Trust | None = None,
 ) -> list[FieldProposal]:
     """Proposals from a network meta *source* at :data:`_META_TRUST`, so it only
     fills the blanks the baseline left.
@@ -381,10 +397,20 @@ def meta_to_proposals(
     strictness. The meta ISRC is proposed verbatim (it was validated at MB
     ingress; only the disc-side ISRC is re-validated, in
     :func:`baseline_proposals`).
+
+    *trust_override* (B-5): when set, every field is proposed at this trust instead
+    of the per-source reproduce-today map — used by :func:`apply_menu_selection` to
+    emit a user-endorsed "overwrite" selection at :data:`Trust.MANUAL`. The
+    ``"Unknown Artist"`` sentinel is *still* demoted to :data:`_SENTINEL_TRUST`
+    (via :func:`_emit_named`) even under an override — a real value must never lose
+    to the sentinel, whatever the user chose (a documented divergence from
+    ``_overwrite_disc``, which takes the sentinel via ``meta.artist or disc.artist``).
     """
     out: list[FieldProposal] = []
 
     def t(field: Field) -> Trust:
+        if trust_override is not None:
+            return trust_override
         return trust_for(source, field, pipeline)
 
     _emit(out, skips, Field.ALBUM, meta.album, t(Field.ALBUM), source)
@@ -463,3 +489,38 @@ def meta_to_proposals(
         _emit(out, skips, Field.TRACK_ISRC, mt.isrc, t(Field.TRACK_ISRC), source, n)
 
     return out
+
+
+def apply_menu_selection(
+    disc: RBIDisc, selected: DiscMeta, *, overwrite: bool
+) -> RBIDisc:
+    """Apply a user-selected search result onto *disc* via the trust resolver (B-5).
+
+    The single menu source-merge path: replaces ``_merge_into_disc`` (update) and
+    ``_overwrite_disc`` (overwrite) at the three ``ResultsScreen`` apply sites
+    (MB / Discogs / AcoustID). *disc* is the live ``ctl.disc`` baseline — the
+    resolver re-baselines on it for each apply, so a *sequence* of menu applies
+    composes exactly as the in-place merges did (later wins, earlier fills), with no
+    persistent accumulator (that is B-7).
+
+    - **overwrite** — the user endorses *selected* as authoritative, so it is emitted
+      at :data:`Trust.MANUAL` (above the OBJECTIVE baseline): it wins, the baseline
+      fills its blanks. Reproduces ``_overwrite_disc`` (meta-priority).
+    - **update** — *selected* is emitted at the :attr:`Source.MENU` map trust (below
+      the baseline): it only fills blanks. Reproduces ``_merge_into_disc``
+      (disc-priority) — this *is* the B-1 keystone with ``disc = ctl.disc``.
+
+    Accepted divergences (resolver-cleaner; pinned in ``test_menu_apply_resolver``):
+    a *selected* ``artist``/``performer`` of ``"Unknown Artist"`` is demoted below a
+    real baseline value (``_overwrite_disc`` would take the sentinel); and the three
+    ISRC carve-outs ride :func:`sanitize_base` + baseline normalisation as elsewhere.
+    These do not arise from pipeline-supplied data: on the rip/import path *disc* is
+    the B-4 committed disc (already ISRC-sanitised), and on the create path
+    ``build_toc_entries`` sets no per-track ISRC. Where reachable at all (e.g. a manual
+    per-track ISRC edit), the divergence *is* the approved drop/normalise behaviour.
+    """
+    trust_override = Trust.MANUAL if overwrite else None
+    proposals = baseline_proposals(disc) + meta_to_proposals(
+        selected, Source.MENU, trust_override=trust_override
+    )
+    return disc_from_resolution(resolve(proposals), sanitize_base(disc))

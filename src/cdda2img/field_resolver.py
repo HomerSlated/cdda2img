@@ -73,6 +73,9 @@ class Source(Enum):
     DURATION = "duration"  # stage-7 text+duration — recording-level
     CDDB = "cddb"
     CANONICAL_MCN = "canonical_mcn"  # §10 _pick_canonical_mcn verdict (catalog only)
+    MENU = "menu"  # B-5: user-selected result in the interactive menu. NOT
+    # recording-level: the user explicitly endorsed this release, so its
+    # mb_release_id is authoritative (user-confirmed) and is kept, not C2-stripped.
 
 
 # Sources that identify a *recording*, not a disc-ID-verified pressing. They must

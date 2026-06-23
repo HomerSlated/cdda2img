@@ -900,8 +900,29 @@ its own characterization.
     guard — a conscious step, not silent erosion.
   - The ranking change (baseline low) stays separate as B-6 — it is the only
     *intentional* trust reordering and gets its own characterization diff.
-- **B-5** — convert the interactive menu-apply paths (`menu_state.py:672–726`,
-  Update vs Overwrite-All → MANUAL-trust proposals) and `_clear_disc`.
+- **B-5** — **LANDED 2026-06-23.** The three interactive menu source-merge applies
+  (`menu_state.py` `_apply_mb` / `_apply_discogs` / `_apply_acoustid`) now route
+  through `resolver_adapter.apply_menu_selection` instead of `_merge_into_disc` /
+  `_overwrite_disc`. Architecture (advisor): the menu is sequential/imperative while
+  the resolver is declarative, so `ctl.disc` is the live baseline re-resolved on each
+  apply — no persistent accumulator (that is B-7). **Update** = the B-1 keystone with
+  `disc = ctl.disc` (selection at the below-baseline `Source.MENU` trust fills blanks);
+  **overwrite** = the new keystone (selection at `Trust.MANUAL`, via
+  `meta_to_proposals(trust_override=…)`, outranks the OBJECTIVE baseline). `Source.MENU`
+  is **not** recording-level, so a user-selected release's `mb_release_id` is kept
+  (user-confirmed) rather than C2-stripped — matching today's bake. Proven unwired
+  first (`test_menu_apply_resolver.py`: both keystones + two 400-example Hypothesis
+  properties), then the three sites flipped; behaviour-neutral except the accepted
+  resolver-cleaner divergences (a *selected* "Unknown Artist" demoted below a real
+  baseline value; the shared ISRC carve-outs — which do not arise from pipeline data:
+  rip/import `ctl.disc` is the B-4 committed disc (ISRC-sanitised) and create-path
+  `build_toc_entries` sets no per-track ISRC, so they surface only via a manual edit,
+  where the divergence *is* the approved drop/normalise). **Out of scope (deferred to
+  B-7):** per-field/per-track
+  direct edits, `_clear_disc`, and revert stay direct `ctl.disc` mutation — modelling
+  typed values as MANUAL proposals only earns its keep once the accumulator is carried
+  into the menu. The C1 `_apply_original` / `_set_original_manually` stay direct
+  mutation by design (those fields are not in the `Field` enum — the C1 enforcement).
 - **B-6** — tune the ranking to the corrected order (baseline low). The single
   intentional behaviour change; its own characterization diff.
 - **B-7** — B5 menu alternatives UI (the confirmed destination), fed by
