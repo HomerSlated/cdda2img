@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import importlib.metadata
 import logging
 import re
@@ -12,6 +13,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from cdda2img.field_resolver import FieldProposal
+    from cdda2img.lookup_result import DiscMeta
     from cdda2img.mb_lookup import MBPrepopResult
     from cdda2img.rip_log import RipLogBuilder
     from cdda2img.terminal_ui import TerminalUI
@@ -1093,8 +1096,18 @@ def _prepopulate_from_discogs(
     ui: TerminalUI | None = None,
     *,
     barcode_hints: list[tuple[str, str]] | None = None,
-) -> RBIDisc:
+) -> tuple[RBIDisc, str | None, DiscMeta | None]:
     """Pre-populate disc.catalog and optionally enrich via Discogs barcode lookup.
+
+    Returns ``(disc, chosen_mcn, applied_hit)`` (B-3 part 2): besides the merged
+    disc, it surfaces the §10 canonical MCN it picked (``chosen_mcn``, the catalog
+    overwrite of phase A) and the Discogs ``DiscMeta`` it actually *merged*
+    (``applied_hit``, ``None`` on every path that did not merge one). The trust
+    resolver reproduces this step from those two values
+    (``canonical_mcn_proposal`` + ``meta_to_proposals``), so they must reflect
+    exactly what the live merge did — hence ``applied_hit`` is ``None`` whenever
+    the merge was skipped (no/ambiguous result, album mismatch), even when a hit
+    object exists.
 
     Two distinct phases:
 
@@ -1117,16 +1130,16 @@ def _prepopulate_from_discogs(
     if chosen and disc.catalog != chosen:
         disc.catalog = chosen
     if not chosen or not discogs_lookup.is_available():
-        return disc
+        return disc, chosen, None
 
     _ui_status(ui, f"Querying Discogs by barcode {chosen}…")
     results = discogs_lookup.search_by_barcode(chosen)
     if len(results) != 1:
-        return disc
+        return disc, chosen, None
     hit = results[0]
     if not _albums_match(disc.album, hit.album):
-        return disc
-    return _merge_into_disc(hit, disc)
+        return disc, chosen, None
+    return _merge_into_disc(hit, disc), chosen, hit
 
 
 class _Notes:
@@ -1598,6 +1611,58 @@ def _emit_mb_provenance(
         provenance["mb_rejected_inconsistent"] = str(mb_result.rejected_inconsistent)
 
 
+def _collect_metadata_proposals(
+    baseline: RBIDisc,
+    mb_meta: DiscMeta | None,
+    chosen_mcn: str | None,
+    discogs_hit: DiscMeta | None,
+    stage7_meta: DiscMeta | None,
+    cddb_meta: DiscMeta | None,
+) -> list[FieldProposal]:
+    """Collect every metadata source's proposals in the live ``_run_metadata_lookups``
+    call order (B-3 part 2 / trust_model_design §11.4): baseline -> MB -> §10
+    canonical-MCN overwrite -> Discogs -> stage-7 -> CDDB.
+
+    AcoustID is deliberately absent: both corroborate steps merge no fields, so
+    they contribute no proposals (proven by ``test_merge_sequence`` and now by the
+    integration shadow-equivalence proof riding the real wrapper). ``stage7_meta``
+    is the ``strip_pressing_mbid``-ed duration match; ``discogs_hit`` is the
+    Discogs ``DiscMeta`` that was actually merged (``None`` when none was).
+
+    This is the B-4 committer's input. Today it feeds only the shadow-equivalence
+    proof (resolve == live merge sequence); at B-4 the live merges are replaced by
+    ``disc_from_resolution(resolve(...), baseline)``.
+    """
+    from cdda2img.field_resolver import Source
+    from cdda2img.resolver_adapter import (
+        baseline_proposals,
+        canonical_mcn_proposal,
+        meta_to_proposals,
+    )
+
+    props = baseline_proposals(baseline)
+    if mb_meta is not None:
+        # mb_meta (MBPrepopResult.meta, R8) has three producing paths, all safe
+        # under the MB_DISC_ID label: (1) single disc-ID match and (2) R1 multi-
+        # match ISRC disambiguation are genuinely pressing-level (every candidate
+        # shares the disc-ID fingerprint); (3) the R4 zero-match ISRC tally is
+        # recording-level but its winner is stripped to mb_release_id=None at the
+        # source (mb_lookup._resolve_via_isrc_tally -> strip_pressing_mbid, pinned
+        # by test_merge_invariants.test_resolve_via_isrc_tally_strips_pressing_mbid).
+        # So no recording-level pressing id ever reaches the resolver mislabelled
+        # as disc-ID-proven — the C2 chokepoint upstream is what makes this safe,
+        # and the accumulator reproduces today's reliance on it.
+        props += meta_to_proposals(mb_meta, Source.MB_DISC_ID)
+    props += canonical_mcn_proposal(chosen_mcn)
+    if discogs_hit is not None:
+        props += meta_to_proposals(discogs_hit, Source.DISCOGS)
+    if stage7_meta is not None:
+        props += meta_to_proposals(stage7_meta, Source.DURATION)
+    if cddb_meta is not None:
+        props += meta_to_proposals(cddb_meta, Source.CDDB)
+    return props
+
+
 def _run_metadata_lookups(
     disc: RBIDisc,
     pcm_file: Path,
@@ -1611,6 +1676,7 @@ def _run_metadata_lookups(
     mb_verbose: bool,
     preferred_country: list[str],
     ui: TerminalUI | None,
+    _shadow_out: dict[str, object] | None = None,
 ) -> tuple[RBIDisc, MBPrepopResult]:
     """Run every remote metadata lookup and merge results into *disc* in
     precedence order: disc-baked CD-Text > MusicBrainz > Discogs > AcoustID
@@ -1627,11 +1693,27 @@ def _run_metadata_lookups(
 
     Mutates *provenance* with the R9 disagreement surface and R12 per-service
     status. Returns ``(merged_disc, mb_result)``.
+
+    B-3 part 2 shadow seam: when *_shadow_out* is given, the collect->resolve
+    trust resolver is run alongside the live merge from the same source metas and
+    the result is stashed for the integration-test equivalence proof
+    (``disc_from_resolution(resolve(acc), baseline) == live_disc``). It is a pure
+    side-computation — gated off in production so the proposal build (which can
+    raise on a C2 violation) can never abort a best-effort metadata run. At B-4
+    this seam becomes the sole committer. Keys written: ``disc`` (shadow disc),
+    ``resolution`` (the full :class:`~cdda2img.field_resolver.Resolution`, whose
+    ``contenders`` diagnoses any mismatch), ``proposals``, ``baseline``.
     """
     from concurrent.futures import ThreadPoolExecutor
 
     from cdda2img.cddb import query_cddb
-    from cdda2img.lookup_result import DiscMeta
+
+    # B-3 part 2: snapshot the pre-merge baseline BEFORE any lookup runs. This is
+    # the disc the resolver assembles onto (it carries the C1 physical fields no
+    # source proposes); it must be captured before prepopulate_from_mb / the
+    # in-place catalog overwrite touch *disc*.
+    baseline_snapshot = copy.deepcopy(disc)
+    stage7_meta: DiscMeta | None = None
     from cdda2img.mb_lookup import _merge_into_disc, prepopulate_from_mb
 
     original_album, original_artist = disc.album, disc.artist
@@ -1692,7 +1774,9 @@ def _run_metadata_lookups(
 
     discogs_attempted = _discogs.is_available()
     pre_discogs_catalog = disc.catalog
-    disc = _prepopulate_from_discogs(disc, ui, barcode_hints=mb_result.barcode_hints)
+    disc, chosen_mcn, discogs_hit = _prepopulate_from_discogs(
+        disc, ui, barcode_hints=mb_result.barcode_hints
+    )
     provenance["lookup_status_discogs"] = _r12_status(
         attempted=discogs_attempted,
         has_data=bool(disc.catalog) and disc.catalog != pre_discogs_catalog,
@@ -1751,7 +1835,8 @@ def _run_metadata_lookups(
             # authoritative — route through the C2 chokepoint before merging,
             # keeping the release group, exactly as the ISRC-tally fallback does.
             provenance["duration_match_release"] = dm.mb_release_id or "?"
-            disc = _merge_into_disc(strip_pressing_mbid(dm), disc)
+            stage7_meta = strip_pressing_mbid(dm)
+            disc = _merge_into_disc(stage7_meta, disc)
 
     # CDDB applied DEAD LAST — zero-trust gap-filler, now the absolute lowest
     # precedence (below even stage-7). By now CD-Text, MB, Discogs, AcoustID and
@@ -1759,6 +1844,26 @@ def _run_metadata_lookups(
     # fields none of them provided.
     if cddb_meta is not None:
         disc = _merge_into_disc(cddb_meta, disc)
+
+    # B-3 part 2 shadow seam (gated): run the trust resolver from the same source
+    # metas and stash the result for the integration equivalence proof. Gated so
+    # the proposal build (which can raise on a C2 violation) never aborts a rip.
+    if _shadow_out is not None:
+        from cdda2img.field_resolver import disc_from_resolution, resolve
+
+        proposals = _collect_metadata_proposals(
+            baseline_snapshot,
+            mb_result.meta,
+            chosen_mcn,
+            discogs_hit,
+            stage7_meta,
+            cddb_meta,
+        )
+        resolution = resolve(proposals)
+        _shadow_out["proposals"] = proposals
+        _shadow_out["resolution"] = resolution
+        _shadow_out["baseline"] = baseline_snapshot
+        _shadow_out["disc"] = disc_from_resolution(resolution, baseline_snapshot)
 
     return disc, mb_result
 

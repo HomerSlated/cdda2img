@@ -856,13 +856,26 @@ its own characterization.
     **unreachable** (Discogs lacks it, MB⊕stage-7 exclusive, CDDB has none);
     (B) catalog **is** §10-owned (canonical MCN overrides) → the trust-ladder fix.
     AcoustID confirmed to merge no fields (asserted), hence absent from the sequence.
-  - **Part 2 — production accumulator (pending)**: thread the proposal accumulator
-    through `_run_metadata_lookups` (expose the Discogs `hit` + chosen MCN from
-    `_prepopulate_from_discogs`), and assert `disc_from_resolution(resolve(acc)) ==
-    live_disc` riding the existing integration tests. This is the B-4 committer set
-    up early. **Must allow-list the two strict-xfail divergences** (invalid-disc-ISRC
-    scrub; duplicate track numbers) so a live disc hitting them does not fire the
-    assertion before B-6 resolves them.
+  - **Part 2 — production accumulator — LANDED 2026-06-23** (`_collect_metadata_proposals`
+    + the `_shadow_out` seam in `_run_metadata_lookups`; `test_shadow_equivalence.py`).
+    The MB `DiscMeta` was already exposed (`MBPrepopResult.meta`, R8); the only source
+    still trapped was the Discogs `hit` + chosen MCN, so `_prepopulate_from_discogs`
+    now returns `(disc, chosen, hit)` (hit is `None` on every path that did not merge
+    one). `_run_metadata_lookups` deep-copies the pre-merge baseline at entry, captures
+    `chosen`/`hit`/`stage7_meta`/`cddb_meta`, and — **gated behind `_shadow_out is not
+    None`** (the proposal build can raise on a C2 violation; an unused shadow path must
+    never abort a best-effort metadata run) — collects proposals, resolves, and stashes
+    `{disc, resolution, proposals, baseline}`. Three integration tests drive the **real**
+    function and assert `disc_from_resolution(resolve(acc), baseline) == live_disc`,
+    newly verifying against running code (vs. part 1's reconstruction): the **full**
+    `_r6_acoustid_corroborate` wrapper is field-neutral (forced down its
+    `is_available()==False` early-return; the merge branch stays covered by
+    `test_merge_sequence`), `_prepopulate_from_discogs`'s phase-A/B disc effect is
+    reproduced from `(chosen, hit)`, and MB's disc effect equals
+    `_merge_into_disc(meta, baseline)`. The fixtures are clean `DiscMeta`, so exact `==`
+    holds and **neither strict-xfail divergence is reachable** — no allow-list machinery
+    was needed (the modulo is the existing strict-xfails in `test_resolver_adapter`).
+    At B-4 the live merges are deleted and the function returns `_shadow_out["disc"]`.
 - **B-4** — **flip**: the resolver output becomes the committed disc; the
   per-source `_merge_into_disc` calls are removed (lookups keep running for their
   side-effects + proposals). De-risked by B-3. **GATED (2026-06-22 decision):** the

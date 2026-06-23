@@ -104,7 +104,7 @@ def test_cddb_is_lowest_precedence_mb_overwrites_it() -> None:
         patch("cdda2img.mb_lookup.lookup_disc_id", return_value=[mb_meta]),
         patch(
             "cdda2img.cdda2img._prepopulate_from_discogs",
-            side_effect=lambda d, *a, **k: d,
+            side_effect=lambda d, *a, **k: (d, None, None),
         ),
         patch(
             "cdda2img.cdda2img._r6_acoustid_corroborate",
@@ -139,7 +139,7 @@ def test_cddb_query_failure_does_not_break_lookups() -> None:
         patch("cdda2img.mb_lookup.lookup_disc_id", return_value=[mb_meta]),
         patch(
             "cdda2img.cdda2img._prepopulate_from_discogs",
-            side_effect=lambda d, *a, **k: d,
+            side_effect=lambda d, *a, **k: (d, None, None),
         ),
         patch(
             "cdda2img.cdda2img._r6_acoustid_corroborate",
@@ -183,7 +183,7 @@ def test_slow_cddb_does_not_gate_mb() -> None:
         patch("cdda2img.mb_lookup.lookup_disc_id", side_effect=slow_mb),
         patch(
             "cdda2img.cdda2img._prepopulate_from_discogs",
-            side_effect=lambda d, *a, **k: d,
+            side_effect=lambda d, *a, **k: (d, None, None),
         ),
         patch(
             "cdda2img.cdda2img._r6_acoustid_corroborate",
@@ -270,7 +270,7 @@ def test_stage7_outranks_cddb_on_contested_field() -> None:
         patch("cdda2img.mb_lookup.duration_match_lookup", return_value=dur_meta),
         patch(
             "cdda2img.cdda2img._prepopulate_from_discogs",
-            side_effect=lambda d, *a, **k: d,
+            side_effect=lambda d, *a, **k: (d, None, None),
         ),
         patch(
             "cdda2img.cdda2img._r6_acoustid_corroborate",
@@ -302,7 +302,7 @@ def test_stage7_skipped_when_only_cddb_seeds_album() -> None:
         patch("cdda2img.mb_lookup.duration_match_lookup") as mock_dur,
         patch(
             "cdda2img.cdda2img._prepopulate_from_discogs",
-            side_effect=lambda d, *a, **k: d,
+            side_effect=lambda d, *a, **k: (d, None, None),
         ),
         patch(
             "cdda2img.cdda2img._r6_acoustid_corroborate",

@@ -378,7 +378,7 @@ def test_prepopulate_discogs_no_mcn_no_hints_returns_unchanged():
         patch("cdda2img.discogs_lookup.is_available", return_value=True),
         patch("cdda2img.discogs_lookup.search_by_barcode") as mock_search,
     ):
-        result = _prepopulate_from_discogs(disc, ui=None)
+        result, _chosen, _hit = _prepopulate_from_discogs(disc, ui=None)
     assert result is disc
     assert result.catalog is None
     mock_search.assert_not_called()
@@ -399,7 +399,7 @@ def test_prepopulate_discogs_hint_fires_when_disc_has_no_mcn():
             "cdda2img.discogs_lookup.search_by_barcode", return_value=[hit]
         ) as mock_search,
     ):
-        result = _prepopulate_from_discogs(
+        result, _chosen, _hit = _prepopulate_from_discogs(
             disc, ui=None, barcode_hints=[("", "0075992377423")]
         )
     mock_search.assert_called_once_with("0075992377423")
@@ -425,7 +425,7 @@ def test_prepopulate_discogs_substring_match_picks_correct_hint():
             "cdda2img.discogs_lookup.search_by_barcode", return_value=ambiguous
         ) as mock_search,
     ):
-        result = _prepopulate_from_discogs(
+        result, _chosen, _hit = _prepopulate_from_discogs(
             disc,
             ui=None,
             barcode_hints=[("", "0075992377423"), ("", "0081227991159")],
@@ -452,7 +452,7 @@ def test_prepopulate_discogs_substring_skips_wrong_hint():
             "cdda2img.discogs_lookup.search_by_barcode", return_value=[]
         ) as mock_search,
     ):
-        result = _prepopulate_from_discogs(
+        result, _chosen, _hit = _prepopulate_from_discogs(
             disc,
             ui=None,
             barcode_hints=[("", "0081227991159"), ("", "0075992377423")],
@@ -478,7 +478,7 @@ def test_prepopulate_discogs_fallback_to_first_hint_when_no_raw_mcn():
             "cdda2img.discogs_lookup.search_by_barcode", return_value=ambiguous
         ) as mock_search,
     ):
-        result = _prepopulate_from_discogs(
+        result, _chosen, _hit = _prepopulate_from_discogs(
             disc,
             ui=None,
             barcode_hints=[("", "0075992377423"), ("", "0081227991159")],
@@ -502,7 +502,7 @@ def test_prepopulate_discogs_enrichment_rejects_wrong_album():
         patch("cdda2img.discogs_lookup.is_available", return_value=True),
         patch("cdda2img.discogs_lookup.search_by_barcode", return_value=compilation),
     ):
-        result = _prepopulate_from_discogs(
+        result, _chosen, _hit = _prepopulate_from_discogs(
             disc, ui=None, barcode_hints=[("", "0081227991159")]
         )
     # MCN set from Phase A (only candidate is the hint); enrichment rejected.
