@@ -38,24 +38,26 @@ where the merge would silently leak it. That strictness is the C2 win, not a
 divergence to paper over — hence :func:`meta_to_proposals` skips empties *before*
 constructing (an empty ``mb_release_id`` must never reach the raising constructor).
 
-Known divergences from ``_merge_into_disc`` (advisor 2026-06-22). Root cause: the
-merge *rebuilds* a meta-matched track entry (so a disc-side value that
-validates-to-empty gets nulled), whereas the resolver *patches* only proposed
-fields and keeps the base otherwise. Both are pinned as strict-xfail equivalence
-tests in ``test_resolver_adapter.py`` and **must be resolved — fixed, or made a
-conscious documented divergence — before the B-4 flip** (where the resolver
-becomes the sole committer and the gap becomes live behaviour):
+Former divergences from ``_merge_into_disc`` (advisor 2026-06-22) — BOTH RESOLVED
+2026-06-23, clearing the B-4 flip gate. Root cause was that the merge *rebuilds* a
+meta-matched track entry (so a disc-side value that validates-to-empty gets nulled),
+whereas the resolver *patches* only proposed fields and keeps the base otherwise:
 
-1. **Invalid disc ISRC + matched meta track with empty ISRC.** ``_merge``
-   re-validates the disc-side ISRC on the rebuilt entry and nulls a malformed one
-   (R13); with no meta ISRC to fall back to, the result is ``None``. The resolver
-   skips the invalid baseline ISRC and the empty meta ISRC, so the base
-   (malformed) value survives. NB the merge only scrubs ISRCs on *matched* tracks
-   — unmatched tracks keep their raw value either way — so the merge's own
-   scrubbing is already match-dependent (a quirk, not a clean invariant).
-2. **Duplicate track numbers in ``meta.tracks``.** ``_merge``'s ``meta_by_num``
-   dict is last-wins; the resolver emits both at equal trust and ``resolve``'s
-   ``max`` is first-wins. Low-reachability (malformed meta).
+1. **Invalid disc ISRC.** RESOLVED by **uniform drop** (:func:`sanitize_base`, the
+   user's 2026-06-23 decision): an invalid on-disc ISRC is dropped on **every**
+   track before assembly, aligning with the R13 validation infrastructure. ``_merge``
+   scrubs an invalid ISRC only on MB-*matched* tracks (it rebuilds those and
+   re-validates) and keeps the garbage verbatim on unmatched ones — a match-dependent
+   quirk the collect->resolve adapter deliberately cannot see. So the resolver now
+   AGREES with ``_merge`` on the matched case (both -> ``None``) and *intentionally
+   diverges* on the unmatched case (resolver -> ``None``, merge -> garbage). The
+   chosen divergence is pinned by
+   ``test_invalid_isrc_dropped_uniformly_unmatched_DIVERGES_from_merge``.
+2. **Duplicate track numbers in ``meta.tracks``.** RESOLVED by **reproduce-today**:
+   :func:`meta_to_proposals` collapses ``meta.tracks`` to last-per-number (matching
+   ``_merge``'s last-wins ``meta_by_num`` dict) before emitting, so the resolver no
+   longer emits equal-trust duplicates that ``resolve``'s ``max`` would break
+   first-wins. Behaviour-neutral. Low-reachability (malformed meta).
 
 Out-of-domain edge (documented, not special-cased): the *falsy-but-present* class.
 The resolver canonicalises an absent disc-level value to ``None`` (it skips empty
@@ -75,7 +77,7 @@ invariant (optional fields None-or-nonempty) and is exact within it.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from cdda2img.field_resolver import Field, FieldProposal, Source, Trust
 from cdda2img.lookup_result import DiscMeta
@@ -142,6 +144,42 @@ def trust_for(source: Source, field: Field, pipeline: str) -> Trust:
     if source is Source.BASELINE:
         return _BASELINE_TRUST
     return _REPRODUCE_META_TRUST[source]
+
+
+def sanitize_base(disc: RBIDisc) -> RBIDisc:
+    """Return *disc* with invalid on-disc track ISRCs (R13/ISO-3901) nulled.
+
+    The base the resolver assembles onto must not smuggle a malformed ISRC into
+    the output via a track that no proposal overwrote. Per the 2026-06-23 decision
+    (B-1 divergence 1, resolved), invalid ISRCs are dropped **uniformly** — on
+    every track — a deliberate, documented divergence from ``_merge_into_disc``,
+    which scrubs them only on MB-matched tracks and keeps the garbage verbatim on
+    unmatched ones (mb_lookup.py:758-782). Dropping uniformly aligns with the R13
+    validation infrastructure: an invalid ISRC is garbage, not a guess.
+
+    Valid ISRCs are left as-is here — :func:`baseline_proposals` proposes their
+    normalised form, which wins at assembly, so the committed value is canonical
+    either way. This must wrap the base at **every committed-disc assembly**
+    (production shadow build + the equivalence test paths) so they agree; it is a
+    no-op on a disc with no malformed ISRCs. (It is *not* applied to bare unit tests
+    of the ``disc_from_resolution`` primitive itself — those exercise the assembler,
+    not the committed-disc contract.)
+
+    NB a related, pre-existing **representational** divergence rides the same axis
+    (advisor 2026-06-23): because :func:`baseline_proposals` normalises *every* valid
+    on-disc ISRC, an UNMATCHED track with a valid but non-canonical (hyphenated /
+    lowercase) ISRC resolves to the canonical form, where ``_merge_into_disc`` (which
+    normalises only matched/rebuilt tracks) keeps the raw value. Resolver -> canonical,
+    merge -> raw; normalising is arguably cleaner (the RBI/TOC ISRC field is 12 chars,
+    no hyphens). Same bucket as the falsy-but-present -> ``None`` canonicalisation
+    below; pinned by
+    ``test_valid_noncanonical_isrc_normalised_uniformly_unmatched_DIVERGES_from_merge``.
+    """
+    new_tracks = [
+        replace(t, isrc=None) if (t.isrc and validate_isrc(t.isrc) is None) else t
+        for t in disc.tracks
+    ]
+    return replace(disc, tracks=new_tracks)
 
 
 def canonical_mcn_proposal(chosen: str | None) -> list[FieldProposal]:
@@ -401,10 +439,17 @@ def meta_to_proposals(
     )
     _emit(out, skips, Field.SET_TITLE, meta.set_title, t(Field.SET_TITLE), source)
 
-    for mt in meta.tracks:
-        if mt.number is None:
-            continue
-        n = mt.number
+    # Duplicate track numbers in malformed meta: ``_merge_into_disc`` keys tracks
+    # by number in a last-wins dict (``mb_lookup.py:757``
+    # ``{t.number: t for t in meta.tracks ...}``), so collapse to last-per-number
+    # before emitting. Emitting both at equal trust would resolve first-wins
+    # (``resolve``'s ``max``) and diverge from the merge — this was B-1 divergence 2,
+    # resolved here 2026-06-23 (reproduce-today, behaviour-neutral: the resolver is
+    # not yet the committer). Dict-comprehension insertion order keeps each number's
+    # first appearance as the iteration position with the last-seen value as content,
+    # matching ``meta_by_num`` exactly.
+    meta_by_num = {mt.number: mt for mt in meta.tracks if mt.number is not None}
+    for n, mt in meta_by_num.items():
         _emit(out, skips, Field.TRACK_TITLE, mt.title, t(Field.TRACK_TITLE), source, n)
         _emit_named(
             out,

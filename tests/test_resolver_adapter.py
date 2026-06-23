@@ -6,12 +6,15 @@ reproduces ``_merge_into_disc`` across **every** merged field (not just the B0
 characterization subset) on the live in-domain space — so the resolver can replace
 the merge fold without behaviour change (the ranking change is deferred to B-6).
 
-Three divergences are known and partitioned out of that space: two pinned as
-strict-xfail examples (invalid-disc-ISRC scrub; duplicate track numbers) and one
-representational class (falsy-but-present ``""``/``0`` on optional fields) excluded
-by the Hypothesis strategy, which models RBIDisc's None-when-absent invariant and
-is exact within it. Also pinned: the C2 strictness boundary (recording-level source
-+ non-empty mb_release_id raises, where the merge would leak) and the §11.5 trace.
+Three divergences were known and partitioned out of that space; the two track-level
+ones are now RESOLVED 2026-06-23 (clearing the B-4 gate): duplicate track numbers by
+reproduce-today last-wins dedup, and invalid-disc-ISRC by uniform drop
+(``sanitize_base``) — the latter a deliberate divergence on unmatched tracks, pinned
+by its own test. The third is a representational class (falsy-but-present ``""``/``0``
+on optional fields) excluded by the Hypothesis strategy, which models RBIDisc's
+None-when-absent invariant and is exact within it. Also pinned: the C2 strictness
+boundary (recording-level source + non-empty mb_release_id raises, where the merge
+would leak) and the §11.5 trace.
 """
 
 import pytest
@@ -31,6 +34,7 @@ from cdda2img.rbi_format import RBIDisc, RBITocEntry
 from cdda2img.resolver_adapter import (
     baseline_proposals,
     meta_to_proposals,
+    sanitize_base,
     trust_for,
 )
 
@@ -42,11 +46,19 @@ def _equiv(
 
     The equivalence is also order-independent: the same proposals resolve to the
     same disc regardless of collection order (baseline-first vs meta-first).
+
+    The committed-disc assembly always wraps the base in ``sanitize_base`` (the
+    single assembly contract; drops invalid on-disc ISRCs uniformly). This holds
+    equivalence-to-``_merge`` on clean discs and on MB-matched invalid ISRCs; it
+    is *intentionally* not equivalent on UNMATCHED invalid ISRCs — that chosen
+    divergence is pinned separately in
+    ``test_invalid_isrc_dropped_uniformly_unmatched_DIVERGES_from_merge``.
     """
+    base = sanitize_base(disc)
     base_props = baseline_proposals(disc)
     meta_props = meta_to_proposals(meta, source)
-    via_resolver = disc_from_resolution(resolve(base_props + meta_props), disc)
-    via_reversed = disc_from_resolution(resolve(meta_props + base_props), disc)
+    via_resolver = disc_from_resolution(resolve(base_props + meta_props), base)
+    via_reversed = disc_from_resolution(resolve(meta_props + base_props), base)
     via_merge = _merge_into_disc(meta, disc)
     assert via_resolver == via_merge
     assert via_reversed == via_merge
@@ -262,45 +274,83 @@ def test_equiv_isrc_disc_normalised_form_proposed():
     assert _equiv(meta, disc).tracks[0].isrc == "GBAYE0000123"
 
 
-# === KNOWN B-1 DIVERGENCES from _merge_into_disc (must resolve before B-4 flip)
+# === B-1 DIVERGENCES from _merge_into_disc — BOTH RESOLVED 2026-06-23 ===========
 # Root cause (advisor 2026-06-22): _merge *rebuilds* a meta-matched track entry,
 # so a disc-side value that validates-to-empty gets nulled; the resolver *patches*
-# only proposed fields and otherwise keeps the base. These are pinned as
-# strict-xfail equivalence assertions so they (a) stay visible, (b) keep the suite
-# green, and (c) self-trip the moment a fix or a conscious documented divergence
-# (matching the discogs_release_id==0 treatment) lands and makes them pass.
+# only proposed fields and otherwise keeps the base.
+#
+# Resolution (gate for the B-4 flip, trust_model_design §11.6):
+# - dup track numbers -> reproduce-today (last-wins dedup in meta_to_proposals);
+#   see test_equiv_duplicate_meta_track_number_last_wins above.
+# - invalid ISRC -> uniform-drop (sanitize_base), a CHOSEN divergence (user
+#   decision 2026-06-23): invalid ISRCs are dropped on EVERY track, where _merge
+#   scrubs only MB-matched ones. On the matched case the resolver now AGREES with
+#   _merge (both -> None); on the unmatched case it intentionally diverges
+#   (resolver -> None, _merge -> garbage), pinned below.
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="B-1 divergence: invalid disc ISRC + matched meta track w/ empty ISRC. "
-    "_merge rebuilds and nulls the bad ISRC; resolver patches and keeps it. "
-    "Resolve before the B-4 flip.",
-)
-def test_equiv_isrc_invalid_disc_matched_meta_empty_isrc_DIVERGES():
+def test_equiv_isrc_invalid_disc_matched_meta_empty_isrc():
+    """B-1 divergence 1 (matched case) — RESOLVED. sanitize_base drops the invalid
+    on-disc ISRC; _merge scrubs it on the matched rebuild; both now -> None."""
     disc = _disc(tracks=[_toc(1, title="D1", isrc="GARBAGE")])
     # meta matches track 1 (so _merge rebuilds it) but carries no ISRC.
     meta = DiscMeta(tracks=[TrackMeta(number=1, title="M1", isrc=None)])
-    # _merge -> isrc None (scrubbed); resolver -> "GARBAGE" (kept).
-    _equiv(meta, disc)
+    assert _equiv(meta, disc).tracks[0].isrc is None
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="B-1 divergence: duplicate track numbers in meta.tracks. _merge's "
-    "meta_by_num dict is last-wins; resolver's equal-trust max is first-wins. "
-    "Resolve before the B-4 flip.",
-)
-def test_equiv_duplicate_meta_track_number_DIVERGES():
+def test_invalid_isrc_dropped_uniformly_unmatched_DIVERGES_from_merge():
+    """The CHOSEN divergence (user decision 2026-06-23): on a track meta did NOT
+    match, an invalid on-disc ISRC is dropped by the resolver (sanitize_base) but
+    KEPT verbatim by _merge_into_disc. This is deliberate — uniform drop aligns
+    with the R13 validation infra. Not routed through _equiv (they diverge here)."""
+    disc = _disc(tracks=[_toc(1, title="D1", isrc="GARBAGE")])
+    meta = DiscMeta(tracks=[])  # no track 1 -> _merge keeps the entry verbatim
+
+    via_resolver = disc_from_resolution(
+        resolve(baseline_proposals(disc) + meta_to_proposals(meta, Source.MB_DISC_ID)),
+        sanitize_base(disc),
+    )
+    via_merge = _merge_into_disc(meta, disc)
+    assert via_resolver.tracks[0].isrc is None  # resolver: dropped
+    assert via_merge.tracks[0].isrc == "GARBAGE"  # _merge: kept (unmatched)
+
+
+def test_valid_noncanonical_isrc_normalised_uniformly_unmatched_DIVERGES_from_merge():
+    """Representational divergence (resolver cleaner), advisor 2026-06-23 — same axis,
+    same bucket as the falsy-but-present -> None canonicalisation. ``baseline_proposals``
+    emits the NORMALISED form of every valid on-disc ISRC (a proposal that wins), so the
+    resolver canonicalises uniformly. ``_merge_into_disc`` normalises only on MB-matched
+    (rebuilt) tracks; an UNMATCHED track keeps the raw hyphenated/lowercase value
+    verbatim. Resolver -> canonical, _merge -> raw. Normalising is arguably *more*
+    correct (the RBI/TOC ISRC field is 12 chars, no hyphens), so this is a documented
+    representational divergence, not a behaviour fix. Predates sanitize_base (it is
+    baseline normalisation); low reachability (Q-channel ISRCs are usually canonical)."""
+    disc = _disc(tracks=[_toc(1, title="D1", isrc="gb-aye-0000123")])
+    meta = DiscMeta(tracks=[])  # unmatched -> _merge keeps the raw entry
+
+    via_resolver = disc_from_resolution(
+        resolve(baseline_proposals(disc) + meta_to_proposals(meta, Source.MB_DISC_ID)),
+        sanitize_base(disc),
+    )
+    via_merge = _merge_into_disc(meta, disc)
+    assert via_resolver.tracks[0].isrc == "GBAYE0000123"  # resolver: normalised
+    assert via_merge.tracks[0].isrc == "gb-aye-0000123"  # _merge: raw (unmatched)
+
+
+def test_equiv_duplicate_meta_track_number_last_wins():
+    """B-1 divergence 2 — RESOLVED 2026-06-23 (reproduce-today). Duplicate track
+    numbers in malformed meta: ``meta_to_proposals`` collapses to last-per-number
+    (matching ``_merge``'s last-wins ``meta_by_num`` dict, mb_lookup.py:757), so the
+    resolver and the merge now agree on the last entry."""
     disc = _disc(tracks=[_toc(1, isrc=None)])
     meta = DiscMeta(
         tracks=[
             TrackMeta(number=1, isrc="AAAA10400486"),  # first
-            TrackMeta(number=1, isrc="BBBB10400487"),  # last (merge picks this)
+            TrackMeta(number=1, isrc="BBBB10400487"),  # last — both pick this
         ]
     )
-    # _merge -> "BBBB10400487" (last); resolver -> "AAAA10400486" (first).
-    _equiv(meta, disc)
+    # _equiv asserts resolver == _merge; both now resolve to the last entry.
+    assert _equiv(meta, disc).tracks[0].isrc == "BBBB10400487"
 
 
 # === sentinel + track-verbatim quirks via the equivalence path ==============
@@ -404,9 +454,9 @@ def test_meta_skips_empty_recorded():
 #                                        ""/0 but the resolver canonicalises to
 #                                        None. Representational, not behavioural.
 # Source is MB_DISC_ID throughout, so meta may carry mb_release_id (no C2 raise).
-# The excluded regions are pinned by the strict-xfail examples above; together they
-# partition the input space (fuzzed-exact where exact, example-pinned where it
-# knowingly diverges).
+# The excluded regions are pinned by the example tests above (the resolved invalid-ISRC
+# and dup-track cases); together they partition the input space (fuzzed-exact where
+# exact, example-pinned where it knowingly diverges).
 
 _LETTERS2 = st.text(alphabet="ABCDEFGHIJKLMNOPQRSTUVWXYZ", min_size=2, max_size=2)
 _ALNUM3 = st.text(

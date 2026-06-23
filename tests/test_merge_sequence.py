@@ -36,6 +36,7 @@ from cdda2img.resolver_adapter import (
     baseline_proposals,
     canonical_mcn_proposal,
     meta_to_proposals,
+    sanitize_base,
 )
 
 # === the two sequences =======================================================
@@ -85,7 +86,10 @@ def _resolver_sequence(
         props += meta_to_proposals(stage7, Source.DURATION)
     if cddb is not None:
         props += meta_to_proposals(cddb, Source.CDDB)
-    return disc_from_resolution(resolve(props), baseline)
+    # sanitize_base: the committed-disc assembly contract (drops invalid on-disc
+    # ISRCs uniformly). A no-op on this property test's clean domain (valid/None
+    # ISRCs only), kept for parity with production.
+    return disc_from_resolution(resolve(props), sanitize_base(baseline))
 
 
 # === strategies (clean live domain) ==========================================

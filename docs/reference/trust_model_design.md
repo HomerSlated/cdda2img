@@ -878,13 +878,17 @@ its own characterization.
     At B-4 the live merges are deleted and the function returns `_shadow_out["disc"]`.
 - **B-4** — **flip**: the resolver output becomes the committed disc; the
   per-source `_merge_into_disc` calls are removed (lookups keep running for their
-  side-effects + proposals). De-risked by B-3. **GATED (2026-06-22 decision):** the
-  flip MUST NOT land while the B-1 divergences are unresolved — at the flip the
-  resolver becomes the sole committer and each divergence becomes live behaviour.
-  Resolution is deferred to B-6, so **B-6 must precede the flip, or land with it**
-  (the staging order is logical, not a hard sequence: pull the ISRC/dup-track fix
-  forward to immediately before B-4). The strict-xfail tests are the tripwire — they
-  flip to real passing tests the moment the divergence is resolved.
+  side-effects + proposals). De-risked by B-3. **GATE CLEARED 2026-06-23:** both B-1
+  divergences are resolved (dup-track reproduce-today; invalid-ISRC uniform-drop via
+  `sanitize_base` — see §11.6), so the flip no longer changes behaviour on an
+  undecided axis. The remaining flip work is mechanical: in `_run_metadata_lookups`,
+  delete the per-source merges, ungate the shadow build, and return
+  `disc_from_resolution(resolve(_collect_metadata_proposals(...)), sanitize_base(baseline))`
+  as the committed disc (the shadow seam IS this; `_shadow_out` becomes the live path).
+  `create_image` does not call `_run_metadata_lookups`, so it is unaffected (its only
+  field merge is the proven-neutral AcoustID corroborate + the menu, which is B-5).
+  The ranking change (baseline low) stays separate as B-6 — it is the only
+  *intentional* trust reordering and gets its own characterization diff.
 - **B-5** — convert the interactive menu-apply paths (`menu_state.py:672–726`,
   Update vs Overwrite-All → MANUAL-trust proposals) and `_clear_disc`.
 - **B-6** — tune the ranking to the corrected order (baseline low). The single
@@ -927,13 +931,32 @@ time), so the trace is never a retrofit. The dump UI lands with B-7.
 - B0 (`test_merge_characterization`) + `test_parallel_pre_menu` stay byte-identical
   through B-5; only B-6 changes them, deliberately.
 - B1 invariants (`test_merge_invariants`) become the resolver's C1/C2 regression gate.
-- **B-4 flip gate (hard, 2026-06-22):** the two strict-xfail divergence tests in
-  `test_resolver_adapter.py` (`*_isrc_invalid_disc_matched_meta_empty_isrc_DIVERGES`,
-  `*_duplicate_meta_track_number_DIVERGES`) MUST be resolved — fixed, or converted to
-  a conscious documented divergence with a passing assertion — **before** the resolver
-  becomes the sole committer (B-4). They are `xfail(strict=True)`, so they self-trip
-  (the suite goes red) the moment a fix lands and they unexpectedly pass — a built-in
-  reminder to remove the mark and re-confirm. See the B-4 note in §11.4.
+- **B-4 flip gate (hard, 2026-06-22) — CLEARED 2026-06-23.** The two former
+  strict-xfail divergences in `test_resolver_adapter.py` are both resolved, so the
+  resolver may become the sole committer (B-4) without changing behaviour on an axis
+  that was not consciously decided:
+  - *duplicate meta track numbers* — **reproduce-today**: `meta_to_proposals` collapses
+    to last-per-number (matches `_merge`'s last-wins `meta_by_num`). Behaviour-neutral.
+    Now `test_equiv_duplicate_meta_track_number_last_wins`.
+  - *invalid on-disc ISRC* — **uniform drop** (`resolver_adapter.sanitize_base`, user
+    decision 2026-06-23): invalid ISRCs (R13) are dropped on every track at assembly,
+    where `_merge` scrubs only MB-matched ones. A deliberate, documented divergence:
+    the resolver agrees with `_merge` on the matched case and intentionally diverges on
+    the unmatched case (resolver drops, `_merge` keeps garbage). Pinned by
+    `test_invalid_isrc_dropped_uniformly_unmatched_DIVERGES_from_merge`; the matched
+    case is `test_equiv_isrc_invalid_disc_matched_meta_empty_isrc`.
+  - `sanitize_base` is the single committed-disc assembly contract — it MUST wrap the
+    base at every **committed-disc assembly** (production shadow build + equivalence
+    tests) so they agree; it is a no-op on a disc with no malformed ISRCs, and is *not*
+    applied to bare unit tests of the `disc_from_resolution` primitive.
+  - **Residual representational divergence on the same axis (documented, not a gate):**
+    `baseline_proposals` normalises *every* valid on-disc ISRC, so an UNMATCHED track
+    with a valid non-canonical (hyphenated/lowercase) ISRC resolves canonical where
+    `_merge` keeps it raw (it normalises only matched tracks). Resolver-is-cleaner —
+    same bucket as the falsy-but-present → None class. Pinned by
+    `test_valid_noncanonical_isrc_normalised_uniformly_unmatched_DIVERGES_from_merge`.
+    The two *enumerated* gate divergences are the ones that were resolved; this is a
+    pre-existing representational one declared, not reconciled to byte-equality.
 - **Equivalence is property-gated:** `test_property_resolver_equals_merge_on_clean_domain`
   (Hypothesis) fuzzes `(disc, meta)` over the live in-domain space (optional fields
   None-or-nonempty, valid/None ISRCs, unique track numbers, non-zero discogs id) and

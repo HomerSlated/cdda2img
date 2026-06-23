@@ -1850,6 +1850,7 @@ def _run_metadata_lookups(
     # the proposal build (which can raise on a C2 violation) never aborts a rip.
     if _shadow_out is not None:
         from cdda2img.field_resolver import disc_from_resolution, resolve
+        from cdda2img.resolver_adapter import sanitize_base
 
         proposals = _collect_metadata_proposals(
             baseline_snapshot,
@@ -1863,7 +1864,11 @@ def _run_metadata_lookups(
         _shadow_out["proposals"] = proposals
         _shadow_out["resolution"] = resolution
         _shadow_out["baseline"] = baseline_snapshot
-        _shadow_out["disc"] = disc_from_resolution(resolution, baseline_snapshot)
+        # sanitize_base: drop invalid on-disc ISRCs uniformly before assembly
+        # (the committed-disc contract; see resolver_adapter.sanitize_base).
+        _shadow_out["disc"] = disc_from_resolution(
+            resolution, sanitize_base(baseline_snapshot)
+        )
 
     return disc, mb_result
 
