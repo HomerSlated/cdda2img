@@ -1845,13 +1845,25 @@ def _run_metadata_lookups(
     if cddb_meta is not None:
         disc = _merge_into_disc(cddb_meta, disc)
 
-    # B-3 part 2 shadow seam (gated): run the trust resolver from the same source
-    # metas and stash the result for the integration equivalence proof. Gated so
-    # the proposal build (which can raise on a C2 violation) never aborts a rip.
-    if _shadow_out is not None:
-        from cdda2img.field_resolver import disc_from_resolution, resolve
-        from cdda2img.resolver_adapter import sanitize_base
+    # B-4 FLIP: the collect->resolve trust resolver is now the SOLE COMMITTER. The
+    # per-source merge chain above is retained (not yet deleted) and demoted to two
+    # roles: it still feeds the mid-pipeline lookups their search context (Discogs
+    # album-match, the stage-7 seed), and its final ``merged`` disc is BOTH the live
+    # equivalence ORACLE (``_shadow_out["merged"]`` — a non-tautological check that
+    # the resolver reproduces the legacy fold, since the returned disc is now the
+    # resolver's) and the never-fail FALLBACK. Deleting the now-redundant trailing
+    # merges is a follow-up after production soak (trust_model_design §11.4 B-4).
+    merged = disc  # legacy fill-blank fold output: lookup context + oracle + fallback
+    from cdda2img.field_resolver import disc_from_resolution, resolve
+    from cdda2img.resolver_adapter import sanitize_base
 
+    committed = merged  # fallback default
+    proposals: list[FieldProposal] = []
+    resolution = None
+    try:
+        # The proposal BUILD must be inside the guard: C2 raises in
+        # FieldProposal.__post_init__ during construction (inside
+        # _collect_metadata_proposals), not in resolve / disc_from_resolution.
         proposals = _collect_metadata_proposals(
             baseline_snapshot,
             mb_result.meta,
@@ -1861,16 +1873,24 @@ def _run_metadata_lookups(
             cddb_meta,
         )
         resolution = resolve(proposals)
+        # sanitize_base: drop invalid on-disc ISRCs uniformly (committed-disc
+        # contract; see resolver_adapter.sanitize_base).
+        committed = disc_from_resolution(resolution, sanitize_base(baseline_snapshot))
+    except Exception as exc:
+        # C2 cannot fire on the live domain (the sole recording-level source,
+        # stage-7, is strip_pressing_mbid'd before construction), but metadata is
+        # best-effort and must never abort a rip — any build/resolve/assemble
+        # failure falls back to the faithful legacy fold.
+        log.warning("trust resolver failed; using legacy merge fallback: %s", exc)
+
+    if _shadow_out is not None:
         _shadow_out["proposals"] = proposals
         _shadow_out["resolution"] = resolution
         _shadow_out["baseline"] = baseline_snapshot
-        # sanitize_base: drop invalid on-disc ISRCs uniformly before assembly
-        # (the committed-disc contract; see resolver_adapter.sanitize_base).
-        _shadow_out["disc"] = disc_from_resolution(
-            resolution, sanitize_base(baseline_snapshot)
-        )
+        _shadow_out["merged"] = merged  # legacy oracle — compared against committed
+        _shadow_out["disc"] = committed
 
-    return disc, mb_result
+    return committed, mb_result
 
 
 def _finalize_import(

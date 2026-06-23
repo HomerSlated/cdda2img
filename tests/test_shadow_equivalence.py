@@ -1,17 +1,18 @@
 """
-test_shadow_equivalence.py — B4 B-3 part 2: the production shadow-equivalence proof.
+test_shadow_equivalence.py — B4 B-3 part 2 / B-4: resolver-vs-legacy equivalence.
 
 B-3 part 1 proved the resolver reproduces a *reconstruction* of the
 ``_run_metadata_lookups`` merge sequence (``test_merge_sequence``). This proves it
-reproduces the **real running function**: it drives the actual
-``cdda2img._run_metadata_lookups`` with its ``_shadow_out`` seam, so the live
-mutate-as-you-go merge and the collect->resolve resolver are computed side by side
-from the same source metas, and asserts they agree
-(``disc_from_resolution(resolve(acc), baseline) == live_disc``).
+reproduces the **real running function**, and survives the B-4 flip as a
+non-tautological check.
 
-This is the B-4 committer, set up early. At B-4 the live merges are deleted and
-``_run_metadata_lookups`` returns ``_shadow_out["disc"]``; until then the seam is a
-gated pure side-computation.
+Post-B-4 (the flip landed): ``_run_metadata_lookups`` returns the resolver's
+committed disc, and the legacy per-source merge chain is retained as the live
+equivalence ORACLE, stashed at ``_shadow_out["merged"]``. These tests drive the
+real function with ``_shadow_out`` enabled and assert the returned (resolver) disc
+equals that legacy oracle (``live == shadow["merged"]``) — proving the flip did not
+change the committed output on clean data. Comparing against ``shadow["disc"]``
+would be tautological now (it *is* the returned disc), so the oracle is the merge.
 
 What this newly tests against real code (vs. the part-1 reconstruction, advisor
 2026-06-23):
@@ -91,19 +92,25 @@ def _run_with_shadow(disc: RBIDisc) -> tuple[RBIDisc, dict[str, object]]:
 
 
 def _assert_equiv(live: RBIDisc, shadow: dict[str, object]) -> None:
-    """Equivalence assertion that surfaces *which* key diverged via contenders."""
-    resolved = shadow["disc"]
-    assert isinstance(resolved, RBIDisc)
-    if resolved != live:
-        # The Resolution's contenders is the decision trace: it shows, per field,
-        # every proposal that competed (trust-descending) — so a mismatch points
-        # straight at the diverging source rather than a bare disc-!= dump.
+    """Post-B-4-flip equivalence check (non-tautological).
+
+    After the flip ``live`` (the returned disc) IS the resolver's committed output,
+    so comparing it to ``shadow["disc"]`` (also the resolver) proves nothing. The
+    real oracle is the retained legacy merge chain, stashed at ``shadow["merged"]``;
+    asserting ``live == merged`` checks the resolver still reproduces the fold on
+    clean data. ``Resolution.contenders`` surfaces *which* field/source diverged.
+    """
+    merged = shadow["merged"]
+    assert isinstance(merged, RBIDisc)
+    if live != merged:
+        # contenders is the decision trace: per field, every proposal that competed
+        # (trust-descending) — so a mismatch names the diverging source.
         from cdda2img.field_resolver import Resolution
 
         resolution = shadow["resolution"]
         assert isinstance(resolution, Resolution)
         diffs = [
-            f"{f}: live={getattr(live, f)!r} shadow={getattr(resolved, f)!r}"
+            f"{f}: resolver={getattr(live, f)!r} merged={getattr(merged, f)!r}"
             for f in (
                 "album",
                 "artist",
@@ -114,15 +121,15 @@ def _assert_equiv(live: RBIDisc, shadow: dict[str, object]) -> None:
                 "mb_release_id",
                 "discogs_release_id",
             )
-            if getattr(live, f) != getattr(resolved, f)
+            if getattr(live, f) != getattr(merged, f)
         ]
         tdiffs = [
-            f"track {lt.track_number}: live={lt!r} shadow={rt!r}"
-            for lt, rt in zip(live.tracks, resolved.tracks, strict=False)
+            f"track {lt.track_number}: resolver={lt!r} merged={rt!r}"
+            for lt, rt in zip(live.tracks, merged.tracks, strict=False)
             if lt != rt
         ]
         msg = (
-            "resolver != live merge\n"
+            "resolver (committed) != legacy merge oracle\n"
             + "\n".join(diffs + tdiffs)
             + f"\ncontenders={resolution.contenders}"
         )
@@ -248,3 +255,43 @@ def test_shadow_mb_only_no_other_sources() -> None:
     assert live.mb_release_id == "rid-only"
     assert [t.title for t in live.tracks] == ["One", "Two"]
     _assert_equiv(live, shadow)
+
+
+def test_resolver_failure_falls_back_to_legacy_merge() -> None:
+    """B-4 never-fail guard: if the resolver path raises (an unforeseen C2, a
+    malformed meta during proposal construction, etc.), _run_metadata_lookups must
+    NOT abort the rip — it logs and falls back to the faithful legacy merge fold.
+
+    The guard wraps the whole resolver path including the proposal BUILD, which is
+    where C2 actually raises (FieldProposal.__post_init__). We inject the failure at
+    _collect_metadata_proposals to prove the build is inside the net.
+    """
+    disc = _disc("Album", "Artist")
+    mb_meta = DiscMeta(
+        album="Album",
+        artist="Artist",
+        mb_release_id="rid",
+        mb_release_group_id="rg",
+        source="musicbrainz",
+        tracks=[TrackMeta(number=1, title="One"), TrackMeta(number=2, title="Two")],
+    )
+    with (
+        patch("cdda2img.cddb.query_cddb", return_value=[]),
+        patch("cdda2img.mb_lookup.lookup_disc_id", return_value=[mb_meta]),
+        patch("cdda2img.acoustid_lookup.is_available", return_value=False),
+        patch("cdda2img.discogs_lookup.is_available", return_value=False),
+        patch(
+            "cdda2img.cdda2img._collect_metadata_proposals",
+            side_effect=RuntimeError("injected build failure"),
+        ),
+    ):
+        live, shadow = _run_with_shadow(disc)  # must not raise
+
+    # Fell back to the legacy fold (MB applied), not aborted or blanked.
+    assert live.mb_release_id == "rid"
+    assert live.album == "Album"
+    assert [t.title for t in live.tracks] == ["One", "Two"]
+    assert live == shadow["merged"]  # committed == fallback == legacy fold
+    # Confirm the except branch was taken: no resolution, empty proposals.
+    assert shadow["resolution"] is None
+    assert shadow["proposals"] == []

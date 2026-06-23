@@ -876,19 +876,30 @@ its own characterization.
     holds and **neither strict-xfail divergence is reachable** — no allow-list machinery
     was needed (the modulo is the existing strict-xfails in `test_resolver_adapter`).
     At B-4 the live merges are deleted and the function returns `_shadow_out["disc"]`.
-- **B-4** — **flip**: the resolver output becomes the committed disc; the
-  per-source `_merge_into_disc` calls are removed (lookups keep running for their
-  side-effects + proposals). De-risked by B-3. **GATE CLEARED 2026-06-23:** both B-1
-  divergences are resolved (dup-track reproduce-today; invalid-ISRC uniform-drop via
-  `sanitize_base` — see §11.6), so the flip no longer changes behaviour on an
-  undecided axis. The remaining flip work is mechanical: in `_run_metadata_lookups`,
-  delete the per-source merges, ungate the shadow build, and return
-  `disc_from_resolution(resolve(_collect_metadata_proposals(...)), sanitize_base(baseline))`
-  as the committed disc (the shadow seam IS this; `_shadow_out` becomes the live path).
-  `create_image` does not call `_run_metadata_lookups`, so it is unaffected (its only
-  field merge is the proven-neutral AcoustID corroborate + the menu, which is B-5).
-  The ranking change (baseline low) stays separate as B-6 — it is the only
-  *intentional* trust reordering and gets its own characterization diff.
+- **B-4** — **flip — LANDED 2026-06-23.** `_run_metadata_lookups` now returns the
+  resolver's committed disc (`disc_from_resolution(resolve(_collect_metadata_proposals(
+  ...)), sanitize_base(baseline))`), unconditionally and in production. The resolve
+  build is wrapped in `try/except` → fallback to the legacy fold (C2 cannot fire on
+  the live domain, but metadata is best-effort and must never abort a rip).
+  **The per-source merge chain is RETAINED, not deleted** (deferred to a post-soak
+  follow-up), demoted to three roles: it feeds the mid-pipeline lookups their search
+  context (Discogs album-match, the stage-7 seed — these *consume* merged state, so
+  the merges cannot simply vanish), it is the never-fail fallback, and its output
+  `merged` is the live equivalence **oracle**. The B-4 gate was the two B-1
+  divergences (dup-track reproduce-today; invalid-ISRC uniform-drop via
+  `sanitize_base` — §11.6); both resolved, so the flip changes no behaviour on an
+  undecided axis (full suite byte-neutral). `create_image` does not call
+  `_run_metadata_lookups`, so it is unaffected (its only field merge is the
+  proven-neutral AcoustID corroborate + the menu, which is B-5).
+  - **Anti-tautology (advisor 2026-06-23):** after the flip the returned disc *is*
+    the resolver output, so `test_shadow_equivalence` was repointed to assert
+    `returned == _shadow_out["merged"]` (resolver vs the retained legacy fold) — a
+    real check, not resolver-vs-itself. When the merges are eventually deleted, this
+    test retires and the golden `test_parallel_pre_menu` / B0
+    `test_merge_characterization` (which pins `_merge_into_disc` directly) carry the
+    guard — a conscious step, not silent erosion.
+  - The ranking change (baseline low) stays separate as B-6 — it is the only
+    *intentional* trust reordering and gets its own characterization diff.
 - **B-5** — convert the interactive menu-apply paths (`menu_state.py:672–726`,
   Update vs Overwrite-All → MANUAL-trust proposals) and `_clear_disc`.
 - **B-6** — tune the ranking to the corrected order (baseline low). The single
