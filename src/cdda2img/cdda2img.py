@@ -2324,7 +2324,8 @@ def _rip_with_fallback(
             ui.set_status(
                 update.status,
                 update.fraction,
-                detail=f"({update.elapsed_frames}/{update.total_frames})",
+                detail=update.note
+                or f"({update.elapsed_frames}/{update.total_frames})",
             )
 
     progress_cb = _cb if ui is not None else None
@@ -2547,7 +2548,8 @@ def rip_image(  # noqa: C901
                     ui.set_status(
                         update.status,
                         update.fraction,
-                        detail=f"({update.elapsed_frames}/{update.total_frames})",
+                        detail=update.note
+                        or f"({update.elapsed_frames}/{update.total_frames})",
                     )
 
             paranoia_cb = _paranoia_cb if ui is not None else None

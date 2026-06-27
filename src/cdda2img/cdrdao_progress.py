@@ -38,6 +38,7 @@ class ProgressUpdate:
     n_tracks: int
     elapsed_frames: int
     total_frames: int
+    note: str = ""  # transient activity detail (e.g. cd-paranoia recovery on a stall)
 
     @property
     def fraction(self) -> float:

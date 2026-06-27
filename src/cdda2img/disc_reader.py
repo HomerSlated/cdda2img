@@ -3,8 +3,9 @@ disc_reader.py — CD-DA ripping via cd-paranoia subprocess.
 
 Public interface:
     RipInfo(disc, track_lsns, disc_last_lsn)
-    rip_disc(device, output_pcm, *, paranoia="overlap", read_offset, read_speed) -> RipInfo
-    rip_single_track(device, track_num, output_pcm, *, paranoia, read_offset, read_speed, progress_cb) -> int
+    rip_disc(device, output_pcm, *, paranoia, read_offset, read_speed, max_retries, never_skip, progress_cb) -> RipInfo
+    rip_single_track(device, track_num, output_pcm, *, paranoia, read_offset, read_speed, max_retries, never_skip, progress_cb) -> int
+    rip_sector_range(device, track_num, start_frame, end_frame, output_pcm, *, paranoia, read_offset, read_speed, max_retries, never_skip) -> int
     query_disc(device) -> (disc_first, disc_last, [(num, first_lsn, length), ...])
 """
 
@@ -39,14 +40,39 @@ _PARANOIA_FLAGS: dict[str, list[str]] = {
 # Example: "  1.    24337 [05:24.37]        0 [00:00.00]    no   no  2"
 _TRACK_RE = re.compile(r"^\s+(\d+)\.\s+(\d+)\s+\[[\d:.]+\]\s+(\d+)")
 
-# TUI progress on the fallback path is derived from the growing output WAV's
-# size, not cd-paranoia's stderr meter (which redraws one line with '\r' and
-# reports non-monotonic sectors during paranoia re-reads — unparseable
-# line-by-line). File size is monotonic, format-agnostic, version-proof; it
-# requires only that cd-paranoia stream the WAV, which it does.
-_WAV_HEADER_BYTES = 44
-_CD_FRAME_BYTES = 2352  # one CD frame = 588 stereo s16 sample pairs
-_PARANOIA_POLL_S = 0.3
+# TUI progress on the fallback path is driven by cd-paranoia's machine-readable
+# callback stream, enabled with -e ("callscript"). Each callback event prints one
+# line to stderr (unbuffered in C — no flush lag):
+#     "##: <fn> [<name>] @ <wordpos>"
+# We follow the WROTE frontier (fn == _CB_WROTE): the committed-output sector,
+# emitted once per verified sector, so the bar advances per-sector (smooth) yet
+# stays honest — during a paranoia stall no WROTE fires and the bar holds, while
+# read/verify/readerr lines keep arriving so the stall is visible as activity.
+# <wordpos> is an absolute position in 16-bit words; LSN = wordpos // CD_FRAMEWORDS
+# (cd-paranoia.c computes the same `sector = inpos / CD_FRAMEWORDS`).
+# This supersedes output-file-size polling, which was coarse: cd-paranoia buffers
+# output in 32 KiB (~14-sector) chunks (buffering_write OUTBUFSZ), so on a slow
+# read the file size — and thus the bar — stair-stepped.
+_CD_FRAMEWORDS = 1176  # 16-bit words per CD frame (2352 bytes / 2)
+_CD_FRAME_BYTES = _CD_FRAMEWORDS * 2  # 2352 bytes per CD frame (raw s16le)
+_CB_WROTE = 14  # paranoia_cb_mode_t: a verified sector was committed to output
+_CALLSCRIPT_RE = re.compile(r"^##:\s*(-?\d+)\s+\[[^\]]*\]\s+@\s+(-?\d+)")
+
+# paranoia_cb_mode_t codes worth surfacing as a live recovery note when the WROTE
+# frontier stalls. ONLY correction/trouble events — plain read (0) / verify (1) are
+# normal flow and stay silent, so a clean track shows a smooth bar with no chatter
+# while a stalled track streams what cd-paranoia is fighting. (callback_strings order
+# in cd-paranoia.c.)
+_CB_RECOVERY_NOTES: dict[int, str] = {
+    2: "repairing edge jitter",
+    3: "repairing jitter",
+    4: "scratch",
+    6: "skipped (unreadable)",
+    10: "repairing dropped samples",
+    11: "repairing duplicated samples",
+    12: "read error",
+    13: "drive cache error",
+}
 
 # ---------------------------------------------------------------------------
 # Public types
@@ -133,6 +159,21 @@ def _build_rbi_disc(disc_first: int, tracks: list[tuple[int, int, int]]) -> RBID
 # ---------------------------------------------------------------------------
 
 
+def _retry_flags(max_retries: int | None, never_skip: bool) -> list[str]:
+    """cd-paranoia ``-z`` (per-block retry budget = attempts per frame).
+
+    cd-paranoia takes ``-z`` as an *optional-argument* flag: bare ``-z`` =
+    never-skip (unlimited retries — cd-paranoia never abandons a sector), and the
+    attached form ``-zN`` = N retries before giving up (default 20). *never_skip*
+    takes precedence over *max_retries*; both unset ⇒ no flag ⇒ the default.
+    """
+    if never_skip:
+        return ["-z"]
+    if max_retries is not None:
+        return [f"-z{max_retries}"]
+    return []
+
+
 def rip_disc(
     device: str,
     output_pcm: Path,
@@ -140,6 +181,8 @@ def rip_disc(
     paranoia: str = "overlap",
     read_offset: int = 0,
     read_speed: int | None = None,
+    max_retries: int | None = None,
+    never_skip: bool = False,
     progress_cb: Callable[[ProgressUpdate], None] | None = None,
 ) -> RipInfo:
     """Rip all audio from *device* to *output_pcm* (raw s16le PCM).
@@ -159,10 +202,16 @@ def rip_disc(
     they only run when the primary cdrdao rip already failed, so the disc is
     suspect and accuracy outranks speed.
 
-    *progress_cb*, when given, receives a :class:`ProgressUpdate` derived from the
-    growing output-file size (see :func:`_run_paranoia_with_progress`) — used to
-    drive the TUI progress bar on the fallback path. When None, cd-paranoia's
-    output passes through to the terminal directly (unchanged behaviour).
+    *max_retries* / *never_skip* control cd-paranoia's per-block retry budget via
+    ``-z`` (see :func:`_retry_flags`): the number of attempts per frame before it
+    gives up on a sector. None / False leaves the default (20). *never_skip* forces
+    unlimited retries (cd-paranoia never abandons a sector) — use with care, it can
+    hang forever on a physically unreadable sector.
+
+    *progress_cb*, when given, receives a :class:`ProgressUpdate` parsed from
+    cd-paranoia's -e callback stream (see :func:`_run_paranoia_with_progress`) —
+    used to drive the TUI progress bar on the fallback path. When None,
+    cd-paranoia's output passes through to the terminal directly (unchanged).
 
     Returns a RipInfo with the skeleton RBIDisc and raw TOC data for CDDB lookup.
     """
@@ -180,6 +229,7 @@ def rip_disc(
     mode_flags = _PARANOIA_FLAGS.get(paranoia, _PARANOIA_FLAGS["overlap"])
     offset_flags = ["-O", str(read_offset)] if read_offset != 0 else []
     speed_flags = ["-S", str(read_speed)] if read_speed is not None else []
+    retry_flags = _retry_flags(max_retries, never_skip)
     wav_path = output_pcm.with_suffix(".paranoia.wav")
     cmd = [
         "cd-paranoia",
@@ -188,6 +238,7 @@ def rip_disc(
         *mode_flags,
         *offset_flags,
         *speed_flags,
+        *retry_flags,
         "--",
         "1-",
         str(wav_path),
@@ -222,6 +273,8 @@ def rip_single_track(
     paranoia: str = "full",
     read_offset: int = 0,
     read_speed: int | None = None,
+    max_retries: int | None = None,
+    never_skip: bool = False,
     progress_cb: Callable[[ProgressUpdate], None] | None = None,
 ) -> int:
     """Rip one track by track number to raw s16le PCM. Returns sector count.
@@ -234,6 +287,10 @@ def rip_single_track(
     *read_speed*, when given, forces the drive read speed via ``-S`` (1 = 1x);
     None leaves it at the drive default. The AR-failure retry passes ``1`` — the
     track already failed verification, so a slow, careful re-read is warranted.
+
+    *max_retries* / *never_skip* set cd-paranoia's per-block retry budget via
+    ``-z`` (see :func:`_retry_flags`) — the attempts per frame before a sector is
+    abandoned. The AR-failure retry is the natural place to spend a larger budget.
     """
     from cdda2img.container import wav_to_raw_pcm
 
@@ -247,6 +304,7 @@ def rip_single_track(
     mode_flags = _PARANOIA_FLAGS.get(paranoia, _PARANOIA_FLAGS["overlap"])
     offset_flags = ["-O", str(read_offset)] if read_offset != 0 else []
     speed_flags = ["-S", str(read_speed)] if read_speed is not None else []
+    retry_flags = _retry_flags(max_retries, never_skip)
     wav_path = output_pcm.with_suffix(".paranoia.wav")
     cmd = [
         "cd-paranoia",
@@ -255,6 +313,7 @@ def rip_single_track(
         *mode_flags,
         *offset_flags,
         *speed_flags,
+        *retry_flags,
         "--",
         str(track_num),
         str(wav_path),
@@ -276,6 +335,73 @@ def rip_single_track(
     return track_length
 
 
+def rip_sector_range(
+    device: str,
+    track_num: int,
+    start_frame: int,
+    end_frame: int,
+    output_pcm: Path,
+    *,
+    paranoia: str = "full",
+    read_offset: int = 0,
+    read_speed: int | None = None,
+    max_retries: int | None = None,
+    never_skip: bool = False,
+) -> int:
+    """Re-rip an exact frame range *within* one track to raw s16le PCM.
+
+    *start_frame* / *end_frame* are sector (frame) offsets relative to the start
+    of track *track_num*. The span is given to cd-paranoia as
+    ``N:[.start]-N:[.end]``: the ``[.k]`` form is a raw sector offset into the
+    track (75 sectors/s — see the cd-paranoia(1) SPAN ARGUMENT grammar). This
+    recovers only the damaged frames of a track that failed AccurateRip instead of
+    re-ripping the whole track (the AccurateRip frame-450 partial-verify and the
+    cd-paranoia callback's READERR positions can pinpoint the bad region).
+
+    cd-paranoia's bracket end-bound inclusivity is its own (the produced length may
+    be ``end - start`` or ``end - start + 1`` frames), so this returns the **actual**
+    frame count produced from the output PCM size rather than the requested width —
+    the caller splices by what was delivered, not by an assumed bound.
+    """
+    from cdda2img.container import wav_to_raw_pcm
+
+    if not 0 <= start_frame < end_frame:
+        msg = f"invalid frame range [{start_frame}, {end_frame}) for track {track_num}"
+        raise ValueError(msg)
+
+    mode_flags = _PARANOIA_FLAGS.get(paranoia, _PARANOIA_FLAGS["overlap"])
+    offset_flags = ["-O", str(read_offset)] if read_offset != 0 else []
+    speed_flags = ["-S", str(read_speed)] if read_speed is not None else []
+    retry_flags = _retry_flags(max_retries, never_skip)
+    span = f"{track_num}:[.{start_frame}]-{track_num}:[.{end_frame}]"
+    wav_path = output_pcm.with_suffix(".paranoia.wav")
+    cmd = [
+        "cd-paranoia",
+        "-d",
+        device,
+        *mode_flags,
+        *offset_flags,
+        *speed_flags,
+        *retry_flags,
+        "--",
+        span,
+        str(wav_path),
+    ]  # LINT-012
+    try:
+        returncode = subprocess.run(cmd).returncode  # noqa: S603  # LINT-012
+        if returncode != 0:
+            msg = (
+                f"cd-paranoia exited with code {returncode} ripping "
+                f"track {track_num} frames [{start_frame}, {end_frame})"
+            )
+            raise RuntimeError(msg)
+        wav_to_raw_pcm(wav_path, output_pcm)
+    finally:
+        wav_path.unlink(missing_ok=True)
+
+    return output_pcm.stat().st_size // _CD_FRAME_BYTES
+
+
 def _sector_to_track(tracks: list[tuple[int, int, int]], sector: int) -> int:
     """Map an absolute LSN to its 1-based track number (clamped to the disc).
 
@@ -290,6 +416,17 @@ def _sector_to_track(tracks: list[tuple[int, int, int]], sector: int) -> int:
     return track
 
 
+def _stall_note(fn: int, abs_sector: int) -> str:
+    """A live recovery-status string for a non-WROTE callback, or "" to stay silent.
+
+    Maps only the correction/trouble events (:data:`_CB_RECOVERY_NOTES`) to a note —
+    so the status line narrates what cd-paranoia is fighting *while the bar holds on a
+    stall*, without any chatter on a clean read.
+    """
+    label = _CB_RECOVERY_NOTES.get(fn)
+    return f"{label} @ sector {abs_sector}" if label else ""
+
+
 def _run_paranoia_with_progress(
     cmd: list[str],
     wav_path: Path,
@@ -298,19 +435,25 @@ def _run_paranoia_with_progress(
     disc_first: int,
     progress_cb: Callable[[ProgressUpdate], None],
 ) -> int:
-    """Run cd-paranoia, emitting ProgressUpdate from the growing output-file size.
+    """Run cd-paranoia with -e, emitting ProgressUpdate from its callback stream.
 
-    Polls ``wav_path``'s size every _PARANOIA_POLL_S seconds and converts
-    bytes → sectors → ProgressUpdate, rather than parsing cd-paranoia's stderr
-    meter. stdout/stderr are discarded: the meter is unparseable, and an
-    undrained PIPE would deadlock the child once its buffer fills. Returns the
-    process exit code.
+    Injects -e ("callscript") so cd-paranoia streams a machine-readable callback
+    line per event to stderr; we follow the WROTE frontier (committed-output
+    sector) for smooth, honest per-sector progress (see the module-level note on
+    _CALLSCRIPT_RE). Correction/trouble events while the frontier is stalled are
+    surfaced as a transient ``note`` (see :func:`_stall_note`) so a held bar reads
+    as active recovery, not a hang; the bar position itself never moves on them.
+    stdout is discarded; the audio still streams to *wav_path* (the file argument),
+    unaffected by -e. stderr is drained line-by-line so the PIPE never fills.
+    *wav_path* is unused now but kept for call-site symmetry. Returns the exit code.
     """
     from cdda2img.cdrdao_progress import ProgressUpdate
 
     n_tracks = len(tracks)
+    elapsed = 0
+    last_note = ""
 
-    def emit(sectors_done: int) -> None:
+    def emit(sectors_done: int, note: str = "") -> None:
         sectors_done = max(0, min(sectors_done, total_sectors))
         progress_cb(
             ProgressUpdate(
@@ -318,24 +461,36 @@ def _run_paranoia_with_progress(
                 n_tracks=n_tracks,
                 elapsed_frames=sectors_done,
                 total_frames=total_sectors,
+                note=note,
             )
         )
 
     proc = subprocess.Popen(  # noqa: S603  # LINT-012
-        cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+        [cmd[0], "-e", *cmd[1:]],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        text=True,
     )
-    while True:
-        try:
-            proc.wait(timeout=_PARANOIA_POLL_S)
-        except subprocess.TimeoutExpired:
-            try:
-                size = wav_path.stat().st_size
-            except OSError:
+    stream = proc.stderr
+    if stream is not None:
+        for line in stream:
+            m = _CALLSCRIPT_RE.match(line)
+            if m is None:
                 continue
-            emit((size - _WAV_HEADER_BYTES) // _CD_FRAME_BYTES)
-        else:
-            break
+            fn = int(m.group(1))
+            abs_sector = int(m.group(2)) // _CD_FRAMEWORDS
+            if fn == _CB_WROTE:
+                if abs_sector - disc_first > elapsed:
+                    elapsed = abs_sector - disc_first
+                    last_note = ""  # progress resumed — clear the recovery message
+                    emit(elapsed)
+            else:
+                note = _stall_note(fn, abs_sector)
+                if note and note != last_note:
+                    last_note = note
+                    emit(elapsed, note)  # bar holds; only the status note changes
 
-    if proc.returncode == 0:
+    rc = proc.wait()
+    if rc == 0:
         emit(total_sectors)  # close the bar at 100%
-    return proc.returncode
+    return rc
