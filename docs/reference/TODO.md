@@ -2,6 +2,35 @@
 
 ## Open
 
+### MCN-gate over-rejection — demote MCN below the MB disc-ID + fuzzy match (2026-06-26) — DECIDED, DEFERRED
+
+Live bug found on the Tracy Chapman s/t rip: an **exact** MB disc-ID match
+(`MhxKMfBAtiU9Pxu7rIJ.m36G_NY-`, 7 releases) was discarded — PROV showed
+`mb_rejected_inconsistent=7`, `lookup_status_mb=empty` — so CDDB's flat
+"Artist - Title" titles won by default. Root cause: `mb_lookup._is_consistent`
+(the Unit-G gate, `mb_lookup.py:~1069`) vetoes any candidate whose barcode fails
+`barcode.mcn_matches(disc.catalog, meta.catalog)`. The on-disc Q-channel MCN was
+`7559607740206` — the publisher built it from the human-readable catalogue number
+`7559-60774-2` plus an arbitrary `06` suffix; it is unreferenced on MB and Discogs
+(both store the printed UPC `075596077422`). So the MCN is worthless as a hard
+identity key, yet it was allowed to veto a far stronger identifier (the disc-ID).
+
+**Decided fix (two parts):**
+1. **Demote MCN below the MB disc-ID** — an on-disc MCN must never veto a disc-ID
+   (TOC) match. Add `check_mcn: bool = True` to `_is_consistent`; the disc-ID filter
+   at `prepopulate_from_mb` (~line 1393) calls `check_mcn=False`. The R4 ISRC-tally
+   path (`_prepop_zero_match`, ~1170) keeps `check_mcn=True` (no disc-ID there). The
+   per-track ISRC veto stays unchanged in both paths. MCN remains a positive ranking
+   signal (`_disambiguate_by_mcn`, the `_select_release_lexicographic` `mcn` rung).
+2. **Make `mcn_matches` fuzzy** — drop the `normalize_barcode` dependence (proven
+   unreliable). Strip to digits, compute the longest common contiguous digit run,
+   match if ≥ 8 (user's "8 of 13"); bump `_MIN_MCN_SUBSTRING_DIGITS` 7→8. Use
+   `difflib.SequenceMatcher(autojunk=False).find_longest_match`.
+
+Verify: re-run the lookup for disc-ID `MhxKMfBAtiU9Pxu7rIJ.m36G_NY-` — it should
+keep the 7 releases and pick an XE pressing via the §10.3 `preferred_country` rung.
+Full decision + line numbers in the `project_mcn_gate_fix_decision` memory.
+
 ### Structural — consolidate recurring RBIDisc / MBID defect classes (2026-06-17) — FOR DISCUSSION
 
 Two defect *classes* have each been fixed at multiple independent call sites across
@@ -52,18 +81,38 @@ test" choice — **resolved in favour of the chokepoint (B1, above)**.
 Sources: bug-hunter `private/bugs/2026-06-15_163056_metadata-pipeline.md`,
 optimiser `private/optimiser/2026-06-15_metadata-consensus.md`.
 BUG-1..7, OPT-1/2/3 and the superseded P3 are complete — archived in the DONE
-log below. OPT-4 is the only live item from this audit.
+log below.
 
-- [ ] **OPT-4** · **Per-field trust score model** — The current fill-blank / first-writer-wins
-      model lets a wrong-but-non-blank CD-Text or CDDB value permanently block a stronger MB
-      value; the only escape is the interactive menu's "Overwrite All". The recommended fix is an
-      explicit `(field, value, trust)` proposal model: each source proposes a trust level per
-      field, the highest-trust proposal wins, and near-ties surface as alternatives in the menu.
-      Extend the existing `match_distance` / `build_match_distance` scaffold rather than adding a
-      new framework. This is a substantial rework; design before implementing.
-      **Design proposal drafted 2026-06-17: `docs/reference/trust_model_design.md`** —
-      unifies OPT-4 with the Structural C1/C2 item below (collect→resolve, per-(source,field)
-      trust). Awaiting a scope decision (§5) before any code.
+- [~] **OPT-4** · **Per-field trust score model** — The collect→resolve resolver this item
+      called for was **built and shipped as B-1…B-6** (`resolver_adapter.py`; the resolver is
+      the sole Layer-2 committer in `_run_metadata_lookups` since B-4; Discogs>MB catalogue
+      inversion in B-6). The original fill-blank / first-writer-wins defect is closed for the
+      rip/import path. **Design + build log:** `docs/reference/trust_model_design.md` §11.
+      What remains are the post-B-6 follow-ups below (no longer "awaiting a scope decision").
+
+#### Trust-model (B4) — outstanding follow-ups (post B-6, 2026-06-27)
+
+- [ ] **B-7** · **Menu alternatives UI** — the confirmed destination for the whole design.
+      Surface `Resolution.alternatives` (cross-source losers) in the interactive metadata
+      menu so the user can pick a runner-up per field; feed the structured `Resolution` into
+      `build_match_distance` to **replace the current PROV string-sniffing**. The §3.1
+      seed/merge decouple falls out for free. Also in scope (deferred from B-5): per-field /
+      per-track direct edits, `_clear_disc`, and revert modelled as `MANUAL` proposals once
+      the accumulator is carried into the menu (a persistent menu accumulator — none today;
+      B-5 re-resolves `ctl.disc` on each apply). trust_model_design.md §11.4 (B-7), §9.
+- [ ] **B-7 prerequisite — §11.5 traceability** · expose per-field decision provenance the
+      resolver already retains internally: `Resolution.contenders[key] -> tuple[FieldProposal, …]`
+      (full contender set, trust-desc) and `Resolution.skipped[key] -> reason` (empty value /
+      "Unknown Artist" sentinel / invalid-ISRC drop) so a *silently dropped correct value*
+      becomes visible. Answers the user requirement "if both B5 choices are wrong, which item
+      in the scoring caused it?" trust_model_design.md §11.5.
+- [ ] **B-4 post-soak cleanup** · delete the **retained** legacy per-source merge chain
+      (`_merge_into_disc` fold), now demoted to three roles: mid-pipeline search context
+      (Discogs album-match + stage-7 seed), the never-fail fallback, and the live equivalence
+      **oracle** for `test_shadow_equivalence`. When deleted: that test retires and the golden
+      `test_parallel_pre_menu` / B0 `test_merge_characterization` carry the guard (a conscious
+      step, not silent erosion). Requires first decoupling the two consumers that read merged
+      state mid-pipeline. trust_model_design.md §11.4 (B-4 notes).
 
 ---
 
