@@ -14,6 +14,7 @@ from __future__ import annotations
 import logging
 import re
 import subprocess
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, NamedTuple
 
@@ -73,6 +74,12 @@ _CB_RECOVERY_NOTES: dict[int, str] = {
     12: "read error",
     13: "drive cache error",
 }
+# A recovery note is STICKY: once a trouble event sets it, it persists through the
+# WROTE bursts that commit the recovered data, reverting to the plain frame count only
+# after this many consecutive clean sectors. Without this, the note is cleared by the
+# very next WROTE and flickers invisibly against the count (WROTE events outnumber
+# trouble events ~4:1 even on a heavily-jittery track). 75 sectors ≈ 1 s at 1x.
+_NOTE_CLEAR_RUN = 75
 
 # ---------------------------------------------------------------------------
 # Public types
@@ -427,6 +434,43 @@ def _stall_note(fn: int, abs_sector: int) -> str:
     return f"{label} @ sector {abs_sector}" if label else ""
 
 
+@dataclass
+class _ParanoiaProgress:
+    """Folds the cd-paranoia ``-e`` callback stream into bar position + sticky note.
+
+    ``feed(fn, abs_sector)`` updates state for one callback event and returns True
+    when the display should be re-emitted. The WROTE frontier (``elapsed``) is
+    monotonic; the recovery ``note`` is sticky — a trouble event sets it, and it
+    rides through the following WROTE bursts, clearing only after
+    :data:`_NOTE_CLEAR_RUN` consecutive clean sectors (see the module note).
+    """
+
+    disc_first: int
+    elapsed: int = 0
+    note: str = ""
+    clean_run: int = 0
+
+    def feed(self, fn: int, abs_sector: int) -> bool:
+        if fn == _CB_WROTE:
+            advanced = abs_sector - self.disc_first > self.elapsed
+            cleared = False
+            if self.note:
+                self.clean_run += 1
+                if self.clean_run >= _NOTE_CLEAR_RUN:  # past the trouble — revert
+                    self.note = ""
+                    cleared = True
+            if advanced:
+                self.elapsed = abs_sector - self.disc_first
+            return advanced or cleared
+        trouble = _stall_note(fn, abs_sector)
+        if trouble:
+            self.clean_run = 0  # still in trouble — reset the clean streak
+            if trouble != self.note:
+                self.note = trouble
+                return True
+        return False
+
+
 def _run_paranoia_with_progress(
     cmd: list[str],
     wav_path: Path,
@@ -440,18 +484,19 @@ def _run_paranoia_with_progress(
     Injects -e ("callscript") so cd-paranoia streams a machine-readable callback
     line per event to stderr; we follow the WROTE frontier (committed-output
     sector) for smooth, honest per-sector progress (see the module-level note on
-    _CALLSCRIPT_RE). Correction/trouble events while the frontier is stalled are
-    surfaced as a transient ``note`` (see :func:`_stall_note`) so a held bar reads
-    as active recovery, not a hang; the bar position itself never moves on them.
-    stdout is discarded; the audio still streams to *wav_path* (the file argument),
-    unaffected by -e. stderr is drained line-by-line so the PIPE never fills.
-    *wav_path* is unused now but kept for call-site symmetry. Returns the exit code.
+    _CALLSCRIPT_RE). Correction/trouble events set a **sticky** recovery ``note``
+    (see :func:`_stall_note` / :data:`_NOTE_CLEAR_RUN`) that rides through the
+    following WROTE bursts and reverts to the plain frame count only after a
+    sustained clean run — so a recovering track shows persistent "repairing …"
+    text instead of a note that flickers invisibly against the count. The bar
+    position never moves on a trouble event. stdout is discarded; the audio still
+    streams to *wav_path* (the file argument), unaffected by -e. stderr is drained
+    line-by-line so the PIPE never fills. *wav_path* is unused now but kept for
+    call-site symmetry. Returns the exit code.
     """
     from cdda2img.cdrdao_progress import ProgressUpdate
 
     n_tracks = len(tracks)
-    elapsed = 0
-    last_note = ""
 
     def emit(sectors_done: int, note: str = "") -> None:
         sectors_done = max(0, min(sectors_done, total_sectors))
@@ -465,6 +510,7 @@ def _run_paranoia_with_progress(
             )
         )
 
+    state = _ParanoiaProgress(disc_first)
     proc = subprocess.Popen(  # noqa: S603  # LINT-012
         [cmd[0], "-e", *cmd[1:]],
         stdout=subprocess.DEVNULL,
@@ -477,18 +523,8 @@ def _run_paranoia_with_progress(
             m = _CALLSCRIPT_RE.match(line)
             if m is None:
                 continue
-            fn = int(m.group(1))
-            abs_sector = int(m.group(2)) // _CD_FRAMEWORDS
-            if fn == _CB_WROTE:
-                if abs_sector - disc_first > elapsed:
-                    elapsed = abs_sector - disc_first
-                    last_note = ""  # progress resumed — clear the recovery message
-                    emit(elapsed)
-            else:
-                note = _stall_note(fn, abs_sector)
-                if note and note != last_note:
-                    last_note = note
-                    emit(elapsed, note)  # bar holds; only the status note changes
+            if state.feed(int(m.group(1)), int(m.group(2)) // _CD_FRAMEWORDS):
+                emit(state.elapsed, state.note)
 
     rc = proc.wait()
     if rc == 0:

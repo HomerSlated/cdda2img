@@ -182,7 +182,7 @@ def test_progress_surfaces_recovery_notes_without_moving_bar(
         "##: 3 [correction] @ 117600\n",  # FIXUP_ATOM — different note, bar holds
         "##: 12 [transport error] @ 117600\n",  # READERR again — note changes back
         "##: 0 [read] @ 117600\n",  # read — silent, no emit
-        "##: 14 [wrote] @ 235200\n",  # sector 200 — progress resumes, note cleared
+        "##: 14 [wrote] @ 235200\n",  # sector 200 — bar advances, note STICKS
     ]
     _FakePopen.rc = 0
     monkeypatch.setattr(dr.subprocess, "Popen", _FakePopen)
@@ -201,6 +201,38 @@ def test_progress_surfaces_recovery_notes_without_moving_bar(
         (1, "read error @ sector 100"),  # bar holds at 1, note set
         (1, "repairing jitter @ sector 100"),  # bar holds, note changes
         (1, "read error @ sector 100"),  # bar holds, note changes back
-        (200, ""),  # WROTE resumes, note cleared
+        (
+            200,
+            "read error @ sector 100",
+        ),  # bar advances; note STICKY (1 < _NOTE_CLEAR_RUN)
+        (1000, ""),  # 100% close
+    ]
+
+
+def test_recovery_note_clears_after_sustained_clean_run(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(dr, "_NOTE_CLEAR_RUN", 2)  # clear after 2 clean sectors
+    _FakePopen.lines = [
+        "##: 3 [correction] @ 117600\n",  # note set @ sector 100, bar at 0
+        "##: 14 [wrote] @ 1176\n",  # sector 1 — clean_run 1 (<2), note rides
+        "##: 14 [wrote] @ 2352\n",  # sector 2 — clean_run 2 (>=2), note clears
+    ]
+    _FakePopen.rc = 0
+    monkeypatch.setattr(dr.subprocess, "Popen", _FakePopen)
+
+    from cdda2img.cdrdao_progress import ProgressUpdate
+
+    seen: list[ProgressUpdate] = []
+    wav = tmp_path / "x.wav"
+    cmd = ["cd-paranoia", "-d", "/dev/sr0", "--", "1-", str(wav)]
+    rc = dr._run_paranoia_with_progress(cmd, wav, 1000, [(1, 0, 1000)], 0, seen.append)
+
+    assert rc == 0
+    pairs = [(u.elapsed_frames, u.note) for u in seen]
+    assert pairs == [
+        (0, "repairing jitter @ sector 100"),  # trouble sets the note
+        (1, "repairing jitter @ sector 100"),  # 1 clean sector — note rides along
+        (2, ""),  # 2nd clean sector hits the threshold — note clears
         (1000, ""),  # 100% close
     ]
