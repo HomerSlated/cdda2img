@@ -2,7 +2,7 @@
 
 ## Open
 
-### MCN-gate over-rejection — demote MCN below the MB disc-ID + fuzzy match (2026-06-26) — DECIDED, DEFERRED
+### MCN-gate over-rejection — separate MCN from barcode + drop the MCN veto (2026-06-27) — DECIDED DIRECTION, DEFERRED
 
 Live bug found on the Tracy Chapman s/t rip: an **exact** MB disc-ID match
 (`MhxKMfBAtiU9Pxu7rIJ.m36G_NY-`, 7 releases) was discarded — PROV showed
@@ -12,24 +12,24 @@ Live bug found on the Tracy Chapman s/t rip: an **exact** MB disc-ID match
 `barcode.mcn_matches(disc.catalog, meta.catalog)`. The on-disc Q-channel MCN was
 `7559607740206` — the publisher built it from the human-readable catalogue number
 `7559-60774-2` plus an arbitrary `06` suffix; it is unreferenced on MB and Discogs
-(both store the printed UPC `075596077422`). So the MCN is worthless as a hard
-identity key, yet it was allowed to veto a far stronger identifier (the disc-ID).
+(both store the printed UPC `075596077422`).
 
-**Decided fix (two parts):**
-1. **Demote MCN below the MB disc-ID** — an on-disc MCN must never veto a disc-ID
-   (TOC) match. Add `check_mcn: bool = True` to `_is_consistent`; the disc-ID filter
-   at `prepopulate_from_mb` (~line 1393) calls `check_mcn=False`. The R4 ISRC-tally
-   path (`_prepop_zero_match`, ~1170) keeps `check_mcn=True` (no disc-ID there). The
-   per-track ISRC veto stays unchanged in both paths. MCN remains a positive ranking
-   signal (`_disambiguate_by_mcn`, the `_select_release_lexicographic` `mcn` rung).
-2. **Make `mcn_matches` fuzzy** — drop the `normalize_barcode` dependence (proven
-   unreliable). Strip to digits, compute the longest common contiguous digit run,
-   match if ≥ 8 (user's "8 of 13"); bump `_MIN_MCN_SUBSTRING_DIGITS` 7→8. Use
-   `difflib.SequenceMatcher(autojunk=False).find_longest_match`.
+**Direction changed 2026-06-27 — MCN ≠ barcode.** They are different identifiers in
+different namespaces, so the earlier "demote + fuzzy-match MCN against barcodes" plan
+is **dropped** (matching two different things is unsound). New direction:
 
-Verify: re-run the lookup for disc-ID `MhxKMfBAtiU9Pxu7rIJ.m36G_NY-` — it should
-keep the 7 releases and pick an XE pressing via the §10.3 `preferred_country` rung.
-Full decision + line numbers in the `project_mcn_gate_fix_decision` memory.
+1. **Separate the fields.** `mcn` = Q-ch Mode-2 MCN, **archival PROV only**, used for
+   identification only as a desperate last resort when no barcode is available (the
+   §10.3 "barcode positively matches on-disc MCN" rung survives as a *positive*
+   last-resort signal). New `barcode` field = the UPC/EAN online services reference —
+   the real disambiguation key (with MB Disc ID + ISRCs). Requires an RBI format bump
+   (spec-before-code): `RBIDisc.barcode` distinct from the MCN (`catalog`).
+2. **Remove the Unit-G MCN veto.** An archival MCN must never veto a stronger
+   identifier (the disc-ID). The per-track ISRC veto stays.
+
+Full design + the learned-trust vision it sits inside:
+`docs/reference/identifier_trust_model.md` (Part 1); memories
+`project_mcn_gate_fix_decision` (history) and `project_learned_trust_model`.
 
 ### Structural — consolidate recurring RBIDisc / MBID defect classes (2026-06-17) — FOR DISCUSSION
 
