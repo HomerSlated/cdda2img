@@ -2575,6 +2575,7 @@ def rip_image(  # noqa: C901
                             track_tmp,
                             paranoia="full",
                             read_offset=read_offset,
+                            read_speed=1,  # AR mismatch — slow re-read for fewer errors
                             progress_cb=paranoia_cb,
                         )
                         new_pcm = track_tmp.read_bytes()
@@ -2609,6 +2610,7 @@ def rip_image(  # noqa: C901
                     temp.pcm_file,
                     paranoia="full",
                     read_offset=read_offset,
+                    read_speed=1,  # AR recovery re-rip — slow, careful read
                     progress_cb=paranoia_cb,
                 )
                 final_track_lsns = paranoia_info.track_lsns

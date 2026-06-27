@@ -3,8 +3,8 @@ disc_reader.py — CD-DA ripping via cd-paranoia subprocess.
 
 Public interface:
     RipInfo(disc, track_lsns, disc_last_lsn)
-    rip_disc(device, output_pcm, *, paranoia="overlap") -> RipInfo
-    rip_single_track(device, track_num, output_pcm, *, paranoia, read_offset, progress_cb) -> int
+    rip_disc(device, output_pcm, *, paranoia="overlap", read_offset, read_speed) -> RipInfo
+    rip_single_track(device, track_num, output_pcm, *, paranoia, read_offset, read_speed, progress_cb) -> int
     query_disc(device) -> (disc_first, disc_last, [(num, first_lsn, length), ...])
 """
 
@@ -139,6 +139,7 @@ def rip_disc(
     *,
     paranoia: str = "overlap",
     read_offset: int = 0,
+    read_speed: int | None = None,
     progress_cb: Callable[[ProgressUpdate], None] | None = None,
 ) -> RipInfo:
     """Rip all audio from *device* to *output_pcm* (raw s16le PCM).
@@ -150,6 +151,13 @@ def rip_disc(
 
     *read_offset* is applied via cd-paranoia's ``-O`` flag so the output PCM
     is offset-corrected at rip time (corrected audio stored directly in the RBI).
+
+    *read_speed*, when given, forces the drive read speed via ``-S`` (e.g. ``1``
+    for 1x). A slower read gives the drive's error correction more time per
+    sector, reducing uncorrectable errors on a damaged disc. None leaves the
+    drive at its default (fastest) speed. The fallback call sites pass ``1`` —
+    they only run when the primary cdrdao rip already failed, so the disc is
+    suspect and accuracy outranks speed.
 
     *progress_cb*, when given, receives a :class:`ProgressUpdate` derived from the
     growing output-file size (see :func:`_run_paranoia_with_progress`) — used to
@@ -171,6 +179,7 @@ def rip_disc(
 
     mode_flags = _PARANOIA_FLAGS.get(paranoia, _PARANOIA_FLAGS["overlap"])
     offset_flags = ["-O", str(read_offset)] if read_offset != 0 else []
+    speed_flags = ["-S", str(read_speed)] if read_speed is not None else []
     wav_path = output_pcm.with_suffix(".paranoia.wav")
     cmd = [
         "cd-paranoia",
@@ -178,6 +187,7 @@ def rip_disc(
         device,
         *mode_flags,
         *offset_flags,
+        *speed_flags,
         "--",
         "1-",
         str(wav_path),
@@ -211,6 +221,7 @@ def rip_single_track(
     *,
     paranoia: str = "full",
     read_offset: int = 0,
+    read_speed: int | None = None,
     progress_cb: Callable[[ProgressUpdate], None] | None = None,
 ) -> int:
     """Rip one track by track number to raw s16le PCM. Returns sector count.
@@ -219,6 +230,10 @@ def rip_single_track(
     matching the coordinate system of a PCM file already processed by
     ``apply_offset``. Does not call ``query_disc`` to determine overall disc
     layout — only queries enough to locate the requested track.
+
+    *read_speed*, when given, forces the drive read speed via ``-S`` (1 = 1x);
+    None leaves it at the drive default. The AR-failure retry passes ``1`` — the
+    track already failed verification, so a slow, careful re-read is warranted.
     """
     from cdda2img.container import wav_to_raw_pcm
 
@@ -231,6 +246,7 @@ def rip_single_track(
 
     mode_flags = _PARANOIA_FLAGS.get(paranoia, _PARANOIA_FLAGS["overlap"])
     offset_flags = ["-O", str(read_offset)] if read_offset != 0 else []
+    speed_flags = ["-S", str(read_speed)] if read_speed is not None else []
     wav_path = output_pcm.with_suffix(".paranoia.wav")
     cmd = [
         "cd-paranoia",
@@ -238,6 +254,7 @@ def rip_single_track(
         device,
         *mode_flags,
         *offset_flags,
+        *speed_flags,
         "--",
         str(track_num),
         str(wav_path),
