@@ -34,17 +34,27 @@ up at the cap.
 
 Output: the raw cd-paranoia output of every pass, then a summary table.
 
-There is also a --characterize mode that answers the harder question — does speed actually
-matter, or was a one-off match luck? It runs repeated, randomized, no-break trials per speed
-(re-seating held constant) and reports a success RATE per speed with a Wilson 95% CI, so a
-speed effect can be told apart from chance. Single sequential runs cannot: they confound
-speed with attempt-order, cumulative re-seating, and a sample size of one.
+Other modes (mutually exclusive):
+  --characterize  speed-vs-success-RATE: repeated, randomized, no-break trials per speed
+                  (re-seating held constant) with a Wilson 95% CI, to tell a real speed
+                  effect from chance — a single sequential run cannot, as it confounds
+                  speed with attempt-order, re-seating, and a sample size of one.
+  --retries       attempts-to-first-match at each fixed speed (how many passes does
+                  recovery take at 8X vs 32X?). Stops at the first match per speed.
+  --transitions   does a TARGET pass match after a PRIME pass (e.g. 40X->8X)? Tests whether
+                  a high-speed prime pass helps the following pass; reports target-match vs
+                  prime-match so you can see which pass is doing the work.
+
+All modes split a "miss" into rip-failure vs read-but-no-AR-match in their output.
 
 Usage:
   uv run python tools/paranoia_recovery_test.py [--device /dev/sr0] [--track 8]
       [--max-attempts 10] [--offset N]
   uv run python tools/paranoia_recovery_test.py --characterize [--repeat 15]
       [--speeds 4,8,16,24,32,40] [--seed 1]
+  uv run python tools/paranoia_recovery_test.py --retries --speeds 8,32 --repeat 10
+  uv run python tools/paranoia_recovery_test.py --transitions --pairs 40:8,40:32,40:16
+      --repeat 3
 
 CDROMRESET (passes 5-6) needs CAP_SYS_ADMIN. Build + grant the bundled helper once:
     make -C tools cdreset && doas setcap cap_sys_admin+ep tools/cdreset
@@ -511,6 +521,129 @@ def run_sequential(
     return 0 if any(r.matched for r in results) else 2
 
 
+# ── retries mode (attempts-to-match at a fixed speed) ────────────────────────
+
+
+def run_retries(
+    device: str,
+    track: int,
+    ar: ARContext,
+    speeds: list[int],
+    max_passes: int,
+    offset: int,
+    wav: Path,
+    pcm: Path,
+) -> int:
+    """At each speed, rip up to *max_passes* times, stopping at the first AR match —
+    measuring how many attempts recovery takes at that speed."""
+    summary: list[
+        tuple[int, int | None, int, int]
+    ] = []  # speed, match@, rip_fails, used
+    for speed in speeds:
+        match_at: int | None = None
+        fails = used = 0
+        for attempt in range(1, max_passes + 1):
+            used = attempt
+            print("\n" + "#" * 72)
+            print(f"# {speed}X  attempt {attempt}/{max_passes}")
+            print("#" * 72)
+            rv = rip_and_verify(device, track, speed, offset, wav, pcm, ar)
+            if rv is None:
+                fails += 1
+                print("  → rip failed")
+                continue
+            v1, v2, cv1, cv2 = rv
+            if cv1 or cv2:
+                via = "v1" if cv1 else "v2"
+                print(f"\n  → v1={v1} v2={v2}  MATCH via {via} (conf {cv1 or cv2})")
+                match_at = attempt
+                break
+            print(f"\n  → v1={v1} v2={v2}  no AR match")
+        summary.append((speed, match_at, fails, used))
+    print("\n" + "=" * 72)
+    print(f"RETRIES — attempts to first AR match per speed (track {track})")
+    print("=" * 72)
+    print(f"{'speed':>6}  {'result':<30}{'rip-fails':>10}")
+    print("-" * 72)
+    for speed, match_at, fails, used in summary:
+        result = (
+            f"matched on attempt {match_at}"
+            if match_at
+            else f"no match in {used} attempts"
+        )
+        print(f"{speed:>5}X  {result:<30}{fails:>10}")
+    print("-" * 72)
+    return 0 if any(m for _, m, _, _ in summary) else 2
+
+
+# ── transitions mode (does a target pass match after a prime pass?) ──────────
+
+
+def run_transitions(
+    device: str,
+    track: int,
+    ar: ARContext,
+    pairs: list[tuple[int, int]],
+    reps: int,
+    offset: int,
+    wav: Path,
+    pcm: Path,
+) -> int:
+    """For each (prime, target) speed pair, repeat *reps* times: rip the prime speed, then
+    the target speed, recording whether the TARGET pass matches — testing the hypothesis
+    that a high-speed prime pass helps the following pass succeed. The prime-match column
+    shows whether the prime pass was already succeeding on its own."""
+    summary: list[
+        tuple[int, int, int, int, int]
+    ] = []  # prime, target, t_match, p_match, t_fail
+    for prime, target in pairs:
+        t_match = p_match = t_fail = 0
+        for rep in range(1, reps + 1):
+            print("\n" + "#" * 72)
+            print(f"# {prime}X -> {target}X   rep {rep}/{reps}")
+            print("#" * 72)
+            print(f"  · prime pass @ {prime}X")
+            rv_p = rip_and_verify(device, track, prime, offset, wav, pcm, ar)
+            if rv_p and (rv_p[2] or rv_p[3]):
+                p_match += 1
+                print(f"    prime matched ({rv_p[0]})")
+            print(f"  · target pass @ {target}X")
+            rv_t = rip_and_verify(device, track, target, offset, wav, pcm, ar)
+            if rv_t is None:
+                t_fail += 1
+                print("    target rip failed")
+            elif rv_t[2] or rv_t[3]:
+                t_match += 1
+                print(f"    target MATCH ({rv_t[0]})")
+            else:
+                print(f"    target no match ({rv_t[0]})")
+        summary.append((prime, target, t_match, p_match, t_fail))
+    print("\n" + "=" * 72)
+    print(f"TRANSITIONS — target-pass AR match after a prime pass (track {track})")
+    print("=" * 72)
+    print(
+        f"{'pair':>12}  {'target match':>13}  {'prime match':>13}  {'tgt rip-fail':>13}"
+    )
+    print("-" * 72)
+    for prime, target, t_match, p_match, t_fail in summary:
+        print(
+            f"{f'{prime}->{target}X':>12}  {f'{t_match}/{reps}':>13}  "
+            f"{f'{p_match}/{reps}':>13}  {f'{t_fail}/{reps}':>13}"
+        )
+    print("-" * 72)
+    print("target-match-after-prime is the hypothesis; compare it against prime-match")
+    print("(the prime pass's own success rate) to see if the prime is what helps.")
+    return 0 if any(tm for _, _, tm, _, _ in summary) else 2
+
+
+def _parse_pairs(spec: str) -> list[tuple[int, int]]:
+    pairs = []
+    for tok in spec.split(","):
+        a, b = tok.split(":")
+        pairs.append((int(a), int(b)))
+    return pairs
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--device", default="/dev/sr0")
@@ -519,18 +652,37 @@ def main() -> int:
     ap.add_argument(
         "--offset", type=int, default=None, help="read offset (default: config)"
     )
-    ap.add_argument(
+    grp = ap.add_mutually_exclusive_group()
+    grp.add_argument(
         "--characterize",
         action="store_true",
         help="speed-vs-success-rate mode: repeated, randomized, no-break trials",
     )
+    grp.add_argument(
+        "--retries",
+        action="store_true",
+        help="attempts-to-first-match per fixed speed (use --speeds, default 8,32)",
+    )
+    grp.add_argument(
+        "--transitions",
+        action="store_true",
+        help="does a target pass match after a prime pass (use --pairs, default 40:8,40:32,40:16)",
+    )
     ap.add_argument(
-        "--repeat", type=int, default=10, help="trials per speed (--characterize)"
+        "--repeat",
+        type=int,
+        default=None,
+        help="trials per speed / max attempts / reps per pair (mode-dependent default)",
     )
     ap.add_argument(
         "--speeds",
         default=None,
-        help="comma-separated X speeds to test (--characterize; default: probed ladder)",
+        help="comma-separated X speeds (--characterize default: ladder; --retries default: 8,32)",
+    )
+    ap.add_argument(
+        "--pairs",
+        default="40:8,40:32,40:16",
+        help="comma-separated prime:target X pairs for --transitions",
     )
     ap.add_argument(
         "--seed",
@@ -541,7 +693,10 @@ def main() -> int:
     args = ap.parse_args()
 
     offset = resolve_offset(args.device, args.offset)
-    mode = "characterize" if args.characterize else "sequential"
+    mode = next(
+        (m for m in ("characterize", "retries", "transitions") if getattr(args, m)),
+        "sequential",
+    )
     print(f"device={args.device} track={args.track} offset={offset:+d} mode={mode}")
 
     ar = setup_ar(args.device, args.track)
@@ -563,7 +718,19 @@ def main() -> int:
                 random.seed(args.seed)
             speeds = [int(s) for s in args.speeds.split(",")] if args.speeds else ladder
             return run_characterization(
-                args.device, args.track, ar, speeds, args.repeat, offset, wav, pcm
+                args.device, args.track, ar, speeds, args.repeat or 10, offset, wav, pcm
+            )
+        if args.retries:
+            speeds = (
+                [int(s) for s in args.speeds.split(",")] if args.speeds else [8, 32]
+            )
+            return run_retries(
+                args.device, args.track, ar, speeds, args.repeat or 10, offset, wav, pcm
+            )
+        if args.transitions:
+            pairs = _parse_pairs(args.pairs)
+            return run_transitions(
+                args.device, args.track, ar, pairs, args.repeat or 3, offset, wav, pcm
             )
         return run_sequential(
             args.device, args.track, ar, ladder, args.max_attempts, offset, wav, pcm
