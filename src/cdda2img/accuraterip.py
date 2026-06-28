@@ -3,6 +3,8 @@ accuraterip.py — AccurateRip checksum computation and database verification.
 
 Public interface:
     verify_rip(pcm_path, track_lsns, disc_last_lsn, drive_offset, cddb_id) -> list[ARTrackResult]
+    fetch_ar_responses(track_lsns, disc_last_lsn, cddb_id) -> (responses, transport, b3sum)
+    match_track_pcm(raw, track, n_tracks, responses) -> (v1_hex, v2_hex, conf_v1, conf_v2)
     print_ar_report(results) -> None
     pack_arip_block(results, track_lsns, disc_last_lsn, cddb_id) -> bytes
     unpack_arip_block(data, track_count) -> RBIArip
@@ -267,6 +269,56 @@ def _parse_dbar(
     return responses
 
 
+def fetch_ar_responses(
+    track_lsns: list[int], disc_last_lsn: int, cddb_id: int
+) -> tuple[list[list[dict]], str | None, str | None]:
+    """Fetch and parse the AccurateRip dBAR once. Returns ``(responses, transport,
+    dbar_b3sum)``; *responses* is empty when the disc is not in the database. Lets a
+    caller verify many tracks (or re-verify after a re-rip) without re-fetching."""
+    import blake3 as _blake3
+
+    n = len(track_lsns)
+    id1, id2 = _ar_disc_ids(track_lsns, disc_last_lsn)
+    ar_data, transport = _fetch_ar(n, id1, id2, cddb_id)
+    dbar_b3sum = _blake3.blake3(ar_data).hexdigest() if ar_data else None
+    responses = (
+        _parse_dbar(
+            ar_data,
+            n,
+            expected_id1=int(id1, 16),
+            expected_id2=int(id2, 16),
+            expected_cddb_id=cddb_id,
+        )
+        if ar_data
+        else []
+    )
+    return responses, transport, dbar_b3sum
+
+
+def match_track_pcm(
+    raw: bytes, track: int, n_tracks: int, responses: list[list[dict]]
+) -> tuple[str, str, int | None, int | None]:
+    """Compute one track's v1/v2 AR checksums from its raw s16le PCM and match them against
+    the per-block dBAR *responses*. *raw* must already be offset-corrected (e.g. a
+    cd-paranoia ``-O`` rip) — there is no read-window shift here, unlike :func:`verify_rip`.
+    Returns ``(v1_hex, v2_hex, conf_v1, conf_v2)``; a confidence is None when no block
+    matched that variant. Interior tracks are self-contained; track 1 / the last track use
+    the same ``sum_from``/``sum_to`` boundary guards as :func:`_ar_checksums`."""
+    frames: array.array = array.array("I")
+    frames.frombytes(raw[: len(raw) - len(raw) % 4])
+    v1, v2 = _ar_checksums(frames, track, n_tracks)
+    conf_v1: int | None = None
+    conf_v2: int | None = None
+    idx = track - 1
+    for resp in responses:
+        entry = resp[idx]
+        if entry["crc"] == v1:
+            conf_v1 = entry["conf"] if conf_v1 is None else max(conf_v1, entry["conf"])
+        if entry["crc"] == v2:
+            conf_v2 = entry["conf"] if conf_v2 is None else max(conf_v2, entry["conf"])
+    return f"{v1:08x}", f"{v2:08x}", conf_v1, conf_v2
+
+
 def verify_rip(
     pcm_path: Path,
     track_lsns: list[int],
@@ -286,21 +338,8 @@ def verify_rip(
     cddb_id: 32-bit integer CDDB disc ID, used to construct the AccurateRip URL.
     """
     n = len(track_lsns)
-    ar_id1, ar_id2 = _ar_disc_ids(track_lsns, disc_last_lsn)
-    import blake3 as _blake3
-
-    ar_data, transport = _fetch_ar(n, ar_id1, ar_id2, cddb_id)
-    dbar_b3sum = _blake3.blake3(ar_data).hexdigest() if ar_data else None
-    responses = (
-        _parse_dbar(
-            ar_data,
-            n,
-            expected_id1=int(ar_id1, 16),
-            expected_id2=int(ar_id2, 16),
-            expected_cddb_id=cddb_id,
-        )
-        if ar_data
-        else []
+    responses, transport, dbar_b3sum = fetch_ar_responses(
+        track_lsns, disc_last_lsn, cddb_id
     )
 
     # Skip the checksum loop entirely when the disc is not in the database.

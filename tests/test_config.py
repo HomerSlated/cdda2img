@@ -386,6 +386,33 @@ def test_embedart_defaults_false(
     assert load_config().embedart is False
 
 
+def test_recovery_passes_defaults_to_three(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cfg = tmp_path / "cfg.toml"
+    cfg.write_text("")
+    monkeypatch.setattr("cdda2img.config.config_path", lambda: cfg)
+    assert load_config().recovery_passes == 3
+
+
+def test_recovery_passes_read_and_zero_allowed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cfg = tmp_path / "cfg.toml"
+    cfg.write_text("recovery_passes = 0\n")  # 0 disables laddered recovery
+    monkeypatch.setattr("cdda2img.config.config_path", lambda: cfg)
+    assert load_config().recovery_passes == 0
+
+
+def test_recovery_passes_out_of_range_falls_back(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cfg = tmp_path / "cfg.toml"
+    cfg.write_text("recovery_passes = 999\n")
+    monkeypatch.setattr("cdda2img.config.config_path", lambda: cfg)
+    assert load_config().recovery_passes == 3
+
+
 # ---------------------------------------------------------------------------
 # save_drive_read_offset — merge-safe partial update
 # ---------------------------------------------------------------------------

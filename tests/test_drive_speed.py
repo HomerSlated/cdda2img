@@ -159,3 +159,43 @@ def test_rip_single_track_no_restore_at_default_speed(
     restored = _stub_single_track(monkeypatch)
     dr.rip_single_track("/dev/sr0", 1, tmp_path / "o.pcm")  # read_speed=None
     assert restored == []
+
+
+# ── probe_speed_ladder ───────────────────────────────────────────────────────
+
+
+def test_probe_speed_ladder_builds_sorted_unique(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Model a drive with discrete rungs [4,8,16,24,32,40]X: each set request snaps to the
+    # nearest rung, read back via drive-info.
+    rungs_kbps = [x * 176 for x in (4, 8, 16, 24, 32, 40)]
+    holder: dict[str, int] = {}
+    restored: list[str] = []
+
+    def fake_select(dev: str, n: int) -> bool:
+        holder["n"] = n
+        return True
+
+    def fake_read(dev: str):
+        target = holder["n"] * 176
+        snapped = min(rungs_kbps, key=lambda k: abs(k - target))
+        return snapped, 40 * 176
+
+    monkeypatch.setattr(ds, "_select_speed", fake_select)
+    monkeypatch.setattr(ds, "read_drive_speed", fake_read)
+    monkeypatch.setattr(ds, "restore_drive_speed", lambda dev: restored.append(dev))
+
+    ladder = ds.probe_speed_ladder("/dev/sr0")
+    assert ladder == [4, 8, 16, 24, 32, 40]
+    assert restored == ["/dev/sr0"]  # restored to max after probing
+
+
+def test_probe_speed_ladder_skips_unsettable_candidates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(ds, "_select_speed", lambda dev, n: n in (8, 40))
+    monkeypatch.setattr(ds, "read_drive_speed", lambda dev: (40 * 176, 40 * 176))
+    monkeypatch.setattr(ds, "restore_drive_speed", lambda dev: None)
+    # only n in {8,40} set successfully; both read back 40X here → ladder = [40]
+    assert ds.probe_speed_ladder("/dev/sr0") == [40]

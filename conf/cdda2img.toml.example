@@ -102,6 +102,14 @@
 # via 'cdda2img extract --embedart'. Default: false
 # embedart = false
 
+# AccurateRip recovery effort for a rip. When cdrdao produces a track that fails
+# AccurateRip, the track is re-ripped with cd-paranoia across the drive's own speed
+# ladder (fastest to slowest), AR-verifying each attempt and stopping at the first
+# match. recovery_passes is how many full sweeps of the ladder to try per failed
+# track before giving up (total attempts = passes x ladder steps). 0 disables the
+# laddered recovery. Default: 3
+# recovery_passes = 3
+
 # Per-drive read and write offsets.
 # read_offset is stored automatically after AccurateRip confirmation.
 # write_offset is stored automatically by `cdda2img setup --write-offset`.

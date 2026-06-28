@@ -2366,6 +2366,94 @@ def _ar_has_partial_mismatch(results: list) -> bool:
     return 0 < n_ok < len(in_db)
 
 
+def _recover_failed_tracks(
+    device: str,
+    failed_tracks: list,
+    track_lsns: list[int],
+    disc_last_lsn: int,
+    pcm_file: Path,
+    responses: list,
+    n_tracks: int,
+    ladder: list[int],
+    n_passes: int,
+    read_offset: int,
+    progress_cb,
+) -> tuple[bool, dict[int, str]]:
+    """Re-rip each AR-failed track across the drive's speed ladder until it matches.
+
+    For every failed track, sweep the ladder *fastest→slowest*, ``n_passes`` times (total
+    ``n_passes x len(ladder)`` attempts), AR-verifying each cd-paranoia rip against the
+    cached *responses* and splicing the first match into *pcm_file*. A track that never
+    matches keeps its original cdrdao audio (no unverified splice). The drive speed is NOT
+    restored between attempts (``restore_speed=False``) — the caller restores once after.
+
+    Returns ``(ok, outcomes)``. ``ok=False`` signals a cdrdao/cd-paranoia track-boundary
+    disagreement (re-rip byte count != expected) that the caller must resolve with the
+    full-disc re-rip fallback. ``outcomes`` maps track number → ``"matched@<N>X"`` or
+    ``"unrecovered"``.
+    """
+    from cdda2img.accuraterip import match_track_pcm
+    from cdda2img.disc_reader import rip_single_track
+
+    outcomes: dict[int, str] = {}
+    # fastest→slowest, repeated n_passes times: an early high-speed match exits sooner.
+    speeds = [s for _ in range(n_passes) for s in reversed(ladder)]
+    with pcm_file.open("r+b") as pcm_fh:
+        for result in failed_tracks:
+            t = result.track  # 1-indexed
+            idx = t - 1
+            byte_start = track_lsns[idx] * _R6_BYTES_PER_FRAME
+            if idx + 1 < len(track_lsns):
+                byte_end = track_lsns[idx + 1] * _R6_BYTES_PER_FRAME
+            else:
+                byte_end = (disc_last_lsn + 1) * _R6_BYTES_PER_FRAME
+            expected_bytes = byte_end - byte_start
+
+            matched = False
+            for speed in speeds:
+                track_tmp = pcm_file.with_stem(f"{pcm_file.stem}.t{t}")
+                try:
+                    rip_single_track(
+                        device,
+                        t,
+                        track_tmp,
+                        paranoia="full",
+                        read_offset=read_offset,
+                        read_speed=speed,
+                        restore_speed=False,
+                        progress_cb=progress_cb,
+                    )
+                    new_pcm = track_tmp.read_bytes()
+                finally:
+                    track_tmp.unlink(missing_ok=True)
+
+                if len(new_pcm) != expected_bytes:
+                    # Structural boundary disagreement (recurs at every speed) — bail to the
+                    # caller's full-disc re-rip fallback.
+                    log.warning(
+                        "track %d: cdrdao=%d bytes, cd-paranoia=%d bytes — boundary "
+                        "mismatch, falling back to full re-rip",
+                        t,
+                        expected_bytes,
+                        len(new_pcm),
+                    )
+                    return False, outcomes
+
+                _v1, _v2, conf_v1, conf_v2 = match_track_pcm(
+                    new_pcm, t, n_tracks, responses
+                )
+                if conf_v1 or conf_v2:
+                    pcm_fh.seek(byte_start)
+                    pcm_fh.write(new_pcm)
+                    outcomes[t] = f"matched@{speed}X"
+                    matched = True
+                    break
+
+            if not matched:
+                outcomes[t] = "unrecovered"  # keep the original cdrdao audio
+    return True, outcomes
+
+
 def rip_image(  # noqa: C901
     device: str | None = None,
     loudness: str = "rg",
@@ -2511,6 +2599,9 @@ def rip_image(  # noqa: C901
         # Track which LSNs fed the final verify_rip call — may change if paranoia fallback fires.
         final_track_lsns = info.track_lsns
         final_disc_last_lsn = info.disc_last_lsn
+        # Speed-laddered AR recovery outcome (populated only if a track fails AR).
+        recovery_outcomes: dict[int, str] = {}
+        recovery_ladder: list[int] = []
 
         # PCM is now offset-corrected for both paths; verify_rip reads from correct positions.
         _ui_status(ui, "Verifying AccurateRip…")
@@ -2532,7 +2623,7 @@ def rip_image(  # noqa: C901
         # them into the already-offset-corrected PCM. cdrdao metadata (ISRC/MCN/
         # CD-Text from subchannel) is preserved — cd-paranoia -Q does not capture it.
         if rip_type == "cdrdao" and _ar_has_partial_mismatch(ar_verify.tracks):
-            from cdda2img.disc_reader import rip_disc, rip_single_track
+            from cdda2img.disc_reader import rip_disc
 
             failed_tracks = [
                 r
@@ -2560,52 +2651,39 @@ def rip_image(  # noqa: C901
 
             paranoia_cb = _paranoia_cb if ui is not None else None
 
-            # Per-track splice: replace only failed track(s) in the corrected PCM.
-            # The PCM is already offset-corrected (apply_offset ran above), so each
-            # re-rip uses -O to produce a matching offset-corrected replacement.
+            # Speed-laddered recovery: re-rip each failed track across the drive's own
+            # speed ladder (fastest→slowest, cfg.recovery_passes sweeps), AR-verifying each
+            # attempt and splicing the first match; a track that never matches keeps its
+            # cdrdao audio. The PCM is already offset-corrected, so each -O re-rip matches.
+            from cdda2img import drive_speed
+            from cdda2img.accuraterip import fetch_ar_responses
+
+            ar_responses, _ar_transport, _ar_b3 = fetch_ar_responses(
+                final_track_lsns, final_disc_last_lsn, cddb_id
+            )
+            recovery_ladder = (
+                drive_speed.probe_speed_ladder(device)
+                if ar_responses and cfg.recovery_passes > 0
+                else []
+            )
             spliced_ok = True
-            with temp.pcm_file.open("r+b") as pcm_fh:
-                for result in failed_tracks:
-                    t = result.track  # 1-indexed
-                    idx = t - 1
-                    byte_start = final_track_lsns[idx] * _R6_BYTES_PER_FRAME
-                    if idx + 1 < len(final_track_lsns):
-                        byte_end = final_track_lsns[idx + 1] * _R6_BYTES_PER_FRAME
-                    else:
-                        byte_end = (final_disc_last_lsn + 1) * _R6_BYTES_PER_FRAME
-                    expected_bytes = byte_end - byte_start
-
-                    track_tmp = temp.pcm_file.with_stem(f"{temp.pcm_file.stem}.t{t}")
-                    try:
-                        rip_single_track(
-                            device,
-                            t,
-                            track_tmp,
-                            paranoia="full",
-                            read_offset=read_offset,
-                            read_speed=1,  # AR mismatch — slow re-read for fewer errors
-                            progress_cb=paranoia_cb,
-                        )
-                        new_pcm = track_tmp.read_bytes()
-                    finally:
-                        track_tmp.unlink(missing_ok=True)
-
-                    if len(new_pcm) != expected_bytes:
-                        # cdrdao and cd-paranoia disagree on track boundaries
-                        # (e.g. nonstandard pregap attribution) — splice would
-                        # corrupt the audio. Fall back to full re-rip.
-                        log.warning(
-                            "track %d: cdrdao=%d bytes, cd-paranoia=%d bytes "
-                            "— boundary mismatch, falling back to full re-rip",
-                            t,
-                            expected_bytes,
-                            len(new_pcm),
-                        )
-                        spliced_ok = False
-                        break
-
-                    pcm_fh.seek(byte_start)
-                    pcm_fh.write(new_pcm)
+            if recovery_ladder:
+                _ui_status(ui, "Recovering failed track(s) across the speed ladder…")
+                spliced_ok, outcomes = _recover_failed_tracks(
+                    device,
+                    failed_tracks,
+                    final_track_lsns,
+                    final_disc_last_lsn,
+                    temp.pcm_file,
+                    ar_responses,
+                    len(final_track_lsns),
+                    recovery_ladder,
+                    cfg.recovery_passes,
+                    read_offset,
+                    paranoia_cb,
+                )
+                recovery_outcomes.update(outcomes)
+                drive_speed.restore_drive_speed(device)  # one restore after the loop
 
             if not spliced_ok:
                 # Boundary mismatch: replace entire PCM with a full cd-paranoia rip.
@@ -2675,6 +2753,12 @@ def rip_image(  # noqa: C901
             provenance["arip_transport"] = ar_verify.transport
         if ar_verify.dbar_b3sum is not None:
             provenance["arip_dbar_b3sum"] = ar_verify.dbar_b3sum
+        # Speed-laddered recovery provenance: what was tried and the per-track outcome.
+        if recovery_ladder:
+            provenance["recovery_passes"] = str(cfg.recovery_passes)
+            provenance["recovery_ladder"] = ",".join(f"{x}X" for x in recovery_ladder)
+        for _t, _outcome in sorted(recovery_outcomes.items()):
+            provenance[f"recovery_track_{_t}"] = _outcome
         ar_summary = format_ar_report(ar_verify.tracks, read_offset=read_offset)
         rbi_path = _finalize_import(
             disc,

@@ -4,7 +4,7 @@ disc_reader.py — CD-DA ripping via cd-paranoia subprocess.
 Public interface:
     RipInfo(disc, track_lsns, disc_last_lsn)
     rip_disc(device, output_pcm, *, paranoia, read_offset, read_speed, max_retries, never_skip, progress_cb) -> RipInfo
-    rip_single_track(device, track_num, output_pcm, *, paranoia, read_offset, read_speed, max_retries, never_skip, progress_cb) -> int
+    rip_single_track(device, track_num, output_pcm, *, paranoia, read_offset, read_speed, max_retries, never_skip, restore_speed, progress_cb) -> int
     rip_sector_range(device, track_num, start_frame, end_frame, output_pcm, *, paranoia, read_offset, read_speed, max_retries, never_skip) -> int
     query_disc(device) -> (disc_first, disc_last, [(num, first_lsn, length), ...])
 """
@@ -307,6 +307,7 @@ def rip_single_track(
     read_speed: int | None = None,
     max_retries: int | None = None,
     never_skip: bool = False,
+    restore_speed: bool = True,
     progress_cb: Callable[[ProgressUpdate], None] | None = None,
 ) -> int:
     """Rip one track by track number to raw s16le PCM. Returns sector count.
@@ -317,8 +318,10 @@ def rip_single_track(
     layout — only queries enough to locate the requested track.
 
     *read_speed*, when given, forces the drive read speed via ``-S`` (1 = 1x);
-    None leaves it at the drive default. The AR-failure retry passes ``1`` — the
-    track already failed verification, so a slow, careful re-read is warranted.
+    None leaves it at the drive default. After a ``read_speed`` rip the drive is
+    restored to its max read speed (a -S setting is persistent) — unless
+    *restore_speed* is False, which the speed-laddered recovery loop uses to avoid
+    thrashing the drive between attempts (it restores once at the end).
 
     *max_retries* / *never_skip* set cd-paranoia's per-block retry budget via
     ``-z`` (see :func:`_retry_flags`) — the attempts per frame before a sector is
@@ -363,7 +366,7 @@ def rip_single_track(
         wav_to_raw_pcm(wav_path, output_pcm)
     finally:
         wav_path.unlink(missing_ok=True)
-        if read_speed is not None:
+        if read_speed is not None and restore_speed:
             from cdda2img import drive_speed
 
             drive_speed.restore_drive_speed(device)

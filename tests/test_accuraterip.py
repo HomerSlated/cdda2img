@@ -23,6 +23,8 @@ from cdda2img.accuraterip import (
     _ar_checksums,
     _ar_disc_ids,
     _parse_dbar,
+    fetch_ar_responses,
+    match_track_pcm,
     pack_arip_block,
     unpack_arip_block,
     verify_rip,
@@ -876,3 +878,78 @@ def test_fetch_ar_debug_log_includes_404(caplog) -> None:
         _fetch_ar(1, "00000000", "00000000", 0)
     messages = [rec.getMessage() for rec in caplog.records]
     assert any("disc not found (404)" in m for m in messages)
+
+
+# ---------------------------------------------------------------------------
+# fetch_ar_responses + match_track_pcm (recovery helpers)
+# ---------------------------------------------------------------------------
+
+
+def test_fetch_ar_responses_parses_and_hashes() -> None:
+    # fetch_ar_responses verifies the per-block header IDs, so the dBAR header must carry
+    # the disc IDs computed from the same TOC.
+    lsns, last = [0, 1000], 2000
+    id1, id2 = (int(x, 16) for x in _ar_disc_ids(lsns, last))
+    dbar = struct.pack("<BLLL", 2, id1, id2, 0)
+    dbar += struct.pack("<BLL", 9, 0xAA, 0x11)
+    dbar += struct.pack("<BLL", 9, 0xBB, 0x22)
+    with patch("cdda2img.accuraterip._fetch_ar", return_value=(dbar, "https")):
+        responses, transport, b3sum = fetch_ar_responses(lsns, last, 0)
+    assert transport == "https"
+    assert b3sum is not None and len(b3sum) == 64
+    assert responses == [
+        [
+            {"conf": 9, "crc": 0xAA, "crc450": 0x11},
+            {"conf": 9, "crc": 0xBB, "crc450": 0x22},
+        ]
+    ]
+
+
+def test_fetch_ar_responses_not_in_db() -> None:
+    with patch("cdda2img.accuraterip._fetch_ar", return_value=(None, "https")):
+        responses, transport, b3sum = fetch_ar_responses([0, 1000], 2000, 0)
+    assert responses == []
+    assert transport == "https"
+    assert b3sum is None
+
+
+def _raw_for(track: int, n_tracks: int):
+    """A raw PCM buffer plus its computed (v1, v2) for an interior track."""
+    raw = bytes((i * 37 + 11) & 0xFF for i in range(4 * 4000))  # 4000 frames
+    frames = array.array("I")
+    frames.frombytes(raw)
+    v1, v2 = _ar_checksums(frames, track, n_tracks)
+    return raw, v1, v2
+
+
+def test_match_track_pcm_matches_block_crc() -> None:
+    raw, v1, _v2 = _raw_for(2, 3)  # interior track → self-contained checksum
+    responses = _parse_dbar(_build_dbar(3, [[(0, 0, 0), (15, v1, 0), (0, 0, 0)]]), 3)
+    v1h, _v2h, conf_v1, conf_v2 = match_track_pcm(raw, 2, 3, responses)
+    assert v1h == f"{v1:08x}"
+    assert conf_v1 == 15  # matched the v1 checksum in the single block
+    assert conf_v2 is None  # block crc was the v1 value, not the v2 value
+
+
+def test_match_track_pcm_no_match() -> None:
+    raw, _v1, _v2 = _raw_for(2, 3)
+    responses = _parse_dbar(_build_dbar(3, [[(0, 0, 0), (9, 0xDEAD, 0), (0, 0, 0)]]), 3)
+    _v1h, _v2h, conf_v1, conf_v2 = match_track_pcm(raw, 2, 3, responses)
+    assert conf_v1 is None
+    assert conf_v2 is None
+
+
+def test_match_track_pcm_takes_highest_confidence() -> None:
+    raw, v1, _v2 = _raw_for(2, 3)
+    responses = _parse_dbar(
+        _build_dbar(
+            3,
+            [
+                [(0, 0, 0), (5, v1, 0), (0, 0, 0)],
+                [(0, 0, 0), (40, v1, 0), (0, 0, 0)],
+            ],
+        ),
+        3,
+    )
+    _v1h, _v2h, conf_v1, _conf_v2 = match_track_pcm(raw, 2, 3, responses)
+    assert conf_v1 == 40  # highest confidence across the two matching blocks

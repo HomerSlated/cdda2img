@@ -64,7 +64,6 @@ CDROMRESET (passes 5-6) needs CAP_SYS_ADMIN. Build + grant the bundled helper on
 from __future__ import annotations
 
 import argparse
-import array
 import fcntl
 import math
 import os
@@ -76,7 +75,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from cdda2img import drive_speed
-from cdda2img.accuraterip import _ar_checksums, _ar_disc_ids, _fetch_ar, _parse_dbar
+from cdda2img.accuraterip import fetch_ar_responses, match_track_pcm
 from cdda2img.cddb import compute_cddb_disc_id
 from cdda2img.config import load_config
 from cdda2img.container import wav_to_raw_pcm
@@ -89,11 +88,8 @@ _CDROMRESET = 0x5312  # hard-reset the drive
 _CDROM_DRIVE_STATUS = 0x5326
 _CDS_DISC_OK = 4  # drive status: disc present and readable
 
-_KBPS_PER_X = 176
 # /var/tmp, not /tmp: /tmp is RAM-backed tmpfs and CD audio floods it.
 _WORK = Path("/var/tmp")  # noqa: S108
-# Candidate Nx values to probe; the drive snaps each to a supported speed.
-_SPEED_PROBE = (1, 2, 3, 4, 6, 8, 10, 12, 16, 20, 24, 32, 40, 48)
 
 
 @dataclass
@@ -203,24 +199,8 @@ def _reseat(device: str, *, reset: bool) -> None:
 
 
 # ── speed ladder ─────────────────────────────────────────────────────────────
-
-
-def probe_speed_ladder(device: str) -> list[int]:
-    """Return the drive's actual discrete read speeds (X), ascending and de-duplicated.
-
-    Sets each candidate Nx via CDROM_SELECT_SPEED and reads back the achieved speed
-    from cdrdao drive-info — so the ladder is the drive's real snapping behaviour.
-    """
-    achieved: set[int] = set()
-    for n in _SPEED_PROBE:
-        if not drive_speed._select_speed(device, n):
-            continue
-        current_kbps, _ = drive_speed.read_drive_speed(device)
-        if current_kbps:
-            achieved.add(max(1, round(current_kbps / _KBPS_PER_X)))
-    ladder = sorted(achieved)
-    drive_speed.restore_drive_speed(device)  # leave it at max after probing
-    return ladder
+# The ladder probe lives in cdda2img.drive_speed (shared with the pipeline's recovery):
+#   ladder = drive_speed.probe_speed_ladder(device)
 
 
 def build_plan(ladder: list[int]) -> list[PassPlan]:
@@ -267,20 +247,9 @@ def setup_ar(device: str, track_num: int) -> ARContext | None:
         print(f"track {track_num} out of range (disc has {n} tracks)", file=sys.stderr)
         return None
     cddb_id = int(compute_cddb_disc_id(track_lsns, disc_last), 16)
-    id1, id2 = _ar_disc_ids(track_lsns, disc_last)
-    data, transport = _fetch_ar(n, id1, id2, cddb_id)
-    if not data:
-        print("disc not found in AccurateRip — cannot verify", file=sys.stderr)
-        return None
-    responses = _parse_dbar(
-        data,
-        n,
-        expected_id1=int(id1, 16),
-        expected_id2=int(id2, 16),
-        expected_cddb_id=cddb_id,
-    )
+    responses, transport, _b3 = fetch_ar_responses(track_lsns, disc_last, cddb_id)
     if not responses:
-        print("no usable AccurateRip blocks for this disc", file=sys.stderr)
+        print("disc not found in AccurateRip — cannot verify", file=sys.stderr)
         return None
     print(
         f"AccurateRip: {len(responses)} block(s) via {transport}; "
@@ -291,21 +260,11 @@ def setup_ar(device: str, track_num: int) -> ARContext | None:
     )
 
 
-def verify_track(pcm: Path, ar: ARContext) -> tuple[int, int, int | None, int | None]:
-    """Compute the target track's v1/v2 and the best confidence each matched at."""
+def verify_track(pcm: Path, ar: ARContext) -> tuple[str, str, int | None, int | None]:
+    """Compute the target track's v1/v2 (hex) and the best confidence each matched at,
+    using the same shared helper the pipeline's recovery uses."""
     raw = pcm.read_bytes()
-    frames: array.array = array.array("I")
-    frames.frombytes(raw[: len(raw) - len(raw) % 4])
-    v1, v2 = _ar_checksums(frames, ar.track_idx + 1, ar.n_tracks)
-    conf_v1: int | None = None
-    conf_v2: int | None = None
-    for resp in ar.responses:
-        entry = resp[ar.track_idx]
-        if entry["crc"] == v1:
-            conf_v1 = max(conf_v1 or 0, entry["conf"])
-        if entry["crc"] == v2:
-            conf_v2 = max(conf_v2 or 0, entry["conf"])
-    return v1, v2, conf_v1, conf_v2
+    return match_track_pcm(raw, ar.track_idx + 1, ar.n_tracks, ar.responses)
 
 
 # ── rip one pass ─────────────────────────────────────────────────────────────
@@ -343,8 +302,7 @@ def rip_and_verify(
     if not rip_track(device, track, speed_x, offset, wav):
         return None
     wav_to_raw_pcm(wav, pcm)
-    v1, v2, cv1, cv2 = verify_track(pcm, ar)
-    return f"{v1:08x}", f"{v2:08x}", cv1, cv2
+    return verify_track(pcm, ar)  # (v1_hex, v2_hex, conf_v1, conf_v2)
 
 
 # ── characterization mode (speed vs success rate) ────────────────────────────
@@ -704,7 +662,7 @@ def main() -> int:
         return 1
 
     print("probing drive speed ladder…")
-    ladder = probe_speed_ladder(args.device)
+    ladder = drive_speed.probe_speed_ladder(args.device)
     if not ladder:
         print("could not probe any drive speeds; aborting", file=sys.stderr)
         return 1

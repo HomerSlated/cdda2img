@@ -41,6 +41,11 @@ _KBPS_PER_X = 176  # 1x CD = 75 sectors/s * 2352 bytes / 1000 ≈ 176 kB/s
 _MAX_READ_RE = re.compile(r"Maximum reading speed:\s*(\d+)\s*kB/s")
 _CUR_READ_RE = re.compile(r"Current reading speed:\s*(\d+)\s*kB/s")
 
+# Candidate Nx values to probe for the drive's real speed ladder; the drive snaps each to a
+# supported speed and we read back the achieved value (so the ladder is the drive's own,
+# not an assumed table).
+_SPEED_PROBE = (1, 2, 3, 4, 6, 8, 10, 12, 16, 20, 24, 32, 40, 48)
+
 
 def read_drive_speed(device: str) -> tuple[int | None, int | None]:
     """Return ``(current_kbps, max_kbps)`` from ``cdrdao drive-info``, or ``(None, None)``.
@@ -113,3 +118,22 @@ def restore_drive_speed(device: str) -> None:
     if _select_speed(device, nx):
         cur_x = current // _KBPS_PER_X if current else "?"
         log.info("drive %s read speed: %sX -> %dX (restored)", device, cur_x, nx)
+
+
+def probe_speed_ladder(device: str) -> list[int]:
+    """Return the drive's actual discrete read speeds (X), ascending and de-duplicated.
+
+    Sets each :data:`_SPEED_PROBE` candidate via ``CDROM_SELECT_SPEED`` and reads back the
+    achieved speed from ``cdrdao drive-info`` — so the ladder reflects the drive's real
+    snapping behaviour, not an assumed table. Restores the drive to max afterwards.
+    Best-effort: a candidate that can't be set or read back is skipped.
+    """
+    achieved: set[int] = set()
+    for n in _SPEED_PROBE:
+        if not _select_speed(device, n):
+            continue
+        current_kbps, _ = read_drive_speed(device)
+        if current_kbps:
+            achieved.add(max(1, round(current_kbps / _KBPS_PER_X)))
+    restore_drive_speed(device)  # leave the drive at max after probing
+    return sorted(achieved)

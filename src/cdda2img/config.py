@@ -197,6 +197,9 @@ class Config:
     low_dr_threshold: float = 5.0  # album LRA (LU) below which low_dynamic_range=YES
     auto: bool = False
     embedart: bool = False
+    # AR-recovery: number of full sweeps of the drive's speed ladder to attempt per
+    # failed track before giving up (total attempts = passes x ladder_steps).
+    recovery_passes: int = 3
     # Ordered priority ranking of release-country codes for the release-selection
     # rung (rbi_spec.md §6.3.2; trust_model_design.md §10.2). NOT a filter: listed
     # codes rank in order, unlisted codes share the lowest rank, empty = key skipped.
@@ -276,6 +279,18 @@ def _parse_dup_policy(raw: object) -> str:
     return value
 
 
+def _bounded_int(raw: object, default: int, lo: int, hi: int, name: str) -> int:
+    """Parse *raw* as an int in [lo, hi]; warn and return *default* on bad/out-of-range."""
+    try:
+        val = int(raw)  # type: ignore[arg-type]
+    except (ValueError, TypeError):
+        val = None  # type: ignore[assignment]
+    if val is None or not lo <= val <= hi:
+        log.warning("Invalid %s %r in config; defaulting to %d", name, raw, default)
+        return default
+    return val
+
+
 def load_config() -> Config:
     """Load and return the user configuration from the TOML file."""
     data = _load_raw()
@@ -349,6 +364,10 @@ def load_config() -> Config:
     auto = bool(data.get("auto", False))
     embedart = bool(data.get("embedart", False))
 
+    recovery_passes = _bounded_int(
+        data.get("recovery_passes", 3), 3, 0, 20, "recovery_passes"
+    )
+
     preferred_country = _parse_preferred_country(data.get("preferred_country", []))
 
     raw_low_dr = data.get("low_dr_threshold", 5.0)
@@ -381,6 +400,7 @@ def load_config() -> Config:
         low_dr_threshold=low_dr_threshold,
         auto=auto,
         embedart=embedart,
+        recovery_passes=recovery_passes,
         preferred_country=preferred_country,
     )
 
