@@ -114,6 +114,27 @@ def test_progress_parses_wrote_frontier(
     assert seen[-1].fraction == 1.0
 
 
+def test_capture_env_tees_raw_stream(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # CDDA2IMG_PARANOIA_CAPTURE tees every raw -e line for offline replay.
+    _FakePopen.lines = [
+        "##: 0 [read] @ 1176\n",
+        "##: 3 [correction] @ 117600\n",
+        "##: 14 [wrote] @ 1176\n",
+    ]
+    _FakePopen.rc = 0
+    monkeypatch.setattr(dr.subprocess, "Popen", _FakePopen)
+    cap = tmp_path / "live.cs"
+    monkeypatch.setenv("CDDA2IMG_PARANOIA_CAPTURE", str(cap))
+
+    wav = tmp_path / "x.wav"
+    cmd = ["cd-paranoia", "-d", "/dev/sr0", "--", "1-", str(wav)]
+    dr._run_paranoia_with_progress(cmd, wav, 1000, [(1, 0, 1000)], 0, lambda u: None)
+
+    assert cap.read_text() == "".join(_FakePopen.lines)
+
+
 def test_progress_failure_no_final_close(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -162,27 +183,94 @@ def test_rip_sector_range_rejects_bad_range(tmp_path: Path) -> None:
         dr.rip_sector_range("/dev/sr0", 8, 150, 100, tmp_path / "o.pcm")
 
 
-# ── stall-status readout (recovery notes while the bar holds) ────────────────
+# ── stall-status readout (cumulative recovery tally on the read-head line) ───
+#
+# Design note: corrections arrive in fast in-memory bursts the TUI can't catch, so we
+# DON'T flash a per-event label. Instead the per-bucket recovery counts accumulate over
+# the track (cumulative, never reset) and ride on the read-head line — the only phase the
+# TUI reliably renders — as "recovering @ sector N — K jitter, …". Validated against the
+# real-disc capture /var/tmp/t8.cs: 2513 jitter, visible on ~80% of 10 Hz refresh frames.
 
 
-def test_stall_note_only_for_trouble_events() -> None:
-    assert dr._stall_note(0, 100) == ""  # read — silent
-    assert dr._stall_note(1, 100) == ""  # verify — silent
-    assert dr._stall_note(12, 100) == "read error @ sector 100"
-    assert dr._stall_note(6, 100) == "skipped (unreadable) @ sector 100"
-    assert dr._stall_note(3, 100) == "repairing jitter @ sector 100"
+def test_recovery_summary_empty_is_blank() -> None:
+    from collections import Counter
+
+    assert dr._recovery_summary(Counter()) == ""
 
 
-def test_progress_surfaces_recovery_notes_without_moving_bar(
+def test_recovery_summary_orders_by_severity() -> None:
+    from collections import Counter
+
+    # jitter is least severe (last in _RECOVERY_ORDER); read err outranks it.
+    summary = dr._recovery_summary(Counter({"jitter": 5, "read err": 2}))
+    assert summary == "2 read err, 5 jitter"
+
+
+def test_recovery_summary_omits_zero_buckets() -> None:
+    from collections import Counter
+
+    assert dr._recovery_summary(Counter({"jitter": 3, "scratch": 0})) == "3 jitter"
+
+
+def test_correction_codes_map_to_buckets() -> None:
+    assert dr._RECOVERY_BUCKETS[3] == "jitter"  # FIXUP_ATOM
+    assert dr._RECOVERY_BUCKETS[12] == "read err"
+    assert dr._RECOVERY_BUCKETS[6] == "skipped"
+    assert 0 not in dr._RECOVERY_BUCKETS  # plain read is not recovery
+    assert 1 not in dr._RECOVERY_BUCKETS  # verify is not recovery
+    assert 9 not in dr._RECOVERY_BUCKETS  # overlap is normal flow, not recovery
+
+
+def test_stall_line_reads_before_any_recovery() -> None:
+    # A pure stall with no corrections shows the read head, no tally.
+    p = dr._ParanoiaProgress(disc_first=0)
+    for s in range(100, 100 + dr._STALL_EVENTS):
+        emitted = p.feed(0, s)  # code 0 = read
+    assert emitted is True  # the _STALL_EVENTS-th read trips the stall line
+    assert p.note == "reading @ sector 107"
+    assert p.recovery == {}
+
+
+def test_stall_line_shows_cumulative_recovery_tally() -> None:
+    # Corrections accumulate; once stalled, the read line carries the running total.
+    p = dr._ParanoiaProgress(disc_first=0)
+    for s in range(100, 100 + dr._STALL_EVENTS):
+        p.feed(3, s)  # code 3 = jitter (FIXUP_ATOM)
+    assert p.recovery["jitter"] == dr._STALL_EVENTS
+    assert p.note == "recovering @ sector 107 — 8 jitter"
+
+
+def test_recovery_tally_survives_wrote_bursts() -> None:
+    # The cumulative tally must NOT reset when the WROTE frontier advances — otherwise it
+    # would be zeroed inside the same commit burst that hides it (the core fix).
+    p = dr._ParanoiaProgress(disc_first=0)
+    for s in range(100, 100 + dr._STALL_EVENTS):
+        p.feed(3, s)  # 8 jitter → recovering line
+    assert p.recovery["jitter"] == 8
+
+    # a commit advances the bar and reverts the note to the plain count
+    assert p.feed(14, 50) is True  # WROTE @ sector 50 > elapsed 0
+    assert p.note == ""
+    assert p.elapsed == 50
+    assert p.recovery["jitter"] == 8  # tally survived the commit
+
+    # the next read-hold shows the *cumulative* total again, not a fresh zero
+    for s in range(200, 200 + dr._STALL_EVENTS):
+        p.feed(0, s)  # reads
+    assert p.note == "recovering @ sector 207 — 8 jitter"
+
+
+def test_wrote_burst_does_not_emit_recovery_line(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
+    # End-to-end through _run_paranoia_with_progress: a correction then a stall of reads
+    # surfaces the tally on the read line; the bar only moves on WROTE.
     _FakePopen.lines = [
-        "##: 14 [wrote] @ 1176\n",  # sector 1 — bar to 1
-        "##: 12 [transport error] @ 117600\n",  # READERR @ sector 100 — note, bar holds
-        "##: 3 [correction] @ 117600\n",  # FIXUP_ATOM — different note, bar holds
-        "##: 12 [transport error] @ 117600\n",  # READERR again — note changes back
-        "##: 0 [read] @ 117600\n",  # read — silent, no emit
-        "##: 14 [wrote] @ 235200\n",  # sector 200 — bar advances, note STICKS
+        "##: 14 [wrote] @ 1176\n",  # sector 1 — bar to 1, count
+        "##: 3 [correction] @ 117600\n",  # jitter @ sector 100 (tally=1, not yet stalled)
+        *["##: 0 [read] @ 117600\n"]
+        * dr._STALL_EVENTS,  # reads → stall, recovering line
+        "##: 14 [wrote] @ 235200\n",  # sector 200 — bar advances, note back to count
     ]
     _FakePopen.rc = 0
     monkeypatch.setattr(dr.subprocess, "Popen", _FakePopen)
@@ -197,42 +285,8 @@ def test_progress_surfaces_recovery_notes_without_moving_bar(
     assert rc == 0
     pairs = [(u.elapsed_frames, u.note) for u in seen]
     assert pairs == [
-        (1, ""),  # first WROTE
-        (1, "read error @ sector 100"),  # bar holds at 1, note set
-        (1, "repairing jitter @ sector 100"),  # bar holds, note changes
-        (1, "read error @ sector 100"),  # bar holds, note changes back
-        (
-            200,
-            "read error @ sector 100",
-        ),  # bar advances; note STICKY (1 < _NOTE_CLEAR_RUN)
-        (1000, ""),  # 100% close
-    ]
-
-
-def test_recovery_note_clears_after_sustained_clean_run(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    monkeypatch.setattr(dr, "_NOTE_CLEAR_RUN", 2)  # clear after 2 clean sectors
-    _FakePopen.lines = [
-        "##: 3 [correction] @ 117600\n",  # note set @ sector 100, bar at 0
-        "##: 14 [wrote] @ 1176\n",  # sector 1 — clean_run 1 (<2), note rides
-        "##: 14 [wrote] @ 2352\n",  # sector 2 — clean_run 2 (>=2), note clears
-    ]
-    _FakePopen.rc = 0
-    monkeypatch.setattr(dr.subprocess, "Popen", _FakePopen)
-
-    from cdda2img.cdrdao_progress import ProgressUpdate
-
-    seen: list[ProgressUpdate] = []
-    wav = tmp_path / "x.wav"
-    cmd = ["cd-paranoia", "-d", "/dev/sr0", "--", "1-", str(wav)]
-    rc = dr._run_paranoia_with_progress(cmd, wav, 1000, [(1, 0, 1000)], 0, seen.append)
-
-    assert rc == 0
-    pairs = [(u.elapsed_frames, u.note) for u in seen]
-    assert pairs == [
-        (0, "repairing jitter @ sector 100"),  # trouble sets the note
-        (1, "repairing jitter @ sector 100"),  # 1 clean sector — note rides along
-        (2, ""),  # 2nd clean sector hits the threshold — note clears
+        (1, ""),  # first WROTE — count
+        (1, "recovering @ sector 100 — 1 jitter"),  # stall, tally on the read line
+        (200, ""),  # bar advances — back to count
         (1000, ""),  # 100% close
     ]

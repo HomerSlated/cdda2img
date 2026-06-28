@@ -12,9 +12,11 @@ Public interface:
 from __future__ import annotations
 
 import logging
+import os
 import re
 import subprocess
-from dataclasses import dataclass
+from collections import Counter
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, NamedTuple
 
@@ -59,27 +61,46 @@ _CD_FRAME_BYTES = _CD_FRAMEWORDS * 2  # 2352 bytes per CD frame (raw s16le)
 _CB_WROTE = 14  # paranoia_cb_mode_t: a verified sector was committed to output
 _CALLSCRIPT_RE = re.compile(r"^##:\s*(-?\d+)\s+\[[^\]]*\]\s+@\s+(-?\d+)")
 
-# paranoia_cb_mode_t codes worth surfacing as a live recovery note when the WROTE
-# frontier stalls. ONLY correction/trouble events — plain read (0) / verify (1) are
-# normal flow and stay silent, so a clean track shows a smooth bar with no chatter
-# while a stalled track streams what cd-paranoia is fighting. (callback_strings order
-# in cd-paranoia.c.)
-_CB_RECOVERY_NOTES: dict[int, str] = {
-    2: "repairing edge jitter",
-    3: "repairing jitter",
+# paranoia_cb_mode_t codes that count as recovery work, mapped to a short bucket name
+# for the live tally. ONLY correction/trouble events — plain read (0) / verify (1) /
+# overlap (9) are normal flow and are not counted, so a clean track shows a smooth bar
+# with no recovery chatter. (callback_strings order in cd-paranoia.c.)
+_RECOVERY_BUCKETS: dict[int, str] = {
+    2: "jitter",  # FIXUP_EDGE
+    3: "jitter",  # FIXUP_ATOM
     4: "scratch",
-    6: "skipped (unreadable)",
-    10: "repairing dropped samples",
-    11: "repairing duplicated samples",
-    12: "read error",
-    13: "drive cache error",
+    6: "skipped",
+    10: "dropped",
+    11: "duped",
+    12: "read err",
+    13: "cache err",
 }
-# A recovery note is STICKY: once a trouble event sets it, it persists through the
-# WROTE bursts that commit the recovered data, reverting to the plain frame count only
-# after this many consecutive clean sectors. Without this, the note is cleared by the
-# very next WROTE and flickers invisibly against the count (WROTE events outnumber
-# trouble events ~4:1 even on a heavily-jittery track). 75 sectors ≈ 1 s at 1x.
-_NOTE_CLEAR_RUN = 75
+# Display order for the tally: most serious first, so data-loss buckets stay visible even
+# when the line is long. Buckets with a zero count are omitted.
+_RECOVERY_ORDER = (
+    "skipped",
+    "read err",
+    "cache err",
+    "scratch",
+    "dropped",
+    "duped",
+    "jitter",
+)
+
+# Why a cumulative tally, not a dwelling label: the corrections arrive in fast in-memory
+# sweeps (thousands of events in <100ms, between two TUI refreshes) — the same blind spot
+# as the WROTE commit bursts. The only phase the TUI reliably catches is the slow drive
+# reads (cd-paranoia emits [read] at ~75/s at 1x). So we DON'T try to flash a label during
+# the correction sweep; we accumulate per-bucket counts for the whole track and render them
+# on the read-head line that already survives. When the committed-output (WROTE) frontier
+# hasn't advanced for this many callback events, we treat it as a stall and emit
+# "reading @ sector N" — or, once any recovery has happened, "recovering @ sector N — N
+# jitter, …" with the running totals. The tally is cumulative and never reset (resetting on
+# WROTE would zero it inside the same burst that hides it), so every visible read-hold shows
+# the totals climbing. The count returns the instant the frontier advances (a commit).
+# _STALL_EVENTS must exceed the normal non-WROTE gap during a commit run; the initial
+# read-ahead legitimately trips it (bar at 0%, "reading …" instead of looking frozen).
+_STALL_EVENTS = 8
 
 # ---------------------------------------------------------------------------
 # Public types
@@ -423,51 +444,66 @@ def _sector_to_track(tracks: list[tuple[int, int, int]], sector: int) -> int:
     return track
 
 
-def _stall_note(fn: int, abs_sector: int) -> str:
-    """A live recovery-status string for a non-WROTE callback, or "" to stay silent.
+def _recovery_summary(recovery: Counter[str]) -> str:
+    """Render the per-bucket recovery tally as "N jitter, M read err", or "" if empty.
 
-    Maps only the correction/trouble events (:data:`_CB_RECOVERY_NOTES`) to a note —
-    so the status line narrates what cd-paranoia is fighting *while the bar holds on a
-    stall*, without any chatter on a clean read.
+    Buckets are emitted in :data:`_RECOVERY_ORDER` (most serious first), omitting zeros,
+    so a clean stretch produces no summary and the read line stays "reading @ sector N".
     """
-    label = _CB_RECOVERY_NOTES.get(fn)
-    return f"{label} @ sector {abs_sector}" if label else ""
+    parts = [f"{recovery[b]} {b}" for b in _RECOVERY_ORDER if recovery.get(b)]
+    return ", ".join(parts)
 
 
 @dataclass
 class _ParanoiaProgress:
-    """Folds the cd-paranoia ``-e`` callback stream into bar position + sticky note.
+    """Folds the cd-paranoia ``-e`` callback stream into bar position + status note.
 
     ``feed(fn, abs_sector)`` updates state for one callback event and returns True
     when the display should be re-emitted. The WROTE frontier (``elapsed``) is
-    monotonic; the recovery ``note`` is sticky — a trouble event sets it, and it
-    rides through the following WROTE bursts, clearing only after
-    :data:`_NOTE_CLEAR_RUN` consecutive clean sectors (see the module note).
+    monotonic. When it stalls — no advance for :data:`_STALL_EVENTS` callback events —
+    the ``note`` narrates the live read head: ``reading @ sector N`` normally, or
+    ``recovering @ sector N — 2513 jitter, …`` once any recovery work has happened, the
+    running per-bucket totals in :attr:`recovery`. The tally is cumulative across the
+    track and never reset, because the corrections that feed it arrive in fast bursts the
+    TUI can't catch — only the slow read-holds are visible, so the read line carries the
+    totals (see the module note on :data:`_STALL_EVENTS`). The note clears to the plain
+    frame count the instant the frontier advances again (a commit).
     """
 
     disc_first: int
     elapsed: int = 0
     note: str = ""
-    clean_run: int = 0
+    read_head: int = 0
+    since_advance: int = 0  # callback events since the WROTE frontier last advanced
+    recovery: Counter[str] = field(
+        default_factory=Counter
+    )  # bucket -> cumulative count
 
     def feed(self, fn: int, abs_sector: int) -> bool:
         if fn == _CB_WROTE:
-            advanced = abs_sector - self.disc_first > self.elapsed
-            cleared = False
-            if self.note:
-                self.clean_run += 1
-                if self.clean_run >= _NOTE_CLEAR_RUN:  # past the trouble — revert
-                    self.note = ""
-                    cleared = True
-            if advanced:
-                self.elapsed = abs_sector - self.disc_first
-            return advanced or cleared
-        trouble = _stall_note(fn, abs_sector)
-        if trouble:
-            self.clean_run = 0  # still in trouble — reset the clean streak
-            if trouble != self.note:
-                self.note = trouble
-                return True
+            if abs_sector - self.disc_first <= self.elapsed:
+                return False  # non-advancing / backward WROTE — ignore
+            self.elapsed = abs_sector - self.disc_first
+            self.since_advance = 0
+            self.note = ""  # frontier advanced — committing, show the count
+            return True
+        # non-WROTE event (read / verify / correction / error / overlap …)
+        self.since_advance += 1
+        self.read_head = max(self.read_head, abs_sector)
+        bucket = _RECOVERY_BUCKETS.get(fn)
+        if bucket:
+            self.recovery[bucket] += 1
+        if self.since_advance < _STALL_EVENTS:
+            return False  # not a stall yet — bar is moving, stay on the count
+        summary = _recovery_summary(self.recovery)
+        line = (
+            f"recovering @ sector {self.read_head} — {summary}"
+            if summary
+            else f"reading @ sector {self.read_head}"
+        )
+        if line != self.note:
+            self.note = line
+            return True
         return False
 
 
@@ -484,15 +520,14 @@ def _run_paranoia_with_progress(
     Injects -e ("callscript") so cd-paranoia streams a machine-readable callback
     line per event to stderr; we follow the WROTE frontier (committed-output
     sector) for smooth, honest per-sector progress (see the module-level note on
-    _CALLSCRIPT_RE). Correction/trouble events set a **sticky** recovery ``note``
-    (see :func:`_stall_note` / :data:`_NOTE_CLEAR_RUN`) that rides through the
-    following WROTE bursts and reverts to the plain frame count only after a
-    sustained clean run — so a recovering track shows persistent "repairing …"
-    text instead of a note that flickers invisibly against the count. The bar
-    position never moves on a trouble event. stdout is discarded; the audio still
-    streams to *wav_path* (the file argument), unaffected by -e. stderr is drained
-    line-by-line so the PIPE never fills. *wav_path* is unused now but kept for
-    call-site symmetry. Returns the exit code.
+    _CALLSCRIPT_RE). Recovery work (corrections/errors) is accumulated into a
+    cumulative per-bucket tally (:class:`_ParanoiaProgress`) and rendered on the
+    read-head line during a stall — "recovering @ sector N — 2513 jitter, …" — since
+    that line is the only phase the TUI reliably catches; the bar reverts to the plain
+    frame count the instant the frontier advances. The bar position never moves on a
+    trouble event. stdout is discarded; the audio still streams to *wav_path* (the file
+    argument), unaffected by -e. stderr is drained line-by-line so the PIPE never fills.
+    *wav_path* is unused now but kept for call-site symmetry. Returns the exit code.
     """
     from cdda2img.cdrdao_progress import ProgressUpdate
 
@@ -510,6 +545,12 @@ def _run_paranoia_with_progress(
             )
         )
 
+    # Opt-in ground-truth capture: tee every raw -e line to this file so a rip that
+    # exercises real recovery can be replayed offline (tools/replay_paranoia_progress.py)
+    # without reproducing a flaky read. No-op unless the env var is set.
+    capture_path = os.environ.get("CDDA2IMG_PARANOIA_CAPTURE")
+    capture = open(capture_path, "a") if capture_path else None  # noqa: SIM115
+
     state = _ParanoiaProgress(disc_first)
     proc = subprocess.Popen(  # noqa: S603  # LINT-012
         [cmd[0], "-e", *cmd[1:]],
@@ -520,12 +561,16 @@ def _run_paranoia_with_progress(
     stream = proc.stderr
     if stream is not None:
         for line in stream:
+            if capture is not None:
+                capture.write(line)
             m = _CALLSCRIPT_RE.match(line)
             if m is None:
                 continue
             if state.feed(int(m.group(1)), int(m.group(2)) // _CD_FRAMEWORDS):
                 emit(state.elapsed, state.note)
 
+    if capture is not None:
+        capture.close()
     rc = proc.wait()
     if rc == 0:
         emit(total_sectors)  # close the bar at 100%
