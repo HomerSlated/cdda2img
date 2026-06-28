@@ -8,6 +8,7 @@ import pytest
 
 import cdda2img.container as container
 import cdda2img.disc_reader as dr
+import cdda2img.drive_speed as ds
 
 
 class _FakeProc:
@@ -25,6 +26,9 @@ def _capture(monkeypatch: pytest.MonkeyPatch) -> dict:
     monkeypatch.setattr(dr, "query_disc", lambda d: (1, 100, [(8, 50, 51)]))
     monkeypatch.setattr(dr.subprocess, "run", fake_run)
     monkeypatch.setattr(container, "wav_to_raw_pcm", lambda *a, **k: None)
+    # The read_speed paths fire a post-rip speed restore (cdrdao drive-info) — neutralise
+    # it here; the dedicated restore behaviour is covered in test_drive_speed.py.
+    monkeypatch.setattr(ds, "restore_drive_speed", lambda dev: None)
     return calls
 
 

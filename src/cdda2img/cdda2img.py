@@ -2394,6 +2394,12 @@ def rip_image(  # noqa: C901
     # Drive offset resolution may prompt the user (input()) — must happen before TUI.
     read_offset, _write_offset, drive_name = _resolve_drive_offsets(device, cfg)
 
+    # A prior rip's cd-paranoia -S slowdown persists on the drive; un-throttle before the
+    # first cdrdao op (fast-toc/scan) so it — and the album-art fetch — run at full speed.
+    from cdda2img import drive_speed
+
+    drive_speed.restore_drive_speed(device)
+
     temp_base = resolve_temp_dir()
     temp = TempFiles(temp_base)
 

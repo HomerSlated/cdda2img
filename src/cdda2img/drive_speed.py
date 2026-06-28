@@ -1,0 +1,115 @@
+"""
+drive_speed.py — restore the optical drive to full read speed.
+
+cd-paranoia's ``-S`` flag (used to slow the AccurateRip-recovery re-rips) sets the
+drive read speed *persistently* — it stays in effect until the next speed-set, not
+just for that one command. cdrdao has no read-speed control, so a drive left slow by
+a prior ``-S 1`` cripples the next cdrdao operation (e.g. fast-toc), slow enough to
+blow the album-art fetch timeout. This module reads the drive's current/max read speed
+and, if the drive is throttled, restores it to maximum.
+
+Reading: there is no Linux ioctl for CD speed, and the drive's own MODE SENSE page-2A
+fields are unreliable on some drives (a PX-716A reports current > max). cdrdao's
+``drive-info`` reads the same page but reports it correctly (7056 kB/s = 40X, the true
+CD-DA max), and cdrdao is already a hard dependency — so it is the trustworthy reader.
+
+Setting: the ``CDROM_SELECT_SPEED`` block-device ioctl (proven by cd-paranoia/cdspeedctl)
+needs only device access — no root, unlike a raw SG_IO ``SET CD SPEED``.
+
+Best-effort throughout: every failure path is swallowed so a rip is never affected.
+
+Public interface:
+    read_drive_speed(device) -> (current_kbps, max_kbps) | (None, None)
+    restore_drive_speed(device) -> None
+"""
+
+from __future__ import annotations
+
+import fcntl
+import logging
+import os
+import re
+import subprocess
+
+log = logging.getLogger(__name__)
+
+# linux/cdrom.h: set the CD-ROM speed. The arg is an Nx multiplier (the kernel scales
+# it by ~177 into a SET CD SPEED command); arg 0 is the "fastest possible" sentinel.
+_CDROM_SELECT_SPEED = 0x5322
+_KBPS_PER_X = 176  # 1x CD = 75 sectors/s * 2352 bytes / 1000 ≈ 176 kB/s
+
+_MAX_READ_RE = re.compile(r"Maximum reading speed:\s*(\d+)\s*kB/s")
+_CUR_READ_RE = re.compile(r"Current reading speed:\s*(\d+)\s*kB/s")
+
+
+def read_drive_speed(device: str) -> tuple[int | None, int | None]:
+    """Return ``(current_kbps, max_kbps)`` from ``cdrdao drive-info``, or ``(None, None)``.
+
+    cdrdao reads MODE SENSE page 2A (page-control = current) and reports the CD-DA-correct
+    figures where the raw page fields would mislead. Never raises — any failure (cdrdao
+    absent, non-zero exit, unparsable output) yields ``(None, None)``.
+    """
+    try:
+        result = subprocess.run(  # noqa: S603  # LINT-012
+            ["cdrdao", "drive-info", "--device", device],  # noqa: S607  # LINT-012
+            capture_output=True,
+            text=True,
+        )
+    except (FileNotFoundError, OSError) as exc:
+        log.debug("cdrdao drive-info failed for %s: %s", device, exc)
+        return None, None
+
+    if result.returncode != 0:
+        log.debug("cdrdao drive-info exited %d for %s", result.returncode, device)
+        return None, None
+
+    # drive-info prints to stdout on some builds, stderr on others — scan both.
+    text = result.stdout + "\n" + result.stderr
+    cur_m = _CUR_READ_RE.search(text)
+    max_m = _MAX_READ_RE.search(text)
+    current = int(cur_m.group(1)) if cur_m else None
+    maximum = int(max_m.group(1)) if max_m else None
+    return current, maximum
+
+
+def _select_speed(device: str, nx: int) -> bool:
+    """Issue CDROM_SELECT_SPEED(nx). Returns True on success; swallows OSError."""
+    try:
+        fd = os.open(device, os.O_RDONLY | os.O_NONBLOCK)
+    except OSError as exc:
+        log.warning("could not open %s to restore read speed: %s", device, exc)
+        return False
+    try:
+        fcntl.ioctl(fd, _CDROM_SELECT_SPEED, nx)
+    except OSError as exc:
+        log.warning("CDROM_SELECT_SPEED(%d) failed on %s: %s", nx, device, exc)
+        return False
+    finally:
+        os.close(fd)
+    return True
+
+
+def restore_drive_speed(device: str) -> None:
+    """If the drive is throttled below its max read speed, restore it to maximum.
+
+    Read-then-conditional: queries current vs max via :func:`read_drive_speed` and only
+    acts when they differ. Sets the exact max (``max_kbps // 176`` as an Nx multiplier),
+    which avoids relying on the ``0 = max`` convention; if the read failed, falls back to
+    Nx ``0`` so the drive is un-throttled regardless. Best-effort — never raises.
+    """
+    current, maximum = read_drive_speed(device)
+
+    if maximum is None:
+        # Couldn't read — un-throttle blind with the "fastest" sentinel.
+        if _select_speed(device, 0):
+            log.info("drive %s read speed reset to max (speed unknown)", device)
+        return
+
+    if current == maximum:
+        log.debug("drive %s already at max read speed (%d kB/s)", device, maximum)
+        return
+
+    nx = max(1, maximum // _KBPS_PER_X)
+    if _select_speed(device, nx):
+        cur_x = current // _KBPS_PER_X if current else "?"
+        log.info("drive %s read speed: %sX -> %dX (restored)", device, cur_x, nx)

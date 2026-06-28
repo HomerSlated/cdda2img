@@ -287,6 +287,10 @@ def rip_disc(
         wav_to_raw_pcm(wav_path, output_pcm)
     finally:
         wav_path.unlink(missing_ok=True)
+        if read_speed is not None:
+            from cdda2img import drive_speed
+
+            drive_speed.restore_drive_speed(device)
 
     disc = _build_rbi_disc(disc_first, tracks)
     track_lsns = [first_lsn for _, first_lsn, _ in tracks]
@@ -359,6 +363,10 @@ def rip_single_track(
         wav_to_raw_pcm(wav_path, output_pcm)
     finally:
         wav_path.unlink(missing_ok=True)
+        if read_speed is not None:
+            from cdda2img import drive_speed
+
+            drive_speed.restore_drive_speed(device)
 
     return track_length
 
@@ -426,6 +434,10 @@ def rip_sector_range(
         wav_to_raw_pcm(wav_path, output_pcm)
     finally:
         wav_path.unlink(missing_ok=True)
+        if read_speed is not None:
+            from cdda2img import drive_speed
+
+            drive_speed.restore_drive_speed(device)
 
     return output_pcm.stat().st_size // _CD_FRAME_BYTES
 
