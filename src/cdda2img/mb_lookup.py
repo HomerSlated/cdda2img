@@ -1049,25 +1049,25 @@ def _disambiguate_by_mcn(matches: list[DiscMeta], disc: RBIDisc) -> DiscMeta | N
 
 
 def _is_consistent(meta: DiscMeta, disc: RBIDisc) -> bool:
-    """True unless *meta* contradicts a non-blank on-disc objective identifier.
+    """True unless *meta* contradicts the disc's per-track ISRCs.
 
-    The disc's Q-channel MCN and per-track ISRCs are gospel, loaded before MB is
-    consulted. A candidate that disagrees with one of them is the *wrong record*
-    (Unit G): reject it wholesale rather than merge a contradiction. Free text
-    (album/artist/titles) is never gated here — only the objective ids.
+    The disc's per-track ISRCs are loaded before MB is consulted; a candidate that
+    disagrees with one is the *wrong record* (Unit G): reject it wholesale rather
+    than merge a contradiction. Free text (album/artist/titles) is never gated
+    here — only the objective per-track ISRC.
 
-      * MCN — both non-blank and not ``mcn_matches`` ⇒ inconsistent (fuzzy:
-        services store partial barcodes).
+    The on-disc MCN is **not** gated here. It and the service-stored barcode are
+    different identifiers in different namespaces, and the MCN is archival-only —
+    never used for disambiguation (see ``docs/reference/identifier_trust_model.md``
+    §1a). A cross-namespace MCN/barcode comparison must therefore never veto a
+    candidate; the per-track ISRC veto is exact and same-namespace, so it stays.
+
       * per-track ISRC — matched by track number; both non-blank and unequal ⇒
         inconsistent (exact: ISRC is a fixed 12-char ISO-3901 code).
 
     Blank on either side is no evidence, never a contradiction. A candidate with
-    no overlapping non-blank ids passes vacuously (consistent until proven wrong).
+    no overlapping non-blank ISRC passes vacuously (consistent until proven wrong).
     """
-    from cdda2img.barcode import mcn_matches
-
-    if disc.catalog and meta.catalog and not mcn_matches(disc.catalog, meta.catalog):
-        return False
     disc_isrcs = {t.track_number: t.isrc for t in disc.tracks if t.isrc}
     if disc_isrcs:
         meta_isrcs = {

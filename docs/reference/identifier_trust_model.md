@@ -39,9 +39,62 @@ we have no other. Disc-mastered metadata is rare, and when present it either con
 the services or is unreferenced (like this MCN). So the disc's MCN earns archival storage
 and last-resort use, nothing more.
 
-**Format impact (spec-before-code):** `RBIDisc` gains a `barcode` field distinct from the
-existing MCN field (`catalog`); RBI spec bump. The `mcn`/`barcode` split must thread the
-toc, PROV, and the §10 selection rungs.
+**Format impact:** `RBIDisc` gains a `barcode` field distinct from the existing MCN field
+(`catalog`). The `mcn`/`barcode` split threads the toc, PROV, and the §10 selection rungs.
+
+---
+
+## 1a. RESOLVED 2026-06-29 — the final, decided shape
+
+The §1 direction is adopted **and tightened**. Two refinements settle it:
+
+**(i) The MCN is archival-only, full stop — no disambiguation use *at all*.** Not a veto,
+not a fuzzy match, not a low-trust confidence contribution. The earlier "keep MCN as a
+positive last-resort signal" rung (§1, §10.3 `mcn`) is **dropped**. Rationale (decisive
+point): distinct releases routinely carry barcodes differing by only a few digits, so a
+fuzzy MCN match false-accepts genuinely-different releases — and the on-disc MCN of the
+motivating disc is unreferenced even on Google. An identifier with no external references
+cannot disambiguate; granting it *any* weight is a logical fallacy, not merely low value.
+
+**(ii) Clone vs archive — the governing principle (retires the synth-MCN fidelity worry).**
+A *clone* is barren and may be unidentifiable in future; an *archive* is the pristine
+invariant (**raw PCM + track timing**) **supplemented** with research material — copied from
+the source when present, sourced externally when blank. We *already* write externally-sourced
+titles and ISRCs into the generated TOC; that is archival enrichment, not infidelity, and
+the verbatim-clone standard was never our standard for the TOC's textual/identifier layer.
+The supplemental data isn't false — it populates previously-blank fields. Therefore
+synthesising a missing MCN is legitimate: the MCN field is *defined* to carry the UPC/EAN
+(Q-ch Mode 2 = 13 BCD barcode digits), so deriving it from the disc's barcode fills the
+field's own canonical content.
+
+**Decided spec:**
+
+- **MCN** (archival only): on-disc MCN present → TOC `CATALOG` line → burned, with
+  `mcn_source=disc` in PROV. Absent → derive from the normalised barcode → TOC `CATALOG`
+  → burned, with `mcn_source=barcode_derived`. The `mcn_source` marker lets a future
+  reader (or our own re-rip) tell a genuine on-disc MCN from a reconstructed one **without
+  changing how the MCN is used** (it is never used beyond archival) — an early single-field
+  instance of the §11.5 per-field traceability.
+- **Barcode** (the disambiguation key): new `RBIDisc.barcode`, sourced from MB/Discogs,
+  added to the B1–B6 resolver as a weighted signal (barcode-vs-barcode, same namespace).
+  Persisted in **PROV only** — not the TOC, not the physical layer.
+- **Veto:** remove the Unit-G cross-namespace MCN veto (`mb_lookup._is_consistent`). The
+  per-track ISRC veto stays (exact, same-namespace, sound).
+
+**No RBI format/version bump.** `build_prov_block` serialises an arbitrary `key=value`
+dict; the binary layout is independent of the PROV key set (precedent: `discogs_release_id`
+is an `RBIDisc` field persisted *only* to PROV; `recovery_track_<n>` was added at v6.0 with
+no bump). "Spec-before-code" here means **documenting** the new `barcode` / `mcn_source`
+keys in `rbi_spec.md` + CLAUDE.md — not a `VERSION_MINOR` change.
+
+**Two-phase implementation:**
+- **Phase 1** — remove the `_is_consistent` MCN veto. Closes the live Tracy Chapman bug
+  (an exact disc-ID match was discarded because an archival MCN disagreed with a catalogued
+  barcode). Pure resolver logic, independently testable.
+- **Phase 2** — add `RBIDisc.barcode` + resolver weight + MCN-from-barcode synthesis +
+  `mcn_source` marker, and tear out the remaining MCN disambiguation machinery
+  (`_disambiguate_by_mcn`, the §10.3 `mcn` rung, `_filter_by_mcn`, `mcn_matches`) so the
+  barcode replaces it with no capability gap.
 
 ---
 

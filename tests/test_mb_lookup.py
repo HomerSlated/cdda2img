@@ -1395,16 +1395,13 @@ def test_is_consistent_blank_overlap_passes_vacuously():
     assert _is_consistent(DiscMeta(catalog="0093624877721"), disc) is True
 
 
-def test_is_consistent_contradicting_mcn_rejected():
+def test_is_consistent_contradicting_mcn_not_rejected():
+    """The on-disc MCN is archival-only and never gates consistency (§1a): a
+    candidate whose barcode diverges from the MCN is NOT rejected on that basis.
+    Only the per-track ISRC (exact, same-namespace) can veto."""
     disc = _make_disc(tracks=[(1, 0, 18000)])
     disc.catalog = "093624877721"  # American Idiot original
-    assert _is_consistent(DiscMeta(catalog="0093624922315"), disc) is False  # reissue
-
-
-def test_is_consistent_fuzzy_mcn_accepts_partial():
-    disc = _make_disc(tracks=[(1, 0, 18000)])
-    disc.catalog = "093624877721"  # printed GTIN-12
-    assert _is_consistent(DiscMeta(catalog="0093624877721"), disc) is True  # EAN-13
+    assert _is_consistent(DiscMeta(catalog="0093624922315"), disc) is True  # reissue
 
 
 def test_is_consistent_contradicting_isrc_rejected():
@@ -1443,15 +1440,18 @@ def test_prepopulate_single_match_contradicting_isrc_blanks():
     assert r.meta is None
 
 
-def test_prepopulate_single_match_contradicting_mcn_blanks():
+def test_prepopulate_single_match_contradicting_mcn_merges():
+    """The Tracy Chapman live bug in miniature: a single disc-ID match whose
+    barcode diverges from the on-disc MCN is NO LONGER vetoed (§1a) — it merges.
+    The MCN cannot reject a stronger identifier (the geometric disc-ID match)."""
     disc = _make_disc(tracks=[(1, 0, 18000)])
     disc.catalog = "093624877721"
     match = DiscMeta(album="Reissue", catalog="0093624922315", release_date="2015")
     with patch("cdda2img.mb_lookup.lookup_disc_id", return_value=[match]):
         r = prepopulate_from_mb(disc, verbose=False)
-    assert r.disc.release_date is None
-    assert r.match_count == 0
-    assert r.rejected_inconsistent == 1
+    assert r.disc.release_date == "2015"
+    assert r.match_count == 1
+    assert r.rejected_inconsistent == 0
 
 
 def test_prepopulate_consistent_single_still_merges():
@@ -1470,9 +1470,11 @@ def test_prepopulate_consistent_single_still_merges():
     assert r.rejected_inconsistent == 0
 
 
-def test_prepopulate_multimatch_drops_inconsistent_then_resolves():
-    """Two pressings share the disc MCN; a reissue with a different barcode is
-    dropped (Unit-G) and counted, then the rung pins the earliest survivor."""
+def test_prepopulate_multimatch_resolves_via_release_group_plurality():
+    """Three disc-ID matches, all consistent (the MCN no longer vetoes, §1a). A
+    reissue in a different release-group is excluded from the winner by
+    release-group *plurality* (not Unit-G), then the rung pins the earliest
+    survivor of the plurality group."""
     disc = _make_disc(tracks=[(1, 0, 18000)])
     disc.catalog = "093624877721"
     s1 = DiscMeta(
@@ -1498,34 +1500,34 @@ def test_prepopulate_multimatch_drops_inconsistent_then_resolves():
     )
     with patch("cdda2img.mb_lookup.lookup_disc_id", return_value=[s1, s2, bad]):
         r = prepopulate_from_mb(disc, verbose=False)
-    assert r.rejected_inconsistent == 1
-    assert r.match_count == 2
+    assert r.rejected_inconsistent == 0  # MCN no longer vetoes 'bad'
+    assert r.match_count == 3  # all three consistent now; rg-x excluded at selection
     assert r.disc.release_date == "1983-04-26"  # pinned earliest survivor ('a')
     assert r.disc.mb_release_group_id == "rg-e"
     assert r.disc.mb_release_id == "a"
     assert r.release_selected_via == "date"
 
 
-def test_prepopulate_r4_tally_winner_gated_by_consistency():
-    """Zero disc-ID matches → R4 ISRC tally fires, but a tally winner whose MCN
-    contradicts the disc MCN is still rejected (advisor #1)."""
+def test_prepopulate_r4_tally_winner_kept_despite_mcn_divergence():
+    """Zero disc-ID matches → R4 ISRC tally fires. The MCN is archival-only and no
+    longer gates the R4 path either (§1a — supersedes the earlier R4 MCN gate):
+    the tally winner is kept because its per-track ISRC agrees; the MCN divergence
+    is irrelevant."""
     disc = _make_disc(tracks=[(1, 0, 18000)])
     disc.catalog = "093624877721"
     disc.tracks[0].isrc = "USRHD0709703"
     winner = DiscMeta(
-        album="Wrong",
-        catalog="0093624922315",  # contradicts the disc MCN
+        album="Reissue",
+        catalog="0093624922315",  # diverges from the on-disc MCN — no longer gates
         release_date="2015",
-        tracks=[TrackMeta(number=1, isrc="USRHD0709703")],  # ISRC half agrees
+        tracks=[TrackMeta(number=1, isrc="USRHD0709703")],  # ISRC agrees
     )
     with (
         patch("cdda2img.mb_lookup.lookup_disc_id", return_value=[]),
         patch("cdda2img.mb_lookup._resolve_via_isrc_tally", return_value=winner),
     ):
         r = prepopulate_from_mb(disc, verbose=False)
-    assert r.disc.release_date is None  # winner rejected on MCN contradiction
-    assert r.disc.album == "Test Album"
-    assert r.meta is None
+    assert r.disc.release_date == "2015"  # winner kept; ISRC agrees, MCN ignored
 
 
 # ---------------------------------------------------------------------------
