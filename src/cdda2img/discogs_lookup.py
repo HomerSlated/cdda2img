@@ -129,7 +129,7 @@ def _parse_result(r) -> DiscMeta:
     return DiscMeta(
         album=album or None,
         artist=artist or None,
-        catalog=barcode,
+        barcode=barcode,
         discogs_release_id=int(release_id) if release_id else None,
         release_date=year,
         country=str(country) if country else None,
@@ -216,7 +216,7 @@ def _parse_full_release(r) -> DiscMeta:
     return DiscMeta(
         album=album or None,
         artist=artist or None,
-        catalog=barcode,
+        barcode=barcode,
         discogs_release_id=int(data["id"]) if data.get("id") else None,
         release_date=year,
         country=str(country) if country else None,

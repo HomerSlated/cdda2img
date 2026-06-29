@@ -283,8 +283,8 @@ def _parse_release(
     from cdda2img.barcode import normalize_barcode
 
     raw_barcode = release.get("barcode") or ""
-    catalog = normalize_barcode(raw_barcode)
-    if raw_barcode and not catalog:
+    barcode = normalize_barcode(raw_barcode)
+    if raw_barcode and not barcode:
         log.info(
             "MB release %r: raw barcode %r failed normalisation (dropped)",
             release.get("id"),
@@ -294,7 +294,7 @@ def _parse_release(
     return DiscMeta(
         album=album_title,
         artist=artist or None,
-        catalog=catalog,
+        barcode=barcode,
         mb_release_id=release.get("id") or None,
         mb_release_group_id=rg.get("id") or None,
         release_date=date or None,
@@ -752,7 +752,7 @@ def _merge_into_disc(meta: DiscMeta, disc: RBIDisc) -> RBIDisc:
         if disc.artist and disc.artist != _unknown
         else (meta.artist or disc.artist)
     )
-    catalog = disc.catalog or meta.catalog
+    catalog = disc.catalog or meta.barcode
 
     meta_by_num = {t.number: t for t in meta.tracks if t.number is not None}
     new_tracks: list[RBITocEntry] = []
@@ -857,7 +857,7 @@ def _overwrite_disc(meta: DiscMeta, disc: RBIDisc) -> RBIDisc:
         disc_total=(
             meta.disc_total if meta.disc_total is not None else disc.disc_total
         ),
-        catalog=meta.catalog or disc.catalog,
+        catalog=meta.barcode or disc.catalog,
         tracks=new_tracks,
         release_date=meta.release_date or disc.release_date or None,
         catalog_number=meta.catalog_number or disc.catalog_number or None,
@@ -1044,7 +1044,7 @@ def _disambiguate_by_mcn(matches: list[DiscMeta], disc: RBIDisc) -> DiscMeta | N
 
     if not disc.catalog:
         return None
-    hits = [m for m in matches if mcn_matches(disc.catalog, m.catalog)]
+    hits = [m for m in matches if mcn_matches(disc.catalog, m.barcode)]
     return hits[0] if len(hits) == 1 else None
 
 
@@ -1218,15 +1218,15 @@ def _select_release_lexicographic(
 
     counts: Counter[str] = Counter()
     for c in candidates:
-        nb = _norm(c.catalog)
+        nb = _norm(c.barcode)
         if nb:
             counts[nb] += 1
 
     pref = [code.upper() for code in preferred_country]
 
     def _key(c: DiscMeta) -> tuple[int, int, int, str, str]:
-        nb = _norm(c.catalog)
-        k_mcn = 0 if (disc.catalog and mcn_matches(disc.catalog, c.catalog)) else 1
+        nb = _norm(c.barcode)
+        k_mcn = 0 if (disc.catalog and mcn_matches(disc.catalog, c.barcode)) else 1
         k_plur = -(counts[nb] if nb else 0)  # more common -> smaller -> first
         country = (c.country or "").upper()
         k_country = pref.index(country) if country in pref else len(pref)
@@ -1306,7 +1306,7 @@ def _prepop_multimatch(
 
     subset = matches
     if disc.catalog:
-        mcn_hits = [m for m in matches if mcn_matches(disc.catalog, m.catalog)]
+        mcn_hits = [m for m in matches if mcn_matches(disc.catalog, m.barcode)]
         if mcn_hits:
             subset = mcn_hits
     rg = _plurality_release_group(subset)
@@ -1404,7 +1404,7 @@ def _prepopulate_from_mb(
     # Hints come from the *consistent* set only: a rejected record's barcode
     # contradicts the disc and must not seed the downstream canonical-MCN pick.
     hints: list[tuple[str, str]] = list(
-        dict.fromkeys((m.mb_release_id or "", m.catalog) for m in matches if m.catalog)
+        dict.fromkeys((m.mb_release_id or "", m.barcode) for m in matches if m.barcode)
     )
     if hints:
         log.debug("MB barcode hints from %d match(es): %s", len(matches), hints)

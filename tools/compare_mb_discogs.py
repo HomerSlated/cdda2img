@@ -245,7 +245,7 @@ def _discogs_fields(discogs_id: int) -> dict:
         "country": dm.country,
         "label": dm.label,
         "catalog_number": dm.catalog_number,
-        "barcode": dm.catalog,
+        "barcode": dm.barcode,
         "year": _year(dm.release_date),
     }
 

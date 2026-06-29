@@ -24,7 +24,7 @@ class DiscMeta:
 
     album: str | None = None
     artist: str | None = None
-    catalog: str | None = None  # MCN / EAN-13 / barcode
+    barcode: str | None = None  # service UPC/EAN barcode (NOT the on-disc MCN)
     mb_disc_id: str | None = None  # computed SHA1 disc ID
     mb_release_id: str | None = None  # MusicBrainz release UUID
     mb_release_group_id: str | None = None  # MusicBrainz release group UUID

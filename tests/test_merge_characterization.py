@@ -87,8 +87,8 @@ def test_disc_number_is_meta_priority_unlike_album():
 
 
 def test_catalog_fill_blank_then_disc_priority():
-    assert _merge_into_disc(DiscMeta(catalog="X"), _disc(catalog=None)).catalog == "X"
-    assert _merge_into_disc(DiscMeta(catalog="X"), _disc(catalog="Y")).catalog == "Y"
+    assert _merge_into_disc(DiscMeta(barcode="X"), _disc(catalog=None)).catalog == "X"
+    assert _merge_into_disc(DiscMeta(barcode="X"), _disc(catalog="Y")).catalog == "Y"
 
 
 # --- per-track title / performer: same disc-priority + sentinel logic -------

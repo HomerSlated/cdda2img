@@ -1314,13 +1314,13 @@ def _discogs_barcode_corroborate(
     if discogs_id is None or not mb_barcode:
         return
     d_meta = _discogs.fetch_release(discogs_id)
-    if d_meta is None or not d_meta.catalog:
+    if d_meta is None or not d_meta.barcode:
         return
-    if d_meta.catalog == mb_barcode:
+    if d_meta.barcode == mb_barcode:
         provenance["discogs_barcode_corroborates"] = "YES"
     else:
         provenance["discogs_barcode_conflict"] = (
-            f"mb:{mb_barcode}|discogs:{d_meta.catalog}"
+            f"mb:{mb_barcode}|discogs:{d_meta.barcode}"
         )
 
 

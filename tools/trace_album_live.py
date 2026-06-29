@@ -132,7 +132,7 @@ def _dump_mb_matches(seed: RBIDisc) -> None:
     for i, m in enumerate(matches):
         print(
             f"    [{i}] album={m.album!r} year={m.release_date!r} "
-            f"barcode={m.catalog!r} country={m.country!r}"
+            f"barcode={m.barcode!r} country={m.country!r}"
         )
         print(
             f"        mbid={m.mb_release_id!r} rg={m.mb_release_group_id!r} "

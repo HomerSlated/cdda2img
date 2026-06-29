@@ -117,7 +117,7 @@ def _full_meta() -> DiscMeta:
     return DiscMeta(
         album="Meta Album",
         artist="Meta Artist",
-        catalog="1111111111111",
+        barcode="1111111111111",
         disc_number=2,
         disc_total=3,
         release_date="1990",
@@ -554,7 +554,7 @@ def _disc_and_meta(draw):
     meta = DiscMeta(
         album=draw(_opt_clean),
         artist=draw(_opt_artist_meta),
-        catalog=draw(_opt_clean),
+        barcode=draw(_opt_clean),
         disc_number=draw(_opt_int),
         disc_total=draw(_opt_int),
         release_date=draw(_opt_clean),

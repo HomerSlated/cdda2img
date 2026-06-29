@@ -229,7 +229,7 @@ def test_discogs_parse_result_artist_album_split():
     assert meta.release_date == "1989"
     assert meta.country == "Belgium"
     assert meta.label == "Epic"
-    assert meta.catalog == "5099747023521"
+    assert meta.barcode == "5099747023521"
     assert meta.source == "discogs"
 
 
@@ -306,7 +306,7 @@ def test_discogs_parse_full_release_prefers_scanned_barcode():
     )
     meta = _parse_full_release(r)
     # 12-digit UPC-A is padded to 13-digit GTIN-13 (leading '0').
-    assert meta.catalog == "0075992377423"
+    assert meta.barcode == "0075992377423"
 
 
 def test_discogs_parse_full_release_drops_printed_only_invalid_barcode():
@@ -332,7 +332,7 @@ def test_discogs_parse_full_release_drops_printed_only_invalid_barcode():
         }
     )
     meta = _parse_full_release(r)
-    assert meta.catalog is None
+    assert meta.barcode is None
 
 
 def test_discogs_parse_full_release_falls_back_to_first_barcode():
@@ -354,7 +354,7 @@ def test_discogs_parse_full_release_falls_back_to_first_barcode():
         }
     )
     meta = _parse_full_release(r)
-    assert meta.catalog == "4012345678901"
+    assert meta.barcode == "4012345678901"
 
 
 def test_normalize_barcode_eleven_digits_returns_none():
@@ -391,7 +391,7 @@ def test_prepopulate_discogs_hint_fires_when_disc_has_no_mcn():
     disc = _disc(album="Eliminator", artist="ZZ Top")
     assert disc.catalog is None
     hit = DiscMeta(
-        album="Eliminator", artist="ZZ Top", catalog="0075992377423", tracks=[]
+        album="Eliminator", artist="ZZ Top", barcode="0075992377423", tracks=[]
     )
     with (
         patch("cdda2img.discogs_lookup.is_available", return_value=True),

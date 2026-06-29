@@ -163,7 +163,7 @@ def test_shadow_multi_source_mb_discogs_cddb() -> None:
         artist="ZZ Top",
         label="Warner Bros.",
         country="US",
-        catalog=mcn,
+        barcode=mcn,
     )
     cddb_meta = DiscMeta(
         album="From CDDB",  # loses to MB
@@ -320,7 +320,7 @@ def test_shadow_b6_discogs_catalogue_beats_mb_diverges_from_legacy() -> None:
         artist="ZZ Top",
         label="Warner Bros.",  # … and Discogs disagrees (the catalogue authority)
         country="GB",
-        catalog=mcn,
+        barcode=mcn,
     )
     with (
         patch("cdda2img.cddb.query_cddb", return_value=[]),

@@ -152,7 +152,7 @@ def _print_meta_summary(meta: DiscMeta) -> None:
     else:
         label_str = "(none)"
     print(f"  Label:         {label_str}")
-    print(f"  MCN:           {meta.catalog or '(none)'}")
+    print(f"  Barcode:       {meta.barcode or '(none)'}")
     _print_meta_tracks(meta)
 
 
@@ -243,7 +243,7 @@ def _show_diff(meta: DiscMeta, disc: RBIDisc) -> None:
 
     _cmp("Album", disc.album, meta.album)
     _cmp("Artist", disc.artist, meta.artist)
-    _cmp("Catalog/barcode", disc.catalog, meta.catalog)
+    _cmp("Catalog/barcode", disc.catalog, meta.barcode)
 
     meta_by_num = {t.number: t for t in meta.tracks if t.number is not None}
     for entry in disc.tracks:

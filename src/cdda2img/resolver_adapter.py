@@ -458,7 +458,7 @@ def meta_to_proposals(
 
     _emit(out, skips, Field.ALBUM, meta.album, t(Field.ALBUM), source)
     _emit_named(out, skips, Field.ARTIST, meta.artist, t(Field.ARTIST), source)
-    _emit(out, skips, Field.CATALOG, meta.catalog, t(Field.CATALOG), source)
+    _emit(out, skips, Field.CATALOG, meta.barcode, t(Field.CATALOG), source)
     _emit(out, skips, Field.DISC_NUMBER, meta.disc_number, t(Field.DISC_NUMBER), source)
     _emit(out, skips, Field.DISC_TOTAL, meta.disc_total, t(Field.DISC_TOTAL), source)
     _emit(

@@ -170,7 +170,7 @@ def _scenario(draw):
         return DiscMeta(
             album=draw(_opt_clean),
             artist=draw(_opt_artist),
-            catalog=draw(_opt_clean),
+            barcode=draw(_opt_clean),
             disc_number=disc_num,
             disc_total=disc_num,
             release_date=draw(_opt_clean),
@@ -305,7 +305,7 @@ def test_discogs_fills_what_mb_left_blank():
 
 def test_canonical_mcn_overrides_baseline_and_meta_catalog():
     baseline = _bare_disc(catalog="0042284229999")  # an on-disc catalog
-    mb = _meta(catalog="1111111111111")
+    mb = _meta(barcode="1111111111111")
     chosen = "0042284229821"  # §10 verdict
     out = _resolver_sequence(baseline, mb, chosen, None, None, None)
     assert out.catalog == chosen
@@ -314,7 +314,7 @@ def test_canonical_mcn_overrides_baseline_and_meta_catalog():
 
 def test_no_canonical_mcn_falls_back_to_fill_blank_catalog():
     baseline = _bare_disc()  # no catalog
-    mb = _meta(catalog="MB-CAT")
+    mb = _meta(barcode="MB-CAT")
     out = _resolver_sequence(baseline, mb, None, None, None, None)
     assert out.catalog == "MB-CAT"  # MB fills the blank when no canonical MCN
     assert out == _live_sequence(baseline, mb, None, None, None, None)

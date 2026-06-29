@@ -40,7 +40,7 @@ def test_agreement_sets_corroborates():
     prov, _, _ = _run(
         link=1198146,
         mb_barcode="042284229821",
-        discogs_meta=DiscMeta(catalog="042284229821", source="discogs"),
+        discogs_meta=DiscMeta(barcode="042284229821", source="discogs"),
     )
     assert prov["discogs_barcode_corroborates"] == "YES"
     assert "discogs_barcode_conflict" not in prov
@@ -50,7 +50,7 @@ def test_conflict_sets_conflict_with_both_barcodes():
     prov, _, _ = _run(
         link=1198146,
         mb_barcode="042284229821",
-        discogs_meta=DiscMeta(catalog="999999999999", source="discogs"),
+        discogs_meta=DiscMeta(barcode="999999999999", source="discogs"),
     )
     assert prov["discogs_barcode_conflict"] == "mb:042284229821|discogs:999999999999"
     assert "discogs_barcode_corroborates" not in prov
@@ -69,7 +69,7 @@ def test_skips_when_discogs_unavailable_no_mb_fetch():
     prov, link_fn, fetch_fn = _run(
         link=1198146,
         mb_barcode="042284229821",
-        discogs_meta=DiscMeta(catalog="042284229821"),
+        discogs_meta=DiscMeta(barcode="042284229821"),
         available=False,
     )
     assert prov == {}
@@ -98,6 +98,6 @@ def test_skips_when_discogs_release_has_no_barcode():
     prov, _, _ = _run(
         link=1198146,
         mb_barcode="042284229821",
-        discogs_meta=DiscMeta(catalog=None, source="discogs"),
+        discogs_meta=DiscMeta(barcode=None, source="discogs"),
     )
     assert prov == {}

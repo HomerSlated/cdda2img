@@ -212,7 +212,7 @@ def _make_meta_disc() -> DiscMeta:
     return DiscMeta(
         album="Pump Up the Jam",
         artist="Technotronic",
-        catalog="5099747023521",
+        barcode="5099747023521",
         mb_release_id="abc-123",
         release_date="1989",
         tracks=[
@@ -613,12 +613,12 @@ def test_prepopulate_returns_barcode_hints_from_all_matches():
     """
     disc = _make_disc(tracks=[(1, 0, 18000)])
     matches = [
-        DiscMeta(album="A", mb_release_id="rid-A", catalog="0075992377423"),
+        DiscMeta(album="A", mb_release_id="rid-A", barcode="0075992377423"),
         # Duplicate (rid-A, 0075992377423) — dropped
-        DiscMeta(album="A2", mb_release_id="rid-A", catalog="0075992377423"),
+        DiscMeta(album="A2", mb_release_id="rid-A", barcode="0075992377423"),
         # Same barcode, different MBID — kept
-        DiscMeta(album="B", mb_release_id="rid-B", catalog="0075992377423"),
-        DiscMeta(album="C", mb_release_id="rid-C", catalog="4012345678901"),
+        DiscMeta(album="B", mb_release_id="rid-B", barcode="0075992377423"),
+        DiscMeta(album="C", mb_release_id="rid-C", barcode="4012345678901"),
         DiscMeta(album="D"),  # no catalog → dropped
     ]
     with patch("cdda2img.mb_lookup.lookup_disc_id", return_value=matches):
@@ -707,8 +707,8 @@ def test_disambiguate_by_mcn_matches_barcode():
     disc = _make_disc(tracks=[(1, 0, 18000)])
     disc.catalog = _ELIMINATOR_MCN
     matches = [
-        DiscMeta(album="Other", catalog="4012345678901", mb_release_id="r0"),
-        DiscMeta(album="Eliminator", catalog=_ELIMINATOR_MCN, mb_release_id="r1"),
+        DiscMeta(album="Other", barcode="4012345678901", mb_release_id="r0"),
+        DiscMeta(album="Eliminator", barcode=_ELIMINATOR_MCN, mb_release_id="r1"),
     ]
     w = _disambiguate_by_mcn(matches, disc)
     assert w is not None and w.mb_release_id == "r1"
@@ -721,11 +721,11 @@ def test_disambiguate_by_mcn_shared_barcode_returns_none():
     disc.catalog = _ELIMINATOR_MCN
     matches = [
         DiscMeta(
-            album="E", catalog=_ELIMINATOR_MCN, release_date="1983", mb_release_id="xe"
+            album="E", barcode=_ELIMINATOR_MCN, release_date="1983", mb_release_id="xe"
         ),
         DiscMeta(
             album="E",
-            catalog=_ELIMINATOR_MCN,
+            barcode=_ELIMINATOR_MCN,
             release_date="1983-11-18",
             mb_release_id="de",
         ),
@@ -735,7 +735,7 @@ def test_disambiguate_by_mcn_shared_barcode_returns_none():
 
 def test_disambiguate_by_mcn_no_match_or_no_mcn_returns_none():
     disc = _make_disc(tracks=[(1, 0, 18000)])
-    matches = [DiscMeta(album="E", catalog=_ELIMINATOR_MCN, mb_release_id="r1")]
+    matches = [DiscMeta(album="E", barcode=_ELIMINATOR_MCN, mb_release_id="r1")]
     # No MCN on the disc → None.
     assert _disambiguate_by_mcn(matches, disc) is None
     # MCN present but matches no candidate barcode → None.
@@ -754,7 +754,7 @@ def test_prepopulate_multimatch_unique_mcn_picks_pressing():
         ),  # no barcode
         DiscMeta(
             album="E",
-            catalog=_ELIMINATOR_MCN,
+            barcode=_ELIMINATOR_MCN,
             release_date="1983-11-18",
             mb_release_id="de",
             mb_release_group_id="rg-e",
@@ -778,14 +778,14 @@ def test_prepopulate_multimatch_rung_pins_earliest_in_shared_barcode_rg():
         DiscMeta(album="E", mb_release_id="us", mb_release_group_id="rg-e"),
         DiscMeta(
             album="E",
-            catalog=_ELIMINATOR_MCN,
+            barcode=_ELIMINATOR_MCN,
             release_date="1983-11-18",
             mb_release_id="de",
             mb_release_group_id="rg-e",
         ),
         DiscMeta(
             album="E",
-            catalog=_ELIMINATOR_MCN,
+            barcode=_ELIMINATOR_MCN,
             release_date="1983",
             mb_release_id="xe",
             mb_release_group_id="rg-e",
@@ -920,7 +920,7 @@ def test_prepopulate_multiple_matches_isrc_disambiguates_winner():
         album="Winner",
         artist="Found",
         mb_release_id="rid-win",
-        catalog="0075992377423",
+        barcode="0075992377423",
         tracks=[
             TrackMeta(number=1, isrc="AAA0000000001"),
             TrackMeta(number=2, isrc="AAA0000000002"),
@@ -1247,7 +1247,7 @@ def test_prepopulate_zero_matches_triggers_r4_tally():
         album="Found Album",
         artist="Found Artist",
         mb_release_id="rid-w",
-        catalog="0075992377423",
+        barcode="0075992377423",
     )
     with (
         patch("cdda2img.mb_lookup.lookup_disc_id", return_value=[]),
@@ -1392,7 +1392,7 @@ def test_compute_disc_id_rejects_out_of_range_track_numbers():
 
 def test_is_consistent_blank_overlap_passes_vacuously():
     disc = _make_disc(tracks=[(1, 0, 18000)])  # no catalog, no track ISRC
-    assert _is_consistent(DiscMeta(catalog="0093624877721"), disc) is True
+    assert _is_consistent(DiscMeta(barcode="0093624877721"), disc) is True
 
 
 def test_is_consistent_contradicting_mcn_not_rejected():
@@ -1401,7 +1401,7 @@ def test_is_consistent_contradicting_mcn_not_rejected():
     Only the per-track ISRC (exact, same-namespace) can veto."""
     disc = _make_disc(tracks=[(1, 0, 18000)])
     disc.catalog = "093624877721"  # American Idiot original
-    assert _is_consistent(DiscMeta(catalog="0093624922315"), disc) is True  # reissue
+    assert _is_consistent(DiscMeta(barcode="0093624922315"), disc) is True  # reissue
 
 
 def test_is_consistent_contradicting_isrc_rejected():
@@ -1446,7 +1446,7 @@ def test_prepopulate_single_match_contradicting_mcn_merges():
     The MCN cannot reject a stronger identifier (the geometric disc-ID match)."""
     disc = _make_disc(tracks=[(1, 0, 18000)])
     disc.catalog = "093624877721"
-    match = DiscMeta(album="Reissue", catalog="0093624922315", release_date="2015")
+    match = DiscMeta(album="Reissue", barcode="0093624922315", release_date="2015")
     with patch("cdda2img.mb_lookup.lookup_disc_id", return_value=[match]):
         r = prepopulate_from_mb(disc, verbose=False)
     assert r.disc.release_date == "2015"
@@ -1459,7 +1459,7 @@ def test_prepopulate_consistent_single_still_merges():
     disc.catalog = "093624877721"  # printed GTIN-12 of the original
     match = DiscMeta(
         album="E",
-        catalog="0093624877721",  # EAN-13 — fuzzy-matches
+        barcode="0093624877721",  # EAN-13 — fuzzy-matches
         release_date="1983-04-26",
         mb_release_id="orig",
     )
@@ -1479,21 +1479,21 @@ def test_prepopulate_multimatch_resolves_via_release_group_plurality():
     disc.catalog = "093624877721"
     s1 = DiscMeta(
         album="E",
-        catalog="0093624877721",
+        barcode="0093624877721",
         release_date="1983-04-26",
         mb_release_id="a",
         mb_release_group_id="rg-e",
     )
     s2 = DiscMeta(
         album="E",
-        catalog="0093624877721",
+        barcode="0093624877721",
         release_date="1983-11-18",
         mb_release_id="b",
         mb_release_group_id="rg-e",
     )
     bad = DiscMeta(
         album="Wrong",
-        catalog="0093624922315",
+        barcode="0093624922315",
         release_date="2015",
         mb_release_id="bad",
         mb_release_group_id="rg-x",
@@ -1518,7 +1518,7 @@ def test_prepopulate_r4_tally_winner_kept_despite_mcn_divergence():
     disc.tracks[0].isrc = "USRHD0709703"
     winner = DiscMeta(
         album="Reissue",
-        catalog="0093624922315",  # diverges from the on-disc MCN — no longer gates
+        barcode="0093624922315",  # diverges from the on-disc MCN — no longer gates
         release_date="2015",
         tracks=[TrackMeta(number=1, isrc="USRHD0709703")],  # ISRC agrees
     )
@@ -1550,7 +1550,7 @@ def test_prepop_multimatch_mcn_subset_excludes_blank_barcode_variant():
     orig1 = DiscMeta(
         album="American Idiot",
         artist="Green Day",
-        catalog="0093624877721",  # fuzzy-matches the disc MCN
+        barcode="0093624877721",  # fuzzy-matches the disc MCN
         release_date="2004-09-20",
         mb_release_id="o1",
         mb_release_group_id="rg-ai",
@@ -1558,7 +1558,7 @@ def test_prepop_multimatch_mcn_subset_excludes_blank_barcode_variant():
     orig2 = DiscMeta(
         album="American Idiot",
         artist="Green Day",
-        catalog="093624877721",
+        barcode="093624877721",
         release_date="2004-11-18",
         mb_release_id="o2",
         mb_release_group_id="rg-ai",
@@ -1566,7 +1566,7 @@ def test_prepop_multimatch_mcn_subset_excludes_blank_barcode_variant():
     blank_variant = DiscMeta(
         album="American Idiot: The Ultimate American Idiot",
         artist="Green Day",
-        catalog=None,  # blank → vacuously consistent, NOT identity-proven
+        barcode=None,  # blank → vacuously consistent, NOT identity-proven
         release_date="2015",
         mb_release_id="v",
         mb_release_group_id="rg-ai",
@@ -1596,14 +1596,14 @@ def test_prepop_multimatch_no_positive_mcn_falls_back_to_full_set():
     matches = [
         DiscMeta(
             album="American Idiot",
-            catalog=None,
+            barcode=None,
             release_date="2004",
             mb_release_id="a",
             mb_release_group_id="rg-ai",
         ),
         DiscMeta(
             album="American Idiot",
-            catalog=None,
+            barcode=None,
             release_date="2004",
             mb_release_id="b",
             mb_release_group_id="rg-ai",
@@ -1895,7 +1895,7 @@ def _cand(mbid, *, catalog=None, country=None, date=None, rg="rg"):
     return DiscMeta(
         album="A",
         artist="B",
-        catalog=catalog,
+        barcode=catalog,
         country=country,
         release_date=date,
         mb_release_id=mbid,
@@ -1999,21 +1999,21 @@ def test_prepopulate_rung_preferred_country_threads_through():
     matches = [
         DiscMeta(
             album="A",
-            catalog=bc,
+            barcode=bc,
             country="US",
             mb_release_id="us",
             mb_release_group_id="rg",
         ),
         DiscMeta(
             album="A",
-            catalog=bc,
+            barcode=bc,
             country="GB",
             mb_release_id="gb",
             mb_release_group_id="rg",
         ),
         DiscMeta(
             album="A",
-            catalog=bc,
+            barcode=bc,
             country="DE",
             mb_release_id="de",
             mb_release_group_id="rg",

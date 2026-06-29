@@ -185,7 +185,7 @@ def _scenario(draw):
     sel = DiscMeta(
         album=draw(_opt_clean),
         artist=draw(_opt_artist),
-        catalog=draw(_opt_clean),
+        barcode=draw(_opt_clean),
         disc_number=draw(st.none() | st.integers(min_value=0, max_value=9)),
         disc_total=draw(st.none() | st.integers(min_value=0, max_value=9)),
         release_date=draw(_opt_clean),
