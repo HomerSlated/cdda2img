@@ -61,23 +61,21 @@ These rules are not visible in the flowcharts; they govern which arrows are foll
 
 ### Multi-match resolution chain (`_prepop_multimatch`, `mb_lookup.py:1227`)
 
-The chain is: ISRC/MCN disambiguation → lexicographic release-selection rung.
+The chain is: ISRC disambiguation → lexicographic release-selection rung. (The on-disc MCN is **not** a disambiguator — §1a, archival only.)
 
 1. **ISRC disambiguation (R1)** — `_disambiguate_by_isrcs` scores each candidate by agreement with the disc's per-track ISRCs; a unique winner with score ≥ `_MIN_ISRC_AGREE` (= 2) and strict uniqueness wins. Sets PROV `multi_match_isrc_disambiguated=YES` (later: confidence +0.15).
-2. **MCN disambiguation** — `_disambiguate_by_mcn` pins a candidate whose barcode matches the on-disc MCN.
-3. **Lexicographic release-selection rung** — when neither of the above pins a winner, the rung **always pins one pressing** from the album-consistent set. There is no abstain / "commit only agreed facts" / "claim no pressing" path; the previous agreed-facts behaviour has been removed.
+2. **Lexicographic release-selection rung** — when ISRC does not pin a winner, the rung **always pins one pressing** from the album-consistent set. There is no abstain / "commit only agreed facts" / "claim no pressing" path; the previous agreed-facts behaviour has been removed.
 
-   The rung first narrows the candidate set to TOC-collision-safe scope: when the disc carries an MCN, narrow to candidates whose barcode positively matches it; then narrow to the **plurality release-group** (the album the disc-ID most agrees on). It then ranks the survivors by a pure lexicographic key chain (`_select_release_lexicographic`, `mb_lookup.py:1164`):
+   The rung narrows the candidate set to the **plurality release-group** (the album the disc-ID most agrees on). The on-disc MCN plays no part (§1a — it is archival, never a disambiguator); TOC-collision-safe scoping rests on the candidates' own service barcodes via the plurality key. It then ranks the survivors by a pure lexicographic key chain (`_select_release_lexicographic`, `mb_lookup.py:1164`):
 
    | Key | Name | Type | Rule |
    |-----|------|------|------|
-   | 0 | `mcn` | objective | candidate barcode positively matches the on-disc MCN → ranks first |
-   | 1 | `barcode_plurality` | popularity prior | the most common normalised barcode across the set wins |
-   | 2 | `preferred_country` | user preference | rank by position in the `preferred_country` config list (priority, **not** a filter; unlisted = lowest equal) |
-   | 3 | `date` | fallback | earliest `release_date` |
-   | 4 | `mbid` | terminal | release-id, guarantees a unique deterministic winner |
+   | 0 | `barcode_plurality` | popularity prior | the most common normalised barcode across the set wins |
+   | 1 | `preferred_country` | user preference | rank by position in the `preferred_country` config list (priority, **not** a filter; unlisted = lowest equal) |
+   | 2 | `date` | fallback | earliest `release_date` |
+   | 3 | `mbid` | terminal | release-id, guarantees a unique deterministic winner |
 
-   No candidate is discarded; the top of the ranking is pinned. Pinning the release id here is legitimate — every survivor shares the disc-ID fingerprint, so this chooses only the *pressing*, never the album. PROV records `release_selected_via` (the key that broke the tie) and, when key 2 fired, `preferred_country_applied`. Later: confidence awards `mb_disc_id_multi` (+0.30), mutually exclusive with `mb_disc_id`.
+   No candidate is discarded; the top of the ranking is pinned. Pinning the release id here is legitimate — every survivor shares the disc-ID fingerprint, so this chooses only the *pressing*, never the album. PROV records `release_selected_via` (the key that broke the tie) and, when `preferred_country` fired, `preferred_country_applied`. Later: confidence awards `mb_disc_id_multi` (+0.30), mutually exclusive with `mb_disc_id`.
 
 ### Stage-7 duration match (OPT-3)
 
@@ -211,7 +209,7 @@ flowchart TD
 7. **Run multi-match chain**: more than one candidate → the disambiguation chain.
 8. **ISRC or MCN pins a winner?**: R1 ISRC scoring or MCN-barcode match attempts to pin a single pressing.
 9. **Merge the disambiguated winner**: the ISRC/MCN winner is merged; ISRC path also sets `multi_match_isrc_disambiguated`.
-10. **Run lexicographic release-selection rung**: no ISRC/MCN winner → narrow to the album-consistent plurality release-group and rank by the key chain (mcn → barcode_plurality → preferred_country → date → mbid).
+10. **Run lexicographic release-selection rung**: no ISRC winner → narrow to the album-consistent plurality release-group and rank by the key chain (barcode_plurality → preferred_country → date → mbid; the on-disc MCN is never a key, §1a).
 11. **Pin best pressing in album-consistent set**: the rung pins one pressing, merges it, and records `release_selected_via` (and `preferred_country_applied` if key 2 fired).
 12. **Emit MB provenance keys**: write `multi_match_isrc_disambiguated`, `release_selected_via`, `mb_rejected_inconsistent`, and the MB lookup status.
 13. **Emit R9 CDDB to MB disagreement**: compare the non-MB view against the MB candidate; flag disagreeing fields.

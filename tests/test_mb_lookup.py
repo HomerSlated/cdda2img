@@ -17,7 +17,6 @@ from cdda2img.lookup_result import (
 )
 from cdda2img.mb_lookup import (
     _disambiguate_by_isrcs,
-    _disambiguate_by_mcn,
     _find_disc_medium,
     _is_consistent,
     _merge_into_disc,
@@ -697,57 +696,17 @@ def test_prepopulate_multimatch_rg_tie_leaves_group_unset():
 
 
 # ---------------------------------------------------------------------------
-# MCN/barcode multi-match disambiguation
+# Multi-match release selection (barcode plurality + lexicographic rung)
 # ---------------------------------------------------------------------------
 
 _ELIMINATOR_MCN = "0075992377423"  # ZZ Top - Eliminator, EU 1983 (valid GTIN-13)
 
 
-def test_disambiguate_by_mcn_matches_barcode():
+def test_prepopulate_multimatch_barcode_plurality_picks_pressing():
+    """A candidate carrying a service barcode outranks a barcodeless sibling on the
+    barcode_plurality rung (the on-disc MCN plays no part, §1a), so the barcoded
+    pressing's exact date + release id are merged."""
     disc = _make_disc(tracks=[(1, 0, 18000)])
-    disc.catalog = _ELIMINATOR_MCN
-    matches = [
-        DiscMeta(album="Other", barcode="4012345678901", mb_release_id="r0"),
-        DiscMeta(album="Eliminator", barcode=_ELIMINATOR_MCN, mb_release_id="r1"),
-    ]
-    w = _disambiguate_by_mcn(matches, disc)
-    assert w is not None and w.mb_release_id == "r1"
-
-
-def test_disambiguate_by_mcn_shared_barcode_returns_none():
-    """A barcode shared by two pressings (DE + XE) is not uniquely identifying,
-    so we return None rather than fabricate one pressing's date / release id."""
-    disc = _make_disc(tracks=[(1, 0, 18000)])
-    disc.catalog = _ELIMINATOR_MCN
-    matches = [
-        DiscMeta(
-            album="E", barcode=_ELIMINATOR_MCN, release_date="1983", mb_release_id="xe"
-        ),
-        DiscMeta(
-            album="E",
-            barcode=_ELIMINATOR_MCN,
-            release_date="1983-11-18",
-            mb_release_id="de",
-        ),
-    ]
-    assert _disambiguate_by_mcn(matches, disc) is None
-
-
-def test_disambiguate_by_mcn_no_match_or_no_mcn_returns_none():
-    disc = _make_disc(tracks=[(1, 0, 18000)])
-    matches = [DiscMeta(album="E", barcode=_ELIMINATOR_MCN, mb_release_id="r1")]
-    # No MCN on the disc → None.
-    assert _disambiguate_by_mcn(matches, disc) is None
-    # MCN present but matches no candidate barcode → None.
-    disc.catalog = "5099747023521"  # valid GTIN-13, not among candidates
-    assert _disambiguate_by_mcn(matches, disc) is None
-
-
-def test_prepopulate_multimatch_unique_mcn_picks_pressing():
-    """A disc MCN that matches exactly ONE candidate barcode pins that pressing,
-    so the full pressing (exact date + release id) is merged."""
-    disc = _make_disc(tracks=[(1, 0, 18000)])
-    disc.catalog = _ELIMINATOR_MCN
     matches = [
         DiscMeta(
             album="E", mb_release_id="us", mb_release_group_id="rg-e"
@@ -762,18 +721,18 @@ def test_prepopulate_multimatch_unique_mcn_picks_pressing():
     ]
     with patch("cdda2img.mb_lookup.lookup_disc_id", return_value=matches):
         r = prepopulate_from_mb(disc, verbose=False)
-    assert r.disc.release_date == "1983-11-18"  # unique barcode → exact pressing
+    assert r.disc.release_date == "1983-11-18"  # the barcoded pressing won
     assert r.disc.mb_release_id == "de"
+    assert r.release_selected_via == "barcode_plurality"
     assert r.isrc_disambiguated is False
 
 
 def test_prepopulate_multimatch_rung_pins_earliest_in_shared_barcode_rg():
-    """§10.3 rung: when a barcode is shared across MCN-matched pressings and no
-    higher key separates them, the earliest release_date breaks the tie and that
-    pressing is pinned (date key). The 'us' candidate lacks the MCN and is dropped
-    by the subset narrowing."""
+    """§10.3 rung: two pressings share a barcode and a barcodeless sibling does not.
+    The barcoded pair wins the plurality tier (so ``via`` is ``barcode_plurality``);
+    within that pair the earliest release_date pins the winner. The on-disc MCN is
+    not consulted (§1a) — selection rests on the candidates' own barcodes."""
     disc = _make_disc(tracks=[(1, 0, 18000)])
-    disc.catalog = _ELIMINATOR_MCN
     matches = [
         DiscMeta(album="E", mb_release_id="us", mb_release_group_id="rg-e"),
         DiscMeta(
@@ -795,8 +754,9 @@ def test_prepopulate_multimatch_rung_pins_earliest_in_shared_barcode_rg():
         r = prepopulate_from_mb(disc, verbose=False)
     assert r.disc.release_date == "1983"  # the pinned 'xe' pressing's own date
     assert r.disc.mb_release_group_id == "rg-e"
-    assert r.disc.mb_release_id == "xe"  # earliest date wins the tie
-    assert r.release_selected_via == "date"
+    assert r.disc.mb_release_id == "xe"  # earliest date within the barcoded pair
+    # 'us' (no barcode) loses the plurality tier, so that is the deciding key.
+    assert r.release_selected_via == "barcode_plurality"
     assert r.isrc_disambiguated is False
 
 
@@ -1529,26 +1489,26 @@ def test_prepopulate_r4_tally_winner_kept_despite_mcn_divergence():
 
 
 # ---------------------------------------------------------------------------
-# #3-a Unit A — MCN-matched subset narrowing (multi-match selection)
+# #3-a Barcode plurality excludes a blank-barcode TOC-collision variant
 # ---------------------------------------------------------------------------
 
 
-def test_prepop_multimatch_mcn_subset_excludes_blank_barcode_variant():
-    """The American Idiot fix: a same-RG variant with a BLANK barcode passes the
-    Unit-G gate vacuously and would break album unanimity — but the MCN-matched
-    subset narrowing drops it, so the agreed album resolves to the original.
+def test_prepop_multimatch_barcode_plurality_excludes_blank_barcode_variant():
+    """The American Idiot fix, now via the SOUND mechanism: a same-RG variant with a
+    BLANK barcode passes the (per-track-ISRC-only) consistency gate vacuously and
+    would break album unanimity — but it loses the barcode_plurality rung to the two
+    barcode-carrying originals, so the agreed album resolves to the original.
 
-    Without narrowing, the variant's divergent album would collapse the agreed
-    album to None (two distinct values); with it, only the two barcode-proven
-    originals contribute → "American Idiot" fills the blank disc album.
+    This is the same outcome the old MCN-narrowing produced, but driven by the
+    candidates' own service barcodes (same-namespace) rather than the cross-namespace
+    on-disc MCN (§1a). The disc has no MCN at all here, to make that explicit.
     """
     disc = _make_disc(tracks=[(1, 0, 18000)])
     disc.album = ""  # blank so the agreed album can fill through (fill-blanks)
-    disc.catalog = "093624877721"
     orig1 = DiscMeta(
         album="American Idiot",
         artist="Green Day",
-        barcode="0093624877721",  # fuzzy-matches the disc MCN
+        barcode="0093624877721",
         release_date="2004-09-20",
         mb_release_id="o1",
         mb_release_group_id="rg-ai",
@@ -1556,7 +1516,7 @@ def test_prepop_multimatch_mcn_subset_excludes_blank_barcode_variant():
     orig2 = DiscMeta(
         album="American Idiot",
         artist="Green Day",
-        barcode="093624877721",
+        barcode="0093624877721",  # same normalised barcode as orig1 (plurality x2)
         release_date="2004-11-18",
         mb_release_id="o2",
         mb_release_group_id="rg-ai",
@@ -1564,7 +1524,7 @@ def test_prepop_multimatch_mcn_subset_excludes_blank_barcode_variant():
     blank_variant = DiscMeta(
         album="American Idiot: The Ultimate American Idiot",
         artist="Green Day",
-        barcode=None,  # blank → vacuously consistent, NOT identity-proven
+        barcode=None,  # blank → loses the plurality rung
         release_date="2015",
         mb_release_id="v",
         mb_release_group_id="rg-ai",
@@ -1575,22 +1535,20 @@ def test_prepop_multimatch_mcn_subset_excludes_blank_barcode_variant():
     ):
         r = prepopulate_from_mb(disc, verbose=False)
     assert r.rejected_inconsistent == 0  # blank barcode is not a contradiction
-    assert r.match_count == 3  # all three survive Unit G
-    assert r.disc.album == "American Idiot"  # narrowing excluded the variant
-    # The TOC-collision variant is excluded from selection; the rung pins the
-    # earliest MCN-matched original, not the 2015 variant.
+    assert r.match_count == 3  # all three survive the consistency gate
+    assert r.disc.album == "American Idiot"  # plurality excluded the variant
+    # The TOC-collision variant loses the plurality tier; among the two barcoded
+    # originals the earliest date pins the winner.
     assert r.disc.release_date == "2004-09-20"  # pinned 'o1' (earliest original)
     assert r.disc.mb_release_id == "o1"
-    assert r.release_selected_via == "date"
+    assert r.release_selected_via == "barcode_plurality"
 
 
-def test_prepop_multimatch_no_positive_mcn_falls_back_to_full_set():
-    """When the disc has an MCN but NO candidate barcode matches (MB lists none),
-    the subset falls back to the full consistent set — RG plurality still holds,
-    so the agreed album/year are taken over every candidate."""
+def test_prepop_multimatch_no_barcodes_uses_full_set_by_rg_plurality():
+    """When no candidate carries a barcode, the full consistent set feeds RG
+    plurality, so the agreed album/year are taken over every candidate."""
     disc = _make_disc(tracks=[(1, 0, 18000)])
     disc.album = ""
-    disc.catalog = "093624877721"
     matches = [
         DiscMeta(
             album="American Idiot",
@@ -1904,21 +1862,6 @@ def _cand(mbid, *, catalog=None, country=None, date=None, rg="rg"):
 def test_rung_empty_returns_none():
     disc = RBIDisc(album="A", artist="B")
     assert _select_release_lexicographic([], disc, []) == (None, None)
-
-
-def test_rung_key0_on_disc_mcn_wins():
-    # A candidate whose barcode matches the on-disc MCN outranks all others,
-    # even a more-popular barcode / earlier date.
-    disc = RBIDisc(album="A", artist="B", catalog="0042284229821")
-    cands = [
-        _cand("other1", catalog="0075992377423", date="1980"),
-        _cand("other2", catalog="0075992377423", date="1981"),
-        _cand("mcn", catalog="0042284229821", date="1999"),
-    ]
-    winner, via = _select_release_lexicographic(cands, disc, [])
-    assert winner is not None
-    assert winner.mb_release_id == "mcn"
-    assert via == "mcn"
 
 
 def test_rung_key1_barcode_plurality_wins():

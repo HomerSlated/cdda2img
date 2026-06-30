@@ -2,37 +2,20 @@
 
 ## Open
 
-### MCN archival-only + barcode as the disambiguation key (2026-06-29) — DECIDED, Phase 1 IN PROGRESS
+### MCN archival-only + barcode as the disambiguation key (2026-06-29) — ✅ DONE 2026-06-30
 
-Live bug on the Tracy Chapman s/t rip: an **exact** MB disc-ID match
-(`MhxKMfBAtiU9Pxu7rIJ.m36G_NY-`, 7 releases) was discarded — PROV showed
-`mb_rejected_inconsistent=7`, `lookup_status_mb=empty` — so CDDB's flat
-"Artist - Title" titles won by default. Root cause: `mb_lookup._is_consistent`
-(the Unit-G gate, `mb_lookup.py:~1069`) vetoes any candidate whose barcode fails
-`barcode.mcn_matches(disc.catalog, meta.catalog)` — a **cross-namespace** comparison
-(on-disc MCN vs service barcode). The on-disc MCN `7559607740206` is the publisher's
-catalogue number `7559-60774-2` + an arbitrary `06`; unreferenced on MB, Discogs, *and*
-Google.
+Closed the Tracy Chapman live bug (an exact MB disc-ID match discarded because an archival
+on-disc MCN was cross-namespace-compared against catalogued barcodes). Decided rationale +
+clone-vs-archive principle in `docs/reference/identifier_trust_model.md` §1a; memory
+`project_mcn_barcode_resolution`. Shipped in three commits:
 
-**Decided 2026-06-29 (full rationale + clone-vs-archive principle in
-`docs/reference/identifier_trust_model.md` §1a; memory
-`project_mcn_barcode_resolution`):**
-
-- **MCN = archival only — never disambiguation** (not a veto, not a fuzzy match, not a
-  low-trust confidence contribution). Distinct releases can share near-identical barcodes,
-  so fuzzy MCN matching false-accepts. On-disc MCN → TOC `CATALOG` → burned
-  (`mcn_source=disc`); absent → derive from normalised barcode → TOC `CATALOG` → burned
-  (`mcn_source=barcode_derived`, the MCN field's canonical content is the UPC/EAN).
-- **Barcode = the disambiguation key**: new `RBIDisc.barcode` (from MB/Discogs), added to
-  the resolver as a weighted signal, persisted in **PROV only**. **No format bump** —
-  PROV is a free-form `key=value` dict (precedent: `discogs_release_id`); "spec-before-code"
-  = document the `barcode`/`mcn_source` keys in `rbi_spec.md` + CLAUDE.md.
-
-**Phase 1 (in progress):** remove the `_is_consistent` MCN veto — closes the live bug;
-pure resolver logic; ISRC veto stays.
-**Phase 2:** add `RBIDisc.barcode` + resolver weight + MCN-from-barcode synthesis +
-`mcn_source`, and tear out the remaining MCN disambiguation (`_disambiguate_by_mcn`, the
-§10.3 `mcn` rung, `_filter_by_mcn`, `mcn_matches`) so barcode replaces it with no gap.
+- **Phase 1 (8ef6c2b)** — removed the `_is_consistent` MCN veto (ISRC veto stays).
+- **Phase 2 step 2+4 (9116c20)** — `RBIDisc.barcode` (PROV-only, no format bump) + resolver
+  `Field.BARCODE` + `_finalize_identifiers` (MCN synthesised from the normalised barcode,
+  `mcn_source=disc|barcode_derived`). On-disc MCN no longer seeds a lookup (no carve-out).
+- **Phase 2 step 5** — tore out the residual MCN disambiguation (`_disambiguate_by_mcn`, the
+  §10.3 `mcn` rung, the `mcn_hits` narrowing, `barcode.mcn_matches`). Release selection rests
+  on `barcode_plurality` (same-namespace). §1a end-state reached.
 
 History: memories `project_mcn_gate_fix_decision` + `project_learned_trust_model`.
 

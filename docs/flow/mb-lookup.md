@@ -99,10 +99,7 @@ flowchart LR
     start([Receive several candidate releases]) --> isrc[Score each candidate by per-track ISRC agreement with the disc]
     isrc --> isrcWin{Unique top score, at least two agreeing?}
     isrcWin -- yes --> winIsrc([Winner by ISRC])
-    isrcWin -- no, tie or too few --> mcn[Compare disc's own barcode against each candidate's barcode]
-    mcn --> mcnWin{Exactly one candidate barcode matches?}
-    mcnWin -- yes --> winMcn([Winner by barcode])
-    mcnWin -- no, none or several --> noWin([No winner — caller uses agreed-facts fallback])
+    isrcWin -- no, tie or too few --> rung[No ISRC winner — caller pins one pressing via the lexicographic release-selection rung: barcode_plurality, then preferred_country, date, mbid. The on-disc MCN is never consulted.]
 ```
 
 ## Step Descriptions

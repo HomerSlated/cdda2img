@@ -1028,34 +1028,6 @@ def _plurality_release_group(matches: list[DiscMeta]) -> str | None:
     return ranked[0][0]
 
 
-def _disambiguate_by_mcn(matches: list[DiscMeta], disc: RBIDisc) -> DiscMeta | None:
-    """Pick the match whose barcode UNIQUELY matches the disc's Q-channel MCN.
-
-    The MCN read from the disc subchannel is the strongest pressing-level
-    signal available, resolved before the MB lookup runs. Comparison is fuzzy
-    (``barcode.mcn_matches``): services store partial / check-digit-free
-    barcodes, so exact EAN-13 equality misses real matches (Unit M).
-
-    A *unique* barcode hit identifies that exact release — safe to merge in
-    full. When the MCN matches **several** candidates (a barcode shared across
-    country variants, e.g. DE + XE), the specific pressing is genuinely
-    undetermined; we return None so the caller falls back to agreed-facts-only
-    population rather than fabricate one pressing's date / release id. Returns
-    None when the disc has no MCN or no candidate barcode matches.
-
-    NB after the Unit-G consistency pre-filter (``prepopulate_from_mb``), every
-    surviving candidate already fuzzy-matches a non-blank disc MCN, so on a
-    multi-survivor this returns None by construction (all hit ⇒ not unique) and
-    resolution falls through to agreed-facts — exactly the intended behaviour.
-    """
-    from cdda2img.barcode import mcn_matches
-
-    if not disc.catalog:
-        return None
-    hits = [m for m in matches if mcn_matches(disc.catalog, m.barcode)]
-    return hits[0] if len(hits) == 1 else None
-
-
 def _is_consistent(meta: DiscMeta, disc: RBIDisc) -> bool:
     """True unless *meta* contradicts the disc's per-track ISRCs.
 
@@ -1091,31 +1063,25 @@ def _is_consistent(meta: DiscMeta, disc: RBIDisc) -> bool:
 def _resolve_multimatch(
     matches: list[DiscMeta], disc: RBIDisc
 ) -> tuple[DiscMeta | None, str]:
-    """Resolve an MB disc-ID multi-match to one pressing using all pre-MB signals.
+    """Resolve an MB disc-ID multi-match to one pressing by per-track ISRC.
 
-    Priority order (strongest deterministic signal last-resort-free first):
-      1. ``isrc`` — per-track ISRC agreement (R1).
-      2. ``mcn``  — the disc's Q-channel MCN against candidate barcodes.
+    Returns ``(winner, method)`` with method ``"isrc"`` (a strict, unique ISRC
+    scorer was found) or ``""`` (no resolution — the caller falls back to the
+    §10.3 lexicographic release-selection rung). A pressing-level caller can then
+    ``_merge_into_disc`` the winner so ``release_date`` (hence the disc's own
+    year) becomes known.
 
-    Returns ``(winner, method)`` with method ``"isrc"`` / ``"mcn"`` / ``""``
-    (no resolution). Pressing-level callers can then ``_merge_into_disc`` the
-    winner so ``release_date`` (hence the disc's own year) becomes known.
-
-    Deliberate ordering (Q3): ISRC is tried *before* the MCN/barcode even though
-    the barcode is the more obviously "pressing-level" id. ``_disambiguate_by_isrcs``
-    only returns a candidate that is the *strict, unique* high scorer at
-    >= _MIN_ISRC_AGREE agreeing per-track ISRCs — recording-identity evidence
-    that cannot tie. A barcode, by contrast, is routinely *shared* across country
-    variants (DE + XE + …), so ``_disambiguate_by_mcn`` returns None on a
-    multi-hit; trying it first would not resolve those and would add no safety.
-    The strict-uniqueness of the ISRC winner is what makes ISRC-first safe.
+    ``_disambiguate_by_isrcs`` only returns a candidate that is the *strict,
+    unique* high scorer at >= _MIN_ISRC_AGREE agreeing per-track ISRCs —
+    recording-identity evidence that cannot tie. The on-disc MCN is **not** used
+    here: it is archival only, never a disambiguator (identifier_trust_model.md
+    §1a). Barcode-level pressing selection is handled inside the lexicographic
+    rung's ``barcode_plurality`` key (candidate barcodes among themselves), not
+    by matching the cross-namespace MCN.
     """
     winner = _disambiguate_by_isrcs(matches, disc)
     if winner is not None:
         return winner, "isrc"
-    winner = _disambiguate_by_mcn(matches, disc)
-    if winner is not None:
-        return winner, "mcn"
     return None, ""
 
 
@@ -1149,9 +1115,9 @@ class MBPrepopResult(NamedTuple):
     # on top of a CDDB-merged disc.
     meta: DiscMeta | None = None
     # §10.3: the key that broke the tie when the lexicographic release-selection
-    # rung pinned one of several album-consistent pressings — ``mcn`` |
+    # rung pinned one of several album-consistent pressings —
     # ``barcode_plurality`` | ``preferred_country`` | ``date`` | ``mbid``. None
-    # when no rung selection ran (single match / ISRC / MCN winner upstream).
+    # when no rung selection ran (single match / ISRC winner upstream).
     # Surfaces in PROV as ``release_selected_via``.
     release_selected_via: str | None = None
     # B-2 (trust_model_design.md §11.2): the Layer-1 *selected pressing* release id,
@@ -1205,18 +1171,21 @@ def _select_release_lexicographic(
     ``(winner, via)`` where *via* names the key that put the winner ahead of the
     runner-up:
 
-      (0) ``mcn``               — barcode positively matches the on-disc MCN
-      (1) ``barcode_plurality`` — the most common normalised barcode wins
-      (2) ``preferred_country`` — user config ranking (priority, NOT a filter)
-      (3) ``date``              — earliest ``release_date``
-      (4) ``mbid``              — terminal, deterministic tiebreak
+      (0) ``barcode_plurality`` — the most common normalised barcode wins
+      (1) ``preferred_country`` — user config ranking (priority, NOT a filter)
+      (2) ``date``              — earliest ``release_date``
+      (3) ``mbid``              — terminal, deterministic tiebreak
 
     No candidate is discarded; the top of the ranking is pinned. *candidates*
     must already be the album-consistent set (the plurality release-group), so
     this only chooses the *pressing*, never the album — pinning ``mb_release_id``
     here is legitimate (every candidate shares the disc-ID fingerprint).
+
+    The on-disc MCN plays no part (identifier_trust_model.md §1a): pressing
+    selection rests on the candidates' own service barcodes (``barcode_plurality``),
+    a same-namespace comparison, not the cross-namespace MCN.
     """
-    from cdda2img.barcode import mcn_matches, normalize_barcode
+    from cdda2img.barcode import normalize_barcode
 
     if not candidates:
         return None, None
@@ -1232,15 +1201,14 @@ def _select_release_lexicographic(
 
     pref = [code.upper() for code in preferred_country]
 
-    def _key(c: DiscMeta) -> tuple[int, int, int, str, str]:
+    def _key(c: DiscMeta) -> tuple[int, int, str, str]:
         nb = _norm(c.barcode)
-        k_mcn = 0 if (disc.catalog and mcn_matches(disc.catalog, c.barcode)) else 1
         k_plur = -(counts[nb] if nb else 0)  # more common -> smaller -> first
         country = (c.country or "").upper()
         k_country = pref.index(country) if country in pref else len(pref)
         k_date = c.release_date or "9999"  # missing date sorts last
         k_mbid = c.mb_release_id or "~"  # '~' (0x7e) sorts after digits/letters
-        return (k_mcn, k_plur, k_country, k_date, k_mbid)
+        return (k_plur, k_country, k_date, k_mbid)
 
     keys = [_key(c) for c in candidates]
     winner = candidates[keys.index(min(keys))]
@@ -1249,7 +1217,7 @@ def _select_release_lexicographic(
     # it necessarily holds the best value — that key is what decided the ranking.
     # When nothing varies above the terminal id, report "mbid" (arbitrary but
     # deterministic).
-    via_names = ("mcn", "barcode_plurality", "preferred_country", "date", "mbid")
+    via_names = ("barcode_plurality", "preferred_country", "date", "mbid")
     via = via_names[-1]
     for i, name in enumerate(via_names):
         if len({k[i] for k in keys}) > 1:
@@ -1267,7 +1235,7 @@ def _prepop_multimatch(
     verbose: bool,
     preferred_country: list[str],
 ) -> MBPrepopResult:
-    """Resolve a consistent MB disc-ID multi-match: ISRC/MCN winner, else the
+    """Resolve a consistent MB disc-ID multi-match: ISRC winner, else the
     lexicographic release-selection rung over the album's plurality release-group
     (§10.3) — pins the best pressing rather than declining to choose."""
     winner, method = _resolve_multimatch(matches, disc)
@@ -1275,10 +1243,9 @@ def _prepop_multimatch(
         updated = _merge_into_disc(winner, disc)
         if verbose:
             date_str = f"  ({winner.release_date})" if winner.release_date else ""
-            via = "ISRC disambiguation" if method == "isrc" else "MCN/barcode match"
             print(
                 f'  MusicBrainz: matched "{winner.album}" by {winner.artist}'
-                f"{date_str} (via {via})"
+                f"{date_str} (via ISRC disambiguation)"
             )
         return MBPrepopResult(
             updated,
@@ -1305,21 +1272,13 @@ def _prepop_multimatch(
     # menu corrects it interactively and the pick is deterministic in --auto —
     # but it IS a real change for the no-human-in-the-loop path.
     #
-    # Unit A: when the disc carries an MCN, narrow to the candidates whose barcode
-    # positively matches it — identity proven. Survivors with a *blank* barcode
-    # passed the Unit-G gate only vacuously and are dropped once a positively-
-    # matching subset exists. Fall back to the full consistent set when none match
-    # (e.g. MB carries no barcodes) — RG plurality still holds.
-    from cdda2img.barcode import mcn_matches
-
-    subset = matches
-    if disc.catalog:
-        mcn_hits = [m for m in matches if mcn_matches(disc.catalog, m.barcode)]
-        if mcn_hits:
-            subset = mcn_hits
-    rg = _plurality_release_group(subset)
+    # The full consistent set feeds the plurality release-group: the on-disc MCN
+    # no longer narrows the candidates (identifier_trust_model.md §1a — the MCN is
+    # archival, never a disambiguator). Pressing selection within the RG rests on
+    # the candidates' own barcodes via the lexicographic rung.
+    rg = _plurality_release_group(matches)
     if rg is not None:
-        rg_subset = [m for m in subset if m.mb_release_group_id == rg]
+        rg_subset = [m for m in matches if m.mb_release_group_id == rg]
         winner, via = _select_release_lexicographic(rg_subset, disc, preferred_country)
         if winner is not None:
             disc = _merge_into_disc(winner, disc)

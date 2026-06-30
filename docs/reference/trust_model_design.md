@@ -644,10 +644,9 @@ menu. But it changes *committed* output on the `--auto` / non-TTY path → **cha
 required** (§10.7).
 
 **The scoring (pure lexicographic, no discards — pick top):** key chain, each breaking ties left by
-the one above:
-0. **on-disc MCN match** [objective] — a candidate whose `catalog` positively matches the disc's
-   own MCN (`barcode.mcn_matches`) ranks first. Evidence outranks proxy (mirrors `OBJECTIVE >
-   everything`).
+the one above. (A former key 0 "on-disc MCN match" was **removed** 2026-06-30 — the on-disc MCN is
+archival only and never a disambiguator, §1a; selection rests on the candidates' own service
+barcodes, a same-namespace comparison.)
 1. **barcode-plurality** [popularity prior] — the most common normalised barcode across the
    album-consistent subset scores highest. **MB-internal plurality is the default** (on the JT disc this alone
    discriminates: `042284229821` ×3). Discogs corroboration (§10.3.1) is a *light* signal on the
@@ -664,8 +663,9 @@ return it as `meta`. **C2 is satisfied, not violated:** setting `mb_release_id` 
 pressing-level-legitimate — every candidate shares the disc-ID fingerprint (unlike the
 AcoustID/duration paths that must null it).
 
-**PROV:** record `release_selected_via` (the key that broke the tie: `mcn`/`barcode_plurality`/
-`preferred_country`/`date`/`mbid`) and, when key (2) fired, `preferred_country_applied`.
+**PROV:** record `release_selected_via` (the key that broke the tie: `barcode_plurality`/
+`preferred_country`/`date`/`mbid` — the on-disc MCN is never a selection key, §1a) and, when
+`preferred_country` fired, `preferred_country_applied`.
 
 ### 10.3.1 Discogs corroboration (barcode-only, light)
 

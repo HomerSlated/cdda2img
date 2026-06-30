@@ -87,14 +87,19 @@ is an `RBIDisc` field persisted *only* to PROV; `recovery_track_<n>` was added a
 no bump). "Spec-before-code" here means **documenting** the new `barcode` / `mcn_source`
 keys in `rbi_spec.md` + CLAUDE.md — not a `VERSION_MINOR` change.
 
-**Two-phase implementation:**
-- **Phase 1** — remove the `_is_consistent` MCN veto. Closes the live Tracy Chapman bug
-  (an exact disc-ID match was discarded because an archival MCN disagreed with a catalogued
-  barcode). Pure resolver logic, independently testable.
-- **Phase 2** — add `RBIDisc.barcode` + resolver weight + MCN-from-barcode synthesis +
-  `mcn_source` marker, and tear out the remaining MCN disambiguation machinery
-  (`_disambiguate_by_mcn`, the §10.3 `mcn` rung, `_filter_by_mcn`, `mcn_matches`) so the
-  barcode replaces it with no capability gap.
+**Two-phase implementation — ALL DONE (2026-06-30):**
+- **Phase 1 (DONE, 8ef6c2b)** — removed the `_is_consistent` MCN veto. Closes the live Tracy
+  Chapman bug (an exact disc-ID match was discarded because an archival MCN disagreed with a
+  catalogued barcode). Pure resolver logic, independently testable.
+- **Phase 2 step 2+4 (DONE, 9116c20)** — added `RBIDisc.barcode` + resolver `Field.BARCODE` +
+  MCN-from-barcode synthesis (`_finalize_identifiers`) + `mcn_source` marker. The on-disc MCN
+  no longer seeds a lookup (no carve-out) and is no longer a *commit* key.
+- **Phase 2 step 5 (DONE)** — tore out the remaining MCN *disambiguation* machinery
+  (`_disambiguate_by_mcn`, the §10.3 `mcn` rung, the `mcn_hits` subset narrowing, and
+  `barcode.mcn_matches`). Release selection now rests entirely on the candidates' own service
+  barcodes (`barcode_plurality`) — a same-namespace comparison. The American Idiot
+  TOC-collision case is preserved through that sounder mechanism. End-state of §1a reached: the
+  on-disc MCN is read for no lookup, no veto, no ranking — archival only.
 
 ---
 
