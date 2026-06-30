@@ -941,7 +941,7 @@ def test_prepopulate_multiple_matches_isrc_disambiguates_winner():
     # _merge_into_disc preserves existing non-blank disc fields, so verify the
     # winner via fields the input disc did not already supply.
     assert r.disc.album == "Disc Album"
-    assert r.disc.catalog == "0075992377423"  # winner's catalog filled in
+    assert r.disc.barcode == "0075992377423"  # winner's barcode filled in
     assert r.disc.mb_release_id == "rid-win"  # winner's MBID filled in
     assert r.match_count == 2
     assert r.isrc_disambiguated is True
@@ -1100,40 +1100,38 @@ def test_collect_barcode_candidates_accepts_r16_tuple_form():
     assert candidates == ["0075992377423", "0081227991159"]
 
 
-def test_collect_barcode_candidates_valid_ondisc_mcn_leads():
-    """A check-digit-valid on-disc MCN ranks first (gospel + clean)."""
+def test_collect_barcode_candidates_ignores_ondisc_mcn():
+    """The on-disc MCN never seeds the candidate list (§1a) — only MB hints do
+    when no service barcode is already set. Even a check-digit-valid MCN is
+    excluded: the MCN is archival, not a lookup key."""
     from cdda2img.cdda2img import _collect_barcode_candidates
 
     disc = _make_disc(tracks=[(1, 0, 18000)])
-    disc.catalog = "0075992377423"  # valid GTIN-13
+    disc.catalog = "0075992377423"  # valid GTIN-13 MCN — must NOT appear
     candidates = _collect_barcode_candidates(disc, [("rid-A", "0081227991159")])
-    assert candidates == ["0075992377423", "0081227991159"]
+    assert candidates == ["0081227991159"]
 
 
-def test_collect_barcode_candidates_invalid_ondisc_mcn_is_last_resort():
-    """An on-disc MCN with a bad check digit is kept but ranked BELOW valid hints.
-
-    It is burnable (13 numeric digits) so we never drop it, but a clean MB
-    barcode hint must win — a check-digit failure on the Q-channel MCN is
-    usually a read error.
-    """
+def test_collect_barcode_candidates_ondisc_mcn_only_yields_empty():
+    """A disc whose only identifier is a readable MCN gets no candidate (and so no
+    Discogs query). The MCN-never-seeds-a-lookup rule, end to end."""
     from cdda2img.cdda2img import _collect_barcode_candidates
 
     disc = _make_disc(tracks=[(1, 0, 18000)])
-    disc.catalog = "1234567890123"  # 13 digits, wrong check digit
-    candidates = _collect_barcode_candidates(disc, [("rid-A", "0081227991159")])
-    # Valid hint first; burnable-but-invalid on-disc MCN as last resort.
-    assert candidates == ["0081227991159", "1234567890123"]
-
-
-def test_collect_barcode_candidates_invalid_ondisc_mcn_kept_when_sole():
-    """With no other candidate, the burnable invalid-check-digit MCN is used."""
-    from cdda2img.cdda2img import _collect_barcode_candidates
-
-    disc = _make_disc(tracks=[(1, 0, 18000)])
-    disc.catalog = "1234567890123"  # 13 digits, wrong check digit
+    disc.catalog = "0075992377423"  # valid MCN, but archival only
     candidates = _collect_barcode_candidates(disc, [])
-    assert candidates == ["1234567890123"]
+    assert candidates == []
+
+
+def test_collect_barcode_candidates_disc_barcode_leads():
+    """An already-set service barcode leads, then MB hints (deduped)."""
+    from cdda2img.cdda2img import _collect_barcode_candidates
+
+    disc = _make_disc(tracks=[(1, 0, 18000)])
+    disc.catalog = "0075992377423"  # MCN ignored
+    disc.barcode = "5099749994027"  # real service barcode — leads
+    candidates = _collect_barcode_candidates(disc, [("rid-A", "0081227991159")])
+    assert candidates == ["5099749994027", "0081227991159"]
 
 
 # ---------------------------------------------------------------------------

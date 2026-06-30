@@ -561,6 +561,41 @@ def _add_release_provenance(provenance: dict, disc: RBIDisc) -> None:  # noqa: C
         provenance["pre_emphasis"] = "YES" if disc.pre_emphasis else "NO"
 
 
+def _finalize_identifiers(provenance: dict, disc: RBIDisc) -> None:
+    """Settle the MCN/barcode pair at finalisation, just before TOC generation.
+
+    Two identifiers, two destinations (identifier_trust_model.md §1a):
+
+    - **barcode** (the service UPC/EAN, the disambiguation key) -> PROV only. Never
+      written to the TOC or the physical layer.
+    - **catalog** (the on-disc MCN) -> TOC CATALOG line, burned back to disc. When
+      the disc carries no MCN of its own, it is *synthesised* from the barcode: the
+      MCN field is defined to hold the UPC/EAN (Q-ch Mode 2 = 13 BCD digits), so a
+      normalised barcode is exactly its canonical content, not an alien value.
+
+    ``mcn_source`` records provenance of the MCN so a later reader distinguishes a
+    genuine disc reading (``disc``) from a reconstruction (``barcode_derived``).
+
+    The synthesis runs the barcode through ``normalize_barcode`` (burnable form,
+    check digit not required) rather than copying it raw: the MCN is burned to the
+    TOC ``CATALOG`` and cdrdao demands 13 numeric digits. MB/Discogs barcodes are
+    already normalised, but a manual/menu entry might not be — so this is the
+    chokepoint that guarantees a burnable result. A barcode that cannot yield 13
+    digits produces no synthesised MCN (catalog stays blank, no ``mcn_source``).
+    """
+    from cdda2img.barcode import normalize_barcode
+
+    if disc.barcode:
+        provenance["barcode"] = disc.barcode
+    if disc.catalog:
+        provenance["mcn_source"] = "disc"
+    elif disc.barcode:
+        synth = normalize_barcode(disc.barcode, require_check_digit=False)
+        if synth:
+            disc.catalog = synth  # synthesise a burnable archival MCN from the barcode
+            provenance["mcn_source"] = "barcode_derived"
+
+
 def _unique_path(stem: str, ext: str, parent: Path | None = None) -> Path:
     """Return a non-colliding Path for {stem}.{ext}, appending _1, _2... if needed."""
     base = parent if parent is not None else Path()
@@ -745,6 +780,7 @@ def create_image(
                 rg_block = pack_rg_block(rg_result)
 
             _add_release_provenance(provenance, disc)
+            _finalize_identifiers(provenance, disc)
             toc_data = generate_toc(disc, raw_titles=raw_titles)
 
             disc_suffix = "" if disc_total == 1 else f"_disc{disc_num}"
@@ -1006,64 +1042,40 @@ def _collect_barcode_candidates(
     disc: RBIDisc,
     barcode_hints: list[tuple[str, str]] | None,
 ) -> list[str]:
-    """Build the de-duplicated 13-digit candidate list, **check-digit-valid first**.
+    """Build the de-duplicated 13-digit service-barcode candidate list.
 
-    Only the *normalised* form of disc.catalog enters the list. A non-normalising
-    raw value (e.g. 11-digit printed barcode) is *not* skipped silently — the
-    caller uses `_pick_canonical_mcn` to substring-match raw digits against this
-    candidate list as a separate, deductive step. *barcode_hints* is the R16
-    tuple form ``(mb_release_id, barcode)``; the MBID is unused here.
+    Sources, in order: any already-set ``disc.barcode`` (a normalised service
+    UPC/EAN), then the MB ``barcode_hints`` (R16 ``(mb_release_id, barcode)``
+    tuples — MBID unused here; all check-digit-valid at MB ingest).
 
-    Check-digit ranking: a GS1-valid on-disc MCN leads (gospel + clean). MB
-    barcode hints are already check-digit-valid at ingest, so they join the
-    valid tier. An on-disc MCN that is burnable (13 numeric digits) but whose
-    check digit fails is kept as a *last-resort* fallback ranked below every
-    valid candidate — never dropped (the disc is gospel; a check-digit failure
-    is usually a Q-channel read error), but a clean alternative wins.
+    The on-disc MCN (``disc.catalog``) is **deliberately not a candidate**: per the
+    decided rule (identifier_trust_model.md §1a, user 2026-06-30) the MCN never
+    seeds a lookup. It is archival only; the data flow is barcode -> MCN (synthesis
+    at finalisation), never MCN -> barcode -> lookup. So a disc whose only
+    identifier is a readable MCN yields no candidate here and no Discogs query.
     """
-    from cdda2img.barcode import normalize_barcode
-
-    valid: list[str] = []  # check-digit-valid (preferred)
-    fallback: list[str] = []  # burnable but check-digit-invalid (last resort)
+    candidates: list[str] = []
     seen: set[str] = set()
 
-    def _add(value: str | None, dest: list[str]) -> None:
+    def _add(value: str | None) -> None:
         if value and value not in seen:
-            dest.append(value)
+            candidates.append(value)
             seen.add(value)
 
-    if disc.catalog:
-        norm = normalize_barcode(disc.catalog)
-        if norm:
-            _add(norm, valid)
-        else:
-            _add(normalize_barcode(disc.catalog, require_check_digit=False), fallback)
+    _add(disc.barcode)
     for _mbid, hint in barcode_hints or []:
-        _add(hint, valid)
-    return valid + fallback
+        _add(hint)
+    return candidates
 
 
-def _pick_canonical_mcn(disc: RBIDisc, candidates: list[str]) -> str | None:
-    """Choose the canonical 13-digit MCN for *disc* from *candidates*.
+def _pick_canonical_barcode(candidates: list[str]) -> str | None:
+    """Choose the canonical service barcode from *candidates*.
 
-    Strategy (in priority order):
-      1. **Substring match (deductive).** If disc.catalog contains raw digits
-         (>= 7) that appear as a substring of any candidate, that candidate IS
-         the MCN — printed barcodes are GTIN-12 without check digit, a prefix
-         of GTIN-12, which is a suffix of EAN-13. Substring bridges all three.
-      2. **First candidate (best-guess fallback).** No substring match but
-         candidates exist → first one wins. Since `_collect_barcode_candidates`
-         orders check-digit-valid candidates first, this prefers a clean MCN
-         and only falls back to a burnable invalid-check-digit on-disc MCN when
-         it is the sole candidate. Blank is worse than a guess the user can
-         correct via [c] in the menu.
-      3. **None.** No candidates at all → nothing to work with.
+    Candidates are check-digit-valid EAN-13 service barcodes, already ordered by
+    ``_collect_barcode_candidates`` (an existing ``disc.barcode`` first, then MB
+    hints). First wins; a blank field is worse than a best-guess the user can
+    correct via [c] in the menu. ``None`` when there are no candidates.
     """
-    from cdda2img.barcode import mcn_matches
-
-    for c in candidates:
-        if mcn_matches(disc.catalog, c):
-            return c
     return candidates[0] if candidates else None
 
 
@@ -1097,38 +1109,39 @@ def _prepopulate_from_discogs(
     *,
     barcode_hints: list[tuple[str, str]] | None = None,
 ) -> tuple[RBIDisc, str | None, DiscMeta | None]:
-    """Pre-populate disc.catalog and optionally enrich via Discogs barcode lookup.
+    """Pre-populate disc.barcode and optionally enrich via Discogs barcode lookup.
 
-    Returns ``(disc, chosen_mcn, applied_hit)`` (B-3 part 2): besides the merged
-    disc, it surfaces the §10 canonical MCN it picked (``chosen_mcn``, the catalog
-    overwrite of phase A) and the Discogs ``DiscMeta`` it actually *merged*
+    Returns ``(disc, chosen_barcode, applied_hit)`` (B-3 part 2): besides the merged
+    disc, it surfaces the §10 canonical barcode it picked (``chosen_barcode``, the
+    barcode overwrite of phase A) and the Discogs ``DiscMeta`` it actually *merged*
     (``applied_hit``, ``None`` on every path that did not merge one). The trust
     resolver reproduces this step from those two values
-    (``canonical_mcn_proposal`` + ``meta_to_proposals``), so they must reflect
+    (``canonical_barcode_proposal`` + ``meta_to_proposals``), so they must reflect
     exactly what the live merge did — hence ``applied_hit`` is ``None`` whenever
     the merge was skipped (no/ambiguous result, album mismatch), even when a hit
     object exists.
 
     Two distinct phases:
 
-    A. **Canonical MCN.** Build a candidate list from disc.catalog (when it
-       normalises) and any MB barcode hints; pick one via `_pick_canonical_mcn`.
-       The chosen MCN is *always* written to disc.catalog — provenance trumps
-       a blank field, and the menu's [c] flow lets the user correct a wrong
-       guess. This is the cornerstone of metadata handling.
+    A. **Canonical barcode.** Build a candidate list from any already-set
+       disc.barcode and the MB barcode hints; pick one via `_pick_canonical_barcode`.
+       The chosen barcode is *always* written to disc.barcode — provenance trumps
+       a blank field, and the menu's [c] flow lets the user correct a wrong guess.
+       The on-disc MCN never seeds this (§1a); a disc with only a readable MCN
+       reaches phase A with no candidate and is left alone.
 
-    B. **Metadata enrichment.** Query Discogs by the chosen MCN. If exactly one
-       result comes back and its album matches disc.album, merge full metadata
+    B. **Metadata enrichment.** Query Discogs by the chosen barcode. If exactly
+       one result comes back and its album matches disc.album, merge full metadata
        (label, country, year, track listing). Otherwise, leave the additional
-       fields alone — the MCN is still set from phase A.
+       fields alone — the barcode is still set from phase A.
     """
     from cdda2img import discogs_lookup
     from cdda2img.mb_lookup import _merge_into_disc
 
     candidates = _collect_barcode_candidates(disc, barcode_hints)
-    chosen = _pick_canonical_mcn(disc, candidates)
-    if chosen and disc.catalog != chosen:
-        disc.catalog = chosen
+    chosen = _pick_canonical_barcode(candidates)
+    if chosen and disc.barcode != chosen:
+        disc.barcode = chosen
     if not chosen or not discogs_lookup.is_available():
         return disc, chosen, None
 
@@ -1614,14 +1627,14 @@ def _emit_mb_provenance(
 def _collect_metadata_proposals(
     baseline: RBIDisc,
     mb_meta: DiscMeta | None,
-    chosen_mcn: str | None,
+    chosen_barcode: str | None,
     discogs_hit: DiscMeta | None,
     stage7_meta: DiscMeta | None,
     cddb_meta: DiscMeta | None,
 ) -> list[FieldProposal]:
     """Collect every metadata source's proposals in the live ``_run_metadata_lookups``
     call order (B-3 part 2 / trust_model_design §11.4): baseline -> MB -> §10
-    canonical-MCN overwrite -> Discogs -> stage-7 -> CDDB.
+    canonical-barcode overwrite -> Discogs -> stage-7 -> CDDB.
 
     AcoustID is deliberately absent: both corroborate steps merge no fields, so
     they contribute no proposals (proven by ``test_merge_sequence`` and now by the
@@ -1636,7 +1649,7 @@ def _collect_metadata_proposals(
     from cdda2img.field_resolver import Source
     from cdda2img.resolver_adapter import (
         baseline_proposals,
-        canonical_mcn_proposal,
+        canonical_barcode_proposal,
         meta_to_proposals,
     )
 
@@ -1653,7 +1666,7 @@ def _collect_metadata_proposals(
         # as disc-ID-proven — the C2 chokepoint upstream is what makes this safe,
         # and the accumulator reproduces today's reliance on it.
         props += meta_to_proposals(mb_meta, Source.MB_DISC_ID)
-    props += canonical_mcn_proposal(chosen_mcn)
+    props += canonical_barcode_proposal(chosen_barcode)
     if discogs_hit is not None:
         props += meta_to_proposals(discogs_hit, Source.DISCOGS)
     if stage7_meta is not None:
@@ -1773,13 +1786,13 @@ def _run_metadata_lookups(
     from cdda2img import discogs_lookup as _discogs
 
     discogs_attempted = _discogs.is_available()
-    pre_discogs_catalog = disc.catalog
-    disc, chosen_mcn, discogs_hit = _prepopulate_from_discogs(
+    pre_discogs_barcode = disc.barcode
+    disc, chosen_barcode, discogs_hit = _prepopulate_from_discogs(
         disc, ui, barcode_hints=mb_result.barcode_hints
     )
     provenance["lookup_status_discogs"] = _r12_status(
         attempted=discogs_attempted,
-        has_data=bool(disc.catalog) and disc.catalog != pre_discogs_catalog,
+        has_data=bool(disc.barcode) and disc.barcode != pre_discogs_barcode,
         errored=False,
     )
     # §10.3.1: cross-source barcode corroboration on the rung-selected release.
@@ -1867,7 +1880,7 @@ def _run_metadata_lookups(
         proposals = _collect_metadata_proposals(
             baseline_snapshot,
             mb_result.meta,
-            chosen_mcn,
+            chosen_barcode,
             discogs_hit,
             stage7_meta,
             cddb_meta,
@@ -2020,6 +2033,7 @@ def _finalize_import(
         rlog_block = rlog_builder.finalize(disc)
 
     _add_release_provenance(provenance, disc)
+    _finalize_identifiers(provenance, disc)
     toc_data = generate_toc(disc)
 
     _ui_status(ui, "Building container…")

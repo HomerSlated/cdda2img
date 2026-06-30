@@ -173,7 +173,7 @@ def test_equiv_blank_disc_full_meta_meta_fills_everything():
     out = _equiv(_full_meta(), blank)
     assert out.album == "Meta Album"
     assert out.artist == "Meta Artist"
-    assert out.catalog == "1111111111111"
+    assert out.barcode == "1111111111111"  # meta.barcode -> disc.barcode (not catalog)
     assert out.disc_number == 2
     assert out.disc_total == 3
     assert out.label == "Meta Label"
@@ -397,10 +397,10 @@ def test_trust_for_network_sources_distinct_call_order():
     assert mb > discogs > stage7 > cddb
 
 
-def test_trust_for_canonical_mcn_outranks_baseline():
-    # The §10 canonical MCN overwrites the baseline catalog -> must outrank it.
-    canonical = trust_for(Source.CANONICAL_MCN, Field.CATALOG, "rip")
-    baseline = trust_for(Source.BASELINE, Field.CATALOG, "rip")
+def test_trust_for_canonical_barcode_outranks_baseline():
+    # The §10 canonical barcode overwrites the baseline barcode -> must outrank it.
+    canonical = trust_for(Source.CANONICAL_BARCODE, Field.BARCODE, "rip")
+    baseline = trust_for(Source.BASELINE, Field.BARCODE, "rip")
     assert canonical > baseline
 
 

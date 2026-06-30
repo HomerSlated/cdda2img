@@ -137,13 +137,13 @@ def _assert_equiv(live: RBIDisc, shadow: dict[str, object]) -> None:
 
 
 def test_shadow_multi_source_mb_discogs_cddb() -> None:
-    """MB + canonical MCN + Discogs merge + CDDB gap-fill — the full happy path.
+    """MB + canonical barcode + Discogs merge + CDDB gap-fill — the full happy path.
 
-    MB pins a release (so stage-7 does not fire), the on-disc valid MCN drives the
-    §10 canonical-MCN pick, Discogs returns a single album-matching hit that
-    merges, and CDDB fills a field nothing richer supplied. The real AcoustID and
-    Discogs-barcode corroborate wrappers run (network off) and must not perturb
-    the disc.
+    MB pins a release (so stage-7 does not fire) and supplies a barcode hint that
+    drives the §10 canonical-barcode pick (the on-disc MCN never seeds a lookup,
+    §1a). Discogs returns a single album-matching hit that merges, and CDDB fills a
+    field nothing richer supplied. The real AcoustID and Discogs-barcode corroborate
+    wrappers run (network off) and must not perturb the disc.
     """
     mcn = "0075992377423"
     disc = _disc("Eliminator", "ZZ Top", catalog=mcn)
@@ -152,6 +152,7 @@ def test_shadow_multi_source_mb_discogs_cddb() -> None:
         artist="ZZ Top",
         mb_release_id="rid-mb",
         mb_release_group_id="rg-mb",
+        barcode=mcn,  # the MB barcode hint that seeds the Discogs query
         source="musicbrainz",
         tracks=[
             TrackMeta(number=1, title="Gimme All Your Lovin'", isrc="USRC18300001"),
@@ -186,7 +187,8 @@ def test_shadow_multi_source_mb_discogs_cddb() -> None:
     assert live.album == "Eliminator"  # MB won
     assert live.label == "Warner Bros."  # Discogs filled
     assert live.release_date == "1983"  # CDDB filled the last gap
-    assert live.catalog == mcn
+    assert live.catalog == mcn  # on-disc MCN untouched by the pipeline
+    assert live.barcode == mcn  # canonical barcode (from the MB hint)
     _assert_equiv(live, shadow)
 
 
@@ -312,6 +314,7 @@ def test_shadow_b6_discogs_catalogue_beats_mb_diverges_from_legacy() -> None:
         mb_release_group_id="rg-mb",
         label="MB Label",  # MB also carries a label …
         country="DE",
+        barcode=mcn,  # MB barcode hint seeds the Discogs query (MCN never does, §1a)
         source="musicbrainz",
         tracks=[TrackMeta(number=1, title="Gimme All Your Lovin'")],
     )

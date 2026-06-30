@@ -752,7 +752,11 @@ def _merge_into_disc(meta: DiscMeta, disc: RBIDisc) -> RBIDisc:
         if disc.artist and disc.artist != _unknown
         else (meta.artist or disc.artist)
     )
-    catalog = disc.catalog or meta.barcode
+    # catalog is the on-disc MCN: archival only, NEVER filled from a service
+    # barcode (cross-namespace). The service UPC/EAN goes to its own `barcode`
+    # field, fill-blank. See docs/reference/identifier_trust_model.md §1a.
+    catalog = disc.catalog
+    barcode = disc.barcode or meta.barcode
 
     meta_by_num = {t.number: t for t in meta.tracks if t.number is not None}
     new_tracks: list[RBITocEntry] = []
@@ -796,6 +800,7 @@ def _merge_into_disc(meta: DiscMeta, disc: RBIDisc) -> RBIDisc:
             meta.disc_total if meta.disc_total is not None else disc.disc_total
         ),
         catalog=catalog,
+        barcode=barcode,
         tracks=new_tracks,
         release_date=disc.release_date or meta.release_date or None,
         catalog_number=disc.catalog_number or meta.catalog_number or None,
@@ -857,7 +862,10 @@ def _overwrite_disc(meta: DiscMeta, disc: RBIDisc) -> RBIDisc:
         disc_total=(
             meta.disc_total if meta.disc_total is not None else disc.disc_total
         ),
-        catalog=meta.barcode or disc.catalog,
+        # catalog (MCN) is archival; meta carries no MCN, so it is untouched even
+        # under overwrite. The service barcode takes meta-priority into `barcode`.
+        catalog=disc.catalog,
+        barcode=meta.barcode or disc.barcode,
         tracks=new_tracks,
         release_date=meta.release_date or disc.release_date or None,
         catalog_number=meta.catalog_number or disc.catalog_number or None,

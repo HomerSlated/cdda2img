@@ -72,7 +72,9 @@ class Source(Enum):
     DISCOGS = "discogs"
     DURATION = "duration"  # stage-7 text+duration — recording-level
     CDDB = "cddb"
-    CANONICAL_MCN = "canonical_mcn"  # §10 _pick_canonical_mcn verdict (catalog only)
+    CANONICAL_BARCODE = (
+        "canonical_barcode"  # §10 _pick_canonical_barcode verdict (barcode only)
+    )
     MENU = "menu"  # B-5: user-selected result in the interactive menu. NOT
     # recording-level: the user explicitly endorsed this release, so its
     # mb_release_id is authoritative (user-confirmed) and is kept, not C2-stripped.
@@ -99,7 +101,8 @@ class Field(Enum):
     # disc-level
     ALBUM = "album"
     ARTIST = "artist"
-    CATALOG = "catalog"  # MCN / EAN-13 barcode
+    CATALOG = "catalog"  # on-disc MCN (archival; baseline passthrough only)
+    BARCODE = "barcode"  # service UPC/EAN — the disambiguation key
     CATALOG_NUMBER = "catalog_number"  # label's own number
     LABEL = "label"
     COUNTRY = "country"

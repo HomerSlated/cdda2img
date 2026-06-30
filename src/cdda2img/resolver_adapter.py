@@ -21,7 +21,7 @@ The trust model is the *reproduce-today* ladder (see :data:`_REPRODUCE_META_TRUS
 - network sources take DISTINCT descending levels in today's call order (MB >
   Discogs > stage-7 > CDDB), so a *multi-source* merge reproduces first-writer-wins
   order-independently (B-3 — proven by ``test_merge_sequence``);
-- the §10 canonical MCN sits ABOVE baseline (it overwrites ``disc.catalog``);
+- the §10 canonical BARCODE sits ABOVE baseline (it overwrites ``disc.barcode``);
 - the ``"Unknown Artist"`` sentinel sits BELOW every real source (it loses to any
   real value but survives alone).
 
@@ -103,11 +103,11 @@ from cdda2img.validators import validate_isrc
 # - network sources take DISTINCT, descending levels in today's call order
 #   (MB > Discogs > stage-7 > CDDB), so a multi-source merge reproduces today's
 #   first-writer-wins **order-independently** (no equal-trust first-seen tiebreak);
-# - the §10 canonical MCN (CANONICAL_MCN) sits ABOVE baseline, because phase A of
-#   `_prepopulate_from_discogs` *overwrites* `disc.catalog` with it unconditionally
-#   (it is not fill-blank). That is why baseline is OBJECTIVE, not MANUAL: lowering
-#   it makes room above for the canonical MCN, and frees MANUAL for genuine user
-#   menu input (B-5).
+# - the §10 canonical BARCODE (CANONICAL_BARCODE) sits ABOVE baseline, because phase
+#   A of `_prepopulate_from_discogs` *overwrites* `disc.barcode` with it
+#   unconditionally (it is not fill-blank). That is why baseline is OBJECTIVE, not
+#   MANUAL: lowering it makes room above for the canonical barcode, and frees MANUAL
+#   for genuine user menu input (B-5).
 #
 # AcoustID is deliberately absent: `_r6_tally_and_merge` merges no fields (it is
 # corroboration-only), so it contributes no proposals. That ACOUSTID's semantic
@@ -122,7 +122,7 @@ _REPRODUCE_META_TRUST: dict[Source, Trust] = {
     Source.ISRC: Trust.ISRC,
     Source.DURATION: Trust.DURATION,  # stage-7
     Source.CDDB: Trust.CDDB,
-    Source.CANONICAL_MCN: Trust.MANUAL,  # §10 verdict overrides baseline catalog
+    Source.CANONICAL_BARCODE: Trust.MANUAL,  # §10 verdict overrides baseline barcode
     # B-5: a menu "update" apply fills blanks only, so MENU sits BELOW the
     # OBJECTIVE baseline (disc-priority, == _merge_into_disc). A menu "overwrite"
     # apply passes trust_override=MANUAL instead (see apply_menu_selection), so this
@@ -240,23 +240,23 @@ def sanitize_base(disc: RBIDisc) -> RBIDisc:
     return replace(disc, tracks=new_tracks)
 
 
-def canonical_mcn_proposal(chosen: str | None) -> list[FieldProposal]:
-    """The §10 canonical-MCN verdict as a single high-trust CATALOG proposal.
+def canonical_barcode_proposal(chosen: str | None) -> list[FieldProposal]:
+    """The §10 canonical-barcode verdict as a single high-trust BARCODE proposal.
 
-    Reproduces phase A of ``_prepopulate_from_discogs`` (``disc.catalog = chosen``,
-    an *unconditional* overwrite when a canonical MCN is picked). At
-    :data:`Trust.MANUAL` it outranks the baseline catalog and every network source,
-    so it wins exactly as the in-place overwrite does. Returns ``[]`` when no MCN
-    was chosen (no candidates), leaving catalog to baseline/meta fill-blank.
+    Reproduces phase A of ``_prepopulate_from_discogs`` (``disc.barcode = chosen``,
+    an *unconditional* overwrite when a canonical barcode is picked). At
+    :data:`Trust.MANUAL` it outranks the baseline barcode and every network source,
+    so it wins exactly as the in-place overwrite does. Returns ``[]`` when no
+    barcode was chosen (no candidates), leaving barcode to baseline/meta fill-blank.
     """
     if not chosen:
         return []
     return [
         FieldProposal(
-            field=Field.CATALOG,
+            field=Field.BARCODE,
             value=chosen,
-            trust=_REPRODUCE_META_TRUST[Source.CANONICAL_MCN],
-            source=Source.CANONICAL_MCN,
+            trust=_REPRODUCE_META_TRUST[Source.CANONICAL_BARCODE],
+            source=Source.CANONICAL_BARCODE,
         )
     ]
 
@@ -353,6 +353,7 @@ def baseline_proposals(
     # artist: "Unknown Artist" sentinel goes in at _SENTINEL_TRUST (see _emit_named)
     _emit_named(out, skips, Field.ARTIST, disc.artist, t(Field.ARTIST), src)
     _emit(out, skips, Field.CATALOG, disc.catalog, t(Field.CATALOG), src)
+    _emit(out, skips, Field.BARCODE, disc.barcode, t(Field.BARCODE), src)
     # disc_number / disc_total: meta-priority quirk -> baseline abstains
     if skips is not None:
         skips.append(Skip(Field.DISC_NUMBER, None, disc.disc_number, _R_ABSTAIN))
@@ -458,7 +459,8 @@ def meta_to_proposals(
 
     _emit(out, skips, Field.ALBUM, meta.album, t(Field.ALBUM), source)
     _emit_named(out, skips, Field.ARTIST, meta.artist, t(Field.ARTIST), source)
-    _emit(out, skips, Field.CATALOG, meta.barcode, t(Field.CATALOG), source)
+    # meta has no on-disc MCN; its barcode routes to Field.BARCODE (never CATALOG).
+    _emit(out, skips, Field.BARCODE, meta.barcode, t(Field.BARCODE), source)
     _emit(out, skips, Field.DISC_NUMBER, meta.disc_number, t(Field.DISC_NUMBER), source)
     _emit(out, skips, Field.DISC_TOTAL, meta.disc_total, t(Field.DISC_TOTAL), source)
     _emit(

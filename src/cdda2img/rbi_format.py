@@ -309,7 +309,12 @@ class RBIDisc:
     artist: str
     disc_number: int = 1
     disc_total: int = 1
-    catalog: str | None = None  # MCN / EAN-13 barcode; None if not available
+    catalog: str | None = None  # on-disc MCN (Q-ch Mode 2); archival only — never
+    # a lookup/disambiguation key. May be synthesised from `barcode` at finalisation
+    # when the disc carries no MCN (PROV `mcn_source=barcode_derived`); burned to the
+    # TOC CATALOG line. See docs/reference/identifier_trust_model.md §1a.
+    barcode: str | None = None  # service UPC/EAN barcode (MB/Discogs); the
+    # disambiguation key. Persisted to PROV only (never the TOC/physical layer).
     cdtext_catalog_ref: str | None = (
         None  # CD-Text PTI 0x86 catalogue/label reference string; None if absent.
         # Renamed from `disc_id` at v6.0 to remove the collision with the

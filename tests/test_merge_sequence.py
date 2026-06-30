@@ -34,7 +34,7 @@ from cdda2img.mb_lookup import _merge_into_disc
 from cdda2img.rbi_format import RBIDisc, RBITocEntry
 from cdda2img.resolver_adapter import (
     baseline_proposals,
-    canonical_mcn_proposal,
+    canonical_barcode_proposal,
     meta_to_proposals,
     sanitize_base,
 )
@@ -52,12 +52,12 @@ def _live_sequence(
 ) -> RBIDisc:
     """The field effects of ``_run_metadata_lookups``, in order (AcoustID merges
     nothing, so it is absent). Phase A of ``_prepopulate_from_discogs`` overwrites
-    ``catalog`` with the canonical MCN between the MB and Discogs merges."""
+    ``barcode`` with the canonical barcode between the MB and Discogs merges."""
     disc = baseline
     if mb is not None:
         disc = _merge_into_disc(mb, disc)
-    if chosen and disc.catalog != chosen:  # phase A — unconditional overwrite
-        disc = replace(disc, catalog=chosen)
+    if chosen and disc.barcode != chosen:  # phase A — unconditional overwrite
+        disc = replace(disc, barcode=chosen)
     if discogs is not None:
         disc = _merge_into_disc(discogs, disc)
     if stage7 is not None:
@@ -79,7 +79,7 @@ def _resolver_sequence(
     props = baseline_proposals(baseline)
     if mb is not None:
         props += meta_to_proposals(mb, Source.MB_DISC_ID)
-    props += canonical_mcn_proposal(chosen)
+    props += canonical_barcode_proposal(chosen)
     if discogs is not None:
         props += meta_to_proposals(discogs, Source.DISCOGS)
     if stage7 is not None:
@@ -143,7 +143,8 @@ def _scenario(draw):
     baseline = RBIDisc(
         album=draw(_str_text),
         artist=draw(_str_artist),
-        catalog=draw(_opt_clean),
+        catalog=draw(_opt_clean),  # on-disc MCN: inert in both committers now
+        barcode=draw(_opt_clean),  # service barcode: disc-priority fill-blank
         disc_number=draw(st.integers(min_value=0, max_value=9)),
         disc_total=draw(st.integers(min_value=0, max_value=9)),
         release_date=draw(_opt_clean),
@@ -303,20 +304,21 @@ def test_discogs_fills_what_mb_left_blank():
     assert out == _live_sequence(baseline, mb, None, discogs, None, None)
 
 
-def test_canonical_mcn_overrides_baseline_and_meta_catalog():
-    baseline = _bare_disc(catalog="0042284229999")  # an on-disc catalog
+def test_canonical_barcode_overrides_baseline_and_meta_barcode():
+    baseline = _bare_disc(catalog="0042284229999")  # on-disc MCN: inert
     mb = _meta(barcode="1111111111111")
-    chosen = "0042284229821"  # §10 verdict
+    chosen = "0042284229821"  # §10 canonical-barcode verdict
     out = _resolver_sequence(baseline, mb, chosen, None, None, None)
-    assert out.catalog == chosen
+    assert out.barcode == chosen  # canonical barcode wins
+    assert out.catalog == "0042284229999"  # MCN untouched by the pipeline
     assert out == _live_sequence(baseline, mb, chosen, None, None, None)
 
 
-def test_no_canonical_mcn_falls_back_to_fill_blank_catalog():
-    baseline = _bare_disc()  # no catalog
+def test_no_canonical_barcode_falls_back_to_fill_blank_barcode():
+    baseline = _bare_disc()  # no catalog, no barcode
     mb = _meta(barcode="MB-CAT")
     out = _resolver_sequence(baseline, mb, None, None, None, None)
-    assert out.catalog == "MB-CAT"  # MB fills the blank when no canonical MCN
+    assert out.barcode == "MB-CAT"  # MB fills the blank when no canonical barcode
     assert out == _live_sequence(baseline, mb, None, None, None, None)
 
 

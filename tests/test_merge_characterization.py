@@ -86,9 +86,12 @@ def test_disc_number_is_meta_priority_unlike_album():
 # --- catalog (MCN): plain fill-blank (disc wins if present) -----------------
 
 
-def test_catalog_fill_blank_then_disc_priority():
-    assert _merge_into_disc(DiscMeta(barcode="X"), _disc(catalog=None)).catalog == "X"
-    assert _merge_into_disc(DiscMeta(barcode="X"), _disc(catalog="Y")).catalog == "Y"
+def test_barcode_fill_blank_then_disc_priority():
+    # meta.barcode -> disc.barcode (fill-blank, disc-priority). The on-disc MCN
+    # (catalog) is never filled from a service barcode.
+    assert _merge_into_disc(DiscMeta(barcode="X"), _disc(barcode=None)).barcode == "X"
+    assert _merge_into_disc(DiscMeta(barcode="X"), _disc(barcode="Y")).barcode == "Y"
+    assert _merge_into_disc(DiscMeta(barcode="X"), _disc(catalog=None)).catalog is None
 
 
 # --- per-track title / performer: same disc-priority + sentinel logic -------
