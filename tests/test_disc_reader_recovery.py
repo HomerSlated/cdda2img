@@ -114,6 +114,42 @@ def test_progress_parses_wrote_frontier(
     assert seen[-1].fraction == 1.0
 
 
+def test_single_track_close_stays_on_its_track(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Recovery close-out at 100% must not roll over to the next track's number.
+
+    A single-track rip passes disc_first == track's first LSN and
+    total_sectors == track length. The final ``emit(total_sectors)`` addresses the
+    sector one past the track's end — the first LSN of the *next* track — so before
+    the clamp it reported "track 9" the instant track 8 finished. The bar must close
+    at 100% while the track number stays 8.
+    """
+    # Track 8 spans LSN 700..799; track 9 begins at 800.
+    tracks = [(8, 700, 100), (9, 800, 100)]
+    last_sector_words = 799 * dr._CD_FRAMEWORDS  # last real sector of track 8
+    _FakePopen.lines = [
+        "Sending all callback output to stderr for wrapper script\n",
+        f"##: 14 [wrote] @ {last_sector_words}\n",
+        "##: 15 [finished] @ 0\n",
+    ]
+    _FakePopen.rc = 0
+    monkeypatch.setattr(dr.subprocess, "Popen", _FakePopen)
+
+    from cdda2img.cdrdao_progress import ProgressUpdate
+
+    seen: list[ProgressUpdate] = []
+    wav = tmp_path / "x.wav"
+    cmd = ["cd-paranoia", "-d", "/dev/sr0", "--", "8", str(wav)]
+    rc = dr._run_paranoia_with_progress(cmd, wav, 100, tracks, 700, seen.append)
+
+    assert rc == 0
+    # Every update — streaming and the 100% close — stays on track 8.
+    assert [u.track for u in seen] == [8, 8]
+    assert seen[-1].elapsed_frames == 100  # count == length: bar still hits 100%
+    assert seen[-1].fraction == 1.0
+
+
 def test_capture_env_tees_raw_stream(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

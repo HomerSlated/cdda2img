@@ -145,3 +145,64 @@ def test_recovery_boundary_mismatch_signals_full_rerip(
     assert ok is False  # caller takes the full-disc re-rip fallback
     assert outcomes == {}  # bailed before recording an outcome
     assert len(state["speeds"]) == 1  # bailed on the very first attempt
+
+
+def test_recovery_tui_status_is_per_attempt(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The recovery loop owns the status line: a per-attempt banner that the live
+    progress callback keeps (only the bar advances), never the "Ripping track" line."""
+    from cdda2img.cdrdao_progress import ProgressUpdate
+
+    statuses: list[tuple[str, float]] = []
+
+    class _FakeUI:
+        def set_status(
+            self, text: str, progress: float = 0.0, detail: str = ""
+        ) -> None:
+            statuses.append((text, progress))
+
+    def fake_rip(device, t, out, **kw):
+        cb = kw.get("progress_cb")
+        if cb is not None:  # emit one mid-track progress event
+            cb(
+                ProgressUpdate(
+                    track=t,
+                    n_tracks=_N_TRACKS,
+                    elapsed_frames=5,
+                    total_frames=_TRACK2_FRAMES,
+                )
+            )
+        Path(out).write_bytes(b"\xaa" * (_TRACK2_FRAMES * _FRAME))
+        return _TRACK2_FRAMES
+
+    def fake_match(raw, track, n_tracks, responses):
+        return "a", "b", 50, None  # match on the first attempt (fastest speed)
+
+    monkeypatch.setattr(dr, "rip_single_track", fake_rip)
+    monkeypatch.setattr(ar, "match_track_pcm", fake_match)
+
+    pcm = _disc_pcm(tmp_path)
+    ladder = [4, 8, 16]  # 3 passes x 3 steps = 9 total attempts
+
+    ok, outcomes = _recover_failed_tracks(
+        "/dev/sr0",
+        _failed(2),
+        _LSNS,
+        _LAST_LSN,
+        pcm,
+        ["resp"],
+        _N_TRACKS,
+        ladder,
+        3,
+        30,
+        _FakeUI(),  # type: ignore[invalid-argument-type]
+    )
+
+    assert ok is True
+    assert outcomes == {2: "matched@16X"}  # fastest-first, matched immediately
+    # Attempt banner set (bar reset to 0), then the progress cb keeps the same text
+    # while advancing the bar — the status never flips to a "Ripping track" line.
+    assert statuses[0] == ("Recover track 2 (1/9)", 0.0)
+    assert statuses[1][0] == "Recover track 2 (1/9)"
+    assert statuses[1][1] == pytest.approx(0.5)  # 5/10 frames

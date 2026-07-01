@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from cdda2img.cdrdao_progress import ProgressUpdate
     from cdda2img.field_resolver import FieldProposal
     from cdda2img.lookup_result import DiscMeta
     from cdda2img.mb_lookup import MBPrepopResult
@@ -2327,7 +2328,6 @@ def _rip_with_fallback(
     When *ui* is provided, cdrdao stdout is captured and fed to the TUI
     progress bar. Without *ui*, behaviour is unchanged.
     """
-    from cdda2img.cdrdao_progress import ProgressUpdate
     from cdda2img.cdrdao_ripper import rip_cdrdao
     from cdda2img.disc_reader import rip_disc
 
@@ -2380,6 +2380,28 @@ def _ar_has_partial_mismatch(results: list) -> bool:
     return 0 < n_ok < len(in_db)
 
 
+def _recovery_status_cb(
+    ui: TerminalUI | None, status_line: list[str]
+) -> Callable[[ProgressUpdate], None] | None:
+    """Build the recovery-loop progress callback (None when there is no TUI).
+
+    The callback keeps the current attempt's status text (``status_line[0]``, updated by
+    the loop per attempt) and moves only the bar + detail — it never rewrites the status,
+    so the "Recover track N (x/y)" banner stays put for the whole rip.
+    """
+    if ui is None:
+        return None
+
+    def _cb(update: ProgressUpdate) -> None:
+        ui.set_status(
+            status_line[0],
+            update.fraction,
+            detail=update.note or f"({update.elapsed_frames}/{update.total_frames})",
+        )
+
+    return _cb
+
+
 def _recover_failed_tracks(
     device: str,
     failed_tracks: list,
@@ -2391,7 +2413,7 @@ def _recover_failed_tracks(
     ladder: list[int],
     n_passes: int,
     read_offset: int,
-    progress_cb,
+    ui: TerminalUI | None,
 ) -> tuple[bool, dict[int, str]]:
     """Re-rip each AR-failed track across the drive's speed ladder until it matches.
 
@@ -2400,6 +2422,11 @@ def _recover_failed_tracks(
     cached *responses* and splicing the first match into *pcm_file*. A track that never
     matches keeps its original cdrdao audio (no unverified splice). The drive speed is NOT
     restored between attempts (``restore_speed=False``) — the caller restores once after.
+
+    The recovery loop owns the TUI status line for its whole duration: it sets a compact
+    per-attempt status (``Recover track N (x/y)``) and routes the live rip
+    progress into the *bar + detail* only, so the recovery context stays visible for the
+    whole track instead of being overwritten by the per-rip "Ripping track" line.
 
     Returns ``(ok, outcomes)``. ``ok=False`` signals a cdrdao/cd-paranoia track-boundary
     disagreement (re-rip byte count != expected) that the caller must resolve with the
@@ -2412,6 +2439,14 @@ def _recover_failed_tracks(
     outcomes: dict[int, str] = {}
     # fastest→slowest, repeated n_passes times: an early high-speed match exits sooner.
     speeds = [s for _ in range(n_passes) for s in reversed(ladder)]
+    total_attempts = len(speeds)
+
+    # The progress callback keeps the current attempt's status text (held in status_line)
+    # and only moves the bar + detail — it never rewrites the status, so the recovery
+    # context persists through the whole rip.
+    status_line = [""]
+    prog_cb = _recovery_status_cb(ui, status_line)
+
     with pcm_file.open("r+b") as pcm_fh:
         for result in failed_tracks:
             t = result.track  # 1-indexed
@@ -2423,8 +2458,14 @@ def _recover_failed_tracks(
                 byte_end = (disc_last_lsn + 1) * _R6_BYTES_PER_FRAME
             expected_bytes = byte_end - byte_start
 
+            if ui is None:
+                print(f"  Recovering track {t}…")
+
             matched = False
-            for speed in speeds:
+            for attempt, speed in enumerate(speeds, 1):
+                status_line[0] = f"Recover track {t} ({attempt}/{total_attempts})"
+                if ui is not None:
+                    ui.set_status(status_line[0], 0.0)
                 track_tmp = pcm_file.with_stem(f"{pcm_file.stem}.t{t}")
                 try:
                     rip_single_track(
@@ -2435,7 +2476,7 @@ def _recover_failed_tracks(
                         read_offset=read_offset,
                         read_speed=speed,
                         restore_speed=False,
-                        progress_cb=progress_cb,
+                        progress_cb=prog_cb,
                     )
                     new_pcm = track_tmp.read_bytes()
                 finally:
@@ -2682,7 +2723,6 @@ def rip_image(  # noqa: C901
             )
             spliced_ok = True
             if recovery_ladder:
-                _ui_status(ui, "Recovering failed track(s) across the speed ladder…")
                 spliced_ok, outcomes = _recover_failed_tracks(
                     device,
                     failed_tracks,
@@ -2694,7 +2734,7 @@ def rip_image(  # noqa: C901
                     recovery_ladder,
                     cfg.recovery_passes,
                     read_offset,
-                    paranoia_cb,
+                    ui,
                 )
                 recovery_outcomes.update(outcomes)
                 drive_speed.restore_drive_speed(device)  # one restore after the loop

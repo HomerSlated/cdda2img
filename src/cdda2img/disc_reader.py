@@ -550,9 +550,17 @@ def _run_paranoia_with_progress(
 
     def emit(sectors_done: int, note: str = "") -> None:
         sectors_done = max(0, min(sectors_done, total_sectors))
+        # Map to a track from the *last written* sector, not the frontier count.
+        # The close-out emit passes sectors_done == total_sectors (a count); that
+        # absolute sector is one past the span's end == the first LSN of the *next*
+        # track, which would misreport "track N+1" the instant a track finishes
+        # (visible on the single-track recovery path). Clamp to the last real
+        # sector so the track number stays put while the bar still closes at 100%.
+        last_sector = disc_first + max(total_sectors - 1, 0)
+        track_sector = min(disc_first + sectors_done, last_sector)
         progress_cb(
             ProgressUpdate(
-                track=_sector_to_track(tracks, disc_first + sectors_done),
+                track=_sector_to_track(tracks, track_sector),
                 n_tracks=n_tracks,
                 elapsed_frames=sectors_done,
                 total_frames=total_sectors,
