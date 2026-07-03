@@ -23,6 +23,7 @@ Reads are timed live on the drive; a run is minutes. Usage:
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import subprocess
 import sys
@@ -237,6 +238,16 @@ def recover_c2guided(
 # ---- driver -----------------------------------------------------------------
 
 
+def stop_spindle() -> None:
+    """Park the spindle (c2read --stop → SCSI START STOP UNIT). Deploy whenever we're
+    done with the drive and no further reads are pending, so a finished run never
+    leaves the platter spinning at the speed the last read set."""
+    with contextlib.suppress(OSError):
+        subprocess.run(  # noqa: S603 — fixed local tool
+            [str(_C2READ), "--device", _DEVICE, "--stop", "-q"], capture_output=True
+        )
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument(
@@ -273,7 +284,8 @@ def main() -> int:
                     f"recovery {r.recovery_secs:6.1f}s  {status:12s} [{tag}]"
                 )
     finally:
-        restore_drive_speed(_DEVICE)
+        restore_drive_speed(_DEVICE)  # leave the speed setting at max for the next op…
+        stop_spindle()  # …but park the spindle now — we're done reading the drive
 
     # Aggregate: mean recovery per arm (recovered trials only).
     print("\n=== summary (mean recovery seconds, recovered trials) ===")

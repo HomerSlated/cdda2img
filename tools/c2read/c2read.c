@@ -205,6 +205,112 @@ static int read_cd(int fd, long lba, unsigned nsec, unsigned sector_type,
     return scsi_in(fd, cdb, sizeof(cdb), buf, nsec * sector_len, sense);
 }
 
+#define OP_GET_CONFIG 0x46
+#define OP_START_STOP 0x1B
+#define FEATURE_CD_READ 0x001E
+
+/* SCSI START STOP UNIT with START=0, LOEJ=0: spin the spindle DOWN without ejecting.
+ * More authoritative than the block-layer CDROMSTOP ioctl (which the sr driver can
+ * issue with O_NONBLOCK quirks); this goes straight to the drive. Returns 0 on GOOD. */
+static int drive_stop(int fd) {
+    unsigned char cdb[6] = {OP_START_STOP, 0, 0, 0, 0x00, 0};
+    unsigned char sense[SENSE_LEN];
+    sg_io_hdr_t io;
+    memset(&io, 0, sizeof(io));
+    memset(sense, 0, SENSE_LEN);
+    io.interface_id = 'S';
+    io.dxfer_direction = SG_DXFER_NONE;
+    io.cmd_len = sizeof(cdb);
+    io.mx_sb_len = SENSE_LEN;
+    io.cmdp = cdb;
+    io.sbp = sense;
+    io.timeout = 30000;
+    if (ioctl(fd, SG_IO, &io) < 0) {
+        fprintf(stderr, "c2read: START STOP UNIT ioctl: %s\n", strerror(errno));
+        return -1;
+    }
+    if ((io.info & SG_INFO_OK_MASK) != SG_INFO_OK) {
+        if (io.sb_len_wr > 0) print_sense(sense, "START STOP UNIT");
+        return -1;
+    }
+    return 0;
+}
+
+/* GET CONFIGURATION, CD Read feature (0x1E) → the drive's *claimed* C2/DAP/CD-Text
+ * support bits. Returns 0 if the descriptor was found (fills the out-params), -1
+ * otherwise. This is only a claim — drives are known to advertise C2 they don't
+ * honour, which is why probe_features() also does a functional smoke read. */
+static int get_cdread_feature(int fd, int *dap, int *c2, int *cdtext, int *current) {
+    unsigned char cdb[10] = {0};
+    unsigned char buf[64] = {0};
+    unsigned char sense[SENSE_LEN];
+
+    cdb[0] = OP_GET_CONFIG;
+    cdb[1] = 0x02;                    /* RT = 10b: return only the named feature */
+    cdb[2] = 0x00;
+    cdb[3] = (unsigned char)FEATURE_CD_READ;
+    cdb[7] = 0x00;
+    cdb[8] = (unsigned char)sizeof(buf);
+
+    if (scsi_in(fd, cdb, sizeof(cdb), buf, sizeof(buf), sense) != 0)
+        return -1;
+    /* 8-byte feature header, then the first feature descriptor. */
+    unsigned code = ((unsigned)buf[8] << 8) | buf[9];
+    if (code != FEATURE_CD_READ)
+        return -1;
+    *current = buf[10] & 0x01;         /* active for the currently-loaded medium */
+    unsigned flags = buf[12];          /* feature-specific byte 0 */
+    *dap = (flags >> 7) & 1;
+    *c2 = (flags >> 1) & 1;            /* C2 Flags supported */
+    *cdtext = flags & 1;
+    return 0;
+}
+
+/* Functional check: does READ CD *with the C2 field* actually return data (not a
+ * CHECK CONDITION)? Reads 3 CD-DA sectors from LBA 0. Returns 0 on success. */
+static int c2_smoke(int fd) {
+    unsigned len = RAW_BYTES + C2_BYTES;
+    unsigned char sense[SENSE_LEN];
+    unsigned char *buf = malloc((size_t)3 * len);
+    if (!buf)
+        return -1;
+    int rc = read_cd(fd, 0, 3, 1, 1, buf, len, sense);
+    free(buf);
+    return rc == 0 ? 0 : -1;
+}
+
+/* --features: report C2 capability (claim + functional smoke) in a machine-parseable
+ * form and exit 0 IFF C2 is clearly usable, so the pipeline can gate on the exit code.
+ * Conservative: anything short of "advertised AND functional" exits non-zero, so an
+ * unreliable/unadvertised C2 falls back to the non-C2 recovery path by default. */
+static int probe_features(int fd) {
+    int dap = 0, c2 = 0, cdtext = 0, current = 0;
+    int have_feat = get_cdread_feature(fd, &dap, &c2, &cdtext, &current);
+    if (have_feat == 0)
+        printf("cd_read_feature present current=%d dap=%d c2_flags=%d cd_text=%d\n",
+               current, dap, c2, cdtext);
+    else
+        printf("cd_read_feature absent (GET CONFIGURATION 0x1E unavailable)\n");
+
+    int smoke = c2_smoke(fd);
+    printf("c2_read_smoke %s\n", smoke == 0 ? "ok" : "failed");
+
+    const char *verdict;
+    int usable;
+    if (smoke != 0) {
+        verdict = "C2_UNSUPPORTED";   /* can't even read with the C2 field */
+        usable = 0;
+    } else if (have_feat == 0 && c2 == 1) {
+        verdict = "C2_SUPPORTED";     /* advertised AND functional */
+        usable = 1;
+    } else {
+        verdict = "C2_UNVERIFIED";    /* reads accepted but not advertised — don't trust */
+        usable = 0;
+    }
+    printf("verdict %s\n", verdict);
+    return usable ? 0 : 1;
+}
+
 /* ---- driver ---------------------------------------------------------------- */
 
 static void set_speed(int fd, int nx) {
@@ -225,6 +331,8 @@ static void usage(const char *me) {
         "  --count N      sectors to read; 0/omitted with --full = whole audio area\n"
         "  --full         read [start, lead-out) via READ TOC\n"
         "  --toc          dump track boundaries (READ TOC) to stdout and exit\n"
+        "  --features     probe C2 capability (claim + smoke); exit 0 iff usable\n"
+        "  --stop         spin the spindle down (START STOP UNIT, no eject) and exit\n"
         "  --any          expected sector type ALL_TYPES (default CD_DA)\n"
         "  --c2beb        request C2+block-error-bits (296 B) instead of C2 (294 B)\n"
         "  --chunk NSEC   sectors per READ CD command (default 24, keeps xfer <64K)\n"
@@ -241,6 +349,7 @@ int main(int argc, char **argv) {
     const char *pcm_path = NULL, *c2_path = NULL;
     long start = 0, count = -1;
     int full = 0, any = 0, c2beb = 0, chunk = 24, speed = 0, ranges = 0, quiet = 0, toc = 0;
+    int features = 0, stop = 0;
 
     for (int i = 1; i < argc; i++) {
         const char *a = argv[i];
@@ -256,6 +365,8 @@ int main(int argc, char **argv) {
         else if (!strcmp(a, "--c2") && i + 1 < argc) c2_path = argv[++i];
         else if (!strcmp(a, "--ranges")) ranges = 1;
         else if (!strcmp(a, "--toc")) toc = 1;
+        else if (!strcmp(a, "--features")) features = 1;
+        else if (!strcmp(a, "--stop")) stop = 1;
         else if (!strcmp(a, "-q")) quiet = 1;
         else { usage(argv[0]); return 2; }
     }
@@ -274,6 +385,19 @@ int main(int argc, char **argv) {
 
     if (toc) {
         int rc = dump_toc(fd);
+        close(fd);
+        return rc == 0 ? 0 : 1;
+    }
+
+    if (features) {
+        int rc = probe_features(fd);
+        close(fd);
+        return rc;
+    }
+
+    if (stop) {
+        int rc = drive_stop(fd);
+        if (rc == 0 && !quiet) fprintf(stderr, "c2read: spindle stopped\n");
         close(fd);
         return rc == 0 ? 0 : 1;
     }
