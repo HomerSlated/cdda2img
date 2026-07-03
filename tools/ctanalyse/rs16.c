@@ -80,7 +80,9 @@ bool rs_chien_search(int *pos, int n, int jisu, const int *sigma)
 		return gf_log[last] < n;
 	}
 
-	int sg[RS_MAX_NPAR / 2 + 2];
+	/* sized for the errata locator (degree up to npar in the all-erasure case),
+	 * not just the error-only npar/2. */
+	int sg[RS_MAX_NPAR + 2];
 	for (int j = 1; j <= jisu; j++)
 		sg[j] = sigma[j];
 	int pos_idx = jisu - 1;
@@ -124,20 +126,36 @@ int rs_forney(int jisu, int ps, const int *sigma, const int *omega)
 	return gf_mul(ps, gf_div(ov, dv));
 }
 
-int rs_decode_column(int npar, const int *E, int n_data,
-                     const int *erasures, int n_erasures,
-                     int *err_j, int *err_val)
+/* Emit the jisu errata at Chien roots pos[] via Forney, then re-validate that the
+ * found errata reproduce E exactly (guards against a silent miscorrection when the
+ * errata exceed capacity). Returns jisu on success, -1 on failure. */
+static int rs_emit_and_validate(int npar, const int *E, int n_data, int jisu,
+                                const int *pos, const int *lambda, const int *omega,
+                                int *err_j, int *err_val)
 {
-	(void)erasures;
-	if (n_erasures != 0)
-		return -1; /* erasure decoding not implemented yet (item 8) */
+	for (int i = 0; i < jisu; i++) {
+		int mask = rs_forney(jisu, pos[i], lambda, omega);
+		if (mask < 0)
+			return -1;
+		err_j[i] = gf_topos(n_data, pos[i]);
+		err_val[i] = mask;
+	}
+	/* Recompute the syndromes S_k = sum_i err_val[i] * pos[i]^k (pos[i] is the
+	 * errata locator value alpha^(n-1-p)) and require them to equal E. */
+	for (int k = 0; k < npar; k++) {
+		int s = 0;
+		for (int i = 0; i < jisu; i++)
+			if (err_val[i])
+				s ^= gf_mulexp(err_val[i], (gf_log[pos[i]] * k) % GF_MAX);
+		if (s != E[k])
+			return -1;
+	}
+	return jisu;
+}
 
-	int has_err = 0;
-	for (int i = 0; i < npar; i++)
-		has_err |= E[i];
-	if (!has_err)
-		return 0;
-
+/* Error-only decode: modified Berlekamp-Massey -> Chien -> Forney. */
+static int rs_decode_errors(int npar, const int *E, int n_data, int *err_j, int *err_val)
+{
 	int sigma[RS_MAX_NPAR / 2 + 2] = {0};
 	int omega[RS_MAX_NPAR / 2 + 1] = {0};
 	int pos[RS_MAX_NPAR / 2];
@@ -157,4 +175,80 @@ int rs_decode_column(int npar, const int *E, int n_data,
 		err_val[i] = mask;
 	}
 	return jisu;
+}
+
+/* Errors-and-erasures decode (item 8, C2 pointers as erasures). With e erasures and
+ * t unknown errors, correction holds when e + 2t <= npar — so each erasure is worth
+ * half an error, doubling reach when the drive tells us *where* the damage is. */
+static int rs_decode_erasures(int npar, const int *E, int n_data,
+                              const int *erasures, int n_erasures,
+                              int *err_j, int *err_val)
+{
+	int e = n_erasures;
+	if (e > npar)
+		return -1; /* more erasures than parity: hopeless */
+
+	/* Erasure locator Gamma(x) = prod (1 - X_i x), X_i = alpha^(n_data-1-p_i). */
+	int gamma[RS_MAX_NPAR + 1] = {0};
+	gamma[0] = 1;
+	int glen = 1;
+	for (int i = 0; i < e; i++) {
+		int p = erasures[i];
+		if (p < 0 || p >= n_data)
+			return -1; /* erasure position out of range */
+		int X = gf_exp[n_data - 1 - p];
+		for (int j = glen; j > 0; j--)
+			gamma[j] ^= gf_mul(X, gamma[j - 1]);
+		glen++;
+	}
+
+	/* Modified syndromes T = Gamma * E mod x^npar. The clean tail T[e..npar-1] is a
+	 * syndrome sequence for the t unknown errors alone; BM on it finds sigma. */
+	int T[RS_MAX_NPAR] = {0};
+	rs_mul_poly(T, npar, gamma, e + 1, E, npar);
+
+	int sigma[RS_MAX_NPAR + 2] = {0};
+	int t;
+	int np2 = npar - e;
+	if (np2 <= 0) {
+		sigma[0] = 1; /* all parity consumed by erasures: no room for errors */
+		t = 0;
+	} else {
+		t = rs_calc_sigma_mbm(np2, &T[e], sigma);
+		if (t < 0 || 2 * t > np2)
+			return -1; /* beyond e + 2t <= npar */
+	}
+
+	/* Combined errata locator Lambda = sigma * Gamma (degree jisu = e + t). */
+	int lambda[RS_MAX_NPAR + 2] = {0};
+	rs_mul_poly(lambda, e + t + 1, sigma, t + 1, gamma, e + 1);
+	int jisu = e + t;
+	if (jisu <= 0 || jisu > npar)
+		return -1;
+
+	/* Errata evaluator Omega = Lambda * E mod x^jisu (deg Omega < jisu). */
+	int omega[RS_MAX_NPAR + 2] = {0};
+	rs_mul_poly(omega, jisu, lambda, e + t + 1, E, npar);
+
+	int pos[RS_MAX_NPAR + 1];
+	if (!rs_chien_search(pos, n_data, jisu, lambda))
+		return -1; /* fewer roots than errata: uncorrectable */
+
+	return rs_emit_and_validate(npar, E, n_data, jisu, pos, lambda, omega, err_j,
+	                            err_val);
+}
+
+int rs_decode_column(int npar, const int *E, int n_data,
+                     const int *erasures, int n_erasures,
+                     int *err_j, int *err_val)
+{
+	int has_err = 0;
+	for (int i = 0; i < npar; i++)
+		has_err |= E[i];
+	if (!has_err)
+		return 0; /* syndromes all zero: column clean (even any flagged positions) */
+
+	if (n_erasures == 0)
+		return rs_decode_errors(npar, E, n_data, err_j, err_val);
+	return rs_decode_erasures(npar, E, n_data, erasures, n_erasures, err_j, err_val);
 }

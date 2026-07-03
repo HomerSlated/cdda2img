@@ -37,10 +37,13 @@ both pass → keep; else discard splice
   Python independently re-runs our AccurateRip on the spliced PCM. Both must pass or the
   repair is discarded (cd-paranoia audio kept). A miscorrection fails the CRC and is
   rejected — this is what makes repair safe without an "unreadable sectors only" policy.
-- **Erasure-aware decode API from day one.** `rs_decode()` accepts an optional
-  erasure-location list (RS corrects `npar` erasures vs `npar/2` errors). Unused until
-  the item-8 C2 probe decides whether the PX-716A's C2 pointers are honest; costs nothing
-  now, avoids an API break later.
+- **Erasure-aware decode (item 8, IMPLEMENTED 2026-07-03).** `rs_decode_column()` does
+  errors-and-erasures (e + 2t ≤ npar). The C2-honesty probe (tools/c2read + c2bench.py)
+  confirmed the PX-716A's C2 pointers are precise (~99%) though blind to positioning slips,
+  so C2 is fed as erasures (never trusting *un*flagged samples). `ctanalyse --erasures`
+  consumes a per-word bitmap; `ctdb_repair.py` builds it from a c2read C2 capture, gated by
+  `--c2-mode` / config `c2_recovery`. Validated on real 40× damage (AR conf 200). See
+  ALGORITHMS.md §6.
 - **Pure C (C99), x86-64-v1 baseline** (nothing beyond SSE2 — the compiler's `-O2`
   default; also keeps the source portable to any architecture). Void, Debian, Ubuntu,
   Arch and Fedora all still target v1; RHEL 9/10 (v2/v3) are supersets.

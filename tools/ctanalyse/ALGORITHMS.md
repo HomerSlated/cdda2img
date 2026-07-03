@@ -175,10 +175,21 @@ Codeword length for position arithmetic: `n = stridecount + npar`.
    `{byte: 2·erroff, old: word, new: word ^ mask}` triples — already in our domain.
 5. `can_recover = false` when any non-zero column has BM fail (degree ≤ 0) or Chien not
    find `jisu` roots. All-or-nothing per disc.
-6. **Erasure extension (item 8, API only for now):** `rs_decode()` accepts an optional
-   erasure-position list per column; with e erasures and t errors correction holds when
-   2t + e ≤ npar. Plumbed through the API from day one, implementation deferred until
-   the C2-honesty probe.
+6. **Erasure extension (item 8, IMPLEMENTED 2026-07-03):** `rs_decode_column()` takes an
+   optional erasure-position list per column; with e erasures and t errors correction holds
+   when e + 2t ≤ npar (each erasure worth half an error). Path: erasure locator
+   Γ(x)=∏(1−X_i·x) with X_i = α^(n_data−1−p_i); modified syndromes T = Γ·E mod x^npar; BM on
+   the clean tail T[e..npar−1] for the t unknown errors; combined errata locator Λ = σ·Γ;
+   Chien + Forney over Λ; then a syndrome **re-validation** (recompute S from the found
+   errata, require == E) that refuses over-capacity miscorrection before it reaches the
+   CRC/AR gate. `--erasures <bitmap>` (one LSB-first bit per local 16-bit word) feeds it;
+   `cta_build_erasures` maps each flagged word to (column, row) by inverting the syndrome
+   transform: u = w − 2·offset − stride, part2 = u mod stride, row = u / stride — so
+   erasures land in exactly the grid cells the syndromes describe. Per column: try
+   errors-and-erasures, fall back to error-only if it fails (false-positive C2 flags cost a
+   slot but never corrupt). The C2 experiment (tools/c2read, tools/c2bench.py) confirmed C2
+   is precise enough to make good erasures; validated end to end on real 40× damage
+   (`ctdb_repair.py --c2`, AR conf 200).
 
 ## 7. CRC model
 

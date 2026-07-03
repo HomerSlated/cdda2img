@@ -33,6 +33,26 @@ static void die(const char *msg)
 	exit(1);
 }
 
+/* Read a whole file into a malloc'd buffer; *size gets its length. Dies on error. */
+static uint8_t *read_file(const char *path, size_t *size)
+{
+	FILE *f = fopen(path, "rb");
+	if (!f)
+		die("cannot open file");
+	if (fseek(f, 0, SEEK_END) != 0)
+		die("cannot seek file");
+	long sz = ftell(f);
+	if (sz < 0)
+		die("cannot size file");
+	rewind(f);
+	uint8_t *buf = malloc((size_t)sz ? (size_t)sz : 1);
+	if (fread(buf, 1, (size_t)sz, f) != (size_t)sz)
+		die("short read");
+	fclose(f);
+	*size = (size_t)sz;
+	return buf;
+}
+
 /* ---- self-test ----------------------------------------------------------- */
 
 /* log-domain polynomial product, as Galois.gfconv (for the TestParity vectors) */
@@ -121,6 +141,88 @@ static int selftest(void)
 		}
 	}
 
+	/* ---- erasure decode: e known erasures + t unknown errors, e + 2t <= NPAR ---- */
+	{
+		static const int ecase[][2] = {{4, 6}, {8, 4}, {16, 0}, {6, 5}, {1, 7}};
+		int err_j2[NPAR], err_val2[NPAR], eras[NPAR];
+		for (size_t ci = 0; ci < sizeof(ecase) / sizeof(ecase[0]); ci++) {
+			int e = ecase[ci][0], t = ecase[ci][1], tot = e + t;
+			lcg = 0x00C0FFEE;
+			for (int i = 0; i < N; i++)
+				ref[i] = lcg_next();
+			memcpy(bad, ref, sizeof(ref));
+			for (int q = 0; q < tot; q++) { /* first e corrupted positions are flagged */
+				int p = (q * 397 + 11) % N;
+				bad[p] ^= (uint16_t)(0x1D + q * 3);
+				if (q < e)
+					eras[q] = p;
+			}
+			ref_syndrome(ref, N, NPAR, Sref);
+			ref_syndrome(bad, N, NPAR, Sbad);
+			for (int i = 0; i < NPAR; i++)
+				E[i] = Sref[i] ^ Sbad[i];
+			int n = rs_decode_column(NPAR, E, N, eras, e, err_j2, err_val2);
+			if (n != tot) {
+				fails++, printf("FAIL eras e=%d t=%d: decode returned %d\n", e, t, n);
+				continue;
+			}
+			for (int i = 0; i < n; i++)
+				bad[err_j2[i]] ^= (uint16_t)err_val2[i];
+			if (memcmp(bad, ref, sizeof(ref)) != 0)
+				fails++, printf("FAIL eras e=%d t=%d: repaired != reference\n", e, t);
+		}
+
+		/* over-capacity: e=2, t=8 -> e + 2t = 18 > NPAR -> must refuse */
+		{
+			lcg = 0x00C0FFEE;
+			for (int i = 0; i < N; i++)
+				ref[i] = lcg_next();
+			memcpy(bad, ref, sizeof(ref));
+			for (int q = 0; q < 10; q++) {
+				int p = (q * 397 + 11) % N;
+				bad[p] ^= (uint16_t)(0x1D + q * 3);
+				if (q < 2)
+					eras[q] = p;
+			}
+			ref_syndrome(ref, N, NPAR, Sref);
+			ref_syndrome(bad, N, NPAR, Sbad);
+			for (int i = 0; i < NPAR; i++)
+				E[i] = Sref[i] ^ Sbad[i];
+			int n = rs_decode_column(NPAR, E, N, eras, 2, err_j2, err_val2);
+			if (n >= 0)
+				fails++, printf("FAIL eras overload: expected refusal, got %d\n", n);
+		}
+
+		/* false-positive erasure: a clean position flagged among the erasures
+		 * (e=3 = 2 real + 1 false, t=5 -> 3 + 10 = 13). Recovers, false flag mask 0. */
+		{
+			lcg = 0x00C0FFEE;
+			for (int i = 0; i < N; i++)
+				ref[i] = lcg_next();
+			memcpy(bad, ref, sizeof(ref));
+			for (int q = 0; q < 7; q++) {
+				int p = (q * 397 + 11) % N;
+				bad[p] ^= (uint16_t)(0x1D + q * 3);
+				if (q < 2)
+					eras[q] = p;
+			}
+			eras[2] = (900 * 397 + 11) % N; /* clean, uncorrupted position */
+			ref_syndrome(ref, N, NPAR, Sref);
+			ref_syndrome(bad, N, NPAR, Sbad);
+			for (int i = 0; i < NPAR; i++)
+				E[i] = Sref[i] ^ Sbad[i];
+			int n = rs_decode_column(NPAR, E, N, eras, 3, err_j2, err_val2);
+			if (n < 0) {
+				fails++, printf("FAIL eras false-positive: unexpected refusal\n");
+			} else {
+				for (int i = 0; i < n; i++)
+					bad[err_j2[i]] ^= (uint16_t)err_val2[i];
+				if (memcmp(bad, ref, sizeof(ref)) != 0)
+					fails++, printf("FAIL eras false-positive: repaired != reference\n");
+			}
+		}
+	}
+
 	printf(fails ? "selftest: %d FAILURE(S)\n" : "selftest: all passed\n", fails);
 	return fails ? 2 : 0;
 }
@@ -138,6 +240,7 @@ static void emit_json(const cta_ctx *c, const cta_result *r)
 	printf("  \"npar\": %d,\n", c->npar);
 	printf("  \"dirty_columns\": %d,\n", r->dirty_columns);
 	printf("  \"corrected_errors\": %d,\n", r->corrected_errors);
+	printf("  \"erasure_columns\": %d,\n", r->erasure_columns);
 
 	printf("  \"corrections\": [");
 	for (size_t i = 0; i < r->n_corr; i++)
@@ -168,11 +271,12 @@ static void emit_json(const cta_ctx *c, const cta_result *r)
 
 static const char *usage =
     "usage: ctanalyse --pcm F --parity F --npar N --stride N(wire) [--toc a:b:...]\n"
-    "                 [--threads N] [--max-offset N] [--impl auto] | --selftest\n";
+    "                 [--erasures F] [--threads N] [--max-offset N] [--impl auto]\n"
+    "                 | --selftest\n";
 
 int main(int argc, char **argv)
 {
-	const char *pcm_path = NULL, *par_path = NULL;
+	const char *pcm_path = NULL, *par_path = NULL, *eras_path = NULL;
 	int npar = 0, stride_wire = 0, threads = 0, max_offset = 0;
 	int do_selftest = 0;
 
@@ -191,6 +295,8 @@ int main(int argc, char **argv)
 			threads = atoi(argv[++i]);
 		else if (!strcmp(argv[i], "--max-offset") && i + 1 < argc)
 			max_offset = atoi(argv[++i]);
+		else if (!strcmp(argv[i], "--erasures") && i + 1 < argc)
+			eras_path = argv[++i];
 		else if ((!strcmp(argv[i], "--toc") || !strcmp(argv[i], "--impl")) && i + 1 < argc)
 			++i; /* accepted for contract compatibility; unused in v1 */
 		else {
@@ -269,11 +375,22 @@ int main(int argc, char **argv)
 	cta_syndromes(&c, S1);
 
 	cta_result res = {0};
+	cta_erasures er = {0};
+	int have_er = 0;
 	res.offset_found =
 	    cta_find_offset(&c, S1, Sdb, max_offset > 0 ? max_offset : stride / 2 - 1,
 	                    &res.offset);
 	if (res.offset_found) {
-		cta_verify(&c, S1, Sdb, res.offset, &res);
+		/* Erasures depend on the detected offset, so bucket them only now. */
+		if (eras_path) {
+			size_t esz;
+			uint8_t *bits = read_file(eras_path, &esz);
+			cta_build_erasures(&c, res.offset, bits, esz * 8, &er);
+			free(bits);
+			have_er = 1;
+			fprintf(stderr, "ctanalyse: %ld C2 erasures bucketed\n", er.total);
+		}
+		cta_verify(&c, S1, Sdb, res.offset, have_er ? &er : NULL, &res);
 		res.crc_before = cta_region_crc(&c, res.offset, NULL, 0);
 		res.crc_after = res.n_corr
 		                    ? cta_region_crc(&c, res.offset, res.corr, res.n_corr)
@@ -284,6 +401,8 @@ int main(int argc, char **argv)
 	}
 
 	emit_json(&c, &res);
+	if (have_er)
+		cta_free_erasures(&er);
 	free(res.corr);
 	free(S1);
 	free(Sdb);

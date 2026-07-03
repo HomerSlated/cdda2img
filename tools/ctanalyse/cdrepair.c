@@ -170,17 +170,71 @@ bool cta_find_offset(const cta_ctx *c, const uint16_t *S1, const uint16_t *Sdb,
 	return false;
 }
 
+/* ---- erasure buckets (C2 pointers -> grid rows) ------------------------- */
+
+void cta_build_erasures(const cta_ctx *c, int offset, const uint8_t *bits,
+                        size_t nbits, cta_erasures *er)
+{
+	const int stride = c->stride, cap = c->npar;
+	er->stride = stride;
+	er->cap = cap;
+	er->total = 0;
+	er->count = calloc((size_t)stride, sizeof(int));
+	er->rows = malloc((size_t)stride * cap * sizeof(int));
+
+	/* Invert word = (row+1)*stride + part2 + 2*offset: u = w - 2*offset - stride,
+	 * then part2 = u mod stride, row = u / stride — the same transform, backwards. */
+	const long shift = 2L * offset + stride;
+	if (nbits > c->nwords)
+		nbits = c->nwords;
+	const size_t nbytes = (nbits + 7) / 8;
+	for (size_t byte = 0; byte < nbytes; byte++) {
+		uint8_t bb = bits[byte];
+		if (!bb)
+			continue;
+		for (int bit = 0; bit < 8; bit++) {
+			if (!(bb & (1u << bit)))
+				continue;
+			size_t w = byte * 8 + bit;
+			if (w >= nbits)
+				break;
+			long u = (long)w - shift;
+			if (u < 0)
+				continue;
+			int part2 = (int)(u % stride);
+			long row = u / stride;
+			if (row >= c->stridecount)
+				continue;
+			int *cnt = &er->count[part2];
+			if (*cnt < cap) {
+				er->rows[(size_t)part2 * cap + *cnt] = (int)row;
+				(*cnt)++;
+				er->total++;
+			}
+		}
+	}
+}
+
+void cta_free_erasures(cta_erasures *er)
+{
+	free(er->rows);
+	free(er->count);
+	er->rows = NULL;
+	er->count = NULL;
+}
+
 /* ---- full verify + decode ----------------------------------------------- */
 
 static int corr_cmp(const void *a, const void *b);
 
 void cta_verify(const cta_ctx *c, const uint16_t *S1, const uint16_t *Sdb,
-                int offset, cta_result *res)
+                int offset, const cta_erasures *er, cta_result *res)
 {
 	const int npar = c->npar;
 	int E[RS_MAX_NPAR];
-	int err_j[RS_MAX_NPAR / 2];
-	int err_val[RS_MAX_NPAR / 2];
+	/* npar (not npar/2): the erasure path can return up to npar errata. */
+	int err_j[RS_MAX_NPAR];
+	int err_val[RS_MAX_NPAR];
 
 	size_t cap = 1024;
 	res->corr = malloc(cap * sizeof(*res->corr));
@@ -188,6 +242,7 @@ void cta_verify(const cta_ctx *c, const uint16_t *S1, const uint16_t *Sdb,
 	res->can_recover = true;
 	res->dirty_columns = 0;
 	res->corrected_errors = 0;
+	res->erasure_columns = 0;
 
 	for (int part2 = 0; part2 < c->stride; part2++) {
 		size_t start = column_error_syndrome(c, S1, Sdb, part2, offset, E);
@@ -199,7 +254,19 @@ void cta_verify(const cta_ctx *c, const uint16_t *S1, const uint16_t *Sdb,
 			continue;
 		res->dirty_columns++;
 
-		int n = rs_decode_column(npar, E, c->stridecount, NULL, 0, err_j, err_val);
+		int e = (er && part2 < er->stride) ? er->count[part2] : 0;
+		const int *eras = e ? er->rows + (size_t)part2 * er->cap : NULL;
+
+		int n;
+		if (e > 0 && e <= npar) {
+			n = rs_decode_column(npar, E, c->stridecount, eras, e, err_j, err_val);
+			if (n <= 0) /* erasures didn't help (over budget / false flags): error-only */
+				n = rs_decode_column(npar, E, c->stridecount, NULL, 0, err_j, err_val);
+			else
+				res->erasure_columns++;
+		} else {
+			n = rs_decode_column(npar, E, c->stridecount, NULL, 0, err_j, err_val);
+		}
 		if (n <= 0) {
 			res->can_recover = false;
 			continue; /* keep scanning: dirty_columns stays informative */

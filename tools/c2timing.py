@@ -46,7 +46,7 @@ from ctdb_probe import (  # type: ignore[unresolved-import]
 _SPS = _FRAME // 4
 _N_TRACKS = len(_LSNS)
 _BOUNDS = [*_LSNS, _LEADOUT]
-_C2READ = Path(__file__).parent / "c2read" / "c2read"
+_C2READ = "c2read"  # resolved on $PATH (symlinked into ~/.local/bin)
 _SCRATCH = Path("private/testdata/c2/timing")
 _MAX_INIT_TRIES = 5  # re-read the initial pass until it genuinely fails AR
 
@@ -63,7 +63,7 @@ def read_window(
     pcm = _SCRATCH / "win.pcm"
     c2 = _SCRATCH / "win.c2"
     cmd = [
-        str(_C2READ),
+        _C2READ,
         "--device",
         _DEVICE,
         "--start",
@@ -244,7 +244,7 @@ def stop_spindle() -> None:
     leaves the platter spinning at the speed the last read set."""
     with contextlib.suppress(OSError):
         subprocess.run(  # noqa: S603 — fixed local tool
-            [str(_C2READ), "--device", _DEVICE, "--stop", "-q"], capture_output=True
+            [_C2READ, "--device", _DEVICE, "--stop", "-q"], capture_output=True
         )
 
 

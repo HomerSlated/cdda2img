@@ -68,6 +68,7 @@ import fcntl
 import math
 import os
 import random
+import shutil
 import subprocess
 import sys
 import time
@@ -143,21 +144,21 @@ def _load(device: str) -> None:
     subprocess.run(["eject", "-t", device], check=False)  # noqa: S603, S607
 
 
-_CDRESET = Path(__file__).resolve().parent / "cdreset"
+_CDRESET = shutil.which("cdreset")  # resolved on $PATH; None if not installed
 
 
 def _reset(device: str) -> None:
     print("  · CDROMRESET (hard-reset drive)")
     # CDROMRESET needs CAP_SYS_ADMIN. Prefer the setcap helper so the rest of the tool
     # stays unprivileged; fall back to a direct ioctl (works only as root/doas).
-    if _CDRESET.exists():
-        if subprocess.run([str(_CDRESET), device], check=False).returncode == 0:  # noqa: S603
+    if _CDRESET:
+        if subprocess.run([_CDRESET, device], check=False).returncode == 0:  # noqa: S603
             return
     elif _ioctl(device, _CDROMRESET):
         return
     print(
         "  ! CDROMRESET unavailable — build + grant the helper once:\n"
-        f"      make -C tools cdreset && doas setcap cap_sys_admin+ep {_CDRESET}",
+        "      make -C tools cdreset && doas setcap cap_sys_admin+ep tools/cdreset",
         file=sys.stderr,
     )
 
