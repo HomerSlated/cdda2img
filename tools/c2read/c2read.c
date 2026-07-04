@@ -188,6 +188,65 @@ static int dump_toc(int fd) {
     return 0;
 }
 
+/* READ TOC/PMA/ATIP with an arbitrary format, two-step allocation (4-byte header
+ * first for the data length, then the full response), raw response dumped verbatim
+ * to *path* — decoding is Python's job (subchannel.parse_fulltoc / cdtext.py).
+ * format 0x02 = raw ("full") TOC incl. sessions (time=1, track=session 1, per
+ * redumper cd_common.ixx); format 0x05 = CD-Text packs from the lead-in (time=0,
+ * track=0). Returns 0 on success; a refusal (e.g. no CD-Text on the disc) prints
+ * the sense and returns -1 WITHOUT creating the file — absence of the file is the
+ * machine-readable "none" signal. */
+static int dump_toc_format(int fd, unsigned format, unsigned time_bit,
+                           unsigned track, const char *path, const char *what) {
+    unsigned char cdb[10] = {0};
+    unsigned char hdr[4] = {0};
+    unsigned char sense[SENSE_LEN];
+
+    cdb[0] = OP_READ_TOC;
+    cdb[1] = (unsigned char)(time_bit << 1);
+    cdb[2] = (unsigned char)(format & 0x0f);
+    cdb[6] = (unsigned char)track;
+    cdb[7] = 0;
+    cdb[8] = sizeof(hdr);
+
+    int rc = scsi_in(fd, cdb, sizeof(cdb), hdr, sizeof(hdr), sense);
+    if (rc != 0) {
+        if (rc == 1) print_sense(sense, what);
+        else fprintf(stderr, "c2read: %s ioctl failed: %s\n", what, strerror(errno));
+        return -1;
+    }
+    unsigned len = (((unsigned)hdr[0] << 8) | hdr[1]) + 2;  /* incl. length field */
+    if (len <= 4) {
+        fprintf(stderr, "c2read: %s: empty response (no data on this disc)\n", what);
+        return -1;
+    }
+    if (len > 0xffff) len = 0xffff;
+
+    unsigned char *buf = malloc(len);
+    if (!buf) return -1;
+    cdb[7] = (unsigned char)(len >> 8);
+    cdb[8] = (unsigned char)(len & 0xff);
+    rc = scsi_in(fd, cdb, sizeof(cdb), buf, len, sense);
+    if (rc != 0) {
+        if (rc == 1) print_sense(sense, what);
+        else fprintf(stderr, "c2read: %s ioctl failed: %s\n", what, strerror(errno));
+        free(buf);
+        return -1;
+    }
+
+    FILE *fp = fopen(path, "wb");
+    if (!fp) {
+        fprintf(stderr, "c2read: open %s: %s\n", path, strerror(errno));
+        free(buf);
+        return -1;
+    }
+    fwrite(buf, 1, len, fp);
+    fclose(fp);
+    free(buf);
+    fprintf(stderr, "c2read: %s: %u bytes -> %s\n", what, len, path);
+    return 0;
+}
+
 /* One READ CD command for nsec sectors from lba into buf (nsec * sector_len bytes).
  * submode: CDB byte 10 sub-channel selection — 0 none, 1 raw P-W (96 B), 2 formatted
  * Q (16 B). Returned per-sector field order is audio, C2, sub (probed on the PX-716A:
@@ -349,6 +408,9 @@ static void usage(const char *me) {
         "  --count N      sectors to read; 0/omitted with --full = whole audio area\n"
         "  --full         read [start, lead-out) via READ TOC\n"
         "  --toc          dump track boundaries (READ TOC) to stdout and exit\n"
+        "  --fulltoc FILE dump the raw full TOC (READ TOC format 2, sessions) here\n"
+        "  --cdtext FILE  dump raw CD-Text packs (READ TOC format 5) here; the file\n"
+        "                 is not created when the disc has no CD-Text\n"
         "  --features     probe C2 capability (claim + smoke + combos); exit 0 iff usable\n"
         "  --stop         spin the spindle down (START STOP UNIT, no eject) and exit\n"
         "  --any          expected sector type ALL_TYPES (default CD_DA)\n"
@@ -371,6 +433,7 @@ static void usage(const char *me) {
 int main(int argc, char **argv) {
     const char *device = "/dev/sr0";
     const char *pcm_path = NULL, *c2_path = NULL, *sub_path = NULL;
+    const char *cdtext_path = NULL, *fulltoc_path = NULL;
     long start = 0, count = -1;
     int full = 0, any = 0, c2beb = 0, chunk = 24, speed = 0, ranges = 0, quiet = 0, toc = 0;
     int features = 0, stop = 0;
@@ -395,6 +458,8 @@ int main(int argc, char **argv) {
         else if (!strcmp(a, "--pcm") && i + 1 < argc) pcm_path = argv[++i];
         else if (!strcmp(a, "--c2") && i + 1 < argc) c2_path = argv[++i];
         else if (!strcmp(a, "--subf") && i + 1 < argc) sub_path = argv[++i];
+        else if (!strcmp(a, "--cdtext") && i + 1 < argc) cdtext_path = argv[++i];
+        else if (!strcmp(a, "--fulltoc") && i + 1 < argc) fulltoc_path = argv[++i];
         else if (!strcmp(a, "--ranges")) ranges = 1;
         else if (!strcmp(a, "--toc")) toc = 1;
         else if (!strcmp(a, "--features")) features = 1;
@@ -447,6 +512,21 @@ int main(int argc, char **argv) {
         if (rc == 0 && !quiet) fprintf(stderr, "c2read: spindle stopped\n");
         close(fd);
         return rc == 0 ? 0 : 1;
+    }
+
+    /* Lead-in metadata dumps (instant — cached TOC data, no streaming read).
+     * CD-Text absence is always soft (warn, no file created); a full-TOC failure
+     * is fatal only when metadata is all that was asked for. */
+    int fulltoc_failed = 0;
+    if (fulltoc_path)
+        fulltoc_failed = dump_toc_format(fd, 0x02, 1, 1, fulltoc_path,
+                                         "READ TOC (full)") != 0;
+    if (cdtext_path)
+        dump_toc_format(fd, 0x05, 0, 0, cdtext_path, "READ TOC (CD-Text)");
+    if ((fulltoc_path || cdtext_path) && !full && count < 0 &&
+        !pcm_path && !c2_path && !sub_path) {
+        close(fd);
+        return fulltoc_failed ? 1 : 0;
     }
 
     set_speed(fd, speed);

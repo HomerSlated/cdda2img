@@ -220,19 +220,118 @@ def decode_q(sector_or_q: bytes) -> ChannelQ:
 
 
 def parse_fulltoc_leadout(fulltoc: bytes) -> int | None:
-    """Lead-out LBA from a redumper ``.fulltoc`` (raw READ TOC format-2 response).
+    """First-session lead-out LBA from a raw READ TOC format-2 response, or
+    None if no lead-out descriptor is present. Thin wrapper over
+    :func:`parse_fulltoc` kept for the redumper ``.fulltoc`` consumers."""
+    leadouts = parse_fulltoc(fulltoc).leadouts
+    if not leadouts:
+        return None
+    return leadouts[min(leadouts)]
+
+
+@dataclass(frozen=True)
+class FullTocTrack:
+    """One numbered track point from the raw (format-2) TOC."""
+
+    session: int
+    track: int
+    control: int
+    start_lba: int
+
+    @property
+    def is_data(self) -> bool:
+        return bool(self.control & CONTROL_DATA)
+
+
+@dataclass
+class FullToc:
+    """Parsed raw READ TOC format-2 response (sessions + ADR=1 points).
+
+    *disc_type* is the A0 PSEC byte of the first session (0x00 = CD-DA /
+    CD-ROM, 0x10 = CD-I, 0x20 = CD-ROM-XA). MSF fields in the response are
+    binary, not BCD (MMC format 0010b).
+    """
+
+    tracks: list[FullTocTrack]
+    leadouts: dict[int, int]  # session -> lead-out LBA
+    first_track: dict[int, int]
+    last_track: dict[int, int]
+    disc_type: int | None
+    n_sessions: int
+
+
+def parse_fulltoc(raw: bytes) -> FullToc:
+    """Parse a raw READ TOC format-2 response (as ``c2read --fulltoc`` dumps it).
 
     The response is a 4-byte header followed by 11-byte descriptors
     ``[session][ADR/CTRL][TNO][POINT][min][sec][frame][zero][PMIN][PSEC]
-    [PFRAME]``. POINT 0xA2 is the lead-out; its PMIN/PSEC/PFRAME are *binary*
-    (not BCD). Returns None if no lead-out descriptor is present.
+    [PFRAME]``. Only ADR=1 descriptors carry the track/lead-out points; ADR=5
+    (multi-session pointers) and ADR=2/3 are skipped.
     """
-    body = fulltoc[4:]
+    body = raw[4:]
+    tracks: list[FullTocTrack] = []
+    leadouts: dict[int, int] = {}
+    first_track: dict[int, int] = {}
+    last_track: dict[int, int] = {}
+    disc_type: int | None = None
+    n_sessions = 0
+
     for off in range(0, len(body) - 10, 11):
-        if body[off + 3] == 0xA2:
-            pmin, psec, pframe = body[off + 8], body[off + 9], body[off + 10]
-            return (pmin * 60 + psec) * 75 + pframe - _MSF_PREGAP
-    return None
+        d = body[off : off + 11]
+        session, adr, control, point = d[0], d[1] >> 4, d[1] & 0x0F, d[3]
+        n_sessions = max(n_sessions, session)
+        if adr != ADR_POSITION:
+            continue
+        lba = (d[8] * 60 + d[9]) * 75 + d[10] - _MSF_PREGAP
+        if point == 0xA0:
+            first_track[session] = d[8]
+            if disc_type is None:
+                disc_type = d[9]
+        elif point == 0xA1:
+            last_track[session] = d[8]
+        elif point == 0xA2:
+            leadouts[session] = lba
+        elif 1 <= point <= 99:
+            tracks.append(
+                FullTocTrack(
+                    session=session, track=point, control=control, start_lba=lba
+                )
+            )
+    return FullToc(
+        tracks=tracks,
+        leadouts=leadouts,
+        first_track=first_track,
+        last_track=last_track,
+        disc_type=disc_type,
+        n_sessions=n_sessions,
+    )
+
+
+def session1_audio_tracks(toc: FullToc) -> tuple[list[FullTocTrack], int]:
+    """Session-1 audio tracks + session-1 lead-out LBA (the CD-DA archival view).
+
+    Policy (c2read-upgrade-plan.md F6): the audio rip covers session 1 only; a
+    data track in a *later* session (Enhanced CD) is reported and excluded; a
+    data track *inside* session 1 (mixed mode) is refused — that disc is not a
+    CD-DA archival target and pretending otherwise corrupts the image.
+    """
+    s1 = [t for t in toc.tracks if t.session == 1]
+    mixed = [t.track for t in s1 if t.is_data]
+    if mixed:
+        msg = f"mixed-mode disc: data track(s) {mixed} inside session 1"
+        raise ValueError(msg)
+    later = [t for t in toc.tracks if t.session > 1]
+    if later:
+        log.info(
+            "multisession disc: excluding %d track(s) in sessions 2..%d "
+            "(Enhanced CD data)",
+            len(later),
+            toc.n_sessions,
+        )
+    if 1 not in toc.leadouts:
+        msg = "full TOC carries no session-1 lead-out"
+        raise ValueError(msg)
+    return s1, toc.leadouts[1]
 
 
 # ---------------------------------------------------------------------------

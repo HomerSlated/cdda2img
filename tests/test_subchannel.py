@@ -21,8 +21,10 @@ from cdda2img.subchannel import (
     decode_q,
     derive_track_layout,
     extract_q,
+    parse_fulltoc,
     parse_fulltoc_leadout,
     scan_subcode,
+    session1_audio_tracks,
 )
 
 _FIXTURES = Path(__file__).parent / "fixtures"
@@ -122,6 +124,60 @@ def test_parse_fulltoc_leadout_absent():
     header = bytes([0x00, 0x0B, 0x01, 0x01])
     a0 = bytes([0x01, 0x10, 0x00, 0xA0, 0, 0, 0, 0, 0x01, 0x00, 0x00])
     assert parse_fulltoc_leadout(header + a0) is None
+
+
+def _ftd(
+    session: int, point: int, pmsf: tuple[int, int, int], *, control: int = 0
+) -> bytes:
+    """One raw-TOC descriptor (ADR=1)."""
+    return bytes([session, 0x10 | control, 0x00, point, 0, 0, 0, 0, *pmsf])
+
+
+def test_parse_fulltoc_real_capture():
+    # c2read --fulltoc capture of the 11-track Tracy Chapman disc (PX-716A).
+    raw = (_FIXTURES / "tracy.fulltoc").read_bytes()
+    toc = parse_fulltoc(raw)
+    assert toc.n_sessions == 1
+    assert (toc.first_track[1], toc.last_track[1]) == (1, 11)
+    assert toc.leadouts == {1: 162892}
+    assert toc.disc_type == 0x00
+    assert len(toc.tracks) == 11
+    assert toc.tracks[0].start_lba == 0
+    assert toc.tracks[1].start_lba == 12032  # matches READ TOC format 0
+    assert all(not t.is_data for t in toc.tracks)
+
+    tracks, leadout = session1_audio_tracks(toc)
+    assert len(tracks) == 11
+    assert leadout == 162892
+
+
+def test_session1_audio_excludes_enhanced_cd_data():
+    hdr = bytes([0x00, 0x00, 0x01, 0x02])
+    body = (
+        _ftd(1, 0xA0, (1, 0x00, 0))
+        + _ftd(1, 0xA1, (2, 0, 0))
+        + _ftd(1, 0xA2, (10, 0, 0))
+        + _ftd(1, 1, (0, 2, 0))
+        + _ftd(1, 2, (5, 2, 0))
+        + _ftd(2, 0xA2, (50, 0, 0))
+        + _ftd(2, 3, (40, 0, 0), control=0x4)  # session-2 data track
+    )
+    toc = parse_fulltoc(hdr + body)
+    assert toc.n_sessions == 2
+    tracks, leadout = session1_audio_tracks(toc)
+    assert [t.track for t in tracks] == [1, 2]
+    assert leadout == (10 * 60) * 75 - 150
+
+
+def test_session1_mixed_mode_refused():
+    hdr = bytes([0x00, 0x00, 0x01, 0x01])
+    body = (
+        _ftd(1, 0xA2, (10, 0, 0))
+        + _ftd(1, 1, (0, 2, 0))
+        + _ftd(1, 2, (5, 0, 0), control=0x4)  # data track INSIDE session 1
+    )
+    with pytest.raises(ValueError, match="mixed-mode"):
+        session1_audio_tracks(parse_fulltoc(hdr + body))
 
 
 # --- synthetic attribution (deterministic bucketing) ------------------------
