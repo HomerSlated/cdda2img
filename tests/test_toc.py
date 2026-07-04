@@ -54,6 +54,9 @@ def _make_disc() -> RBIDisc:
             duration_frames=_FRAMES_PER_MIN * 3,
             pregap_frames=75,  # 1-second pregap
             isrc="GBAYE9300003",
+            pre_emphasis=True,  # spec §6.1.10 flags + INDEX >= 02 points
+            copy_permitted=True,
+            index_points=[750, 3000],
         ),
         RBITocEntry(
             track_number=4,
@@ -102,6 +105,12 @@ def test_toc_fields_round_trip() -> None:
         assert pt.duration_frames == rt.duration_frames
         assert pt.pregap_frames == rt.pregap_frames
         assert pt.start_frame == rt.start_frame
+        assert pt.pre_emphasis == rt.pre_emphasis
+        assert pt.copy_permitted == rt.copy_permitted
+        assert pt.index_points == rt.index_points
+
+    # R14 aggregate: track 3 carries PRE_EMPHASIS, so the disc-level flag is set.
+    assert parsed.pre_emphasis is True
 
 
 # ---------------------------------------------------------------------------

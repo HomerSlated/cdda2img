@@ -103,6 +103,9 @@ def parsed_to_rbi_disc(parsed: ParsedDisc) -> RBIDisc:
                 duration_frames=pt.duration_frames,
                 pregap_frames=pt.pregap_frames,
                 isrc=pt.isrc,
+                pre_emphasis=pt.pre_emphasis,
+                copy_permitted=pt.copy_permitted,
+                index_points=list(pt.index_points),
             )
         )
     return disc

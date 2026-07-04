@@ -113,6 +113,8 @@ class RipInfo(NamedTuple):
     disc: RBIDisc
     track_lsns: list[int]  # absolute first_lsn for each track, needed for CDDB lookup
     disc_last_lsn: int
+    prov: dict[str, str] | None = None  # read-stage provenance keys (e.g. the
+    # subq_toc toc_source / ISRC vote counts); merged into PROV by rip_image
 
 
 # ---------------------------------------------------------------------------

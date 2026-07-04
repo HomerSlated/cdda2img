@@ -2378,13 +2378,13 @@ def _rip_disc_stage(
     """Read the disc, returning (info, rip_type, c2_path).
 
     Normal path (``c2_recovery = off``, the default): cdrdao read-cd — audio + subchannel
-    metadata in one pass. C2 path (``on``, or ``auto`` + drive supports C2): one c2read
-    audio pass that also captures the C2 error-pointer bitmap, plus a separate cdrdao
-    read-toc metadata pass (c2read can't read the subchannel yet). c2read runs first — it
-    is the cheaper pass and the critical data — so a fatal read fails before the metadata
-    scan. The read-toc pass captures ISRC via per-track READ SUB-CHANNEL, which also
-    sidesteps cdrdao bug #75 (its inline read-cd ISRC latch), so the C2 path's metadata is
-    if anything a touch more reliable.
+    metadata in one pass. C2 path (``on``, or ``auto`` + drive supports C2): ONE c2read
+    pass captures audio + C2 error-pointer bitmap + raw P-W subchannel + full TOC +
+    CD-Text, and ``subq_toc.build_rip_info`` assembles the disc metadata from those
+    captures (pre-gaps/INDEX/CONTROL from the Q stream, majority-voted MCN/ISRC —
+    structurally immune to cdrdao bug #75). Only if that assembly fails (e.g. an
+    unusable full TOC) does the old two-pass fallback run: ``cdrdao read-toc``
+    (rip_type "c2read+toc").
 
     Both the cdrdao and c2read paths return RAW PCM (drive offset not applied); the caller
     works raw through AR + ctanalyse and applies apply_offset once, late. Only a cd-paranoia
@@ -2395,9 +2395,12 @@ def _rip_disc_stage(
     )
     if use_c2:
         from cdda2img.c2_reader import read_disc_c2
-        from cdda2img.cdrdao_ripper import read_toc_metadata
 
-        c2_status = "Reading audio + C2 pointers (c2read)…"
+        sub_file = pcm_file.with_suffix(".sub")
+        cdtext_file = pcm_file.with_suffix(".cdtext")
+        fulltoc_file = pcm_file.with_suffix(".fulltoc")
+
+        c2_status = "Reading audio + C2 + subchannel (c2read)…"
         _ui_status(ui, c2_status)
 
         def _c2_cb(done: int, total: int) -> None:
@@ -2412,11 +2415,30 @@ def _rip_disc_stage(
             device,
             pcm_file,
             c2_file,
+            output_sub=sub_file,
+            output_cdtext=cdtext_file,
+            output_fulltoc=fulltoc_file,
             progress_cb=_c2_cb if ui is not None else None,
         )
-        _ui_status(ui, "Reading disc metadata (cdrdao read-toc)…")
-        info = read_toc_metadata(device)
-        return info, "c2read+toc", c2_file
+        try:
+            from cdda2img.subq_toc import build_rip_info
+
+            info = build_rip_info(
+                fulltoc_file.read_bytes(),
+                sub_file.read_bytes(),
+                cdtext_file.read_bytes() if cdtext_file.exists() else None,
+            )
+        except (ValueError, OSError) as exc:
+            log.warning(
+                "subchannel TOC assembly failed (%s) — falling back to cdrdao read-toc",
+                exc,
+            )
+            from cdda2img.cdrdao_ripper import read_toc_metadata
+
+            _ui_status(ui, "Reading disc metadata (cdrdao read-toc)…")
+            info = read_toc_metadata(device)
+            return info, "c2read+toc", c2_file
+        return info, "c2read", c2_file
 
     info, rip_type = _rip_with_fallback(device, pcm_file, read_offset, ui=ui)
     return info, rip_type, None
@@ -2713,7 +2735,7 @@ def rip_image(  # noqa: C901
         # already-corrected PCM (it applied -O at read time), so it verifies at offset 0.
         from cdda2img.offset_correct import apply_offset
 
-        raw_domain = rip_type in ("cdrdao", "c2read+toc")
+        raw_domain = rip_type in ("cdrdao", "c2read", "c2read+toc")
         ar_offset = read_offset if raw_domain else 0
 
         # R8: CDDB query now happens inside _finalize_import in parallel
@@ -2787,7 +2809,7 @@ def rip_image(  # noqa: C901
         # Re-rip only the failed tracks via cd-paranoia (full paranoia) and splice
         # them into the already-offset-corrected PCM. cdrdao metadata (ISRC/MCN/
         # CD-Text from subchannel) is preserved — cd-paranoia -Q does not capture it.
-        if rip_type in ("cdrdao", "c2read+toc") and _ar_has_partial_mismatch(
+        if rip_type in ("cdrdao", "c2read", "c2read+toc") and _ar_has_partial_mismatch(
             ar_verify.tracks
         ):
             from cdda2img.disc_reader import rip_disc
@@ -2921,6 +2943,10 @@ def rip_image(  # noqa: C901
             "source": device,
             "ripper": rip_type,
         }
+        # Read-stage provenance from the metadata assembly (subq_toc: toc_source,
+        # Q-frame stats, per-track ISRC vote counts).
+        if info.prov:
+            provenance.update(info.prov)
         if drive_name is not None:
             provenance["drive_name"] = drive_name
             provenance["drive_read_offset"] = f"{read_offset:+d}"

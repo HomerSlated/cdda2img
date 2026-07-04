@@ -18,6 +18,10 @@ class ParsedTrack:
     duration_frames: int  # audio-only duration in CD frames; excludes pregap
     pregap_frames: int = 0  # pregap duration in CD frames; 0 if none
     isrc: str | None = None  # ISO 3901 ISRC (12 chars); None if absent
+    pre_emphasis: bool = False  # per-track Q CONTROL 0x1 (rbi_spec §6.1.10)
+    copy_permitted: bool = False  # per-track Q CONTROL 0x2 (rbi_spec §6.1.10)
+    index_points: list[int] = field(default_factory=list)  # INDEX >= 02 offsets,
+    # frames relative to the audio start, ascending (rbi_spec §6.1.10)
 
     @property
     def audio_start_frame(self) -> int:
@@ -60,6 +64,11 @@ _TITLE_UNICODE_RE = re.compile(r"^//\s*TRACK_TITLE_UNICODE:\s*(.+)$", re.MULTILI
 # treated as the negation — handled separately so we don't false-match.
 _PRE_EMPH_RE = re.compile(r"^\s*PRE_EMPHASIS\s*$", re.MULTILINE)
 _NO_PRE_EMPH_RE = re.compile(r"^\s*NO\s+PRE_EMPHASIS\s*$", re.MULTILINE)
+# Same bare/negated pair for the digital-copy-permitted flag (rbi_spec §6.1.10).
+_COPY_RE = re.compile(r"^\s*COPY\s*$", re.MULTILINE)
+_NO_COPY_RE = re.compile(r"^\s*NO\s+COPY\s*$", re.MULTILINE)
+# INDEX >= 02 points: offsets relative to the audio start (rbi_spec §6.1.10).
+_INDEX_RE = re.compile(r"^\s*INDEX\s+(\d{2}:\d{2}:\d{2})", re.MULTILINE)
 
 _ALL_ZEROS_MCN = "0000000000000"
 
@@ -101,8 +110,10 @@ def parse_toc(toc_bytes: bytes) -> ParsedDisc:
         # presence of "NO PRE_EMPHASIS" must not false-match because of
         # the trailing "PRE_EMPHASIS" — match against the cleaned block.
         cleaned = _NO_PRE_EMPH_RE.sub("", block)
-        if _PRE_EMPH_RE.search(cleaned):
+        track_pre_emph = bool(_PRE_EMPH_RE.search(cleaned))
+        if track_pre_emph:
             any_pre_emph = True
+        track_copy = bool(_COPY_RE.search(_NO_COPY_RE.sub("", block)))
 
         file_m = _FILE_TS_RE.search(block)
         if not file_m:
@@ -147,6 +158,12 @@ def parse_toc(toc_bytes: bytes) -> ParsedDisc:
                 duration_frames=duration_frames,
                 pregap_frames=pregap_frames,
                 isrc=_first_or_none(_ISRC_RE, block),
+                pre_emphasis=track_pre_emph,
+                copy_permitted=track_copy,
+                index_points=[
+                    frames_from_timestamp(im.group(1))
+                    for im in _INDEX_RE.finditer(block)
+                ],
             )
         )
         cumulative_out_of_file_silence += silence_in_block

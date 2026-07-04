@@ -274,6 +274,10 @@ class RBITocEntry:
     duration_frames: int  # audio-only duration in CD frames (1/75 s); excludes pregap
     pregap_frames: int = 0  # pregap duration in CD frames; 0 if no pregap
     isrc: str | None = None  # ISO 3901 ISRC code (12 chars); None if not available
+    pre_emphasis: bool = False  # Q CONTROL 0x1 (spec §6.1.10); False when uncaptured
+    copy_permitted: bool = False  # Q CONTROL 0x2 (spec §6.1.10); False when uncaptured
+    index_points: list[int] = field(default_factory=list)  # INDEX >= 02 offsets in
+    # frames relative to the audio start (after pregap), ascending (spec §6.1.10)
 
     @property
     def start_seconds(self) -> float:
@@ -365,12 +369,16 @@ class RBIDisc:
 # ---------------------------------------------------------------------------
 
 
-def _frames_to_timestamp(frames: int) -> str:
+def timestamp_from_frames(frames: int) -> str:
     """Convert an absolute CD frame count to MM:SS:FF timestamp string."""
     mm = frames // (CD_FRAMES_PER_SECOND * 60)
     ss = (frames // CD_FRAMES_PER_SECOND) % 60
     ff = frames % CD_FRAMES_PER_SECOND
     return f"{mm:02}:{ss:02}:{ff:02}"
+
+
+# In-module shorthand kept for the RBITocEntry timestamp properties above.
+_frames_to_timestamp = timestamp_from_frames
 
 
 def frames_from_timestamp(ts: str) -> int:

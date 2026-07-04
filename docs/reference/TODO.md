@@ -16,15 +16,30 @@ plan (single-pass capture drops the read-toc pass), so it is not worth instrumen
 Planned in full: **`docs/reference/c2read-upgrade-plan.md`** (features F1–F11, difficulty
 ranking, dependency build order, reference audit, per-feature strategies; §7 cdrtools
 review — adopted the Plextor Q-Check C1/C2/CU census + mode-page-01 retry tuning, dismissed
--edc-corr as data-sector-only). Execution is phased; **Phase 1 landed 2026-07-04**:
-single-pass audio+C2+subchannel capture (`--sub raw|q` + `--subf`), zero-fill of
-hard-unreadable sectors (PCM zeros + C2 all-ones so the streams never desync and downstream
-sees pure erasures), 5-combo `--features` probe, stdout progress. PX-716A probe: all five
-0xBE combos supported, field order audio→C2→sub, captured sub decodes with `subchannel.py`
-unchanged. Remaining phases: Q-stream policy layer (pre-gaps/INDEX/CONTROL + MCN/ISRC
-majority vote), CD-Text + full-TOC capture/decode, TOC assembly + parity harness + pipeline
-switch (drops the 181 s read-toc pass → `auto` default becomes defensible), then retry
-ladder / speed report / cx census.
+-edc-corr as data-sector-only). **Phases 1–4 landed 2026-07-04**:
+
+- **Phase 1** — single-pass audio+C2+subchannel capture (`--sub raw|q` + `--subf`),
+  zero-fill of hard-unreadable sectors (PCM zeros + C2 all-ones = pure erasures
+  downstream), 5-combo `--features` probe, stdout progress → TUI. PX-716A: all five 0xBE
+  combos supported, field order audio→C2→sub.
+- **Phase 2** — Q-stream policy layer in `subchannel.py`: `derive_track_layout`
+  (pre-gaps/INDEX/CONTROL, position-slip defence) + MCN/ISRC majority voting. Pre-gaps
+  match `cdrdao read-toc` frame-exactly on the live disc (all 11 tracks).
+- **Phase 3** — `--fulltoc`/`--cdtext` raw dumps + `cdtext.py` decoder +
+  `parse_fulltoc`/`session1_audio_tracks` (Enhanced-CD exclusion, mixed-mode refusal).
+- **Phase 4** — `subq_toc.build_rip_info` assembly + pipeline switch: the C2 rip path is
+  now ONE c2read pass (rip_type `c2read`; `cdrdao read-toc` fallback only if assembly
+  fails); `tools/toc_parity.py` harness reports ALL MATCH vs a fresh read-toc; full live
+  rip validated end-to-end (track-8 CTDB repair regression intact, 11/11 AR conf 200,
+  `test` 37/37; PROV `toc_source=subq@c2read` + ISRC vote keys). rbi_spec §6.1.10: the
+  embedded TOC now round-trips per-track `COPY`/`PRE_EMPHASIS` flags and INDEX ≥ 02 lines.
+
+Remaining: **Phase 5** — F8 retry ladder + cache-defeat + mode-page-01 experiment, F10
+speed report (drop `cdrdao drive-info` from drive_speed.py), F11 Plextor C1/C2/CU census.
+Then the **default-flip decision** (c2read as normal-path primary; `c2_recovery=auto`
+already the user's setting) after a multi-disc parity soak — a user decision, not a code
+change. Also observed 2026-07-04: per-rip Q valid-frame counts vary widely (157k vs 72k
+usable frames on the same disc) — the floors/TOC-authority absorb it, but worth watching.
 
 ### MCN archival-only + barcode as the disambiguation key (2026-06-29) — ✅ DONE 2026-06-30
 

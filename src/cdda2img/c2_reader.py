@@ -1,13 +1,12 @@
-"""c2_reader.py — raw MMC audio + C2 (+ subchannel) capture via ``c2read`` (on ``$PATH``).
+"""c2_reader.py — raw MMC audio + C2 + subchannel capture via ``c2read`` (on ``$PATH``).
 
 Used by the rip pipeline when C2-erasure recovery is enabled and the drive supports
-C2: ``c2read`` does the one full-disc audio read (raw s16le) alongside the per-byte
-C2 error-pointer bitmap that feeds ctanalyse's erasure decode, and can capture the
-raw P-W subchannel stream in the same pass (``output_sub``). Until the subchannel
-decode is wired end-to-end, disc metadata (pre-gaps / ISRC / MCN / CD-Text) still
-comes from a separate ``cdrdao read-toc`` pass (see docs/reference/
-c2read-upgrade-plan.md — c2read is being extended into a read-only cdrdao
-replacement).
+C2: ONE ``c2read`` full-disc read (raw s16le audio) captures the per-byte C2
+error-pointer bitmap that feeds ctanalyse's erasure decode, the raw P-W subchannel
+stream (``output_sub``), and the lead-in full TOC + CD-Text dumps
+(``output_fulltoc`` / ``output_cdtext``). ``subq_toc.build_rip_info`` assembles the
+disc metadata from those captures, so the C2 path needs no second ``cdrdao
+read-toc`` pass (docs/reference/c2read-upgrade-plan.md, Phase 4).
 
 ``c2read`` is the standalone C helper built from ``tools/c2read`` and symlinked onto
 ``$PATH``. READ CD returns s16le, so — unlike cdrdao's s16be BIN — the PCM needs no
@@ -77,14 +76,18 @@ def read_disc_c2(
     output_pcm: Path,
     output_c2: Path,
     output_sub: Path | None = None,
+    output_cdtext: Path | None = None,
+    output_fulltoc: Path | None = None,
     read_speed: int | None = None,
     progress_cb: Callable[[int, int], None] | None = None,
 ) -> None:
     """Full-disc raw audio (s16le, no byte-swap) + C2 bitmap via ``c2read --full``.
 
     *output_sub*, when given, additionally captures the raw P-W subchannel stream
-    (96 B/sector) in the same pass. *progress_cb(done, total)* receives c2read's
-    machine-parseable stdout progress (sector counts) when provided.
+    (96 B/sector) in the same pass; *output_cdtext* / *output_fulltoc* dump the
+    lead-in CD-Text packs and raw full TOC (instant reads). A disc without CD-Text
+    simply produces no cdtext file — check for existence. *progress_cb(done,
+    total)* receives c2read's machine-parseable stdout progress (sector counts).
 
     Raises RuntimeError on a genuine failure. c2read's exit code is the C2 *verdict*:
     0 = flags found, 3 = none found / hard-unreadable regions — both mean the read
@@ -102,6 +105,10 @@ def read_disc_c2(
     ]
     if output_sub is not None:
         cmd += ["--sub", "raw", "--subf", str(output_sub)]
+    if output_cdtext is not None:
+        cmd += ["--cdtext", str(output_cdtext)]
+    if output_fulltoc is not None:
+        cmd += ["--fulltoc", str(output_fulltoc)]
     if read_speed:
         cmd += ["--speed", str(read_speed)]
 

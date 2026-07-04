@@ -223,6 +223,13 @@ The `ISRC` line is optional per track; included when an ISO 3901 ISRC code is av
 
 The `START` line is optional per track; present only for tracks that have a pre-gap.
 
+The `COPY`/`NO COPY` and `PRE_EMPHASIS`/`NO PRE_EMPHASIS` lines record the track's
+Q-channel CONTROL flags when the source captured them (§6.1.10); sources that cannot
+capture them write the defaults `NO COPY` / `NO PRE_EMPHASIS`.
+
+`INDEX` lines are optional per track; present only when the source captured INDEX ≥ 02
+points (§6.1.10).
+
 #### 6.1.2 Timestamp format
 
 CD-DA frame timestamps use the format `MM:SS:FF` where:
@@ -300,8 +307,30 @@ The `generate_toc()` function produces a canonical, deterministic TOC encoding. 
 2. **Blank lines**: one blank line after the `CD_DA` line; one after `CATALOG` (if present); one after the disc-level `CD_TEXT` block; one blank line at the end of each track block.
 3. **Indentation**: `LANGUAGE_MAP`, `LANGUAGE N`, and their closing `}` lines are indented 2 spaces inside `CD_TEXT {`; inner fields (`TITLE`, `PERFORMER`, `DISC_ID`) are indented 4 spaces.
 4. **Disc-level field order**: `CD_DA` → `CATALOG` (if present) → `CD_TEXT { LANGUAGE_MAP ... LANGUAGE 0 { TITLE PERFORMER DISC_ID } }`.
-5. **Track field order**: `// Track N` → `// TRACK_TITLE_UNICODE:` (if needed) → `TRACK AUDIO` → `NO COPY` → `NO PRE_EMPHASIS` → `TWO_CHANNEL_AUDIO` → `ISRC` (if present) → `CD_TEXT { LANGUAGE 0 { TITLE PERFORMER } }` → `FILE` → `START` (if present).
+5. **Track field order**: `// Track N` → `// TRACK_TITLE_UNICODE:` (if needed) → `TRACK AUDIO` → `COPY`|`NO COPY` → `PRE_EMPHASIS`|`NO PRE_EMPHASIS` → `TWO_CHANNEL_AUDIO` → `ISRC` (if present) → `CD_TEXT { LANGUAGE 0 { TITLE PERFORMER } }` → `FILE` → `START` (if present) → `INDEX` lines (if present).
 6. **FILE start position**: always formatted as `MM:SS:FF` (e.g. `00:00:00` for track 1); never the bare integer `0`.
+
+#### 6.1.10 Track CONTROL flags and INDEX points
+
+Each audio track's Q-channel CONTROL flags may be recorded per track:
+
+- `COPY` / `NO COPY` — the digital-copy-permitted flag (CONTROL bit value `0x2`).
+- `PRE_EMPHASIS` / `NO PRE_EMPHASIS` — the 50/15 µs pre-emphasis flag (CONTROL bit
+  value `0x1`). Readers aggregating a disc-level pre-emphasis signal (R14) **MUST**
+  treat any track-level `PRE_EMPHASIS` as disc-level `True`.
+
+Sources that capture the program-area Q stream (`c2read --sub raw` single-pass rips)
+write the flags actually observed (majority-voted across the track's Q frames);
+sources that cannot capture CONTROL (file-based `create`, foreign imports without
+flag data) write the defaults `NO COPY` / `NO PRE_EMPHASIS`.
+
+Additional index points (Q-channel INDEX ≥ 02) are recorded as `INDEX MM:SS:FF`
+lines following the `START` line (cdrdao grammar): each timestamp is the offset of
+the index transition **relative to the track's audio start** (the INDEX 01 point,
+i.e. after any pre-gap). Index numbers are implicit and sequential: the first
+`INDEX` line is INDEX 02, the second INDEX 03, and so on. Writers **MUST** emit
+INDEX lines in ascending offset order; readers encountering INDEX lines **MUST**
+preserve them across a parse → regenerate round-trip.
 
 ---
 

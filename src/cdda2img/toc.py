@@ -8,7 +8,12 @@ import wave
 from pathlib import Path
 
 from cdda2img.barcode import normalize_barcode
-from cdda2img.rbi_format import CD_FRAMES_PER_SECOND, RBIDisc, RBITocEntry
+from cdda2img.rbi_format import (
+    CD_FRAMES_PER_SECOND,
+    RBIDisc,
+    RBITocEntry,
+    timestamp_from_frames,
+)
 
 _TITLE_REPLACEMENTS: dict[str, str] = {
     "\u2018": "'",  # left single quote
@@ -156,6 +161,11 @@ def generate_toc(
         start_lines = (
             [f"START {track.pregap_timestamp}"] if track.pregap_frames > 0 else []
         )
+        # INDEX >= 02 points: offsets relative to the audio start, ascending;
+        # index numbers implicit and sequential (rbi_spec §6.1.10).
+        index_lines = [
+            f"INDEX {timestamp_from_frames(off)}" for off in sorted(track.index_points)
+        ]
 
         track_cdtext_lines = []
         if track.title:
@@ -177,13 +187,14 @@ def generate_toc(
             f"// Track {track.track_number}",
             *unicode_lines,
             "TRACK AUDIO",
-            "NO COPY",
-            "NO PRE_EMPHASIS",
+            "COPY" if track.copy_permitted else "NO COPY",
+            "PRE_EMPHASIS" if track.pre_emphasis else "NO PRE_EMPHASIS",
             "TWO_CHANNEL_AUDIO",
             *isrc_lines,
             *track_cdtext_block,
             f'FILE "{pcm_filename}" {track.start_timestamp} {track.slot_timestamp}',
             *start_lines,
+            *index_lines,
             "",
         ]
 
