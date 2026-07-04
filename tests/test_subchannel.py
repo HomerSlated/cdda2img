@@ -8,6 +8,10 @@ on the multi-hundred-MB capture, which is gitignored under ``rips/``.
 
 from __future__ import annotations
 
+from pathlib import Path
+
+import pytest
+
 from cdda2img.subchannel import (
     ADR_ISRC,
     ADR_MCN,
@@ -15,10 +19,13 @@ from cdda2img.subchannel import (
     CD_SUBCODE_SIZE,
     crc16_gsm,
     decode_q,
+    derive_track_layout,
     extract_q,
     parse_fulltoc_leadout,
     scan_subcode,
 )
+
+_FIXTURES = Path(__file__).parent / "fixtures"
 
 # --- real-disc fixtures (raw 96-byte subcode sectors) -----------------------
 
@@ -129,20 +136,43 @@ def _pack_q(q: bytes) -> bytes:
     return bytes(sector)
 
 
-def _make_q(adr: int, payload9: bytes) -> bytes:
-    """Build a valid 12-byte Q frame: [ctrl|adr] + 9 payload + CRC-16/GSM."""
+def _make_q(adr: int, payload9: bytes, control: int = 0) -> bytes:
+    """Build a valid 12-byte Q frame: [ctrl|adr] + 9 payload + CRC-16/GSM.
+
+    *control* is the Q CONTROL nibble (0 = 2-channel audio, no flags; 0x1 =
+    pre-emphasis, 0x2 = copy permitted — redumper cd/subcode.ixx Control).
+    """
     assert len(payload9) == 9
-    head = bytes([(0x4 << 4) | adr]) + payload9  # CONTROL=audio(0x4)
+    head = bytes([(control << 4) | adr]) + payload9
     crc = crc16_gsm(head)
     return head + bytes([crc >> 8, crc & 0xFF])
 
 
-def _position(track: int, lba: int) -> bytes:
-    frames = lba + 150
+def _bcd_enc(v: int) -> int:
+    return ((v // 10) << 4) | (v % 10)
+
+
+def _position(
+    track: int, lba: int, index: int = 1, control: int = 0, claim_lba: int | None = None
+) -> bytes:
+    """ADR=1 program frame. *claim_lba* forges the absolute-MSF position (for
+    slip tests) while the frame still sits at *lba* in the stream. All numeric
+    fields (track, index, MSF) are BCD, as on disc."""
+    frames = (claim_lba if claim_lba is not None else lba) + 150
     amin, rem = divmod(frames, 60 * 75)
     asec, aframe = divmod(rem, 75)
-    payload = bytes([track, 0x01, 0x00, 0x00, 0x00, 0x00, amin, asec, aframe])
-    return _pack_q(_make_q(ADR_POSITION, payload))
+    payload = bytes([
+        _bcd_enc(track),
+        _bcd_enc(index),
+        0x00,
+        0x00,
+        0x00,
+        0x00,
+        _bcd_enc(amin),
+        _bcd_enc(asec),
+        _bcd_enc(aframe),
+    ])
+    return _pack_q(_make_q(ADR_POSITION, payload, control=control))
 
 
 def _mcn(digits: str) -> bytes:
@@ -172,3 +202,164 @@ def test_scan_attributes_mcn_to_leadin_and_program():
     assert scan.base_lba == -3  # program LBA 0 is at file sector index 3
     assert scan.base_agreement == 1.0
     assert scan.invalid_q == 0
+
+
+# --- ChannelQ.index ----------------------------------------------------------
+
+
+def test_index_property():
+    assert decode_q(_position(1, 100, index=0)).index == 0
+    assert decode_q(_position(1, 100, index=1)).index == 1
+    assert decode_q(_position(1, 100, index=12)).index == 12
+
+
+def test_index_invalid_bcd():
+    # Forge an index byte with a non-BCD nibble (0x1A).
+    payload = bytes([0x01, 0x1A, 0, 0, 0, 0, 0, 2, 0])
+    q = decode_q(_pack_q(_make_q(ADR_POSITION, payload)))
+    assert q.index == -1
+
+
+# --- MCN/ISRC majority voting (F4) ------------------------------------------
+
+
+def _isrc(code: str) -> bytes:
+    """ADR=3 frame for a 12-char ISRC (5 six-bit alnum + 7 BCD digits)."""
+    table = "0123456789_______ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+    bits = 0
+    for ch in code[:5]:
+        bits = (bits << 6) | table.index(ch)
+    field = (bits << 2).to_bytes(4, "big")  # 30 bits + 2 pad
+    digits = code[5:12] + "0"  # 7 digits + pad nibble
+    field += bytes((int(digits[2 * k]) << 4) | int(digits[2 * k + 1]) for k in range(4))
+    return _pack_q(_make_q(ADR_ISRC, field + b"\x00"))
+
+
+def test_isrc_builder_roundtrip():
+    assert decode_q(_isrc("USRE10400888")).isrc() == "USRE10400888"
+
+
+def test_scan_vote_majority_wins_with_runner_up():
+    sectors = [_position(1, 0), _position(1, 1)]
+    sectors += [_mcn("0093624877721")] * 3 + [_mcn("1111111111111")] * 2
+    scan = scan_subcode(b"".join(sectors))
+    (d,) = [d for d in scan.data if d.type == "MCN"]
+    assert d.value == "0093624877721"
+    assert d.count == 5
+    assert d.runner_up == ("1111111111111", 2)
+
+
+def test_scan_vote_floor_single_observation():
+    sectors = [_position(1, 0), _position(1, 1), _mcn("0093624877721")]
+    scan = scan_subcode(b"".join(sectors))
+    (d,) = [d for d in scan.data if d.type == "MCN"]
+    assert d.value is None  # one observation never clears the >=2 floor
+    assert d.count == 1
+
+
+def test_scan_isrc_vote_rejects_invalid_shape():
+    # "1SRE1..." decodes cleanly from 6-bit charset but fails ISO-3901 (the
+    # country code must be alphabetic); the valid minority value must win.
+    sectors = [_position(1, 0), _position(1, 1)]
+    sectors += [_isrc("1SRE10400888")] * 3 + [_isrc("USRE10400888")] * 2
+    scan = scan_subcode(b"".join(sectors))
+    (d,) = [d for d in scan.data if d.type == "ISRC"]
+    assert d.value == "USRE10400888"
+
+
+# --- derive_track_layout (F3) ------------------------------------------------
+
+
+def _stream(*segments: tuple[int, int, int, int]) -> bytes:
+    """Contiguous Q stream from LBA 0: segments of (track, index, control, n)."""
+    out: list[bytes] = []
+    lba = 0
+    for track, index, control, n in segments:
+        for _ in range(n):
+            out.append(_position(track, lba, index=index, control=control))
+            lba += 1
+    return b"".join(out)
+
+
+def test_layout_pregap_detected():
+    data = _stream((1, 1, 0, 10), (2, 0, 0, 5), (2, 1, 0, 10))
+    layout = derive_track_layout(data, {1: 0, 2: 15}, 25)
+    assert layout.pregap_frames == {2: 5}
+    assert layout.frames_dropped_slip == 0
+    assert layout.frames_used == 25
+
+
+def test_layout_no_pregap():
+    data = _stream((1, 1, 0, 10), (2, 1, 0, 10))
+    layout = derive_track_layout(data, {1: 0, 2: 10}, 20)
+    assert layout.pregap_frames == {}
+
+
+def test_layout_pregap_floor_single_frame():
+    data = _stream((1, 1, 0, 10), (2, 0, 0, 1), (2, 1, 0, 10))
+    layout = derive_track_layout(data, {1: 0, 2: 11}, 21)
+    assert layout.pregap_frames == {}  # one index-00 frame must not invent one
+
+
+def test_layout_implausible_pregap_ignored():
+    # An 800-frame apparent pre-gap (> 10 s cap) is distrust-and-drop.
+    data = _stream((2, 0, 0, 3), (2, 1, 0, 5))
+    layout = derive_track_layout(data, {2: 800}, 900)
+    assert layout.pregap_frames == {}
+
+
+def test_layout_slip_frames_dropped():
+    good = _stream((1, 1, 0, 10))
+    slipped = _position(1, 10, claim_lba=60)  # claims a position 50 ahead
+    tail = b"".join(_position(1, lba) for lba in range(11, 16))
+    layout = derive_track_layout(good + slipped + tail, {1: 0}, 16)
+    assert layout.frames_dropped_slip == 1
+    assert layout.frames_used == 15
+
+
+def test_layout_index_points():
+    data = _stream((1, 1, 0, 10), (1, 2, 0, 4), (1, 3, 0, 1), (2, 1, 0, 5))
+    layout = derive_track_layout(data, {1: 0, 2: 15}, 20)
+    # INDEX 02 seen 4x -> recorded at its first LBA; INDEX 03 seen once -> floor.
+    assert layout.index_points == {1: [(2, 10)]}
+
+
+def test_layout_control_majority():
+    data = _stream((1, 1, 0x1, 9), (1, 1, 0x0, 1), (2, 1, 0x2, 5))
+    layout = derive_track_layout(data, {1: 0, 2: 10}, 15)
+    assert layout.control[1].pre_emphasis is True  # 9:1 majority
+    assert layout.control[1].copy_permitted is False
+    assert layout.control[2].copy_permitted is True
+    assert layout.control[2].pre_emphasis is False
+
+
+def test_layout_unanchorable_raises():
+    data = _mcn("0093624877721") * 3
+    with pytest.raises(ValueError, match="anchor"):
+        derive_track_layout(data, {1: 0}, 10)
+
+
+# --- real capture fixture (PX-716A, c2read --sub raw) ------------------------
+
+# 300 sectors (LBA 11850..12149) of a c2read --sub raw capture of the Tracy
+# Chapman disc, spanning the track 1 -> 2 boundary: a real 52-frame pre-gap
+# (index 00 from LBA 11980, TOC start 12032) with 3 interleaved MCN frames.
+# cdrdao read-toc independently reports pregap 00:00:52 for track 2.
+
+
+def test_real_fixture_layout_matches_cdrdao():
+    data = (_FIXTURES / "subq_track2_boundary.sub").read_bytes()
+    layout = derive_track_layout(data, {1: 0, 2: 12032}, 162892)
+    assert layout.pregap_frames == {2: 52}
+    assert layout.index_points == {}
+    assert layout.control[2].pre_emphasis is False
+    assert layout.control[2].copy_permitted is False
+
+
+def test_real_fixture_mcn_vote():
+    data = (_FIXTURES / "subq_track2_boundary.sub").read_bytes()
+    scan = scan_subcode(data)
+    assert scan.base_lba == 11850
+    (d,) = [d for d in scan.data if d.type == "MCN"]
+    assert d.value == "7559607740206"  # matches READ SUB-CHANNEL ground truth
+    assert d.count == 3
