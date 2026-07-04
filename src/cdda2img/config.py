@@ -200,12 +200,15 @@ class Config:
     # AR-recovery: number of full sweeps of the drive's speed ladder to attempt per
     # failed track before giving up (total attempts = passes x ladder_steps).
     recovery_passes: int = 3
-    # C2-erasure-assisted CTDB recovery gate (item 8): "auto" uses the drive's C2
-    # error pointers as RS erasures only when the drive advertises + functionally
-    # supports C2; "on" forces it; "off" never uses C2 (falls back to error-only
-    # ctanalyse, then the cd-paranoia ladder). C2 is a *modifier* to ctanalyse, not a
-    # separate method, so "off" never disables recovery — only the erasure boost.
-    c2_recovery: str = "auto"
+    # C2-erasure-assisted CTDB recovery gate (item 8). "off" (default) rips via cdrdao
+    # read-cd as usual — CTDB error-only ctanalyse still repairs above cd-paranoia. "auto"
+    # uses the drive's C2 error pointers as RS erasures when the drive advertises +
+    # functionally supports C2; "on" forces it. C2 is a *modifier* to ctanalyse, not a
+    # separate method, so it never disables recovery — only adds the erasure boost.
+    # Default off because enabling C2 today means a second (cdrdao read-toc) metadata pass
+    # (c2read can't read the subchannel yet); the erasure boost only helps discs too damaged
+    # for error-only ctanalyse. Opt in for a troublesome disc, or for production testing.
+    c2_recovery: str = "off"
     # Ordered priority ranking of release-country codes for the release-selection
     # rung (rbi_spec.md §6.3.2; trust_model_design.md §10.2). NOT a filter: listed
     # codes rank in order, unlisted codes share the lowest rank, empty = key skipped.
@@ -384,7 +387,7 @@ def load_config() -> Config:
     recovery_passes = _bounded_int(
         data.get("recovery_passes", 3), 3, 0, 20, "recovery_passes"
     )
-    c2_recovery = _parse_c2_recovery(data.get("c2_recovery", "auto"))
+    c2_recovery = _parse_c2_recovery(data.get("c2_recovery", "off"))
 
     preferred_country = _parse_preferred_country(data.get("preferred_country", []))
 

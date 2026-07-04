@@ -14,6 +14,8 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from cdda2img.cdrdao_progress import ProgressUpdate
+    from cdda2img.config import Config
+    from cdda2img.disc_reader import RipInfo
     from cdda2img.field_resolver import FieldProposal
     from cdda2img.lookup_result import DiscMeta
     from cdda2img.mb_lookup import MBPrepopResult
@@ -2365,6 +2367,52 @@ def _rip_with_fallback(
         ), "cd-paranoia"
 
 
+def _rip_disc_stage(
+    device: str,
+    pcm_file: Path,
+    c2_file: Path,
+    read_offset: int,
+    cfg: Config,
+    ui: TerminalUI | None = None,
+) -> tuple[RipInfo, str, Path | None]:
+    """Read the disc, returning (info, rip_type, c2_path).
+
+    Normal path (``c2_recovery = off``, the default): cdrdao read-cd — audio + subchannel
+    metadata in one pass. C2 path (``on``, or ``auto`` + drive supports C2): one c2read
+    audio pass that also captures the C2 error-pointer bitmap, plus a separate cdrdao
+    read-toc metadata pass (c2read can't read the subchannel yet). c2read runs first — it
+    is the cheaper pass and the critical data — so a fatal read fails before the metadata
+    scan. The read-toc pass captures ISRC via per-track READ SUB-CHANNEL, which also
+    sidesteps cdrdao bug #75 (its inline read-cd ISRC latch), so the C2 path's metadata is
+    if anything a touch more reliable.
+
+    Both the cdrdao and c2read paths return RAW PCM (drive offset not applied); the caller
+    works raw through AR + ctanalyse and applies apply_offset once, late. Only a cd-paranoia
+    *read* fallback (rip_type "cd-paranoia") returns already-corrected PCM.
+    """
+    use_c2 = cfg.c2_recovery == "on" or (
+        cfg.c2_recovery != "off" and _drive_supports_c2(device)
+    )
+    if use_c2:
+        from cdda2img.c2_reader import read_disc_c2
+        from cdda2img.cdrdao_ripper import read_toc_metadata
+
+        _ui_status(ui, "Reading audio + C2 pointers (c2read)…")
+        read_disc_c2(device, pcm_file, c2_file)
+        _ui_status(ui, "Reading disc metadata (cdrdao read-toc)…")
+        info = read_toc_metadata(device)
+        return info, "c2read+toc", c2_file
+
+    info, rip_type = _rip_with_fallback(device, pcm_file, read_offset, ui=ui)
+    return info, rip_type, None
+
+
+def _drive_supports_c2(device: str) -> bool:
+    from cdda2img.c2_reader import drive_supports_c2
+
+    return drive_supports_c2(device)
+
+
 def _ar_has_partial_mismatch(results: list) -> bool:
     """True when some (but not all) disc-in-database tracks have AR mismatches.
 
@@ -2543,7 +2591,10 @@ def rip_image(  # noqa: C901
 
     drive_speed.restore_drive_speed(device)
 
-    temp_base = resolve_temp_dir()
+    # A whole-disc rip needs the raw PCM (~up to 850 MB) plus apply_offset's transient
+    # copy plus the C2 bitmap — require ~1.5 GB so a near-full tmpfs is rejected up front
+    # rather than ENOSPC-ing mid-rip at apply_offset.
+    temp_base = resolve_temp_dir(min_required_bytes=1_500_000_000)
     temp = TempFiles(temp_base)
 
     # Pre-TUI one-shot banner: fast disc scan + background MB/art fetch, then render
@@ -2629,7 +2680,10 @@ def rip_image(  # noqa: C901
         # the background while the rest of the rip runs.
         track_preview = _start_track_preview(device, temp_base, ui, enabled=preview)
 
-        info, rip_type = _rip_with_fallback(device, temp.pcm_file, read_offset, ui=ui)
+        c2_file = temp.pcm_file.with_suffix(".c2")
+        info, rip_type, c2_path = _rip_disc_stage(
+            device, temp.pcm_file, c2_file, read_offset, cfg, ui=ui
+        )
 
         track_count = len(info.disc.tracks)
         total_s = info.disc.total_seconds
@@ -2638,13 +2692,14 @@ def rip_image(  # noqa: C901
             f"{track_count} track(s), {int(total_s) // 60}:{int(total_s) % 60:02d} total",
         )
 
-        # cdrdao has no native offset flag; correct the PCM after ripping.
-        # cd-paranoia applied -O at rip time, so its PCM is already corrected.
-        if rip_type == "cdrdao" and read_offset != 0:
-            from cdda2img.offset_correct import apply_offset
+        # Offset domain (unified model): the cdrdao and c2read reads return RAW PCM. We
+        # work raw through AR + ctanalyse and apply the drive offset once, late (before the
+        # cd-paranoia ladder, or at storage). Only a cd-paranoia *read* fallback returns
+        # already-corrected PCM (it applied -O at read time), so it verifies at offset 0.
+        from cdda2img.offset_correct import apply_offset
 
-            _ui_status(ui, "Applying drive offset correction…")
-            apply_offset(temp.pcm_file, read_offset)
+        raw_domain = rip_type in ("cdrdao", "c2read+toc")
+        ar_offset = read_offset if raw_domain else 0
 
         # R8: CDDB query now happens inside _finalize_import in parallel
         # with the MB disc-ID lookup. The standalone call is gone; we just
@@ -2658,13 +2713,12 @@ def rip_image(  # noqa: C901
         recovery_outcomes: dict[int, str] = {}
         recovery_ladder: list[int] = []
 
-        # PCM is now offset-corrected for both paths; verify_rip reads from correct positions.
         _ui_status(ui, "Verifying AccurateRip…")
         ar_verify = verify_rip(
             temp.pcm_file,
             final_track_lsns,
             final_disc_last_lsn,
-            read_offset=0,
+            read_offset=ar_offset,
             cddb_id=cddb_id,
         )
         if ui is not None:
@@ -2673,11 +2727,54 @@ def rip_image(  # noqa: C901
         if ui is not None:
             ui.resume()
 
+        # CTDB parity repair FIRST (above cd-paranoia): error-only ctanalyse on the raw PCM
+        # (network parity, zero extra reads), with C2 erasures if the C2 path captured them.
+        # Skipped on a cd-paranoia read fallback (already corrected — no raw domain for
+        # ctanalyse's offset detection). On success the PCM is repaired in place and the
+        # cd-paranoia ladder is skipped; on failure we correct the PCM and fall through.
+        if raw_domain and _ar_has_partial_mismatch(ar_verify.tracks):
+            from cdda2img.ctdb_repair import repair_whole_disc
+
+            _ui_status(ui, "Trying CTDB parity repair…")
+            _ctdb = repair_whole_disc(
+                temp.pcm_file,
+                final_track_lsns,
+                final_disc_last_lsn,
+                cddb_id,
+                read_offset,
+                c2_path=c2_path,
+            )
+            if _ctdb.repaired:
+                rip_type = "c2read+ctdb" if c2_path is not None else "cdrdao+ctdb"
+                for _t in _ctdb.damaged_tracks:
+                    recovery_outcomes[_t] = f"ctdb_repaired@{_ctdb.entry_id}"
+                _ui_status(ui, "Re-verifying AccurateRip (CTDB repair)…")
+                ar_verify = verify_rip(
+                    temp.pcm_file,
+                    final_track_lsns,
+                    final_disc_last_lsn,
+                    read_offset=read_offset,
+                    cddb_id=cddb_id,
+                )
+                if ui is not None:
+                    ui.pause()
+                print_ar_report(ar_verify.tracks, read_offset=read_offset)
+                if ui is not None:
+                    ui.resume()
+            else:
+                _ui_status(
+                    ui, "CTDB repair not applicable — correcting for cd-paranoia…"
+                )
+                apply_offset(temp.pcm_file, read_offset)
+                raw_domain = False
+
         # AR-triggered fallback: partial mismatch → read error on specific tracks.
         # Re-rip only the failed tracks via cd-paranoia (full paranoia) and splice
         # them into the already-offset-corrected PCM. cdrdao metadata (ISRC/MCN/
         # CD-Text from subchannel) is preserved — cd-paranoia -Q does not capture it.
-        if rip_type == "cdrdao" and _ar_has_partial_mismatch(ar_verify.tracks):
+        if rip_type in ("cdrdao", "c2read+toc") and _ar_has_partial_mismatch(
+            ar_verify.tracks
+        ):
             from cdda2img.disc_reader import rip_disc
 
             failed_tracks = [
@@ -2777,6 +2874,17 @@ def rip_image(  # noqa: C901
             print_ar_report(ar_verify.tracks, read_offset=read_offset)
             if ui is not None:
                 ui.resume()
+
+        # Storage domain: apply the drive offset exactly once, here, if we're still raw
+        # (a clean disc, or a CTDB-repaired one). The cd-paranoia paths already corrected.
+        if raw_domain:
+            _ui_status(ui, "Applying drive offset correction…")
+            apply_offset(temp.pcm_file, read_offset)
+            raw_domain = False
+        if c2_path is not None:
+            from cdda2img.c2_reader import park_spindle
+
+            park_spindle(device)
 
         arip_block = pack_arip_block(
             ar_verify.tracks, final_track_lsns, final_disc_last_lsn, cddb_id

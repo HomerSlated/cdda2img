@@ -2,6 +2,27 @@
 
 ## Open
 
+### C2-path read progress into the TUI (2026-07-04)
+
+On the C2 rip path the two read subprocesses show only a throbber, no measurable progress:
+`c2_reader.read_disc_c2` (c2read) and `cdrdao_ripper.read_toc_metadata` (cdrdao read-toc) both
+`capture_output=True` (to keep the TUI clean) but don't parse progress. Wire real progress in:
+c2read emits a periodic "read N / M sectors" line — parse it and feed a fraction to the TUI
+(add a `--progress`/line-buffered mode if needed); cdrdao read-toc can reuse `CdrdaoProgress`
+like `rip_cdrdao`'s `_run_with_progress`. Medium priority (cosmetic; the reads work).
+
+### Extend c2read to read the subchannel — eventual read-only cdrdao replacement (2026-07-04)
+
+The C2-recovery rip path (`c2_recovery = on/auto`) currently needs a **second** full-disc
+pass — `cdrdao read-toc` (~181 s) for metadata (pre-gaps, ISRC, MCN, CD-Text) on top of the
+`c2read` audio+C2 pass (~95 s) — because c2read reads only user data + C2, not the subchannel.
+Extend c2read incrementally, one function at a time, to read pre-gaps, ISRC (Q Mode 3), MCN
+(Q Mode 2), CD-Text (R-W), and anything else the pipeline needs, so the metadata pass can be
+dropped and the C2 path becomes a single read (audio + C2 + metadata). That flips the
+economics enough to make `auto` the sensible default (see `config.c2_recovery`, defaulted
+`off` for now). Ultimately c2read could replace cdrdao for **reading** entirely (and possibly
+writing too, given Plextor VariRec/PoweRec opcodes). **Low priority.**
+
 ### MCN archival-only + barcode as the disambiguation key (2026-06-29) — ✅ DONE 2026-06-30
 
 Closed the Tracy Chapman live bug (an exact MB disc-ID match discarded because an archival

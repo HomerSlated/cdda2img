@@ -71,6 +71,10 @@ exclude = ["scratch"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# Don't accumulate GBs of PCM temp dirs across runs: keep only the most recent session,
+# and within it only failed tests' tmp_path dirs (passing tests clean up immediately).
+tmp_path_retention_count = 1
+tmp_path_retention_policy = "failed"
 filterwarnings = [
     # discogs_client 2.3.0 has an invalid escape in fetchers.py; fixed upstream eventually
     "ignore::SyntaxWarning:discogs_client.*",

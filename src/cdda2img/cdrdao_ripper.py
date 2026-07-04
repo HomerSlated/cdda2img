@@ -105,6 +105,43 @@ def rip_cdrdao(
     return RipInfo(disc=disc, track_lsns=track_lsns, disc_last_lsn=disc_last_lsn)
 
 
+def read_toc_metadata(device: str) -> RipInfo:
+    """Capture disc metadata (pre-gaps, per-track ISRC, MCN, CD-Text) via ``cdrdao
+    read-toc`` WITHOUT reading the audio — the C2-recovery path pairs this with a
+    separate ``c2read`` audio pass. Returns a RipInfo whose disc/LSNs come from the
+    parsed .toc; the audio is supplied by the caller (there is no BIN). ~one full-disc
+    subchannel pass (fast-toc skips pre-gaps/ISRC/MCN, so it can't be used here).
+
+    Returns a RipInfo with a None-valued audio (the caller writes the PCM separately).
+    """
+    from cdda2img.cdrdao_reader import parsed_to_rbi_disc
+    from cdda2img.toc_parser import parse_toc
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        toc_path = Path(tmpdir) / "meta.toc"
+        cmd = ["cdrdao", "read-toc", "--device", device, str(toc_path)]  # LINT-013
+        try:
+            # Capture cdrdao's verbose analysis output so it never corrupts the TUI.
+            result = subprocess.run(cmd, capture_output=True, text=True)  # noqa: S603
+        except FileNotFoundError:
+            msg = "cdrdao not found — install cdrdao"
+            raise RuntimeError(msg) from None
+        if result.returncode != 0:
+            msg = (
+                f"cdrdao read-toc exited with code {result.returncode}: "
+                f"{(result.stderr or '').strip()}"
+            )
+            raise RuntimeError(msg)
+        log.debug("cdrdao read-toc: %s", (result.stderr or "").strip())
+        parsed = parse_toc(toc_path.read_bytes())
+
+    disc = parsed_to_rbi_disc(parsed)
+    track_lsns = [pt.start_frame + pt.pregap_frames for pt in parsed.tracks]
+    last = parsed.tracks[-1]
+    disc_last_lsn = last.start_frame + last.pregap_frames + last.duration_frames - 1
+    return RipInfo(disc=disc, track_lsns=track_lsns, disc_last_lsn=disc_last_lsn)
+
+
 def _run_with_progress(
     cmd: list[str],
     progress_cb: Callable[[ProgressUpdate], None],

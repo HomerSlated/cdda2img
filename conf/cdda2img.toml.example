@@ -115,8 +115,10 @@
 # much damage it can reconstruct. C2 is only a *modifier* to ctanalyse, so "off"
 # never disables recovery -- it just skips the erasure boost (error-only ctanalyse,
 # then the cd-paranoia ladder). "auto" uses C2 only when the drive both advertises
-# and functionally supports it; "on" forces it; "off" never uses it. Default: auto
-# c2_recovery = "auto"
+# and functionally supports it; "on" forces it; "off" never uses it. Default: off
+# (enabling C2 today adds a second cdrdao read-toc metadata pass, since c2read cannot
+# read the subchannel yet; error-only ctanalyse still repairs above cd-paranoia).
+# c2_recovery = "off"
 
 # Per-drive read and write offsets.
 # read_offset is stored automatically after AccurateRip confirmation.

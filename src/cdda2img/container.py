@@ -93,6 +93,10 @@ def resolve_temp_dir(min_required_bytes: int = 100_000_000) -> Path:
         os.getenv("TMP"),
         os.getenv("TEMP"),
         os.getenv("TMPDIR"),
+        # Prefer disk-backed /var/tmp over a RAM-backed /tmp (tmpfs): a whole-disc rip's
+        # PCM plus apply_offset's transient copy is >1.5 GB, which floods a small tmpfs.
+        # Skipped automatically if absent / too small (the free-space check below).
+        "/var/tmp",  # noqa: S108 — a validated candidate, not an unchecked temp path
         tempfile.gettempdir(),
     ]
     for candidate in candidates:

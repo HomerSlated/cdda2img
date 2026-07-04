@@ -413,13 +413,13 @@ def test_recovery_passes_out_of_range_falls_back(
     assert load_config().recovery_passes == 3
 
 
-def test_c2_recovery_defaults_to_auto(
+def test_c2_recovery_defaults_to_off(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     cfg = tmp_path / "cfg.toml"
     cfg.write_text("")
     monkeypatch.setattr("cdda2img.config.config_path", lambda: cfg)
-    assert load_config().c2_recovery == "auto"
+    assert load_config().c2_recovery == "off"
 
 
 def test_c2_recovery_valid_values(
