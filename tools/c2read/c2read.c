@@ -48,6 +48,9 @@
 #define RAW_BYTES 2352            /* CD-DA user data per sector */
 #define C2_BYTES 294             /* 2352 bits, one per audio byte */
 #define C2_BEB_BYTES 296         /* C2 + block-error bits variant */
+#define SUB_RAW_BYTES 96         /* raw P-W subcode, interleaved */
+#define SUB_Q_BYTES 16           /* formatted Q sub-channel block */
+#define MAX_XFER 65535           /* keep one READ CD transfer under 64 KiB */
 #define LEADOUT_TRACK 0xAA
 #define SENSE_LEN 32
 #define SG_TIMEOUT_MS 60000      /* generous — a defect can trigger long internal retries */
@@ -185,10 +188,13 @@ static int dump_toc(int fd) {
     return 0;
 }
 
-/* One READ CD command for nsec sectors from lba into buf (nsec * sector_len bytes). */
+/* One READ CD command for nsec sectors from lba into buf (nsec * sector_len bytes).
+ * submode: CDB byte 10 sub-channel selection — 0 none, 1 raw P-W (96 B), 2 formatted
+ * Q (16 B). Returned per-sector field order is audio, C2, sub (probed on the PX-716A:
+ * Q CRCs only validate at offset 2352+294; matches redumper SectorOrder::DATA_C2_SUB). */
 static int read_cd(int fd, long lba, unsigned nsec, unsigned sector_type,
-                   unsigned c2mode, void *buf, unsigned sector_len,
-                   unsigned char *sense) {
+                   unsigned c2mode, unsigned submode, void *buf,
+                   unsigned sector_len, unsigned char *sense) {
     unsigned char cdb[12] = {0};
     cdb[0] = OP_READ_CD;
     cdb[1] = (unsigned char)(sector_type << 2);          /* expected_sector_type, bits 4-2 */
@@ -200,7 +206,7 @@ static int read_cd(int fd, long lba, unsigned nsec, unsigned sector_type,
     cdb[7] = (unsigned char)((nsec >> 8) & 0xff);
     cdb[8] = (unsigned char)(nsec & 0xff);
     cdb[9] = (unsigned char)(0x10 | (c2mode << 1));      /* include_user_data | error_flags */
-    cdb[10] = 0x00;                                      /* no sub-channel */
+    cdb[10] = (unsigned char)(submode & 0x07);           /* sub-channel selection */
     cdb[11] = 0x00;
     return scsi_in(fd, cdb, sizeof(cdb), buf, nsec * sector_len, sense);
 }
@@ -266,15 +272,16 @@ static int get_cdread_feature(int fd, int *dap, int *c2, int *cdtext, int *curre
     return 0;
 }
 
-/* Functional check: does READ CD *with the C2 field* actually return data (not a
- * CHECK CONDITION)? Reads 3 CD-DA sectors from LBA 0. Returns 0 on success. */
-static int c2_smoke(int fd) {
-    unsigned len = RAW_BYTES + C2_BYTES;
+/* Functional check: does READ CD with this C2/sub-channel field combination return
+ * data (not a CHECK CONDITION)? Reads 3 CD-DA sectors from LBA 0. Returns 0 on ok. */
+static int combo_smoke(int fd, unsigned c2mode, unsigned submode) {
+    unsigned len = RAW_BYTES + (c2mode ? C2_BYTES : 0) +
+                   (submode == 1 ? SUB_RAW_BYTES : submode == 2 ? SUB_Q_BYTES : 0);
     unsigned char sense[SENSE_LEN];
     unsigned char *buf = malloc((size_t)3 * len);
     if (!buf)
         return -1;
-    int rc = read_cd(fd, 0, 3, 1, 1, buf, len, sense);
+    int rc = read_cd(fd, 0, 3, 1, c2mode, submode, buf, len, sense);
     free(buf);
     return rc == 0 ? 0 : -1;
 }
@@ -282,7 +289,9 @@ static int c2_smoke(int fd) {
 /* --features: report C2 capability (claim + functional smoke) in a machine-parseable
  * form and exit 0 IFF C2 is clearly usable, so the pipeline can gate on the exit code.
  * Conservative: anything short of "advertised AND functional" exits non-zero, so an
- * unreliable/unadvertised C2 falls back to the non-C2 recovery path by default. */
+ * unreliable/unadvertised C2 falls back to the non-C2 recovery path by default.
+ * Also smoke-tests every C2/sub-channel combination so the single-pass capture path
+ * (audio + C2 + subcode in one READ CD) can be gated per drive. */
 static int probe_features(int fd) {
     int dap = 0, c2 = 0, cdtext = 0, current = 0;
     int have_feat = get_cdread_feature(fd, &dap, &c2, &cdtext, &current);
@@ -292,8 +301,17 @@ static int probe_features(int fd) {
     else
         printf("cd_read_feature absent (GET CONFIGURATION 0x1E unavailable)\n");
 
-    int smoke = c2_smoke(fd);
+    int smoke = combo_smoke(fd, 1, 0);
     printf("c2_read_smoke %s\n", smoke == 0 ? "ok" : "failed");
+
+    static const struct { const char *name; unsigned c2mode, submode; } combos[] = {
+        {"c2", 1, 0},         {"sub_raw", 0, 1},    {"sub_q", 0, 2},
+        {"c2+sub_raw", 1, 1}, {"c2+sub_q", 1, 2},
+    };
+    for (unsigned i = 0; i < sizeof(combos) / sizeof(combos[0]); i++)
+        printf("combo %s %s\n", combos[i].name,
+               combo_smoke(fd, combos[i].c2mode, combos[i].submode) == 0
+                   ? "ok" : "failed");
 
     const char *verdict;
     int usable;
@@ -323,33 +341,40 @@ static void set_speed(int fd, int nx) {
 static void usage(const char *me) {
     fprintf(stderr,
         "usage: %s [--device DEV] [--start LBA] [--count N | --full]\n"
-        "          [--any] [--c2beb] [--chunk NSEC] [--speed X]\n"
-        "          [--pcm FILE] [--c2 FILE] [--ranges] [-q]\n"
+        "          [--any] [--c2beb] [--sub raw|q] [--chunk NSEC] [--speed X]\n"
+        "          [--pcm FILE] [--c2 FILE] [--subf FILE] [--ranges] [-q]\n"
         "\n"
         "  --device DEV   optical device (default /dev/sr0)\n"
         "  --start LBA    first sector (default 0)\n"
         "  --count N      sectors to read; 0/omitted with --full = whole audio area\n"
         "  --full         read [start, lead-out) via READ TOC\n"
         "  --toc          dump track boundaries (READ TOC) to stdout and exit\n"
-        "  --features     probe C2 capability (claim + smoke); exit 0 iff usable\n"
+        "  --features     probe C2 capability (claim + smoke + combos); exit 0 iff usable\n"
         "  --stop         spin the spindle down (START STOP UNIT, no eject) and exit\n"
         "  --any          expected sector type ALL_TYPES (default CD_DA)\n"
         "  --c2beb        request C2+block-error-bits (296 B) instead of C2 (294 B)\n"
-        "  --chunk NSEC   sectors per READ CD command (default 24, keeps xfer <64K)\n"
+        "  --sub raw|q    also capture the sub-channel: raw P-W (96 B) or formatted Q (16 B)\n"
+        "  --chunk NSEC   sectors per READ CD command (default 24, clamped to keep xfer <64K)\n"
         "  --speed X      set drive read speed to Nx first (best-effort)\n"
         "  --pcm FILE     write raw s16 PCM (2352 B/sector) here\n"
         "  --c2 FILE      write raw C2 bitmap (294 B/sector) here\n"
+        "  --subf FILE    write the sub-channel stream here (needs --sub)\n"
         "  --ranges       print coalesced flagged-LBA ranges to stderr\n"
-        "  -q             quiet: suppress the periodic progress line\n",
+        "  -q             quiet: suppress the periodic stderr progress line\n"
+        "\n"
+        "  Read mode always emits machine-parseable 'progress <done> <total>' lines\n"
+        "  on stdout (rate-limited); hard-unreadable sectors are zero-filled in the\n"
+        "  PCM (C2 bitmap all-ones, sub zeroed) so the output files never desync.\n",
         me);
 }
 
 int main(int argc, char **argv) {
     const char *device = "/dev/sr0";
-    const char *pcm_path = NULL, *c2_path = NULL;
+    const char *pcm_path = NULL, *c2_path = NULL, *sub_path = NULL;
     long start = 0, count = -1;
     int full = 0, any = 0, c2beb = 0, chunk = 24, speed = 0, ranges = 0, quiet = 0, toc = 0;
     int features = 0, stop = 0;
+    unsigned submode = 0;                          /* 0 none, 1 raw P-W, 2 formatted Q */
 
     for (int i = 1; i < argc; i++) {
         const char *a = argv[i];
@@ -359,10 +384,17 @@ int main(int argc, char **argv) {
         else if (!strcmp(a, "--full")) full = 1;
         else if (!strcmp(a, "--any")) any = 1;
         else if (!strcmp(a, "--c2beb")) c2beb = 1;
+        else if (!strcmp(a, "--sub") && i + 1 < argc) {
+            const char *m = argv[++i];
+            if (!strcmp(m, "raw")) submode = 1;
+            else if (!strcmp(m, "q")) submode = 2;
+            else { usage(argv[0]); return 2; }
+        }
         else if (!strcmp(a, "--chunk") && i + 1 < argc) chunk = (int)strtol(argv[++i], NULL, 0);
         else if (!strcmp(a, "--speed") && i + 1 < argc) speed = (int)strtol(argv[++i], NULL, 0);
         else if (!strcmp(a, "--pcm") && i + 1 < argc) pcm_path = argv[++i];
         else if (!strcmp(a, "--c2") && i + 1 < argc) c2_path = argv[++i];
+        else if (!strcmp(a, "--subf") && i + 1 < argc) sub_path = argv[++i];
         else if (!strcmp(a, "--ranges")) ranges = 1;
         else if (!strcmp(a, "--toc")) toc = 1;
         else if (!strcmp(a, "--features")) features = 1;
@@ -371,11 +403,26 @@ int main(int argc, char **argv) {
         else { usage(argv[0]); return 2; }
     }
     if (chunk < 1) chunk = 1;
+    if (sub_path && !submode) {
+        fprintf(stderr, "c2read: --subf requires --sub raw|q\n");
+        return 2;
+    }
 
     unsigned sector_type = any ? 0u : 1u;          /* ALL_TYPES vs CD_DA */
     unsigned c2mode = c2beb ? 2u : 1u;
     unsigned c2_len = c2beb ? C2_BEB_BYTES : C2_BYTES;
-    unsigned sector_len = RAW_BYTES + c2_len;
+    unsigned sub_len = submode == 1 ? SUB_RAW_BYTES : submode == 2 ? SUB_Q_BYTES : 0;
+    unsigned sector_len = RAW_BYTES + c2_len + sub_len;
+
+    /* One transfer must stay under 64 KiB (sg one-shot buffer comfort zone); the
+     * retry/zero-fill path also assumes chunk fits a 64-bit sector mask. */
+    int maxchunk = (int)(MAX_XFER / sector_len);
+    if (maxchunk > 63) maxchunk = 63;
+    if (chunk > maxchunk) {
+        fprintf(stderr, "c2read: --chunk %d clamped to %d (%u B/sector)\n",
+                chunk, maxchunk, sector_len);
+        chunk = maxchunk;
+    }
 
     int fd = open(device, O_RDONLY | O_NONBLOCK);
     if (fd < 0) {
@@ -419,7 +466,7 @@ int main(int argc, char **argv) {
                     leadout, count, start);
     }
 
-    FILE *pcm_fp = NULL, *c2_fp = NULL;
+    FILE *pcm_fp = NULL, *c2_fp = NULL, *sub_fp = NULL;
     if (pcm_path && !(pcm_fp = fopen(pcm_path, "wb"))) {
         fprintf(stderr, "c2read: open %s: %s\n", pcm_path, strerror(errno));
         close(fd); return 1;
@@ -427,6 +474,13 @@ int main(int argc, char **argv) {
     if (c2_path && !(c2_fp = fopen(c2_path, "wb"))) {
         fprintf(stderr, "c2read: open %s: %s\n", c2_path, strerror(errno));
         if (pcm_fp) fclose(pcm_fp);
+        close(fd);
+        return 1;
+    }
+    if (sub_path && !(sub_fp = fopen(sub_path, "wb"))) {
+        fprintf(stderr, "c2read: open %s: %s\n", sub_path, strerror(errno));
+        if (pcm_fp) fclose(pcm_fp);
+        if (c2_fp) fclose(c2_fp);
         close(fd);
         return 1;
     }
@@ -439,26 +493,53 @@ int main(int argc, char **argv) {
     long range_start = -1, range_end = -1;  /* open coalesced flagged range */
     struct timespec t0, t1;
     clock_gettime(CLOCK_MONOTONIC, &t0);
+    double last_prog = 0.0;                 /* rate limit for stdout progress lines */
 
     long lba = start, remaining = count;
     while (remaining > 0) {
         unsigned n = (unsigned)(remaining < chunk ? remaining : chunk);
-        int rc = read_cd(fd, lba, n, sector_type, c2mode, buf, sector_len, sense);
+        unsigned long long hard_mask = 0;   /* sectors zero-filled below (chunk <= 63) */
+        int rc = read_cd(fd, lba, n, sector_type, c2mode, submode, buf, sector_len, sense);
         if (rc != 0) {
-            /* A whole-chunk failure: the drive could not return these sectors at
-             * all (distinct from a C2 flag, which returns data). Record and skip
-             * past this chunk so the scan completes rather than stalling. */
+            /* Whole-chunk failure: the drive could not return these sectors at all
+             * (distinct from a C2 flag, which returns data). Narrow to per-sector
+             * reads (one retry each); a sector that still fails is ZERO-FILLED —
+             * PCM zeros, C2 all-ones, sub zeros — so the output files never desync
+             * and downstream treats the span as all-erasures. */
             if (rc == 1) print_sense(sense, "READ CD");
             else fprintf(stderr, "c2read: READ CD ioctl at LBA %ld: %s\n",
                          lba, strerror(errno));
-            st.read_errors += n;
-            lba += n; remaining -= n;
-            continue;
+            for (unsigned s = 0; s < n; s++) {
+                unsigned char *sec = buf + (size_t)s * sector_len;
+                long cur = lba + (long)s;
+                int src = read_cd(fd, cur, 1, sector_type, c2mode, submode, sec,
+                                  sector_len, sense);
+                if (src != 0)
+                    src = read_cd(fd, cur, 1, sector_type, c2mode, submode, sec,
+                                  sector_len, sense);
+                if (src != 0) {
+                    memset(sec, 0, RAW_BYTES);
+                    memset(sec + RAW_BYTES, 0xff, c2_len);
+                    if (sub_len)
+                        memset(sec + RAW_BYTES + c2_len, 0, sub_len);
+                    hard_mask |= 1ull << s;
+                    st.read_errors++;
+                    fprintf(stderr, "c2read: hard %ld\n", cur);
+                }
+            }
         }
 
         for (unsigned s = 0; s < n; s++) {
             const unsigned char *sec = buf + (size_t)s * sector_len;
             const unsigned char *c2 = sec + RAW_BYTES;
+            if (hard_mask & (1ull << s)) {
+                /* Zero-filled sector: write it, but keep the synthetic all-ones C2
+                 * out of the C2 stats so the verdict still reflects the drive. */
+                if (pcm_fp) fwrite(sec, 1, RAW_BYTES, pcm_fp);
+                if (c2_fp) fwrite(c2, 1, c2_len, c2_fp);
+                if (sub_fp) fwrite(sec + RAW_BYTES + c2_len, 1, sub_len, sub_fp);
+                continue;
+            }
             unsigned bits = 0;
             for (unsigned b = 0; b < c2_len; b++)
                 bits += (unsigned)__builtin_popcount(c2[b]);
@@ -482,9 +563,19 @@ int main(int argc, char **argv) {
             }
             if (pcm_fp) fwrite(sec, 1, RAW_BYTES, pcm_fp);
             if (c2_fp) fwrite(c2, 1, c2_len, c2_fp);
+            if (sub_fp) fwrite(sec + RAW_BYTES + c2_len, 1, sub_len, sub_fp);
         }
 
         lba += n; remaining -= n;
+
+        /* Machine-parseable progress on stdout for the pipeline TUI (<= ~4 Hz). */
+        clock_gettime(CLOCK_MONOTONIC, &t1);
+        double now = (double)t1.tv_sec + (double)t1.tv_nsec / 1e9;
+        if (now - last_prog >= 0.25 || remaining == 0) {
+            printf("progress %ld %ld\n", count - remaining, count);
+            fflush(stdout);
+            last_prog = now;
+        }
         if (!quiet && (st.sectors_read % 4096 < (unsigned)n))
             fprintf(stderr, "\r  read %llu / %ld sectors  (flagged %llu, C2 bits %llu) ",
                     st.sectors_read, count, st.sectors_flagged, st.c2_bits);
@@ -499,6 +590,7 @@ int main(int argc, char **argv) {
 
     if (pcm_fp) fclose(pcm_fp);
     if (c2_fp) fclose(c2_fp);
+    if (sub_fp) fclose(sub_fp);
     free(buf); free(sense); close(fd);
 
     /* ---- summary + verdict ------------------------------------------------- */

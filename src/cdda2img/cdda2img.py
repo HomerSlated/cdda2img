@@ -2397,8 +2397,23 @@ def _rip_disc_stage(
         from cdda2img.c2_reader import read_disc_c2
         from cdda2img.cdrdao_ripper import read_toc_metadata
 
-        _ui_status(ui, "Reading audio + C2 pointers (c2read)…")
-        read_disc_c2(device, pcm_file, c2_file)
+        c2_status = "Reading audio + C2 pointers (c2read)…"
+        _ui_status(ui, c2_status)
+
+        def _c2_cb(done: int, total: int) -> None:
+            if ui is not None:
+                ui.set_status(
+                    c2_status,
+                    done / total if total > 0 else 0.0,
+                    detail=f"({done}/{total})",
+                )
+
+        read_disc_c2(
+            device,
+            pcm_file,
+            c2_file,
+            progress_cb=_c2_cb if ui is not None else None,
+        )
         _ui_status(ui, "Reading disc metadata (cdrdao read-toc)…")
         info = read_toc_metadata(device)
         return info, "c2read+toc", c2_file

@@ -2,26 +2,29 @@
 
 ## Open
 
-### C2-path read progress into the TUI (2026-07-04)
+### C2-path read progress into the TUI (2026-07-04) — c2read half ✅ DONE 2026-07-04
 
-On the C2 rip path the two read subprocesses show only a throbber, no measurable progress:
-`c2_reader.read_disc_c2` (c2read) and `cdrdao_ripper.read_toc_metadata` (cdrdao read-toc) both
-`capture_output=True` (to keep the TUI clean) but don't parse progress. Wire real progress in:
-c2read emits a periodic "read N / M sectors" line — parse it and feed a fraction to the TUI
-(add a `--progress`/line-buffered mode if needed); cdrdao read-toc can reuse `CdrdaoProgress`
-like `rip_cdrdao`'s `_run_with_progress`. Medium priority (cosmetic; the reads work).
+The c2read half is wired (Phase 1 of the c2read upgrade plan): c2read emits machine-parseable
+`progress <done> <total>` lines on stdout; `c2_reader.read_disc_c2(progress_cb=…)` streams
+them (stderr goes to a temp file so `hard <lba>` floods can't deadlock the reader) and
+`_rip_disc_stage` feeds the TUI a real fraction. Remaining: `cdrdao_ripper.read_toc_metadata`
+(cdrdao read-toc) still shows a throbber — it disappears entirely with Phase 4 of the upgrade
+plan (single-pass capture drops the read-toc pass), so it is not worth instrumenting.
 
-### Extend c2read to read the subchannel — eventual read-only cdrdao replacement (2026-07-04)
+### Extend c2read to read the subchannel — read-only cdrdao replacement (2026-07-04) — IN PROGRESS
 
-The C2-recovery rip path (`c2_recovery = on/auto`) currently needs a **second** full-disc
-pass — `cdrdao read-toc` (~181 s) for metadata (pre-gaps, ISRC, MCN, CD-Text) on top of the
-`c2read` audio+C2 pass (~95 s) — because c2read reads only user data + C2, not the subchannel.
-Extend c2read incrementally, one function at a time, to read pre-gaps, ISRC (Q Mode 3), MCN
-(Q Mode 2), CD-Text (R-W), and anything else the pipeline needs, so the metadata pass can be
-dropped and the C2 path becomes a single read (audio + C2 + metadata). That flips the
-economics enough to make `auto` the sensible default (see `config.c2_recovery`, defaulted
-`off` for now). Ultimately c2read could replace cdrdao for **reading** entirely (and possibly
-writing too, given Plextor VariRec/PoweRec opcodes). **Low priority.**
+Planned in full: **`docs/reference/c2read-upgrade-plan.md`** (features F1–F11, difficulty
+ranking, dependency build order, reference audit, per-feature strategies; §7 cdrtools
+review — adopted the Plextor Q-Check C1/C2/CU census + mode-page-01 retry tuning, dismissed
+-edc-corr as data-sector-only). Execution is phased; **Phase 1 landed 2026-07-04**:
+single-pass audio+C2+subchannel capture (`--sub raw|q` + `--subf`), zero-fill of
+hard-unreadable sectors (PCM zeros + C2 all-ones so the streams never desync and downstream
+sees pure erasures), 5-combo `--features` probe, stdout progress. PX-716A probe: all five
+0xBE combos supported, field order audio→C2→sub, captured sub decodes with `subchannel.py`
+unchanged. Remaining phases: Q-stream policy layer (pre-gaps/INDEX/CONTROL + MCN/ISRC
+majority vote), CD-Text + full-TOC capture/decode, TOC assembly + parity harness + pipeline
+switch (drops the 181 s read-toc pass → `auto` default becomes defensible), then retry
+ladder / speed report / cx census.
 
 ### MCN archival-only + barcode as the disambiguation key (2026-06-29) — ✅ DONE 2026-06-30
 
