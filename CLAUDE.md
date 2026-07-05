@@ -235,6 +235,7 @@ Full specification: `docs/reference/rbi_spec.md`.
 
 Public documentation and research in `docs/`:
 - `docs/reference/rbi_spec.md` — full RBI container format specification
+- `docs/reference/RECOVERY.md` — the failed-read recovery toolkit: component inventory (roles, status, dependencies, conflicts, combinations), c2read user guide, and the developer deep-dive (science, evidence, design philosophy, adoption/rejection history). Living doc — update alongside recovery-strategy changes
 - `docs/reference/reference.toc` — annotated cdrdao TOC grammar reference
 - `docs/reference/c2read-upgrade-plan.md` — c2read → read-only cdrdao replacement plan (F1–F11)
 - `docs/reference/TUI_Design.md` — TUI design notes

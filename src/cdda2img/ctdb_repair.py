@@ -210,7 +210,12 @@ def build_erasure_bitmap(c2_path: Path, nwords: int, align_pairs: int = -2) -> b
     Collapse per-byte -> per-sample-pair (any of 4 bytes flagged), shift by the drive's
     C2/audio offset (align_pairs, -2 on the PX-716A), expand each pair to its 2 words,
     packbits. packbits (not fancy-index ``|=``) is mandatory: C2 flags cluster, so many
-    words share a byte and fancy-index OR silently drops duplicates."""
+    words share a byte and fancy-index OR silently drops duplicates.
+
+    Sign convention: align_pairs=-2 makes audio pair i read bitmap index i+2 — the C2
+    bitmap LAGS the audio by 2 pairs. tools/modepage_experiment.py measures the same
+    physical lag as k=+2 in its slice convention (TP-argmax vs an AR-verified oracle,
+    precision 0.993 / recall 0.990, 2026-07-05). Do not "fix" either sign."""
     raw = np.fromfile(c2_path, dtype=np.uint8)
     nsec = raw.size // 294
     bits = np.unpackbits(raw[: nsec * 294].reshape(nsec, 294), axis=1)

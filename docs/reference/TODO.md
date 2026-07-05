@@ -47,10 +47,14 @@ review — adopted the Plextor Q-Check C1/C2/CU census + mode-page-01 retry tuni
 
 Remaining follow-ups: the **default-flip decision** (c2read as normal-path primary;
 `c2_recovery=auto` already the user's setting) after a multi-disc `toc_parity.py` soak —
-a user decision, not a code change. Run the `--recovery 0x20,1` experiment against the
-damaged disc (does drive-side fast-fail improve C2 honesty / recovery time?). Also
-observed 2026-07-04: per-rip Q valid-frame counts vary widely (157k vs 72k usable frames
-on the same disc) — the floors/TOC-authority absorb it, but worth watching.
+a user decision, not a code change. ~~Run the `--recovery 0x20,1` experiment~~ — DONE
+2026-07-05 (`tools/modepage_experiment.py`): drive-side error-recovery tuning is inert
+for the miscorrection defect class (identical latency / C2 honesty / AR rate across
+default, 0x20:1, 0x00:1) — rejected for adoption, flag kept as manual diagnostic; the
+run also pinned the C2/audio alignment (bitmap lags audio by 2 pairs; production
+erasure feed verified correct) — full verdict in `docs/reference/RECOVERY.md` §4.6.
+Also observed 2026-07-04: per-rip Q valid-frame counts vary widely (157k vs 72k usable
+frames on the same disc) — the floors/TOC-authority absorb it, but worth watching.
 
 ### c2read multi-pass speed-ladder recovery — ✅ TESTED + SHIPPED 2026-07-05
 
