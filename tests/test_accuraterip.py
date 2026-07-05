@@ -24,6 +24,7 @@ from cdda2img.accuraterip import (
     _ar_disc_ids,
     _parse_dbar,
     fetch_ar_responses,
+    format_ar_report,
     match_track_pcm,
     pack_arip_block,
     unpack_arip_block,
@@ -419,6 +420,94 @@ def test_verify_rip_v2_match_comes_from_crc_field_not_crc450(tmp_path: Path) -> 
     assert r.confidence_v1 == 10  # from the v1-era block's CRC field
     assert r.confidence_v2 == 20  # from the v2-era block's CRC field (the fix)
     assert r.max_confidence == 20  # highest single-block confidence overall
+
+
+# ---------------------------------------------------------------------------
+# 4b. crc450 — frame-450 sub-CRC (partial verification of damaged tracks)
+# ---------------------------------------------------------------------------
+
+
+def test_ar_crc450_formula() -> None:
+    """Independent re-implementation: v1-style sum over the 588 samples at
+    track offset 450 sectors, with a LOCAL 1-based multiplier."""
+    from cdda2img.accuraterip import _ar_crc450
+
+    n_frames = 452 * 588
+    frames: array.array = array.array("I", range(n_frames))
+    lo = 450 * 588
+    expected = sum((j + 1) * (lo + j) for j in range(588)) & 0xFFFFFFFF
+    assert _ar_crc450(frames) == expected
+
+
+def test_ar_crc450_short_track_is_none() -> None:
+    """A track shorter than 451 sectors has no frame-450 window."""
+    from cdda2img.accuraterip import _ar_crc450
+
+    frames: array.array = array.array("I", [1] * (450 * 588))  # one sector short
+    assert _ar_crc450(frames) is None
+
+
+def test_verify_rip_damaged_track_gets_crc450_confidence(tmp_path: Path) -> None:
+    """Full v1/v2 fail but the frame-450 sub-CRC matches a block → the track is
+    graded DAMAGED (confidence_450 set). Blocks storing crc450=0 (no data)
+    must never contribute."""
+    from cdda2img.accuraterip import _ar_crc450
+
+    n_sectors = 452
+    pcm = bytearray(n_sectors * 2352)
+    # Non-zero content inside the frame-450 window so the sub-CRC is non-zero.
+    struct.pack_into("<I", pcm, (450 * 588 + 7) * 4, 0x1234ABCD)
+    pcm_path = tmp_path / "disc.pcm"
+    pcm_path.write_bytes(bytes(pcm))
+
+    frames: array.array = array.array("I")
+    frames.frombytes(bytes(pcm))
+    c450 = _ar_crc450(frames)
+    assert c450 not in (None, 0)
+
+    id1_hex, id2_hex = _ar_disc_ids([0], n_sectors - 1)
+    id1, id2 = int(id1_hex, 16), int(id2_hex, 16)
+
+    def _block(conf: int, crc: int, crc450: int) -> bytes:
+        return struct.pack("<BLLL", 1, id1, id2, 0) + struct.pack(
+            "<BLL", conf, crc, crc450
+        )
+
+    # Neither block matches the full CRC; block 1 (conf 25) matches crc450;
+    # block 2 (conf 90) stores crc450=0 and must not be counted.
+    dbar = _block(25, 0x11111111, c450) + _block(90, 0x22222222, 0)
+
+    with patch("cdda2img.accuraterip._fetch_ar", return_value=(dbar, "https")):
+        result = verify_rip(pcm_path, track_lsns=[0], disc_last_lsn=n_sectors - 1)
+
+    r = result.tracks[0]
+    assert r.confidence_v1 is None and r.confidence_v2 is None
+    assert r.confidence_450 == 25  # not 90 — the zero entry never matches
+    assert r.max_confidence == 90
+
+
+def test_format_ar_report_damaged_status() -> None:
+    """A failed track with a crc450 match renders DAMAGED, and the summary
+    separates damaged from plain mismatch."""
+    results = [
+        _make_result(1, "aaaaaaaa", "bbbbbbbb", 50, 60, 60, 110),
+        ARTrackResult(
+            track=2,
+            v1_crc="cccccccc",
+            v2_crc="dddddddd",
+            confidence_v1=None,
+            confidence_v2=None,
+            max_confidence=200,
+            total_confidence=400,
+            confidence_450=200,
+        ),
+        _make_result(3, "eeeeeeee", "ffffffff", None, None, 200, 400),
+    ]
+    text = format_ar_report(results)
+    assert "DAMAGED (crc450 [200])" in text
+    assert "MISMATCH (max 200)" in text
+    assert "1/3 tracks verified (1 damaged, 1 mismatch)" in text
+    assert "frame-450 region matches" in text
 
 
 # ---------------------------------------------------------------------------

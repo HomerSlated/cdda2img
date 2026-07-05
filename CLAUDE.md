@@ -507,11 +507,18 @@ Per-track:      9 bytes  <BLL   conf, crc, crc450
 Each track entry carries a **single** AccurateRip checksum (`crc`) — *not* separate v1
 and v2 fields. Whether that value is a v1 or a v2 checksum depends on the submitting
 ripper: v1-era rippers wrote a v1 checksum, v2-era rippers a v2 checksum, into the same
-slot. The second 4-byte field (`crc450`) is the frame-450 sub-CRC used only for blind
-offset detection — it is **not** the v2 checksum. `verify_rip` therefore computes both v1
-and v2 locally and tests **each against `crc`**, tallying each variant's confidence from
-whichever blocks matched; a v2-era block (often the highest-confidence one) is how v2
-confidence is earned. A track not matched in any block gets `confidence=None`.
+slot. The second 4-byte field (`crc450`) is the frame-450 sub-CRC — it is **not** the v2
+checksum. `verify_rip` therefore computes both v1 and v2 locally and tests **each
+against `crc`**, tallying each variant's confidence from whichever blocks matched; a
+v2-era block (often the highest-confidence one) is how v2 confidence is earned. A track
+not matched in any block gets `confidence=None`. `crc450` is additionally tallied
+(`_ar_crc450`: v1-style sum over the sector at track offset 450, **local** multiplier
+1..588; formula pinned empirically vs live dBAR + cyanrip 2026-07-05) for **partial
+verification**: a track failing the full CRC but matching crc450 is graded `DAMAGED`
+in the report (right pressing/offset, corrupt elsewhere) with
+`ARTrackResult.confidence_450` set and PROV `ar450_track_<n>=matched@<conf>`; blocks
+storing `crc450=0` never match, tracks < 451 sectors have no window, and crc450 is
+never a verification pass or recovery splice gate on its own.
 
 (History: matching the computed v2 against `crc450` instead of `crc` made `confidence_v2`
 perpetually `None` — fixed by reading the single `crc` field for both variants.)

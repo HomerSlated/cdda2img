@@ -64,6 +64,12 @@ class ARTrackResult:
     total_confidence: int | None = (
         None  # None = not in DB; sum of all dBAR block confidences
     )
+    # Frame-450 sub-CRC match confidence. Only meaningful on tracks whose full
+    # v1/v2 failed: a crc450 match there means the frame-450 region is
+    # byte-identical to a DB submission — right pressing/offset, damage
+    # elsewhere in the track ("DAMAGED" in the report). Never a verification
+    # pass on its own and never a recovery splice gate.
+    confidence_450: int | None = None
 
 
 @dataclass
@@ -114,6 +120,27 @@ def _ar_checksums(
     csum_lo = int((products & np.uint64(0xFFFFFFFF)).sum())
     csum_hi = int((products >> np.uint64(32)).sum())
     return csum_lo & 0xFFFFFFFF, (csum_lo + csum_hi) & 0xFFFFFFFF
+
+
+_CRC450_FRAME = 450  # sector offset into the track of the sub-CRC window
+
+
+def _ar_crc450(frames: array.array) -> int | None:
+    """AccurateRip frame-450 sub-CRC: v1-style sum over the single sector at
+    track offset 450, with a LOCAL 1-based multiplier (1..588, not the global
+    track position). Returns None when the track is too short to contain the
+    window (< 451 sectors ≈ 6 s).
+
+    Formula pinned empirically 2026-07-05 against the AR-verified reference
+    disc: all 11 tracks match their dBAR ``crc450`` fields, and track 8's
+    value equals the one cyanrip reports for the same disc.
+    """
+    lo = _CRC450_FRAME * 588
+    if len(frames) < lo + 588:
+        return None
+    arr = np.frombuffer(frames, dtype=np.uint32)[lo : lo + 588].astype(np.uint64)
+    mults = np.arange(1, 589, dtype=np.uint64)
+    return int((arr * mults).sum()) & 0xFFFFFFFF
 
 
 def _ar_disc_ids(track_lsns: list[int], disc_last_lsn: int) -> tuple[str, str]:
@@ -391,9 +418,11 @@ def verify_rip(
             frames.frombytes(raw[: len(raw) - len(raw) % 4])
 
             v1, v2 = _ar_checksums(frames, i + 1, n)
+            c450 = _ar_crc450(frames)
 
             conf_v1: int | None = None
             conf_v2: int | None = None
+            conf_450: int | None = None
             max_conf: int | None = None
             total_conf: int = 0
             for resp in responses:
@@ -408,8 +437,10 @@ def verify_rip(
                 # a v1 value in v1-era blocks and a v2 value in v2-era blocks.
                 # Test both locally-computed checksums against that single field
                 # and tally each variant's confidence from whichever blocks it
-                # matched. entry["crc450"] is the offset-detection sub-CRC and is
-                # deliberately not consulted here.
+                # matched. entry["crc450"] is the frame-450 sub-CRC, tallied
+                # separately: it grades a full-CRC failure ("DAMAGED" — right
+                # pressing, corrupt elsewhere) and never verifies on its own.
+                # Many blocks store 0 there (no data) — a zero never matches.
                 if entry["crc"] == v1:
                     conf_v1 = (
                         max(conf_v1, entry["conf"])
@@ -422,6 +453,12 @@ def verify_rip(
                         if conf_v2 is not None
                         else entry["conf"]
                     )
+                if c450 is not None and entry["crc450"] and entry["crc450"] == c450:
+                    conf_450 = (
+                        max(conf_450, entry["conf"])
+                        if conf_450 is not None
+                        else entry["conf"]
+                    )
 
             results.append(
                 ARTrackResult(
@@ -432,10 +469,24 @@ def verify_rip(
                     confidence_v2=conf_v2,
                     max_confidence=max_conf,
                     total_confidence=total_conf if total_conf > 0 else None,
+                    confidence_450=conf_450,
                 )
             )
 
     return ARVerifyResult(tracks=results, transport=transport, dbar_b3sum=dbar_b3sum)
+
+
+def _track_status(r: ARTrackResult) -> str:
+    """One track's report verdict. A track verifies if EITHER full-CRC variant
+    matched. A failed track whose frame-450 sub-CRC matches the DB is graded
+    DAMAGED — right pressing at the right offset, corrupt bytes elsewhere in
+    the track (definitely damage, not a configuration problem); otherwise it
+    stays a plain MISMATCH."""
+    if r.confidence_v1 is not None or r.confidence_v2 is not None:
+        return "OK"
+    if r.confidence_450 is not None:
+        return f"DAMAGED (crc450 [{r.confidence_450}])"
+    return f"MISMATCH (max {r.max_confidence})"
 
 
 def format_ar_report(results: list[ARTrackResult], read_offset: int = 0) -> str:
@@ -468,13 +519,10 @@ def format_ar_report(results: list[ARTrackResult], read_offset: int = 0) -> str:
         return f"[{c}]" if c is not None else "[ — ]"
 
     lines: list[str] = ["AccurateRip:"]
+    n_damaged = 0
     for r in results:
-        # A track verifies if EITHER variant matched; show both confidences so
-        # the (usually higher) v2 count is no longer hidden behind v1.
-        if r.confidence_v1 is not None or r.confidence_v2 is not None:
-            status = "OK"
-        else:
-            status = f"MISMATCH (max {r.max_confidence})"
+        status = _track_status(r)
+        n_damaged += status.startswith("DAMAGED")
         lines.append(
             f"  Track {r.track:2d}: "
             f"v1={r.v1_crc} {_conf(r.confidence_v1):<7}"
@@ -487,7 +535,17 @@ def format_ar_report(results: list[ARTrackResult], read_offset: int = 0) -> str:
         best = [max(r.confidence_v1 or 0, r.confidence_v2 or 0) for r in results]
         lines.append(f"  {n}/{n} tracks verified (min confidence {min(best)})")
     else:
-        lines.append(f"  {n_ok}/{n} tracks verified ({n - n_ok} mismatch)")
+        parts = []
+        if n_damaged:
+            parts.append(f"{n_damaged} damaged")
+        if n - n_ok - n_damaged:
+            parts.append(f"{n - n_ok - n_damaged} mismatch")
+        lines.append(f"  {n_ok}/{n} tracks verified ({', '.join(parts)})")
+        if n_damaged:
+            lines.append(
+                "  DAMAGED = in the AR DB (frame-450 region matches) but the "
+                "track has bad bytes elsewhere"
+            )
     return "\n".join(lines)
 
 

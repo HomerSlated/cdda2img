@@ -6,7 +6,8 @@ combine, and the evidence behind every adoption and rejection.
 **Living document.** Updated as the strategy is refined.
 
 Last updated: 2026-07-05 (multi-pass recovery test + cd-paranoia retirement, f79fb2a;
-then the mode-page-01 experiment verdict + the C2 alignment pinning, same day).
+the mode-page-01 experiment verdict + C2 alignment pinning; then crc450 partial
+verification — DAMAGED grading — same day).
 
 ---
 
@@ -101,8 +102,12 @@ reserved niche for components 6/7/11.
 2. **Role**: gate (absolute, crowd-sourced) — the primary correctness gate for the whole
    pipeline.
 3. **Status**: included (verification always; recovery gate; per-block header
-   verification against response splicing). `crc450`: parsed, unused — candidate for
-   cheap blind-offset detection and partial verification of unrecoverable tracks.
+   verification against response splicing). `crc450`: **wired for partial
+   verification** (2026-07-05) — a track failing the full CRC but matching the
+   frame-450 sub-CRC is graded **DAMAGED** (right pressing at the right offset,
+   corrupt bytes elsewhere) instead of an ambiguous MISMATCH; PROV
+   `ar450_track_<n>=matched@<conf>`. Never a verification pass on its own, never a
+   recovery splice gate. The blind-offset-detection use remains open (§4.9).
 4. **Dependencies**: online service (accuraterip.com) + disc pressing in the AR DB +
    correct offset-domain handling (2.13).
 5. **Optional**: verification is always on (informational, never fails a rip);
@@ -468,9 +473,15 @@ Semantics that matter:
   independent witnesses.
 - Partial mismatch (some tracks match) means sector damage → recovery. All-tracks
   mismatch on an in-DB disc means the offset is wrong → configuration, not recovery.
-- `crc450` is a v1-style checksum of a single frame at offset 450 — enough to test
-  candidate offsets cheaply or to say "mostly right" about a track that cannot fully
-  match. Parsed, currently unused (candidate future work).
+- `crc450` is a v1-style checksum over the single sector at track offset 450 with a
+  **local** 1-based multiplier (1..588, not the global track position) — formula pinned
+  empirically 2026-07-05: all 11 reference-disc tracks match their dBAR fields, and
+  track 8's value equals cyanrip's output for the same disc. Wired for partial
+  verification: full-CRC failure + crc450 match ⇒ report grade **DAMAGED** (the
+  frame-450 region is byte-identical to a DB submission, so the pressing and offset
+  are right and the failure is damage elsewhere in the track). Zero-guard required —
+  many blocks store `crc450=0` (no data). Tracks shorter than 451 sectors have no
+  window. The cheap blind-offset-detection use is still open.
 
 ### 4.4 CTDB: CRCs and parity (2.2, 2.3)
 
@@ -627,8 +638,10 @@ Chronology of the evidence (all on the same reference disc — a 1988 pressing w
 
 ### 4.9 Open questions
 
-- **crc450**: wire up for cheap blind-offset detection and partial verification of
-  `unrecovered` tracks?
+- **crc450 blind-offset detection**: the partial-verification half shipped 2026-07-05
+  (DAMAGED grading); the other half — testing candidate offsets against the one-sector
+  sub-CRC instead of full-track sweeps (foreign imports, unknown-offset drives) —
+  remains open.
 - **CTDB CRC as a sweep gate** for discs in CTDB but not AR (currently the sweep gates
   on AR only).
 - **Q valid-frame variance**: per-rip usable Q-frame counts vary wildly (157k vs 72k on

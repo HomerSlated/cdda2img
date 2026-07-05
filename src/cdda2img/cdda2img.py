@@ -2963,6 +2963,17 @@ def rip_image(  # noqa: C901
             provenance["recovery_ladder"] = ",".join(f"{x}X" for x in recovery_ladder)
         for _t, _outcome in sorted(recovery_outcomes.items()):
             provenance[f"recovery_track_{_t}"] = _outcome
+        # Frame-450 partial verification: a track that still fails full AR but
+        # matches the crc450 sub-CRC is graded "damaged, right pressing" —
+        # recorded so an unrecovered track carries the strongest statement the
+        # evidence supports.
+        for _r in ar_verify.tracks:
+            if (
+                _r.confidence_v1 is None
+                and _r.confidence_v2 is None
+                and _r.confidence_450 is not None
+            ):
+                provenance[f"ar450_track_{_r.track}"] = f"matched@{_r.confidence_450}"
         ar_summary = format_ar_report(ar_verify.tracks, read_offset=read_offset)
         rbi_path = _finalize_import(
             disc,
