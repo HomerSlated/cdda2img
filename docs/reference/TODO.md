@@ -282,6 +282,21 @@ landed (`make check` + py3.10 green). Detail retained below for reference.
 
 - [x] **BEETS-5** · DONE 2026-06-14 (`bde0e5c`): `_release_sort_key` sorts by `(date, country_pref)` before the `for release in releases:` loop in `_chain_to_mb`; `_COUNTRY_PREF = {"GB":0,"US":1,"XW":2}`; 8 new tests in `tests/test_acoustid_lookup.py`.
 
+### Catalogue duplicate detection keys on editorial fields, not physical identity (2026-07-05)
+
+Observed live: a `rip --auto --duplicate skip` of the Tracy Chapman disc registered a
+second catalogue row despite an existing entry for the *same physical disc* (same MCN
+`7559607740206`, same track durations, same post-repair AR v1 CRCs). Cause:
+`catalogue._find_duplicates` requires an exact SQL match on `album AND artist AND
+disc_number AND disc_total AND track_count` *before* the physical evidence is consulted,
+then post-filters on `year` — and an `--auto` run's metadata guess (here confidence 0.30,
+`mb_disc_id_multi`) can differ from a reviewed entry's year/strings while the disc is
+identical. Editorial fields are best-guesses (the "Guess the Album" authority model);
+physical identity is not. Proposed direction: match on the physical keys first (MCN +
+track count + per-track durations + AR CRCs when both sides have them) and demote
+album/artist/year to display/tiebreak. Until then, `--duplicate skip` under `--auto` is
+unreliable as a re-rip guard.
+
 ### Catalogue duplicate-registration policy (2026-06-13)
 
 - [x] **CAT-1** · Add `duplicate_catalogue_entry` config knob (values: `skip` / `replace` / `add`;
