@@ -126,6 +126,48 @@ def test_unsupported_charset_block_skipped():
     assert parse_cdtext(_HDR + b"".join(text + size)) == []
 
 
+def test_utf8_payload_decoded_utf8_first():
+    """cdrdao/CDEmu-authored discs carry raw UTF-8 despite declaring charset 0x00:
+    a U+2019 apostrophe (bytes E2 80 99) must decode as UTF-8, not as the Latin-1
+    mojibake 'Talkin\\xe2\\x80\\x99'."""
+    packs = _text_packs_bytes(PTI_TITLE, 1, [b"Talkin\xe2\x80\x99 Bout"])
+    blocks = parse_cdtext(_HDR + b"".join(packs))
+    assert blocks[0].track_title(1) == "Talkin\u2019 Bout"
+
+
+def test_latin1_payload_still_decodes():
+    """Genuine Latin-1 bytes (invalid as UTF-8) take the fallback unchanged."""
+    packs = _text_packs_bytes(PTI_TITLE, 1, [b"Caf\xe9 del Mar"])  # lone 0xE9 = é
+    blocks = parse_cdtext(_HDR + b"".join(packs))
+    assert blocks[0].track_title(1) == "Café del Mar"
+
+
+def _text_packs_bytes(
+    pti: int, first_track: int, strings: list[bytes], *, block: int = 0
+) -> list[bytes]:
+    payload = b"\x00".join(strings) + b"\x00"
+    return [
+        _pack(pti, first_track if i == 0 else 0, i // 12, block, payload[i : i + 12])
+        for i in range(0, len(payload), 12)
+    ]
+
+
+def test_real_cdemu_capture_utf8_titles():
+    """Real capture from a CDEmu-mounted RBI (2026-07-05): UTF-8 CD-Text that
+    previously baked mojibake into the ripped RBI's titles."""
+    from pathlib import Path
+
+    raw = (Path(__file__).parent / "fixtures" / "cdemu_utf8.cdtext").read_bytes()
+    blocks = parse_cdtext(raw)
+    assert blocks, "fixture produced no CD-Text blocks"
+    b = blocks[0]
+    assert b.track_title(1) == "Talkin\u2019 Bout a Revolution"
+    assert b.track_title(6) == "Mountains o\u2019 Things"
+    assert b.track_title(7) == "She\u2019s Got Her Ticket"
+    assert b.track_title(10) == "If Not Now\u2026"
+    assert b.track_title(11) == "For You"
+
+
 def test_malformed_length_raises():
     with pytest.raises(ValueError, match="neither"):
         parse_cdtext(_HDR + b"\x00" * 17)

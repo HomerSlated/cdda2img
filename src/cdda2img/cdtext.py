@@ -21,7 +21,10 @@ previous track". References: libmirage ``cdtext-coder.c``, cdrdao
 
 Only language block 0 in a single-byte Latin-ish charset is decoded (ISO 8859-1
 or ASCII); MS-JIS / double-byte blocks are counted and skipped — none exist in
-the local collection, and wrong-charset text is worse than none.
+the local collection, and wrong-charset text is worse than none. Within such a
+block each string is decoded UTF-8-first with a Latin-1 fallback: cdrdao-authored
+discs (and CDEmu-mounted images) carry raw UTF-8 bytes despite declaring charset
+0x00, and strict-UTF-8 validation makes the heuristic safe (see ``_decode_text``).
 """
 
 from __future__ import annotations
@@ -218,6 +221,23 @@ def parse_cdtext(raw: bytes) -> list[CDTextBlock]:
     return [blocks[b] for b in sorted(blocks) if blocks[b].text]
 
 
+def _decode_text(chunk: bytes) -> str:
+    """UTF-8-first decode with a Latin-1 fallback.
+
+    The spec says charset 0x00 is ISO 8859-1, but discs authored by cdrdao (and
+    CDEmu-mounted images) carry the TOC file's raw UTF-8 bytes verbatim —
+    decoding those as Latin-1 bakes mojibake into titles (a U+2019 apostrophe,
+    bytes E2 80 99, becomes three Latin-1 junk characters). Pure ASCII is
+    identical under both charsets, and multibyte sequences that validate as
+    strict UTF-8 are essentially never intended Latin-1, so trying UTF-8 first
+    is safe; genuine Latin-1 bytes (e.g. a lone 0xE9 "é") fail UTF-8 validation
+    and take the fallback."""
+    try:
+        return chunk.decode("utf-8")
+    except UnicodeDecodeError:
+        return chunk.decode("latin-1")
+
+
 def _decode_strings(group: list[bytes]) -> dict[int, str]:
     """Reassemble one (block, PTI) group into per-track strings."""
     group = sorted(group, key=lambda p: p[2])  # sequence order
@@ -229,7 +249,7 @@ def _decode_strings(group: list[bytes]) -> dict[int, str]:
     for chunk in data.split(b"\x00"):
         if track > 99:
             break
-        text = chunk.decode("latin-1")
+        text = _decode_text(chunk)
         if text == "\t":
             # TAB shorthand: same as the previous track's string.
             text = out.get(track - 1, "")
