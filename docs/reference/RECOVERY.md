@@ -536,6 +536,13 @@ recovery) exposes an error-handling byte and a retry count (PX-716A default: 0x0
 retries). The hypothesis was that fast-fail (`0x20,1` — TB: transfer the bad block
 anyway; 1 retry) would shorten failed sweep attempts and/or change C2 honesty.
 
+The drive **genuinely applies and persists** these changes — verified by an explicit
+MODE SENSE → MODE SELECT → MODE SENSE readback cycle with two distinct value pairs
+(`0x20,1` and `0x00,5`), then a verified restore. The experiment arms were real drive
+states, not silently-ignored selects; `c2read --recovery` now performs this readback
+itself and fails loudly on a mismatch, so a page-ignoring drive can never silently
+invalidate a future experiment.
+
 **Experiment verdict (2026-07-05, `tools/modepage_experiment.py`): the parameter is
 inert for this defect class — rejected for adoption.** Three arms (default, `0x20,1`,
 `0x00,1`), 5 interleaved reps each, whole-track 40X reads with C2, measured against an

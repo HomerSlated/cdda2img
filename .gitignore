@@ -308,3 +308,16 @@ __marimo__/
 
 # Compiled tools/ helpers (source is tracked; the binary is a local build artifact)
 /tools/cdreset
+
+# Disc capture artifacts in the repo root (e.g. from running RECOVERY.md's c2read
+# recipes here) — actual audio content, never committable. Root-anchored: the same
+# extensions are legitimate as test fixtures under tests/fixtures/.
+/*.pcm
+/*.c2
+/*.sub
+/*.cdtext
+/*.fulltoc
+/*.rbi
+/*.wav
+/*.bin
+/*.toc

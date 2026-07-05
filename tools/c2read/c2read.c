@@ -419,6 +419,18 @@ static int set_recovery(int fd, long err, long retr) {
     buf[off + 3] = (unsigned char)retr;
     if (mode_select10(fd, buf, (unsigned)len, off) != 0)
         return -1;
+    /* Readback: a drive can accept MODE SELECT and silently ignore it — verify
+     * the page actually changed before letting an experiment trust it.
+     * (PX-716A verified to genuinely apply + persist, 2026-07-05.) */
+    unsigned char chk[256];
+    unsigned chk_off = 0;
+    if (mode_sense10(fd, 0x01, chk, sizeof(chk), &chk_off) < 0 ||
+        chk[chk_off + 2] != (unsigned char)err ||
+        chk[chk_off + 3] != (unsigned char)retr) {
+        fprintf(stderr, "c2read: recovery page readback mismatch — drive "
+                        "ignored MODE SELECT\n");
+        return -1;
+    }
     printf("recovery_page err 0x%02lx retries %ld\n", err, retr);
     return 0;
 }
