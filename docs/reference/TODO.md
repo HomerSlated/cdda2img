@@ -2,6 +2,31 @@
 
 ## Open
 
+### NEXT SESSION — USER-AUTHORIZED (2026-07-05): default flip + pre-emphasis virtual disc
+
+The user gave the go-ahead for both; deferred to next session for execution.
+
+1. **Default flip — c2read becomes the normal-path primary read engine.** Change the
+   `c2_recovery` default from `"off"` to `"auto"` (`config.py` `Config` default +
+   `_parse_c2_recovery` + `conf/cdda2img.toml.example`), so a C2-capable drive uses the
+   single-pass c2read path by default and cdrdao read-cd/read-toc is retired from the
+   default read path (cdrdao keeps burning + the full-disc read fallback when cdrdao is
+   still selected). Update CLAUDE.md rip-pipeline §1 (which currently says "Normal
+   (c2_recovery=off, default)"), the man page, and any status text. Run full tests +
+   a live `rip` to confirm. **Evidence backing the flip (soak, 2026-07-05):** two
+   virtual CDEmu discs of different geometry (Tracy 11-trk, Under My Skin 13-trk) both
+   `toc_parity` ALL MATCH — every geometry/pregap/ISRC/MCN/flag field identical to
+   cdrdao read-toc; the only CD-Text-title diffs are cdrdao's own UTF-8→Latin-1
+   mojibake (c2read is correct, `6e175d8`).
+2. **Pre-emphasis virtual test disc.** Author a cdrdao TOC with `PRE_EMPHASIS` on a
+   couple of tracks (reuse an extracted TOC+BIN, e.g. under `/tmp/cdda2img_mnt_*`),
+   mount via CDEmu, run `toc_parity` — cdrdao read-toc and c2read/subq must both report
+   the flag and agree. Verified feasible from libmirage source: TOC parser sets
+   `MIRAGE_TRACK_FLAG_PREEMPHASIS` (parser.c:669) → `get_ctl` CONTROL bit 0
+   (track.c:402) → `_generate_q_subchannel` writes `(ctl<<4)|ADR` (sector.c:1815), so
+   the mounted disc carries pre-emphasis in the program-area Q. No burner/media needed;
+   physical CD-RW burn via `cdrdao write` is the optional authenticity fallback.
+
 ### C2-path read progress into the TUI (2026-07-04) — c2read half ✅ DONE 2026-07-04
 
 The c2read half is wired (Phase 1 of the c2read upgrade plan): c2read emits machine-parseable
@@ -45,9 +70,9 @@ review — adopted the Plextor Q-Check C1/C2/CU census + mode-page-01 retry tuni
   (LBA 112500–112950), and exposed thousands of stage-2 C2 corrections in tracks
   2/7/9/11 that AR (conf 200) cannot see — the disc-health early-warning case proven.
 
-Remaining follow-ups: the **default-flip decision** (c2read as normal-path primary;
-`c2_recovery=auto` already the user's setting) after a multi-disc `toc_parity.py` soak —
-a user decision, not a code change. ~~Run the `--recovery 0x20,1` experiment~~ — DONE
+Remaining follow-ups: the **default-flip** — ✅ USER-AUTHORIZED 2026-07-05 after the
+multi-disc `toc_parity.py` soak went green (see the NEXT SESSION block at the top of
+this file for the execution steps + evidence). ~~Run the `--recovery 0x20,1` experiment~~ — DONE
 2026-07-05 (`tools/modepage_experiment.py`): drive-side error-recovery tuning is inert
 for the miscorrection defect class (identical latency / C2 honesty / AR rate across
 default, 0x20:1, 0x00:1) — rejected for adoption, flag kept as manual diagnostic; the
