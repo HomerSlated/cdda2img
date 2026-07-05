@@ -68,6 +68,12 @@ tox
 
 Standalone utility scripts live in `tools/` (tracked, not part of the installed package).
 
+- **`tools/toc_parity.py`** — field-by-field parity gate: `cdrdao read-toc` vs the c2read
+  subchannel assembly (`subq_toc.build_rip_info`), live or from saved captures. Green across
+  the disc shelf is the acceptance condition for preferring the single-pass path.
+- **`tools/cx_census.py`** — per-track aggregation of the Plextor Q-Check C1/C2/CU error
+  census (`c2read --cxscan`): disc-health early warning (C1/C2 rates rise long before
+  anything becomes uncorrectable or AR notices).
 - **`tools/measure_write_offset.py`** — burn-and-read-back write offset measurement.
   Generates a synthetic test signal, burns it via `cdrdao write`, rips via `cdrdao read-cd`,
   and measures where the known pulses landed. Accumulates cycles per drive in

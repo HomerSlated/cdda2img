@@ -34,12 +34,23 @@ review — adopted the Plextor Q-Check C1/C2/CU census + mode-page-01 retry tuni
   `test` 37/37; PROV `toc_source=subq@c2read` + ISRC vote keys). rbi_spec §6.1.10: the
   embedded TOC now round-trips per-track `COPY`/`PRE_EMPHASIS` flags and INDEX ≥ 02 lines.
 
-Remaining: **Phase 5** — F8 retry ladder + cache-defeat + mode-page-01 experiment, F10
-speed report (drop `cdrdao drive-info` from drive_speed.py), F11 Plextor C1/C2/CU census.
-Then the **default-flip decision** (c2read as normal-path primary; `c2_recovery=auto`
-already the user's setting) after a multi-disc parity soak — a user decision, not a code
-change. Also observed 2026-07-04: per-rip Q valid-frame counts vary widely (157k vs 72k
-usable frames on the same disc) — the floors/TOC-authority absorb it, but worth watching.
+- **Phase 5 (2026-07-05)** — F8: per-sector retry ladder (`--retries`, default 2) with
+  cache-defeat seek-away reads between attempts + sense-key classification in the summary;
+  `--recovery ERR,RETR` mode-page-01 experiment flag (O_RDWR per-flag, saved page restored
+  on every exit path; set/restore verified live — drive default err=0x00 retries=10).
+  F10: `--speed-report` (page 2A at cdrdao's offsets — kB/s-identical to `cdrdao
+  drive-info` at 4X and 40X); `drive_speed.read_drive_speed` now prefers c2read with
+  cdrdao fallback. F11: `--cxscan` Plextor Q-Check census + `tools/cx_census.py`:
+  first run put ALL 256 CU errors + every hotspot in track 8's known defect span
+  (LBA 112500–112950), and exposed thousands of stage-2 C2 corrections in tracks
+  2/7/9/11 that AR (conf 200) cannot see — the disc-health early-warning case proven.
+
+Remaining follow-ups: the **default-flip decision** (c2read as normal-path primary;
+`c2_recovery=auto` already the user's setting) after a multi-disc `toc_parity.py` soak —
+a user decision, not a code change. Run the `--recovery 0x20,1` experiment against the
+damaged disc (does drive-side fast-fail improve C2 honesty / recovery time?). Also
+observed 2026-07-04: per-rip Q valid-frame counts vary widely (157k vs 72k usable frames
+on the same disc) — the floors/TOC-authority absorb it, but worth watching.
 
 ### MCN archival-only + barcode as the disambiguation key (2026-06-29) — ✅ DONE 2026-06-30
 

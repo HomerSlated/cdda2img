@@ -68,6 +68,9 @@ typedef struct {
     long first_flagged_lba;
     long last_flagged_lba;
     unsigned long long read_errors;       /* sectors we could not read at all (sense) */
+    unsigned long long sense_medium;      /* hard failures with sense key 3 (medium) */
+    unsigned long long sense_hardware;    /* sense key 4 (hardware) */
+    unsigned long long sense_other;       /* any other terminal sense */
 } stats_t;
 
 /* ---- SCSI plumbing --------------------------------------------------------- */
@@ -301,6 +304,215 @@ static int drive_stop(int fd) {
     return 0;
 }
 
+/* ---- MODE SENSE / SELECT plumbing (page 2A speed report, page 01 recovery) -- */
+
+static void set_speed(int fd, int nx);  /* defined with the driver below */
+
+#define OP_MODE_SENSE10 0x5A
+#define OP_MODE_SELECT10 0x55
+#define OP_INQUIRY 0x12
+
+/* MODE SENSE(10) for one page, two-step allocation. Returns total bytes read
+ * (mode header + block descriptors + page) or -1. *page_off is set to the page
+ * start (8 + block-descriptor length), following cdspeedctl's 2A reader. */
+static int mode_sense10(int fd, unsigned page, unsigned char *buf, unsigned cap,
+                        unsigned *page_off) {
+    unsigned char cdb[10] = {0};
+    unsigned char sense[SENSE_LEN];
+
+    cdb[0] = OP_MODE_SENSE10;
+    cdb[2] = (unsigned char)(page & 0x3f);
+    cdb[7] = 0;
+    cdb[8] = 8;
+    if (scsi_in(fd, cdb, sizeof(cdb), buf, 8, sense) != 0)
+        return -1;
+    unsigned len = (((unsigned)buf[0] << 8) | buf[1]) + 2;
+    if (len > cap) len = cap;
+    cdb[7] = (unsigned char)(len >> 8);
+    cdb[8] = (unsigned char)(len & 0xff);
+    if (scsi_in(fd, cdb, sizeof(cdb), buf, len, sense) != 0)
+        return -1;
+    *page_off = 8 + ((((unsigned)buf[6] << 8) | buf[7]));
+    if (*page_off + 2 > len)
+        return -1;
+    return (int)len;
+}
+
+/* MODE SELECT(10) sending back a (modified) MODE SENSE(10) response. The mode
+ * data length must be zeroed and the page's PS bit cleared per SPC. */
+static int mode_select10(int fd, unsigned char *buf, unsigned len,
+                         unsigned page_off) {
+    unsigned char cdb[10] = {0};
+    unsigned char sense[SENSE_LEN];
+    sg_io_hdr_t io;
+
+    buf[0] = buf[1] = 0;               /* mode data length: reserved on select */
+    buf[page_off] &= 0x3f;             /* clear PS (and reserved bit 6) */
+
+    cdb[0] = OP_MODE_SELECT10;
+    cdb[1] = 0x10;                     /* PF = SPC-format pages */
+    cdb[7] = (unsigned char)(len >> 8);
+    cdb[8] = (unsigned char)(len & 0xff);
+
+    memset(&io, 0, sizeof(io));
+    memset(sense, 0, SENSE_LEN);
+    io.interface_id = 'S';
+    io.dxfer_direction = SG_DXFER_TO_DEV;
+    io.cmd_len = sizeof(cdb);
+    io.mx_sb_len = SENSE_LEN;
+    io.dxfer_len = len;
+    io.dxferp = buf;
+    io.cmdp = cdb;
+    io.sbp = sense;
+    io.timeout = 30000;
+    if (ioctl(fd, SG_IO, &io) < 0)
+        return -1;
+    if ((io.info & SG_INFO_OK_MASK) != SG_INFO_OK) {
+        if (io.sb_len_wr > 0) print_sense(sense, "MODE SELECT");
+        return -1;
+    }
+    return 0;
+}
+
+/* --speed-report: page 2A read speeds, the exact fields cdrdao drive-info
+ * reports (GenericMMC.cc: max = page[8:10], current = page[14:16], kB/s).
+ * The "page 2A lies" folklore is naive readers using the wrong offsets. */
+static int speed_report(int fd) {
+    unsigned char buf[256];
+    unsigned off = 0;
+    if (mode_sense10(fd, 0x2a, buf, sizeof(buf), &off) < 0 ||
+        (buf[off] & 0x3f) != 0x2a) {
+        fprintf(stderr, "c2read: MODE SENSE page 2A unavailable\n");
+        return -1;
+    }
+    unsigned char *mp = buf + off;
+    unsigned max_kbps = ((unsigned)mp[8] << 8) | mp[9];
+    unsigned cur_kbps = ((unsigned)mp[14] << 8) | mp[15];
+    printf("speed max_kbps %u current_kbps %u max_x %u current_x %u\n",
+           max_kbps, cur_kbps, max_kbps / 176, cur_kbps / 176);
+    return 0;
+}
+
+/* --recovery ERR,RETR (EXPERIMENT): read-error-recovery mode page 01 — byte 2
+ * error-recovery bits (0x20 = TB transfer-block; readcd uses 0x21 = TB|DCR for
+ * uncorrected reads), byte 3 = drive retry count. Requires an O_RDWR fd (the
+ * unprivileged SG_IO filter blocks MODE SELECT on read-only opens). The old
+ * values are printed and restored on exit. Pattern from cdrtools readcd domode(). */
+static int recovery_saved_len = -1;
+static unsigned recovery_saved_off;
+static unsigned char recovery_saved[256];
+
+static int set_recovery(int fd, long err, long retr) {
+    unsigned char buf[256];
+    unsigned off = 0;
+    int len = mode_sense10(fd, 0x01, buf, sizeof(buf), &off);
+    if (len < 0 || (buf[off] & 0x3f) != 0x01 || (unsigned)len < off + 4) {
+        fprintf(stderr, "c2read: MODE SENSE page 01 unavailable\n");
+        return -1;
+    }
+    memcpy(recovery_saved, buf, (size_t)len);
+    recovery_saved_len = len;
+    recovery_saved_off = off;
+    fprintf(stderr, "c2read: recovery page old err=0x%02x retries=%u\n",
+            buf[off + 2], buf[off + 3]);
+    buf[off + 2] = (unsigned char)err;
+    buf[off + 3] = (unsigned char)retr;
+    if (mode_select10(fd, buf, (unsigned)len, off) != 0)
+        return -1;
+    printf("recovery_page err 0x%02lx retries %ld\n", err, retr);
+    return 0;
+}
+
+static void restore_recovery(int fd) {
+    if (recovery_saved_len < 0)
+        return;
+    if (mode_select10(fd, recovery_saved, (unsigned)recovery_saved_len,
+                      recovery_saved_off) != 0)
+        fprintf(stderr, "c2read: WARNING: could not restore recovery page\n");
+    recovery_saved_len = -1;
+}
+
+/* ---- Plextor C1/C2/CU error census (Q-Check, cdrtools readcd -cxscan) ------ */
+
+static int inquiry_is_plextor(int fd) {
+    unsigned char cdb[6] = {OP_INQUIRY, 0, 0, 0, 36, 0};
+    unsigned char buf[36] = {0};
+    unsigned char sense[SENSE_LEN];
+    if (scsi_in(fd, cdb, sizeof(cdb), buf, sizeof(buf), sense) != 0)
+        return 0;
+    return memcmp(buf + 8, "PLEXTOR", 7) == 0;
+}
+
+/* Vendor 0xEA sub-commands (pinned from cdrtools readcd plextor_*_cx_scan):
+ * 0x15 = init scan, 0x16 = read counters (26 B), 0x17 = end scan. */
+static int plextor_cx_cmd(int fd, unsigned sub, unsigned char *data,
+                          unsigned data_len) {
+    unsigned char cdb[12] = {0};
+    unsigned char sense[SENSE_LEN];
+    cdb[0] = 0xEA;
+    cdb[1] = (unsigned char)sub;
+    if (sub == 0x15) cdb[3] = 0x01;
+    if (sub == 0x16) { cdb[2] = 0x01; cdb[10] = (unsigned char)data_len; }
+    int rc = scsi_in(fd, cdb, sizeof(cdb), data, data_len, sense);
+    if (rc == 1) print_sense(sense, "PLEXTOR 0xEA");
+    return rc == 0 ? 0 : -1;
+}
+
+#define CX_INTERVAL 75            /* one second of sectors per counter read */
+
+static int cx_scan(int fd, long start, int speed, int quiet) {
+    if (!inquiry_is_plextor(fd)) {
+        fprintf(stderr, "c2read: --cxscan needs a Plextor drive (INQUIRY gate)\n");
+        return 2;
+    }
+    long leadout = read_leadout(fd);
+    if (leadout < 0)
+        return 1;
+    set_speed(fd, speed);
+
+    unsigned char *buf = malloc((size_t)CX_INTERVAL * RAW_BYTES);
+    if (!buf)
+        return 1;
+    if (plextor_cx_cmd(fd, 0x15, NULL, 0) != 0) {
+        fprintf(stderr, "c2read: cx scan init refused\n");
+        free(buf);
+        return 1;
+    }
+
+    unsigned long long tc1 = 0, tc2 = 0, tcu = 0;
+    unsigned max_c1 = 0, max_c2 = 0, max_cu = 0;
+    unsigned char sense[SENSE_LEN];
+    for (long lba = start; lba < leadout; lba += CX_INTERVAL) {
+        unsigned n = (unsigned)(leadout - lba < CX_INTERVAL ? leadout - lba
+                                                            : CX_INTERVAL);
+        if (read_cd(fd, lba, n, 1, 0, 0, buf, RAW_BYTES, sense) != 0)
+            fprintf(stderr, "c2read: cx read error at LBA %ld (continuing)\n", lba);
+        unsigned char d[26] = {0};
+        if (plextor_cx_cmd(fd, 0x16, d, sizeof(d)) != 0)
+            continue;
+        unsigned c1 = (unsigned)((d[16] << 8) | d[17]) +
+                      (unsigned)((d[14] << 8) | d[15]) +
+                      (unsigned)((d[12] << 8) | d[13]);
+        unsigned cu = (unsigned)((d[20] << 8) | d[21]);
+        unsigned c2 = (unsigned)((d[22] << 8) | d[23]);
+        printf("cx %ld %u %u %u\n", lba, c1, c2, cu);
+        tc1 += c1; tc2 += c2; tcu += cu;
+        if (c1 > max_c1) max_c1 = c1;
+        if (c2 > max_c2) max_c2 = c2;
+        if (cu > max_cu) max_cu = cu;
+        if (!quiet && ((lba - start) / CX_INTERVAL) % 40 == 0)
+            fprintf(stderr, "\r  cx scan %ld / %ld ", lba, leadout);
+    }
+    plextor_cx_cmd(fd, 0x17, NULL, 0);
+    free(buf);
+    if (!quiet) fprintf(stderr, "\n");
+    fprintf(stderr,
+            "\ncx summary: C1 total %llu (max %u/s), C2 total %llu (max %u/s), "
+            "CU total %llu (max %u/s)\n",
+            tc1, max_c1, tc2, max_c2, tcu, max_cu);
+    return 0;
+}
+
 /* GET CONFIGURATION, CD Read feature (0x1E) → the drive's *claimed* C2/DAP/CD-Text
  * support bits. Returns 0 if the descriptor was found (fills the out-params), -1
  * otherwise. This is only a claim — drives are known to advertise C2 they don't
@@ -413,6 +625,14 @@ static void usage(const char *me) {
         "                 is not created when the disc has no CD-Text\n"
         "  --features     probe C2 capability (claim + smoke + combos); exit 0 iff usable\n"
         "  --stop         spin the spindle down (START STOP UNIT, no eject) and exit\n"
+        "  --speed-report print page-2A max/current read speed (cdrdao drive-info\n"
+        "                 fields) and exit\n"
+        "  --cxscan       Plextor C1/C2/CU error census (Q-Check, 75-sector\n"
+        "                 intervals); needs O_RDWR (vendor opcode); 'cx' lines on stdout\n"
+        "  --retries K    per-sector attempts on a failed chunk before zero-fill\n"
+        "                 (default 2); a cache-defeat read is issued between attempts\n"
+        "  --recovery E,R EXPERIMENT: set mode page 01 error-recovery byte E and retry\n"
+        "                 count R for this run (restored on exit); needs O_RDWR\n"
         "  --any          expected sector type ALL_TYPES (default CD_DA)\n"
         "  --c2beb        request C2+block-error-bits (296 B) instead of C2 (294 B)\n"
         "  --sub raw|q    also capture the sub-channel: raw P-W (96 B) or formatted Q (16 B)\n"
@@ -436,7 +656,8 @@ int main(int argc, char **argv) {
     const char *cdtext_path = NULL, *fulltoc_path = NULL;
     long start = 0, count = -1;
     int full = 0, any = 0, c2beb = 0, chunk = 24, speed = 0, ranges = 0, quiet = 0, toc = 0;
-    int features = 0, stop = 0;
+    int features = 0, stop = 0, speedrep = 0, cxscan = 0, retries = 2;
+    long rec_err = -1, rec_retr = -1;              /* --recovery experiment values */
     unsigned submode = 0;                          /* 0 none, 1 raw P-W, 2 formatted Q */
 
     for (int i = 1; i < argc; i++) {
@@ -464,10 +685,21 @@ int main(int argc, char **argv) {
         else if (!strcmp(a, "--toc")) toc = 1;
         else if (!strcmp(a, "--features")) features = 1;
         else if (!strcmp(a, "--stop")) stop = 1;
+        else if (!strcmp(a, "--speed-report")) speedrep = 1;
+        else if (!strcmp(a, "--cxscan")) cxscan = 1;
+        else if (!strcmp(a, "--retries") && i + 1 < argc)
+            retries = (int)strtol(argv[++i], NULL, 0);
+        else if (!strcmp(a, "--recovery") && i + 1 < argc) {
+            char *end = NULL;
+            rec_err = strtol(argv[++i], &end, 0);
+            if (!end || *end != ',') { usage(argv[0]); return 2; }
+            rec_retr = strtol(end + 1, NULL, 0);
+        }
         else if (!strcmp(a, "-q")) quiet = 1;
         else { usage(argv[0]); return 2; }
     }
     if (chunk < 1) chunk = 1;
+    if (retries < 1) retries = 1;
     if (sub_path && !submode) {
         fprintf(stderr, "c2read: --subf requires --sub raw|q\n");
         return 2;
@@ -489,7 +721,12 @@ int main(int argc, char **argv) {
         chunk = maxchunk;
     }
 
-    int fd = open(device, O_RDONLY | O_NONBLOCK);
+    /* Vendor opcodes (--cxscan) and MODE SELECT (--recovery) fail the kernel's
+     * unprivileged SG_IO command filter on read-only fds; a write-open (cdrom
+     * group has rw on /dev/srN) lifts the filter — still no root. Everything
+     * else keeps the least-privilege O_RDONLY open. */
+    int need_rw = cxscan || rec_err >= 0;
+    int fd = open(device, (need_rw ? O_RDWR : O_RDONLY) | O_NONBLOCK);
     if (fd < 0) {
         fprintf(stderr, "c2read: open %s: %s\n", device, strerror(errno));
         return 1;
@@ -505,6 +742,23 @@ int main(int argc, char **argv) {
         int rc = probe_features(fd);
         close(fd);
         return rc;
+    }
+
+    if (speedrep) {
+        int rc = speed_report(fd);
+        close(fd);
+        return rc == 0 ? 0 : 1;
+    }
+
+    if (cxscan) {
+        int rc = cx_scan(fd, start, speed, quiet);
+        close(fd);
+        return rc;
+    }
+
+    if (rec_err >= 0 && set_recovery(fd, rec_err, rec_retr) != 0) {
+        close(fd);
+        return 1;
     }
 
     if (stop) {
@@ -533,10 +787,11 @@ int main(int argc, char **argv) {
 
     if (full || count < 0) {
         long leadout = read_leadout(fd);
-        if (leadout < 0) { close(fd); return 1; }
+        if (leadout < 0) { restore_recovery(fd); close(fd); return 1; }
         if (start >= leadout) {
             fprintf(stderr, "c2read: start %ld >= lead-out %ld — nothing to read\n",
                     start, leadout);
+            restore_recovery(fd);
             close(fd);
             return 1;
         }
@@ -549,11 +804,13 @@ int main(int argc, char **argv) {
     FILE *pcm_fp = NULL, *c2_fp = NULL, *sub_fp = NULL;
     if (pcm_path && !(pcm_fp = fopen(pcm_path, "wb"))) {
         fprintf(stderr, "c2read: open %s: %s\n", pcm_path, strerror(errno));
+        restore_recovery(fd);
         close(fd); return 1;
     }
     if (c2_path && !(c2_fp = fopen(c2_path, "wb"))) {
         fprintf(stderr, "c2read: open %s: %s\n", c2_path, strerror(errno));
         if (pcm_fp) fclose(pcm_fp);
+        restore_recovery(fd);
         close(fd);
         return 1;
     }
@@ -561,15 +818,21 @@ int main(int argc, char **argv) {
         fprintf(stderr, "c2read: open %s: %s\n", sub_path, strerror(errno));
         if (pcm_fp) fclose(pcm_fp);
         if (c2_fp) fclose(c2_fp);
+        restore_recovery(fd);
         close(fd);
         return 1;
     }
 
     unsigned char *buf = malloc((size_t)chunk * sector_len);
     unsigned char *sense = malloc(SENSE_LEN);
-    if (!buf || !sense) { fprintf(stderr, "c2read: out of memory\n"); return 1; }
+    unsigned char *flushbuf = malloc(RAW_BYTES);   /* cache-defeat throwaway */
+    if (!buf || !sense || !flushbuf) {
+        fprintf(stderr, "c2read: out of memory\n");
+        restore_recovery(fd);
+        return 1;
+    }
 
-    stats_t st = {0, 0, 0, 0, -1, -1, 0};
+    stats_t st = {0, 0, 0, 0, -1, -1, 0, 0, 0, 0};
     long range_start = -1, range_end = -1;  /* open coalesced flagged range */
     struct timespec t0, t1;
     clock_gettime(CLOCK_MONOTONIC, &t0);
@@ -592,11 +855,22 @@ int main(int argc, char **argv) {
             for (unsigned s = 0; s < n; s++) {
                 unsigned char *sec = buf + (size_t)s * sector_len;
                 long cur = lba + (long)s;
-                int src = read_cd(fd, cur, 1, sector_type, c2mode, submode, sec,
-                                  sector_len, sense);
-                if (src != 0)
+                int src = -1;
+                for (int attempt = 0; attempt < retries; attempt++) {
+                    if (attempt > 0) {
+                        /* Cache-defeat (readcd pattern): a back-to-back retry
+                         * often just replays the drive cache; read one sector
+                         * far away first so the retry is a real disc access. */
+                        long away = cur >= start + 5000 ? cur - 5000 : cur + 5000;
+                        unsigned char fsense[SENSE_LEN];
+                        read_cd(fd, away, 1, sector_type, 0, 0, flushbuf,
+                                RAW_BYTES, fsense);
+                    }
                     src = read_cd(fd, cur, 1, sector_type, c2mode, submode, sec,
                                   sector_len, sense);
+                    if (src == 0)
+                        break;
+                }
                 if (src != 0) {
                     memset(sec, 0, RAW_BYTES);
                     memset(sec + RAW_BYTES, 0xff, c2_len);
@@ -604,6 +878,12 @@ int main(int argc, char **argv) {
                         memset(sec + RAW_BYTES + c2_len, 0, sub_len);
                     hard_mask |= 1ull << s;
                     st.read_errors++;
+                    unsigned code = sense[0] & 0x7f;
+                    unsigned key = (code == 0x70 || code == 0x71)
+                                       ? (sense[2] & 0x0f) : 0;
+                    if (key == 0x3) st.sense_medium++;
+                    else if (key == 0x4) st.sense_hardware++;
+                    else st.sense_other++;
                     fprintf(stderr, "c2read: hard %ld\n", cur);
                 }
             }
@@ -671,13 +951,18 @@ int main(int argc, char **argv) {
     if (pcm_fp) fclose(pcm_fp);
     if (c2_fp) fclose(c2_fp);
     if (sub_fp) fclose(sub_fp);
-    free(buf); free(sense); close(fd);
+    restore_recovery(fd);
+    free(buf); free(sense); free(flushbuf); close(fd);
 
     /* ---- summary + verdict ------------------------------------------------- */
     fprintf(stderr, "\nc2read summary (%s)\n", device);
     fprintf(stderr, "  sectors read     : %llu (%.1f s, %.1f sectors/s)\n",
             st.sectors_read, secs, st.sectors_read / (secs > 0 ? secs : 1));
     fprintf(stderr, "  hard read errors : %llu sectors (no data returned)\n", st.read_errors);
+    if (st.read_errors)
+        fprintf(stderr,
+                "  hard error sense : medium %llu, hardware %llu, other %llu\n",
+                st.sense_medium, st.sense_hardware, st.sense_other);
     fprintf(stderr, "  C2-flagged       : %llu sectors, %llu bits total, max %u bits/sector\n",
             st.sectors_flagged, st.c2_bits, st.max_bits_in_sector);
     if (st.sectors_flagged)

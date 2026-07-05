@@ -41,6 +41,35 @@ def test_read_drive_speed_parses_current_and_max(
     assert ds.read_drive_speed("/dev/sr0") == (706, 7056)
 
 
+def test_read_drive_speed_prefers_c2read(monkeypatch: pytest.MonkeyPatch) -> None:
+    # c2read --speed-report machine line wins; cdrdao must not even be invoked.
+    calls: list[str] = []
+
+    def _run(cmd: list[str], **k: object) -> _Result:
+        calls.append(cmd[0])
+        if cmd[0] == "c2read":
+            return _Result(
+                stdout="speed max_kbps 7056 current_kbps 706 max_x 40 current_x 4\n"
+            )
+        return _Result(stdout=_DRIVE_INFO)
+
+    monkeypatch.setattr(ds.subprocess, "run", _run)
+    assert ds.read_drive_speed("/dev/sr0") == (706, 7056)
+    assert calls == ["c2read"]
+
+
+def test_read_drive_speed_falls_back_to_cdrdao(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _run(cmd: list[str], **k: object) -> _Result:
+        if cmd[0] == "c2read":
+            raise FileNotFoundError  # helper not installed
+        return _Result(stdout=_DRIVE_INFO)
+
+    monkeypatch.setattr(ds.subprocess, "run", _run)
+    assert ds.read_drive_speed("/dev/sr0") == (706, 7056)
+
+
 def test_read_drive_speed_scans_stderr_too(monkeypatch: pytest.MonkeyPatch) -> None:
     # Some cdrdao builds print drive-info to stderr; the reader must scan both streams.
     monkeypatch.setattr(
