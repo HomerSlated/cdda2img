@@ -131,6 +131,53 @@ def read_disc_c2(
     log.debug("c2read: %s", stderr_text.strip())
 
 
+def read_span(
+    device: str,
+    start_lba: int,
+    count: int,
+    output_pcm: Path,
+    read_speed: int | None = None,
+    progress_cb: Callable[[int, int], None] | None = None,
+) -> None:
+    """Targeted raw read of ``[start_lba, start_lba + count)`` sectors (s16le PCM only,
+    no C2/sub capture) — the AR-recovery re-read primitive. Speed is set per invocation
+    (``--speed``) and deliberately NOT restored by c2read, so a recovery sweep can step
+    the ladder without re-spinning between attempts; the caller restores once after.
+
+    Same exit-code contract as :func:`read_disc_c2`: 0 and 3 both mean the read
+    completed (3 is only the no-C2-flags verdict); hard-unreadable sectors arrive
+    zero-filled, so the output is always exactly ``count`` sectors long."""
+    cmd = [
+        _C2READ,
+        "--device",
+        device,
+        "--start",
+        str(start_lba),
+        "--count",
+        str(count),
+        "-q",
+        "--pcm",
+        str(output_pcm),
+    ]
+    if read_speed:
+        cmd += ["--speed", str(read_speed)]
+    try:
+        if progress_cb is None:
+            result = subprocess.run(  # noqa: S603 — fixed helper on $PATH
+                cmd, capture_output=True, check=False
+            )
+            returncode = result.returncode
+            stderr_text = result.stderr.decode(errors="replace")
+        else:
+            returncode, stderr_text = _run_with_progress(cmd, progress_cb)
+    except FileNotFoundError:
+        msg = "c2read not found — build tools/c2read and put it on $PATH"
+        raise RuntimeError(msg) from None
+    if returncode not in (0, 3):
+        msg = f"c2read span read failed (exit {returncode}): {stderr_text.strip()}"
+        raise RuntimeError(msg)
+
+
 def _run_with_progress(
     cmd: list[str], progress_cb: Callable[[int, int], None]
 ) -> tuple[int, str]:

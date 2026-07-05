@@ -52,24 +52,34 @@ damaged disc (does drive-side fast-fail improve C2 honesty / recovery time?). Al
 observed 2026-07-04: per-rip Q valid-frame counts vary widely (157k vs 72k usable frames
 on the same disc) — the floors/TOC-authority absorb it, but worth watching.
 
-### NEXT SESSION — c2read multi-pass speed-ladder recovery test (2026-07-05)
+### c2read multi-pass speed-ladder recovery — ✅ TESTED + SHIPPED 2026-07-05
 
 Recovery-strategy model (settled with the user): **c2+ctdb repair and multi-pass
 re-reading are alternative exits tried in cost order** — ctanalyse±C2 first (zero extra
 reads), multi-pass only when that can't fire (drive without C2, disc not in CTDB) or
 fails. Both are proven; c2+ctdb is faster but doubly conditional, so multi-pass is the
 **unconditional fallback we must keep** — and per the paranoia_recovery_test evidence,
-the recovery mechanism is the *sweep across passes × speeds*, not cd-paranoia's engine
-(single-pass recovery at any one speed was unreliable; only the varying-speed sweep
-reliably recovered).
+the recovery mechanism is the *sweep across passes × speeds*, not cd-paranoia's engine.
 
-**The test**: replicate the cd-paranoia recovery experiment with a c2read arm — damaged
-disc, targeted re-reads (track and/or C2-span granularity) across the drive's speed
-ladder, multiple sweeps, **AR as the only gate** (no C2 erasures, no CTDB parity), splice
-on first match. Success criterion: recovery rate comparable to the cd-paranoia ladder →
-c2read replaces cd-paranoia in `_recover_failed_tracks` (and cd-paranoia's remaining
-role approaches nil). Primitives already exist: `--start/--count` spans, per-invocation
-`--speed`, `--retries` + cache-defeat; the sweep driver belongs in Python (tools/ first).
+**The test (run 2026-07-05, `tools/c2read_recovery_test.py`)**: c2read whole-track
+re-reads across the probed ladder, multiple sweeps, **AR the only gate** (no C2, no
+CTDB), on the damaged reference disc. Result: **3/3 sequential recoveries** (attempts
+7, 2, 10 of a 20-attempt budget; winning speeds 32X/32X/4X — no consistent speed, the
+sweep is the mechanism) + 3/3 in Thursday's c2timing baseline arm = **6/6**, every
+recovery byte-identical (same AR v1) at conf 200. The harness was validated offline
+first against the saved whole-disc capture (replay slicing, edge-pad paths).
+
+**Shipped the consequence**: `_recover_failed_tracks` now re-reads via
+`c2_reader.read_span` (new) in the **raw offset domain** — window read with margin
+sectors, offset-corrected slice AR-verified, **verified corrected bytes spliced
+sample-exactly** at `track_start*2352 + read_offset*4` (neighbouring tracks provably
+unperturbed). The CTDB-failure early `apply_offset` and the cd-paranoia
+boundary-disagreement full-disc re-rip bail are gone (c2read has no independent
+geometry opinion); `apply_offset` now runs exactly once, at storage, on every raw path.
+rip_type gains `+c2rec`. Live-validated by driving the new function against a copy of
+the saved damaged capture: 3 failed tracks (2, 7, 8) all recovered on the real drive,
+whole-disc re-verify 11/11 conf 200. cd-paranoia's only remaining role is the full-disc
+*read* fallback when cdrdao fails (plus `track_preview`).
 
 ### PLANNED — c2read intra-read verification + boundary overlap checking (2026-07-05)
 

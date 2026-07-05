@@ -127,6 +127,46 @@ def test_read_disc_c2_exit_1_raises(monkeypatch: pytest.MonkeyPatch) -> None:
         c2r.read_disc_c2("/dev/sr0", Path("a.pcm"), Path("a.c2"))
 
 
+# ── read_span (targeted recovery re-read) ────────────────────────────────────
+
+
+def test_read_span_command_and_speed(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = _capture_cmd(monkeypatch)
+    c2r.read_span("/dev/sr0", 111142, 9481, Path("w.pcm"), read_speed=8)
+    (cmd,) = calls
+    assert cmd[:3] == ["c2read", "--device", "/dev/sr0"]
+    assert cmd[cmd.index("--start") + 1] == "111142"
+    assert cmd[cmd.index("--count") + 1] == "9481"
+    assert cmd[cmd.index("--speed") + 1] == "8"
+    assert cmd[cmd.index("--pcm") + 1] == "w.pcm"
+    assert "--full" not in cmd
+    assert "--c2" not in cmd
+
+
+def test_read_span_no_speed_flag_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = _capture_cmd(monkeypatch)
+    c2r.read_span("/dev/sr0", 0, 10, Path("w.pcm"))
+    (cmd,) = calls
+    assert "--speed" not in cmd
+
+
+def test_read_span_exit_3_is_success(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        c2r.subprocess, "run", lambda *a, **k: _Result(stdout=b"", returncode=3)
+    )
+    c2r.read_span("/dev/sr0", 0, 10, Path("w.pcm"))  # no raise
+
+
+def test_read_span_exit_1_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        c2r.subprocess,
+        "run",
+        lambda *a, **k: _Result(stdout=b"", stderr=b"boom", returncode=1),
+    )
+    with pytest.raises(RuntimeError, match=r"exit 1.*boom"):
+        c2r.read_span("/dev/sr0", 0, 10, Path("w.pcm"))
+
+
 # ── progress streaming ───────────────────────────────────────────────────────
 
 

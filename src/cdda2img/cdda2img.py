@@ -2454,7 +2454,7 @@ def _ar_has_partial_mismatch(results: list) -> bool:
     """True when some (but not all) disc-in-database tracks have AR mismatches.
 
     All-tracks mismatch means offset misconfiguration; partial mismatch means
-    sector read errors — only the latter benefits from a cd-paranoia re-rip.
+    sector read errors — only the latter benefits from a targeted re-read.
     """
     in_db = [r for r in results if r.max_confidence is not None]
     if not in_db:
@@ -2467,24 +2467,74 @@ def _ar_has_partial_mismatch(results: list) -> bool:
 
 def _recovery_status_cb(
     ui: TerminalUI | None, status_line: list[str]
-) -> Callable[[ProgressUpdate], None] | None:
+) -> Callable[[int, int], None] | None:
     """Build the recovery-loop progress callback (None when there is no TUI).
 
     The callback keeps the current attempt's status text (``status_line[0]``, updated by
     the loop per attempt) and moves only the bar + detail — it never rewrites the status,
-    so the "Recover track N (x/y)" banner stays put for the whole rip.
+    so the "Recover track N (x/y)" banner stays put for the whole read. Consumes
+    c2read's ``progress <done> <total>`` sector counts.
     """
     if ui is None:
         return None
 
-    def _cb(update: ProgressUpdate) -> None:
+    def _cb(done: int, total: int) -> None:
         ui.set_status(
             status_line[0],
-            update.fraction,
-            detail=update.note or f"({update.elapsed_frames}/{update.total_frames})",
+            done / total if total > 0 else 0.0,
+            detail=f"({done}/{total})",
         )
 
     return _cb
+
+
+def _read_track_window(
+    device: str,
+    track_lsns: list[int],
+    disc_last_lsn: int,
+    idx: int,
+    read_offset: int,
+    speed: int,
+    window_tmp: Path,
+    prog_cb: Callable[[int, int], None] | None,
+) -> bytes:
+    """One targeted c2read re-read of track ``idx`` (0-based); returns the track's
+    offset-CORRECTED PCM bytes, ready for AR verification.
+
+    The raw read window carries ``ceil(|read_offset| / 588)`` margin sectors on the
+    side the offset points to; where the window would cross a disc edge it is clamped
+    and zero-padded instead (the pad lands inside AccurateRip's first/last
+    2940-sample exclusion zone — the same invariant accuraterip.py relies on).
+    """
+    from math import ceil
+
+    from cdda2img.c2_reader import read_span
+
+    leadout = disc_last_lsn + 1
+    s = track_lsns[idx]
+    e = track_lsns[idx + 1] if idx + 1 < len(track_lsns) else leadout
+    track_bytes = (e - s) * _R6_BYTES_PER_FRAME
+    lead = ceil(-read_offset / 588) if read_offset < 0 else 0
+    tail = ceil(read_offset / 588) if read_offset > 0 else 0
+    lo = max(0, s - lead)
+    hi = min(leadout, e + tail)
+    try:
+        read_span(
+            device, lo, hi - lo, window_tmp, read_speed=speed, progress_cb=prog_cb
+        )
+        window = window_tmp.read_bytes()
+    finally:
+        window_tmp.unlink(missing_ok=True)
+    pad_front = (lo - (s - lead)) * _R6_BYTES_PER_FRAME
+    pad_back = ((e + tail) - hi) * _R6_BYTES_PER_FRAME
+    if pad_front or pad_back:
+        window = bytes(pad_front) + window + bytes(pad_back)
+    base = lead * _R6_BYTES_PER_FRAME + read_offset * 4
+    corrected = window[base : base + track_bytes]
+    if len(corrected) < track_bytes:
+        msg = f"short window read: {len(corrected)} of {track_bytes} bytes"
+        raise RuntimeError(msg)
+    return corrected
 
 
 def _recover_failed_tracks(
@@ -2499,36 +2549,39 @@ def _recover_failed_tracks(
     n_passes: int,
     read_offset: int,
     ui: TerminalUI | None,
-) -> tuple[bool, dict[int, str]]:
-    """Re-rip each AR-failed track across the drive's speed ladder until it matches.
+) -> dict[int, str]:
+    """Re-read each AR-failed track across the drive's speed ladder until it matches.
 
     For every failed track, sweep the ladder *fastest→slowest*, ``n_passes`` times (total
-    ``n_passes x len(ladder)`` attempts), AR-verifying each cd-paranoia rip against the
-    cached *responses* and splicing the first match into *pcm_file*. A track that never
-    matches keeps its original cdrdao audio (no unverified splice). The drive speed is NOT
-    restored between attempts (``restore_speed=False``) — the caller restores once after.
+    ``n_passes x len(ladder)`` attempts), re-reading the track's raw sector window via
+    ``c2read`` at each speed, AR-verifying the offset-corrected slice against the cached
+    *responses*, and splicing the first match into the RAW *pcm_file*. The splice is
+    sample-exact — the verified corrected bytes land at ``track_start*2352 +
+    read_offset*4`` — so a neighbouring track's already-verified audio is never
+    perturbed. A track that never matches keeps its original audio (no unverified
+    splice). *pcm_file* stays in the raw offset domain throughout; the caller applies
+    ``apply_offset`` once, at storage. Speed is set per read and NOT restored between
+    attempts — the caller restores once after the loop.
 
-    The recovery loop owns the TUI status line for its whole duration: it sets a compact
-    per-attempt status (``Recover track N (x/y)``) and routes the live rip
-    progress into the *bar + detail* only, so the recovery context stays visible for the
-    whole track instead of being overwritten by the per-rip "Ripping track" line.
+    Validated live: 6/6 recoveries on the damaged reference disc across two days
+    (tools/c2read_recovery_test.py + tools/c2timing.py baseline arm), every recovery
+    byte-identical at AR confidence 200. The sweep across passes x speeds is the
+    recovery mechanism — no paranoia engine involved.
 
-    Returns ``(ok, outcomes)``. ``ok=False`` signals a cdrdao/cd-paranoia track-boundary
-    disagreement (re-rip byte count != expected) that the caller must resolve with the
-    full-disc re-rip fallback. ``outcomes`` maps track number → ``"matched@<N>X"`` or
-    ``"unrecovered"``.
+    The recovery loop owns the TUI status line for its whole duration: a compact
+    per-attempt status (``Recover track N (x/y)``) with the live read progress routed
+    into the bar + detail only.
+
+    Returns ``outcomes`` mapping track number → ``"matched@<N>X"`` or ``"unrecovered"``.
     """
     from cdda2img.accuraterip import match_track_pcm
-    from cdda2img.disc_reader import rip_single_track
 
     outcomes: dict[int, str] = {}
     # fastest→slowest, repeated n_passes times: an early high-speed match exits sooner.
     speeds = [s for _ in range(n_passes) for s in reversed(ladder)]
     total_attempts = len(speeds)
+    file_size = (disc_last_lsn + 1) * _R6_BYTES_PER_FRAME
 
-    # The progress callback keeps the current attempt's status text (held in status_line)
-    # and only moves the bar + detail — it never rewrites the status, so the recovery
-    # context persists through the whole rip.
     status_line = [""]
     prog_cb = _recovery_status_cb(ui, status_line)
 
@@ -2536,62 +2589,54 @@ def _recover_failed_tracks(
         for result in failed_tracks:
             t = result.track  # 1-indexed
             idx = t - 1
-            byte_start = track_lsns[idx] * _R6_BYTES_PER_FRAME
-            if idx + 1 < len(track_lsns):
-                byte_end = track_lsns[idx + 1] * _R6_BYTES_PER_FRAME
-            else:
-                byte_end = (disc_last_lsn + 1) * _R6_BYTES_PER_FRAME
-            expected_bytes = byte_end - byte_start
 
             if ui is None:
                 print(f"  Recovering track {t}…")
 
             matched = False
+            window_tmp = pcm_file.with_stem(f"{pcm_file.stem}.t{t}")
             for attempt, speed in enumerate(speeds, 1):
                 status_line[0] = f"Recover track {t} ({attempt}/{total_attempts})"
                 if ui is not None:
                     ui.set_status(status_line[0], 0.0)
-                track_tmp = pcm_file.with_stem(f"{pcm_file.stem}.t{t}")
                 try:
-                    rip_single_track(
+                    corrected = _read_track_window(
                         device,
-                        t,
-                        track_tmp,
-                        paranoia="full",
-                        read_offset=read_offset,
-                        read_speed=speed,
-                        restore_speed=False,
-                        progress_cb=prog_cb,
+                        track_lsns,
+                        disc_last_lsn,
+                        idx,
+                        read_offset,
+                        speed,
+                        window_tmp,
+                        prog_cb,
                     )
-                    new_pcm = track_tmp.read_bytes()
-                finally:
-                    track_tmp.unlink(missing_ok=True)
-
-                if len(new_pcm) != expected_bytes:
-                    # Structural boundary disagreement (recurs at every speed) — bail to the
-                    # caller's full-disc re-rip fallback.
-                    log.warning(
-                        "track %d: cdrdao=%d bytes, cd-paranoia=%d bytes — boundary "
-                        "mismatch, falling back to full re-rip",
-                        t,
-                        expected_bytes,
-                        len(new_pcm),
-                    )
-                    return False, outcomes
+                except (RuntimeError, OSError) as exc:
+                    log.warning("track %d re-read at %dX failed: %s", t, speed, exc)
+                    continue
 
                 _v1, _v2, conf_v1, conf_v2 = match_track_pcm(
-                    new_pcm, t, n_tracks, responses
+                    corrected, t, n_tracks, responses
                 )
                 if conf_v1 or conf_v2:
-                    pcm_fh.seek(byte_start)
-                    pcm_fh.write(new_pcm)
+                    # Splice the VERIFIED corrected bytes at their raw-file position,
+                    # clamped to the file (samples beyond a disc edge were zero-pad
+                    # inside AR's exclusion zone — they have no file position).
+                    dst_lo = track_lsns[idx] * _R6_BYTES_PER_FRAME + read_offset * 4
+                    src = corrected
+                    if dst_lo < 0:
+                        src = src[-dst_lo:]
+                        dst_lo = 0
+                    if dst_lo + len(src) > file_size:
+                        src = src[: file_size - dst_lo]
+                    pcm_fh.seek(dst_lo)
+                    pcm_fh.write(src)
                     outcomes[t] = f"matched@{speed}X"
                     matched = True
                     break
 
             if not matched:
-                outcomes[t] = "unrecovered"  # keep the original cdrdao audio
-    return True, outcomes
+                outcomes[t] = "unrecovered"  # keep the original audio
+    return outcomes
 
 
 def rip_image(  # noqa: C901
@@ -2730,9 +2775,9 @@ def rip_image(  # noqa: C901
         )
 
         # Offset domain (unified model): the cdrdao and c2read reads return RAW PCM. We
-        # work raw through AR + ctanalyse and apply the drive offset once, late (before the
-        # cd-paranoia ladder, or at storage). Only a cd-paranoia *read* fallback returns
-        # already-corrected PCM (it applied -O at read time), so it verifies at offset 0.
+        # work raw through AR + ctanalyse + the c2read recovery ladder and apply the
+        # drive offset exactly once, at storage. Only a cd-paranoia *read* fallback
+        # returns already-corrected PCM (it applied -O at read time) → verifies at 0.
         from cdda2img.offset_correct import apply_offset
 
         raw_domain = rip_type in ("cdrdao", "c2read", "c2read+toc")
@@ -2764,11 +2809,12 @@ def rip_image(  # noqa: C901
         if ui is not None:
             ui.resume()
 
-        # CTDB parity repair FIRST (above cd-paranoia): error-only ctanalyse on the raw PCM
-        # (network parity, zero extra reads), with C2 erasures if the C2 path captured them.
-        # Skipped on a cd-paranoia read fallback (already corrected — no raw domain for
-        # ctanalyse's offset detection). On success the PCM is repaired in place and the
-        # cd-paranoia ladder is skipped; on failure we correct the PCM and fall through.
+        # CTDB parity repair FIRST (above the re-read ladder): error-only ctanalyse on the
+        # raw PCM (network parity, zero extra reads), with C2 erasures if the C2 path
+        # captured them. Skipped on a cd-paranoia read fallback (already corrected — no
+        # raw domain for ctanalyse's offset detection). On success the PCM is repaired in
+        # place and the ladder is skipped; on failure we fall through, still raw — the
+        # c2read ladder works in the raw domain too.
         if raw_domain and _ar_has_partial_mismatch(ar_verify.tracks):
             from cdda2img.ctdb_repair import repair_whole_disc
 
@@ -2798,22 +2844,13 @@ def rip_image(  # noqa: C901
                 print_ar_report(ar_verify.tracks, read_offset=read_offset)
                 if ui is not None:
                     ui.resume()
-            else:
-                _ui_status(
-                    ui, "CTDB repair not applicable — correcting for cd-paranoia…"
-                )
-                apply_offset(temp.pcm_file, read_offset)
-                raw_domain = False
-
         # AR-triggered fallback: partial mismatch → read error on specific tracks.
-        # Re-rip only the failed tracks via cd-paranoia (full paranoia) and splice
-        # them into the already-offset-corrected PCM. cdrdao metadata (ISRC/MCN/
-        # CD-Text from subchannel) is preserved — cd-paranoia -Q does not capture it.
+        # Re-read only the failed tracks via c2read (raw targeted window reads) and
+        # splice the verified corrected bytes into the still-raw PCM. Disc metadata
+        # (ISRC/MCN/CD-Text from subchannel) is untouched — only audio is re-read.
         if rip_type in ("cdrdao", "c2read", "c2read+toc") and _ar_has_partial_mismatch(
             ar_verify.tracks
         ):
-            from cdda2img.disc_reader import rip_disc
-
             failed_tracks = [
                 r
                 for r in ar_verify.tracks
@@ -2824,26 +2861,14 @@ def rip_image(  # noqa: C901
             n_bad = len(failed_tracks)
             _ui_status(
                 ui,
-                f"{n_bad} track(s) failed AccurateRip — re-ripping with cd-paranoia…",
+                f"{n_bad} track(s) failed AccurateRip — re-reading with c2read…",
             )
 
-            from cdda2img.cdrdao_progress import ProgressUpdate as _PU
-
-            def _paranoia_cb(update: _PU) -> None:
-                if ui is not None:
-                    ui.set_status(
-                        update.status,
-                        update.fraction,
-                        detail=update.note
-                        or f"({update.elapsed_frames}/{update.total_frames})",
-                    )
-
-            paranoia_cb = _paranoia_cb if ui is not None else None
-
-            # Speed-laddered recovery: re-rip each failed track across the drive's own
-            # speed ladder (fastest→slowest, cfg.recovery_passes sweeps), AR-verifying each
-            # attempt and splicing the first match; a track that never matches keeps its
-            # cdrdao audio. The PCM is already offset-corrected, so each -O re-rip matches.
+            # Speed-laddered recovery: re-read each failed track across the drive's own
+            # speed ladder (fastest→slowest, cfg.recovery_passes sweeps), AR-verifying
+            # each attempt and splicing the first match; a track that never matches
+            # keeps its original audio. The sweep across passes x speeds is the recovery
+            # mechanism (validated 6/6 on the damaged reference disc).
             from cdda2img import drive_speed
             from cdda2img.accuraterip import fetch_ar_responses
 
@@ -2855,9 +2880,8 @@ def rip_image(  # noqa: C901
                 if ar_responses and cfg.recovery_passes > 0
                 else []
             )
-            spliced_ok = True
             if recovery_ladder:
-                spliced_ok, outcomes = _recover_failed_tracks(
+                outcomes = _recover_failed_tracks(
                     device,
                     failed_tracks,
                     final_track_lsns,
@@ -2873,37 +2897,13 @@ def rip_image(  # noqa: C901
                 recovery_outcomes.update(outcomes)
                 drive_speed.restore_drive_speed(device)  # one restore after the loop
 
-            if not spliced_ok:
-                # Boundary mismatch: replace entire PCM with a full cd-paranoia rip.
-                _ui_status(
-                    ui,
-                    "Track boundary mismatch — re-ripping full disc with cd-paranoia…",
-                )
-                paranoia_info = rip_disc(
-                    device,
-                    temp.pcm_file,
-                    paranoia="full",
-                    read_offset=read_offset,
-                    read_speed=1,  # AR recovery re-rip — slow, careful read
-                    progress_cb=paranoia_cb,
-                )
-                final_track_lsns = paranoia_info.track_lsns
-                final_disc_last_lsn = paranoia_info.disc_last_lsn
-                # cd-paranoia "1-" starts at track 1 INDEX 01, not the disc start.
-                # The cdrdao TOC's FILE offsets include the track 1 pregap; prepend
-                # zero-padded silence so the PCM coordinate system matches the TOC.
-                pregap_pad = disc.tracks[0].pregap_frames * _R6_BYTES_PER_FRAME
-                if pregap_pad > 0:
-                    pcm_bytes = temp.pcm_file.read_bytes()
-                    temp.pcm_file.write_bytes(bytes(pregap_pad) + pcm_bytes)
-
-            rip_type = "cdrdao+cd-paranoia"
-            _ui_status(ui, "Verifying AccurateRip (re-rip)…")
+            rip_type = f"{rip_type}+c2rec"
+            _ui_status(ui, "Verifying AccurateRip (re-read)…")
             ar_verify = verify_rip(
                 temp.pcm_file,
                 final_track_lsns,
                 final_disc_last_lsn,
-                read_offset=0,  # PCM is offset-corrected: apply_offset or cd-paranoia -O
+                read_offset=read_offset,  # PCM is still raw; corrected once at storage
                 cddb_id=cddb_id,
             )
             if ui is not None:
@@ -2913,7 +2913,8 @@ def rip_image(  # noqa: C901
                 ui.resume()
 
         # Storage domain: apply the drive offset exactly once, here, if we're still raw
-        # (a clean disc, or a CTDB-repaired one). The cd-paranoia paths already corrected.
+        # (clean disc, CTDB-repaired, or c2read-ladder-recovered). Only a cd-paranoia
+        # *read* fallback arrives already corrected.
         if raw_domain:
             _ui_status(ui, "Applying drive offset correction…")
             apply_offset(temp.pcm_file, read_offset)
