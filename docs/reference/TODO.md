@@ -52,6 +52,37 @@ damaged disc (does drive-side fast-fail improve C2 honesty / recovery time?). Al
 observed 2026-07-04: per-rip Q valid-frame counts vary widely (157k vs 72k usable frames
 on the same disc) — the floors/TOC-authority absorb it, but worth watching.
 
+### NEXT SESSION — c2read multi-pass speed-ladder recovery test (2026-07-05)
+
+Recovery-strategy model (settled with the user): **c2+ctdb repair and multi-pass
+re-reading are alternative exits tried in cost order** — ctanalyse±C2 first (zero extra
+reads), multi-pass only when that can't fire (drive without C2, disc not in CTDB) or
+fails. Both are proven; c2+ctdb is faster but doubly conditional, so multi-pass is the
+**unconditional fallback we must keep** — and per the paranoia_recovery_test evidence,
+the recovery mechanism is the *sweep across passes × speeds*, not cd-paranoia's engine
+(single-pass recovery at any one speed was unreliable; only the varying-speed sweep
+reliably recovered).
+
+**The test**: replicate the cd-paranoia recovery experiment with a c2read arm — damaged
+disc, targeted re-reads (track and/or C2-span granularity) across the drive's speed
+ladder, multiple sweeps, **AR as the only gate** (no C2 erasures, no CTDB parity), splice
+on first match. Success criterion: recovery rate comparable to the cd-paranoia ladder →
+c2read replaces cd-paranoia in `_recover_failed_tracks` (and cd-paranoia's remaining
+role approaches nil). Primitives already exist: `--start/--count` spans, per-invocation
+`--speed`, `--retries` + cache-defeat; the sweep driver belongs in Python (tools/ first).
+
+### PLANNED — c2read intra-read verification + boundary overlap checking (2026-07-05)
+
+A lightweight paranoia-style self-verification layer for c2read: overlap the chunk
+boundaries and cross-check the overlap regions between consecutive reads (slip/jitter
+detection without any external database), optionally N-pass per-sector majority-vote
+consensus as the arbiter for discs in **neither** AR nor CTDB — the one niche where
+cd-paranoia's overlap verification is currently the only slip defence (the C2 experiment
+proved slips are invisible to C2: coherent wrong audio, zero flags). Deliberately
+**debatable and unscheduled**: justifying it requires a disc that defeats every existing
+method (AR, CTDB±C2, multi-pass ladder); C2 flags could weight the consensus vote when
+present. Marked as planned per user decision 2026-07-05; do not build speculatively.
+
 ### MCN archival-only + barcode as the disambiguation key (2026-06-29) — ✅ DONE 2026-06-30
 
 Closed the Tracy Chapman live bug (an exact MB disc-ID match discarded because an archival

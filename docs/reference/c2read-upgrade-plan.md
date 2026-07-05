@@ -424,6 +424,12 @@ F8's zero-fill bug fix folded into F1's read-loop work, and F9 free to ride alon
 early. Prerequisite actions: fetch a T10 MMC draft; verify the IEC 60908 CD-Text
 annex; run the F1 combo probe on the PX-716A before committing to 0xBE-vs-0xD8.
 
+**Post-plan follow-ups (2026-07-05, tracked in TODO.md):** the c2read multi-pass
+speed-ladder recovery test (AR-gated, no C2/CTDB — candidate replacement for the
+cd-paranoia rung in `_recover_failed_tracks`), and the planned-but-unscheduled
+intra-read verification / boundary overlap checking (the paranoia-style arbiter for
+discs in neither AR nor CTDB). All eleven original features shipped 2026-07-04/05.
+
 ---
 
 ## 7. Appendix: cdrtools (readcd) review — 2026-07-04
