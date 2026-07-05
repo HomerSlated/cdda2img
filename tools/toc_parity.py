@@ -12,7 +12,8 @@ Offline mode (re-diff existing captures):
     uv run python tools/toc_parity.py --cdrdao-toc meta.toc \\
         --fulltoc x.fulltoc --sub x.sub [--cdtext x.cdtext]
 
-Exit code: 0 = all fields match, 1 = differences, 2 = capture failure.
+Exit code: 0 = all fields match (or the only diffs are cdrdao CD-Text mojibake,
+where c2read is provably correct), 1 = real differences, 2 = capture failure.
 """
 
 from __future__ import annotations
@@ -53,20 +54,47 @@ def _capture_live(device: str, workdir: Path) -> tuple[Path, Path, Path, Path]:
     return toc, fulltoc, sub, cdtext
 
 
-def _diff(ref: ParsedDisc, info) -> int:
-    differences = 0
+def _is_cdrdao_mojibake(cdrdao: object, subq: object) -> bool:
+    """True when cdrdao's string is the Latin-1 misreading of subq's UTF-8 string.
 
-    def check(name: str, a: object, b: object) -> None:
-        nonlocal differences
-        if a != b:
-            differences += 1
-            print(f"  DIFF {name}: cdrdao={a!r} subq={b!r}")
+    cdrdao read-toc decodes CD-Text charset-0x00 strictly as ISO-8859-1 per spec.
+    When a disc actually carries UTF-8 (every cdrdao/CDEmu-authored disc does --
+    the authoring copies the TOC file's raw bytes), each non-ASCII character comes
+    back double-encoded (a U+2019 apostrophe, E2 80 99, becomes three Latin-1 junk
+    chars). c2read + cdtext.py decode UTF-8-first and are correct, so detecting the
+    exact byte relationship lets
+    the soak score these as "c2read superior", not as parity failures against a
+    reference that is itself wrong on this axis.
+    """
+    if not isinstance(cdrdao, str) or not isinstance(subq, str):
+        return False
+    try:
+        return subq.encode("utf-8").decode("latin-1") == cdrdao
+    except (UnicodeEncodeError, UnicodeDecodeError):
+        return False
+
+
+def _diff(ref: ParsedDisc, info) -> tuple[int, int]:
+    """Diff the two track models. Returns (real_differences, cdrdao_mojibake)."""
+    differences = 0
+    mojibake = 0
+
+    def check(name: str, a: object, b: object, *, text: bool = False) -> None:
+        nonlocal differences, mojibake
+        if a == b:
+            return
+        if text and _is_cdrdao_mojibake(a, b):
+            mojibake += 1
+            print(f"  MOJIBAKE {name}: cdrdao={a!r} is Latin-1 misread; subq={b!r} ✓")
+            return
+        differences += 1
+        print(f"  DIFF {name}: cdrdao={a!r} subq={b!r}")
 
     disc = info.disc
     check("catalog", ref.catalog, disc.catalog)
     check("cdtext_catalog_ref", ref.disc_id, disc.cdtext_catalog_ref)
-    check("album", ref.title, disc.album)
-    check("artist", ref.performer, disc.artist)
+    check("album", ref.title, disc.album, text=True)
+    check("artist", ref.performer, disc.artist, text=True)
     check("pre_emphasis", ref.pre_emphasis, disc.pre_emphasis)
     check("n_tracks", len(ref.tracks), len(disc.tracks))
     check(
@@ -83,9 +111,9 @@ def _diff(ref: ParsedDisc, info) -> int:
         check(f"track{n}.pre_emphasis", r.pre_emphasis, m.pre_emphasis)
         check(f"track{n}.copy", r.copy_permitted, m.copy_permitted)
         check(f"track{n}.index_points", r.index_points, m.index_points)
-        check(f"track{n}.title", r.title, m.title)
-        check(f"track{n}.performer", r.performer, m.performer)
-    return differences
+        check(f"track{n}.title", r.title, m.title, text=True)
+        check(f"track{n}.performer", r.performer, m.performer, text=True)
+    return differences, mojibake
 
 
 def main() -> int:
@@ -114,11 +142,19 @@ def main() -> int:
         )
         if info.prov:
             print(f"subq provenance: {info.prov}")
-        differences = _diff(ref, info)
+        differences, mojibake = _diff(ref, info)
 
+    moji_note = (
+        f" ({mojibake} cdrdao CD-Text mojibake, c2read correct)" if mojibake else ""
+    )
     if differences:
-        print(f"PARITY: {differences} difference(s)")
+        print(f"PARITY: {differences} difference(s){moji_note}")
         return 1
+    if mojibake:
+        # cdrdao mis-decoded UTF-8 CD-Text; c2read got it right. Not a failure —
+        # c2read is strictly superior here, so the gate stays green.
+        print(f"PARITY: ALL MATCH{moji_note}")
+        return 0
     print("PARITY: ALL MATCH")
     return 0
 
