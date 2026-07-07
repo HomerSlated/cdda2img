@@ -114,14 +114,31 @@ def resolve_temp_dir(min_required_bytes: int = 100_000_000) -> Path:
 
 
 class TempFiles:
+    """Per-invocation scratch workspace, isolated in its own unique subdirectory.
+
+    Every run gets a fresh ``mkdtemp`` directory under *base_dir*, so a fragment
+    left by a previous run (or written by a concurrent one) can never share a
+    path with this run's output. This matters because the c2read rip path emits
+    sidecar captures (``.cdtext``/``.sub``/``.fulltoc``/``.c2``) beside
+    :attr:`pcm_file`, and c2read only writes ``.cdtext`` when the disc actually
+    carries CD-Text. With the old fixed ``all_tracks.*`` names in a shared
+    ``/var/tmp``, a disc with no CD-Text silently inherited the previous rip's
+    stale ``all_tracks.cdtext`` -- baking a wrong album into the image. The
+    unique directory removes that whole class of fragment reuse; :meth:`cleanup`
+    then discards *all* sidecars in one shot regardless of suffix.
+    """
+
     def __init__(self, base_dir: Path):
-        self.base = base_dir
-        self.pcm_file = base_dir / "all_tracks.pcm"  # final raw PCM (stored in RBI)
+        # The random mkdtemp suffix is the unique identifier that binds every
+        # fragment below to exactly this invocation. Same filesystem as
+        # *base_dir*, so resolve_temp_dir's free-space guarantee still holds.
+        self.base = Path(tempfile.mkdtemp(prefix="cdda2img_", dir=base_dir))
+        self.pcm_file = self.base / "all_tracks.pcm"  # final raw PCM (stored in RBI)
         self.pcm_pre = (
-            base_dir / "all_tracks_pre.wav"
+            self.base / "all_tracks_pre.wav"
         )  # concatenated WAV, pre-normalisation
         self.pcm_norm = (
-            base_dir / "all_tracks_norm.wav"
+            self.base / "all_tracks_norm.wav"
         )  # normalised WAV (if normalisation enabled)
         self._temp_tracks: list[Path] = []
 
@@ -131,8 +148,10 @@ class TempFiles:
         return path
 
     def cleanup(self) -> None:
-        for path in [self.pcm_file, self.pcm_pre, self.pcm_norm, *self._temp_tracks]:
-            path.unlink(missing_ok=True)
+        # Remove the whole isolated directory: every fragment (pcm, wavs,
+        # per-track temps, and any c2read .cdtext/.sub/.fulltoc/.c2 sidecars)
+        # lives inside it, so one rmtree leaves nothing behind.
+        shutil.rmtree(self.base, ignore_errors=True)
 
 
 # ---------------------------------------------------------------------------

@@ -15,6 +15,7 @@ import pytest
 from cdda2img.concat import concat_wav
 from cdda2img.container import (
     ExtractOptions,
+    TempFiles,
     _parse_provenance,
     _release_intelligence_line,
     build_container,
@@ -456,6 +457,39 @@ def test_prov_unicode_line_separators_cannot_forge_record():
         parsed = _roundtrip_prov(data)
         assert parsed == data
         assert "mb_release_id" not in parsed
+
+
+def test_tempfiles_isolates_each_run(tmp_path):
+    """Two TempFiles under the same base get distinct directories: a fragment
+    from one run can never share a path with another (the ABBA/Tracy stale
+    .cdtext bug). All fragments live under the run's own unique dir."""
+    a = TempFiles(tmp_path)
+    b = TempFiles(tmp_path)
+    assert a.base != b.base
+    assert a.base.parent == tmp_path
+    assert a.pcm_file.parent == a.base
+    for f in (a.pcm_file, a.pcm_pre, a.pcm_norm, a.temp_track(1, ".wav")):
+        assert f.parent == a.base
+
+
+def test_tempfiles_cleanup_removes_all_sidecars(tmp_path):
+    """cleanup() removes the whole run directory, including c2read sidecars
+    (.cdtext/.sub/.fulltoc/.c2) that the old per-file cleanup never touched."""
+    t = TempFiles(tmp_path)
+    t.pcm_file.write_bytes(b"pcm")
+    for suffix in (".cdtext", ".sub", ".fulltoc", ".c2"):
+        t.pcm_file.with_suffix(suffix).write_bytes(b"x")
+    t.temp_track(1, ".wav").write_bytes(b"w")
+    assert t.base.exists()
+    t.cleanup()
+    assert not t.base.exists()  # rmtree took the sidecars with it
+
+
+def test_tempfiles_cleanup_is_idempotent(tmp_path):
+    """A second cleanup() (e.g. finally after an early failure) must not raise."""
+    t = TempFiles(tmp_path)
+    t.cleanup()
+    t.cleanup()
 
 
 def test_prov_block_absent_when_not_passed(tmp_path_factory, wav_tracks):

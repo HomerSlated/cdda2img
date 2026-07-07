@@ -2760,7 +2760,7 @@ def rip_image(  # noqa: C901
     try:
         # Grab track 1 first (drive is single-use), then play it on a loop in
         # the background while the rest of the rip runs.
-        track_preview = _start_track_preview(device, temp_base, ui, enabled=preview)
+        track_preview = _start_track_preview(device, temp.base, ui, enabled=preview)
 
         c2_file = temp.pcm_file.with_suffix(".c2")
         info, rip_type, c2_path = _rip_disc_stage(

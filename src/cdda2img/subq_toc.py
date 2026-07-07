@@ -31,7 +31,7 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING
 
-from cdda2img.cdtext import parse_cdtext
+from cdda2img.cdtext import PTI_TITLE, parse_cdtext
 from cdda2img.disc_reader import RipInfo
 from cdda2img.rbi_format import RBIDisc, RBITocEntry
 from cdda2img.subchannel import (
@@ -78,6 +78,22 @@ def build_rip_info(
     isrcs = _voted_isrcs(scan, prov)
     mcn = _voted_mcn(scan)
     cdtext = _first_cdtext_block(cdtext_raw)
+    if cdtext is not None and not _cdtext_matches_disc(cdtext, set(track_starts)):
+        # The CD-Text describes a different track set than the disc actually has:
+        # a stale sidecar from a prior rip, or lead-in the drive cached from the
+        # previously-loaded disc. Trusting it bakes a wrong album into the image
+        # (a no-CD-Text disc inheriting the last disc's titles), so discard it and
+        # let the online lookups supply the metadata. Prefer no CD-Text over wrong.
+        log.warning(
+            "CD-Text track range does not match disc tracks %d-%d "
+            "(cdtext first/last=%s/%s) - discarding as stale/foreign",
+            min(track_starts),
+            max(track_starts),
+            cdtext.first_track,
+            cdtext.last_track,
+        )
+        prov["cdtext_rejected"] = "track_range_mismatch"
+        cdtext = None
 
     entries: list[RBITocEntry] = []
     starts = sorted(track_starts.items())
@@ -187,3 +203,23 @@ def _first_cdtext_block(cdtext_raw: bytes | None) -> CDTextBlock | None:
         log.warning("CD-Text capture undecodable (%s) — ignored", exc)
         return None
     return blocks[0] if blocks else None
+
+
+def _cdtext_matches_disc(cdtext: CDTextBlock, track_numbers: set[int]) -> bool:
+    """True when *cdtext* describes THIS disc's tracks, not a foreign/stale set.
+
+    The SIZE_INFO pack is CD-Text's own declaration of the track range it covers;
+    when present it must match the disc's first and last audio-track numbers
+    exactly. Without SIZE_INFO, fall back to the observed per-track titles:
+    genuine disc CD-Text titles every audio track, so the lowest and highest
+    titled track must coincide with the disc's own range. An album-level-only
+    block (no per-track titles) carries nothing that can contradict the disc, so
+    it is allowed through.
+    """
+    first, last = min(track_numbers), max(track_numbers)
+    if cdtext.first_track is not None and cdtext.last_track is not None:
+        return cdtext.first_track == first and cdtext.last_track == last
+    titled = {n for n in cdtext.text.get(PTI_TITLE, {}) if n > 0}
+    if not titled:
+        return True
+    return min(titled) == first and max(titled) == last

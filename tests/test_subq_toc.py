@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
+from cdda2img.cdtext import PTI_TITLE, CDTextBlock
 from cdda2img.subchannel import ADR_POSITION, CD_SUBCODE_SIZE, crc16_gsm
-from cdda2img.subq_toc import build_rip_info
+from cdda2img.subq_toc import _cdtext_matches_disc, build_rip_info
 
 # ---------------------------------------------------------------------------
 # Synthetic capture builders (Q frames mirror tests/test_subchannel.py)
@@ -133,8 +136,6 @@ def test_build_degrades_without_anchorable_sub():
 
 
 def test_real_fulltoc_with_boundary_sub_slice(fixtures_dir=None):
-    from pathlib import Path
-
     fixtures = Path(__file__).parent / "fixtures"
     fulltoc = (fixtures / "tracy.fulltoc").read_bytes()
     sub = (fixtures / "subq_track2_boundary.sub").read_bytes()
@@ -148,3 +149,58 @@ def test_real_fulltoc_with_boundary_sub_slice(fixtures_dir=None):
     assert info.disc.tracks[2].pregap_frames == 0
     assert info.track_lsns[1] == 12032
     assert info.disc_last_lsn == 162891
+
+
+# ---------------------------------------------------------------------------
+# CD-Text <-> disc binding guard: reject a stale/foreign CD-Text sidecar whose
+# track range does not describe the disc actually in the drive. Regression for
+# the ABBA-Gold-tagged-as-Tracy-Chapman bug: a no-CD-Text disc read a prior
+# rip's leftover all_tracks.cdtext and baked in the wrong album.
+# ---------------------------------------------------------------------------
+
+_FIXTURES = Path(__file__).parent / "fixtures"
+
+
+def test_matching_cdtext_is_kept():
+    # tracy.fulltoc (11 tracks) + the Tracy Chapman CD-Text (SIZE_INFO 1..11):
+    # ranges agree, so the titles must be applied.
+    fulltoc = (_FIXTURES / "tracy.fulltoc").read_bytes()
+    sub = (_FIXTURES / "subq_track2_boundary.sub").read_bytes()
+    cdtext = (_FIXTURES / "cdemu_utf8.cdtext").read_bytes()
+    info = build_rip_info(fulltoc, sub, cdtext)
+    assert info.disc.album == "Tracy Chapman"
+    assert info.disc.tracks[0].title == "Talkin\u2019 Bout a Revolution"
+    assert info.prov is not None
+    assert "cdtext_rejected" not in info.prov
+
+
+def test_mismatched_cdtext_is_discarded():
+    # The same 11-track Tracy CD-Text against a 2-track disc: the range cannot
+    # describe this disc, so it is dropped and no title survives.
+    cdtext = (_FIXTURES / "cdemu_utf8.cdtext").read_bytes()
+    info = build_rip_info(_TOC, _SUB, cdtext)
+    assert info.disc.album == ""
+    assert info.disc.tracks[0].title == ""
+    assert info.prov is not None
+    assert info.prov["cdtext_rejected"] == "track_range_mismatch"
+
+
+def test_cdtext_binding_uses_size_info_range():
+    block = CDTextBlock(block=0, first_track=1, last_track=11)
+    assert _cdtext_matches_disc(block, set(range(1, 12)))
+    assert not _cdtext_matches_disc(block, set(range(1, 20)))
+    assert not _cdtext_matches_disc(block, {1, 2})
+
+
+def test_cdtext_binding_falls_back_to_titled_tracks_without_size_info():
+    # No SIZE_INFO: the observed per-track titles must span the disc's range.
+    titled = {PTI_TITLE: {0: "Album", 1: "a", 2: "b", 3: "c"}}
+    block = CDTextBlock(block=0, text=titled)
+    assert _cdtext_matches_disc(block, {1, 2, 3})
+    assert not _cdtext_matches_disc(block, {1, 2, 3, 4})
+
+
+def test_cdtext_binding_allows_album_only_block():
+    # Album-level-only CD-Text has nothing per-track to contradict the disc.
+    block = CDTextBlock(block=0, text={PTI_TITLE: {0: "Album"}})
+    assert _cdtext_matches_disc(block, {1, 2, 3})
