@@ -13,6 +13,7 @@ Menu structure:
 
 from __future__ import annotations
 
+import shutil
 import wave
 from pathlib import Path
 
@@ -55,12 +56,24 @@ def _trunc(text: str | None, width: int) -> str:
     return text if len(text) <= width else text[: width - 1] + "…"
 
 
+# Set while a `_prompt` is blocked in ``input()``. The menu's SIGWINCH handler
+# (installed by ``menu_state.MenuController`` in TUI mode) reads this to decide
+# whether a terminal resize should interrupt the read for an immediate repaint:
+# raising only while a read is in flight keeps a resize from aborting network
+# I/O that a screen's ``handle_input`` does *after* its prompt.
+_AWAITING_INPUT: bool = False
+
+
 def _prompt(prompt: str) -> str:
+    global _AWAITING_INPUT
+    _AWAITING_INPUT = True
     try:
         return input(prompt)
     except (EOFError, KeyboardInterrupt):
         print()
         return "b"
+    finally:
+        _AWAITING_INPUT = False
 
 
 def _prompt_edit(label: str, current: str) -> str:
@@ -85,40 +98,72 @@ def _prompt_search_fields(artist: str, title: str) -> tuple[str, str]:
 # ---------------------------------------------------------------------------
 
 
-def _print_disc_summary(disc: RBIDisc) -> None:
-    # The canonical disc-metadata header (Album/Artist/Label/Country/Cat. no./
-    # MCN/Original/Tracks) is rendered by the shared rbi_format.format_disc_metadata
-    # so the menu, `list`, and catalogue are byte-identical (rbi_spec.md §6.3.2);
-    # the menu only prepends its 2-space chrome indent. Set / Disc / Low DR are
-    # menu-local ancillary lines outside the canonical block.
-    for line in format_disc_metadata(
-        album=disc.album,
-        artist=disc.artist,
-        release_date=disc.release_date,
-        label=disc.label,
-        country=disc.country,
-        catalog_number=disc.catalog_number,
-        mcn=disc.catalog,
-        original_release_found=disc.original_release_found,
-        original_release_title=disc.original_release_title,
-        original_release_year=disc.original_release_year,
-        track_count=len(disc.tracks),
-    ):
-        print(f"  {line}")
+def _print_disc_summary(disc: RBIDisc, *, reserve: int = 15) -> None:
+    """Print the disc-metadata header and a height-fitted track list.
+
+    The metadata header block (Album/Artist/Label/Country/Cat. no./MCN/Original/
+    Tracks) is the summary's payload and is **always printed in full** — it must
+    stay pinned at the top of the alternate screen. It is rendered by the shared
+    ``rbi_format.format_disc_metadata`` so the menu, ``list``, and catalogue are
+    byte-identical (rbi_spec.md §6.3.2); the menu only prepends its 2-space
+    chrome indent. Set / Disc / Low DR are menu-local ancillary header lines.
+
+    The track table below is truncated to whatever vertical space remains after
+    reserving ``reserve`` rows for the surrounding screen chrome (title bar +
+    menu + prompt) and this summary's own header + table frame. This is what
+    stops a long tracklist (e.g. a 19-track compilation on a short terminal)
+    from scrolling the header off the top. A truncated list ends with a
+    "… and N more" marker; because every frame is a full repaint, growing the
+    terminal (the SIGWINCH repaint) simply reflows more rows into view.
+    """
+    header: list[str] = [
+        f"  {line}"
+        for line in format_disc_metadata(
+            album=disc.album,
+            artist=disc.artist,
+            release_date=disc.release_date,
+            label=disc.label,
+            country=disc.country,
+            catalog_number=disc.catalog_number,
+            mcn=disc.catalog,
+            original_release_found=disc.original_release_found,
+            original_release_title=disc.original_release_title,
+            original_release_year=disc.original_release_year,
+            track_count=len(disc.tracks),
+        )
+    ]
     if disc.set_title:
-        print(f"  {'Set:':<15}{disc.set_title}")
+        header.append(f"  {'Set:':<15}{disc.set_title}")
     if disc.disc_total > 1 or disc.disc_number != 1:
-        print(f"  {'Disc:':<15}{disc.disc_number} of {disc.disc_total}")
+        header.append(f"  {'Disc:':<15}{disc.disc_number} of {disc.disc_total}")
     if disc.low_dynamic_range is not None:
-        print(f"  {'Low DR:':<15}{'YES' if disc.low_dynamic_range else 'NO'}")
-    if disc.tracks:
-        print()
-        print(f"  {'#':>2}  {'Title':<40}  {'ISRC'}")
-        print(f"  {'─':>2}  {'─' * 40}  {'─' * 12}")
-        for t in disc.tracks[:20]:
-            print(f"  {t.track_number:>2}  {_trunc(t.title, 40):<40}  {t.isrc or ''}")
-        if len(disc.tracks) > 20:
-            print(f"  … and {len(disc.tracks) - 20} more")
+        header.append(f"  {'Low DR:':<15}{'YES' if disc.low_dynamic_range else 'NO'}")
+    for line in header:
+        print(line)
+
+    if not disc.tracks:
+        return
+
+    # Fit the track table into the rows left after the pinned header, the
+    # table's own 3-line frame (blank + column header + rule), and the caller's
+    # chrome reserve. Bias toward truncation: over-reserving hides a couple of
+    # rows (harmless); under-reserving scrolls the header off (the bug).
+    term_rows = shutil.get_terminal_size(fallback=(80, 24)).lines
+    n = len(disc.tracks)
+    budget = term_rows - len(header) - 3 - reserve
+    if budget >= n:
+        show, hidden = n, 0
+    else:
+        show = max(1, budget - 1)  # leave one row for the "… and N more" marker
+        hidden = n - show
+
+    print()
+    print(f"  {'#':>2}  {'Title':<40}  {'ISRC'}")
+    print(f"  {'─':>2}  {'─' * 40}  {'─' * 12}")
+    for t in disc.tracks[:show]:
+        print(f"  {t.track_number:>2}  {_trunc(t.title, 40):<40}  {t.isrc or ''}")
+    if hidden:
+        print(f"  … and {hidden} more")
 
 
 def _print_meta_tracks(meta: DiscMeta) -> None:

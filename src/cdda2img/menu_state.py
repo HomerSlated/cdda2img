@@ -30,7 +30,9 @@ stdin-not-a-tty → ``run()`` returns the disc unchanged; the loop never runs.
 
 from __future__ import annotations
 
+import contextlib
 import copy
+import signal
 import sys
 import tempfile
 from dataclasses import dataclass
@@ -59,6 +61,14 @@ _ENTER_FULLSCREEN = "\033[?1049h"
 _EXIT_FULLSCREEN = "\033[?1049l"
 
 
+class _Resized(Exception):
+    """Raised out of a blocked ``input()`` by the SIGWINCH handler.
+
+    Caught in :meth:`MenuController._step` and turned into a no-op re-render, so
+    the next frame repaints at the terminal's new size. Not an error condition.
+    """
+
+
 def _clear_screen() -> None:
     sys.stdout.write(_CLEAR_SCREEN)
     sys.stdout.flush()
@@ -72,6 +82,57 @@ def _enter_fullscreen() -> None:
 def _exit_fullscreen() -> None:
     sys.stdout.write(_EXIT_FULLSCREEN)
     sys.stdout.flush()
+
+
+# Sentinel distinguishing "handler was never installed" (non-POSIX platform, or
+# not the main thread) from a genuine previous handler of None / SIG_DFL.
+_WINCH_UNSET: object = object()
+
+
+def _install_winch() -> object:
+    """Install a SIGWINCH handler that interrupts a blocked prompt for a repaint.
+
+    Returns the previous handler (to restore later) or :data:`_WINCH_UNSET` when
+    SIGWINCH is unavailable (non-POSIX) or we are not on the main thread —
+    signals can only be installed from the main thread, and the menu tolerates
+    absence (a resize just won't repaint until the next keypress).
+
+    The handler raises :class:`_Resized` only while a ``metadata_menu._prompt``
+    is actually blocked in ``input()`` (its ``_AWAITING_INPUT`` flag). At any
+    other time it is a no-op: the next full repaint already reflects the new
+    size, and raising there could abort a screen's post-prompt network I/O.
+    """
+    if not hasattr(signal, "SIGWINCH"):
+        return _WINCH_UNSET
+
+    # Resolve the module ONCE, here — importing inside the handler is not
+    # re-entrant-safe: a SIGWINCH burst (rapid resizing) delivers a second
+    # signal mid-import, corrupting the import machinery ("SystemError:
+    # isinstance returned a result with an exception set"). The handler must be
+    # minimal, like KeyboardInterrupt's: read one flag, maybe raise.
+    from cdda2img import metadata_menu
+
+    def _handler(signum: int, frame: object) -> None:
+        if metadata_menu._AWAITING_INPUT:
+            # Disarm before raising so a second signal arriving while this
+            # _Resized unwinds can't re-enter and raise again (single-shot per
+            # blocked read; _prompt re-arms on the next input()).
+            metadata_menu._AWAITING_INPUT = False
+            raise _Resized
+
+    try:
+        return signal.signal(signal.SIGWINCH, _handler)
+    except (ValueError, OSError):
+        return _WINCH_UNSET  # not the main thread
+
+
+def _restore_winch(prev: object) -> None:
+    """Restore the SIGWINCH disposition saved by :func:`_install_winch`."""
+    if prev is _WINCH_UNSET or not hasattr(signal, "SIGWINCH"):
+        return
+    handler = prev if prev is not None else signal.SIG_DFL
+    with contextlib.suppress(ValueError, OSError):
+        signal.signal(signal.SIGWINCH, handler)  # type: ignore[arg-type]
 
 
 class MenuState(Enum):
@@ -1018,23 +1079,36 @@ class MenuController:
         """
         if not sys.stdin.isatty() or self.auto_apply:
             return self.disc
+        prev_winch: object = _WINCH_UNSET
         if self.tui:
             _enter_fullscreen()
+            prev_winch = _install_winch()
         try:
             while not self.done and self.stack:
                 self._step()
         finally:
             if self.tui:
+                _restore_winch(prev_winch)
                 _exit_fullscreen()
         return self.disc
 
     def _step(self) -> None:
-        """Render the active screen and apply its navigation intent."""
+        """Render the active screen and apply its navigation intent.
+
+        A terminal resize while blocked on input raises :class:`_Resized` out
+        of ``handle_input``; we swallow it and return, so the loop immediately
+        re-renders at the new size (the pending nav intent, if any, is dropped —
+        the user just re-issues the keystroke).
+        """
         top = self.stack[-1]
         if self.tui:
             _clear_screen()
         top.render(self)
-        self._apply(top.handle_input(self))
+        try:
+            nav = top.handle_input(self)
+        except _Resized:
+            return
+        self._apply(nav)
 
     def _apply(self, nav: Nav) -> None:
         """Apply a navigation intent to the stack."""

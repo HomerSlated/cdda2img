@@ -58,6 +58,59 @@ def test_trunc_none():
 
 
 # ---------------------------------------------------------------------------
+# _print_disc_summary — height-aware fitting
+#
+# The metadata header is the summary's payload and must stay pinned at the top
+# of the alternate screen; only the track table below it truncates to fit the
+# terminal height, so a long tracklist never scrolls the header out of view.
+# ---------------------------------------------------------------------------
+
+
+def _summary_lines(disc, rows: int, reserve: int = 15) -> list[str]:
+    from cdda2img import metadata_menu as mm
+
+    fake = SimpleNamespace(lines=rows, columns=80)
+    with patch("cdda2img.metadata_menu.shutil.get_terminal_size", return_value=fake):
+        import io
+        from contextlib import redirect_stdout
+
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            mm._print_disc_summary(disc, reserve=reserve)
+    return buf.getvalue().splitlines()
+
+
+def test_summary_shows_all_tracks_on_tall_terminal():
+    disc = _disc(tracks=19)
+    lines = _summary_lines(disc, rows=80)
+    assert len([ln for ln in lines if "Track " in ln]) == 19
+    assert not any("more" in ln for ln in lines)
+
+
+def test_summary_truncates_and_pins_header_on_short_terminal():
+    disc = _disc(album="Gold", artist="ABBA", tracks=19)
+    lines = _summary_lines(disc, rows=24)
+    text = "\n".join(lines)
+    # Header payload always fully present...
+    assert "Gold" in text
+    assert "ABBA" in text
+    # ...tracklist truncated with an accurate remainder count that reconciles.
+    more = [ln for ln in lines if "more" in ln]
+    assert len(more) == 1
+    shown = len([ln for ln in lines if "Track " in ln])
+    hidden = int(more[0].split("and")[1].split("more")[0])
+    assert shown < 19
+    assert shown + hidden == 19
+
+
+def test_summary_no_tracks_prints_header_only():
+    disc = _disc(tracks=0)
+    lines = _summary_lines(disc, rows=24)
+    assert not any("more" in ln for ln in lines)
+    assert not any(ln.strip().startswith("#") for ln in lines)
+
+
+# ---------------------------------------------------------------------------
 # _show_diff (captured via output)
 # ---------------------------------------------------------------------------
 

@@ -1162,3 +1162,93 @@ def test_tui_restores_main_screen_on_exception() -> None:
         ctl.run()
     enter.assert_called_once()
     exit_.assert_called_once()  # finally ran despite the exception
+
+
+# ---------------------------------------------------------------------------
+# SIGWINCH resize handling
+#
+# A terminal resize while blocked on a prompt interrupts the read (raising
+# _Resized out of input()) so the immediate-mode loop repaints at the new size.
+# The handler only fires while a prompt is actually reading, so a resize can
+# never abort a screen's post-prompt network I/O.
+# ---------------------------------------------------------------------------
+
+
+def test_winch_handler_raises_only_while_awaiting_input() -> None:
+    import signal
+
+    from cdda2img import menu_state as ms
+    from cdda2img import metadata_menu as mm
+
+    if not hasattr(signal, "SIGWINCH"):
+        pytest.skip("no SIGWINCH on this platform")
+
+    prev = ms._install_winch()
+    assert prev is not ms._WINCH_UNSET
+    try:
+        handler = signal.getsignal(signal.SIGWINCH)
+        mm._AWAITING_INPUT = False
+        handler(signal.SIGWINCH, None)  # not reading → no repaint interrupt
+        mm._AWAITING_INPUT = True
+        with pytest.raises(ms._Resized):
+            handler(signal.SIGWINCH, None)
+    finally:
+        mm._AWAITING_INPUT = False
+        ms._restore_winch(prev)
+
+
+def test_winch_handler_disarms_after_raise() -> None:
+    """A SIGWINCH burst can't re-enter and raise while the first _Resized unwinds.
+
+    Regression for the rapid-resize crash: the handler clears _AWAITING_INPUT
+    before raising, so a second signal arriving during the unwind is a no-op
+    until the next input() re-arms it. (The old handler also imported inside
+    itself, which corrupted the import machinery under bursts — now resolved
+    once at install time.)
+    """
+    import signal
+
+    from cdda2img import menu_state as ms
+    from cdda2img import metadata_menu as mm
+
+    if not hasattr(signal, "SIGWINCH"):
+        pytest.skip("no SIGWINCH on this platform")
+
+    prev = ms._install_winch()
+    try:
+        handler = signal.getsignal(signal.SIGWINCH)
+        mm._AWAITING_INPUT = True
+        with pytest.raises(ms._Resized):
+            handler(signal.SIGWINCH, None)
+        assert mm._AWAITING_INPUT is False  # disarmed by the handler
+        handler(signal.SIGWINCH, None)  # second signal during unwind: no raise
+    finally:
+        mm._AWAITING_INPUT = False
+        ms._restore_winch(prev)
+
+
+def test_step_swallows_resized_without_applying_nav() -> None:
+    from cdda2img import menu_state as ms
+
+    ctl = MenuController(_disc(), tui=False)
+
+    class _RaisingScreen(ms.Screen):
+        state = MenuState.MAIN
+        renders = 0
+
+        def render(self, ctl):
+            type(self).renders += 1
+
+        def handle_input(self, ctl):
+            raise ms._Resized
+
+    ctl.stack = [_RaisingScreen()]
+    ctl._step()  # must not propagate _Resized
+    assert _RaisingScreen.renders == 1
+    assert isinstance(ctl.stack[-1], _RaisingScreen)  # no nav applied
+
+
+def test_restore_winch_tolerates_unset_sentinel() -> None:
+    from cdda2img import menu_state as ms
+
+    ms._restore_winch(ms._WINCH_UNSET)  # no-op, never raises
