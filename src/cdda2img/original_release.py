@@ -33,14 +33,23 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
-# R3: tolerances for the track-set / runtime verifier. Duration is gated on the
-# SUM across all tracks, not per-track: MB recording lengths and disc frame
-# durations routinely differ by tens of ms per track (rounding, pre-gap
-# accounting), so a tight per-track gate would false-reject correct matches —
-# the sum absorbs that noise while still catching a genuinely different
-# tracklist. (A dead _R3_PER_TRACK_TOLERANCE_MS constant lived here; F-005.)
-_R3_SUM_DURATION_TOLERANCE_MS = 2_000  # ±2 seconds across all tracks
+# R3: sum-of-durations tolerance. MB recording lengths and disc frame durations
+# drift by ~tens-to-low-hundreds of ms per track (second-rounding, pre-gap
+# accounting, mastering differences); across a many-track disc that accumulates
+# — a 19-track compilation legitimately drifts ~3 s from its OWN disc-ID-matched
+# release. A *fixed* ±2 s cap therefore false-rejected the disc's own pressing
+# (the ABBA Gold case), so the tolerance scales with track count, with a floor
+# for short discs. A genuinely different tracklist (a missing/extra track) still
+# blows past it by a whole track's worth of seconds, so the gate keeps its teeth.
+_R3_SUM_DURATION_FLOOR_MS = 2_000  # short discs: ±2 s
+_R3_SUM_DURATION_PER_TRACK_MS = 350  # + per compared track
 _R3_TITLE_FUZZ_CUTOFF = 80  # aggregate token_set_ratio across the tracklist
+
+
+def _sum_duration_tolerance_ms(n_tracks: int) -> int:
+    """Track-count-scaled ±tolerance for the R3 sum-of-durations gate."""
+    return max(_R3_SUM_DURATION_FLOOR_MS, _R3_SUM_DURATION_PER_TRACK_MS * n_tracks)
+
 
 # R14: pre-emphasis ≈ early 1980s. After 1986 it's extremely rare in
 # new releases — a candidate year above this with disc.pre_emphasis=True
@@ -95,7 +104,8 @@ def _verify_release_matches_disc(
       Empty-on-either-side skips (can't compare what isn't there). This is
       the strictest single signal — a track-count mismatch is positive
       evidence that we're looking at the wrong release.
-    * **Sum-of-durations** — within ±2 s when both sides have lengths.
+    * **Sum-of-durations** — within a track-count-scaled tolerance
+      (:func:`_sum_duration_tolerance_ms`) when both sides have lengths.
       Catches structural mismatches (different versions, extra/missing
       track) even when track counts agree. Only valid when *meta* is the
       disc's **own** pressing (track.length agrees with the physical TOC to
@@ -129,19 +139,21 @@ def _verify_release_matches_disc(
         )
         return False
 
-    # Gate 2: sum-of-durations within ±2 s. Frame_to_ms via 1000/75 ≈ 13.33.
-    # Pressing-specific — skipped when verifying a cross-pressing candidate.
+    # Gate 2: sum-of-durations within a track-count-scaled tolerance. Frame_to_ms
+    # via 1000/75 ≈ 13.33. Pressing-specific — skipped for a cross-pressing candidate.
     disc_sum_ms = sum(
         int(t.duration_frames * 1000 / 75) for t in disc.tracks if t.duration_frames
     )
     meta_sum_ms = sum(t.duration_ms or 0 for t in meta.tracks if t.duration_ms)
     if check_durations and disc_sum_ms > 0 and meta_sum_ms > 0:
         diff = abs(disc_sum_ms - meta_sum_ms)
-        if diff > _R3_SUM_DURATION_TOLERANCE_MS:
+        tol = _sum_duration_tolerance_ms(max(len(disc.tracks), len(meta.tracks)))
+        if diff > tol:
             log.debug(
-                "R3 reject (sum durations): disc %.1fs, meta %.1fs (%s)",
+                "R3 reject (sum durations): disc %.1fs, meta %.1fs, tol %.1fs (%s)",
                 disc_sum_ms / 1000,
                 meta_sum_ms / 1000,
+                tol / 1000,
                 meta.mb_release_id or "<no MBID>",
             )
             return False
@@ -252,7 +264,7 @@ def _fetch_release_group(rg_id: str):  # type: ignore[no-untyped-def]
 
 
 def _resolve_rg_original(
-    rg_id: str, disc: RBIDisc
+    rg_id: str, disc: RBIDisc, *, is_own_rg: bool = False
 ) -> tuple[str | None, int | None] | None:
     """Resolve ``(original title, original year)`` from an MB release group.
 
@@ -264,9 +276,17 @@ def _resolve_rg_original(
     first-release-date, so the year MUST come from a release-group fetch, not
     the stub's ``original_release_date`` (which is always ``None`` there).
 
-    Returns ``None`` when the group is unusable as an original — a derivative
-    secondary type (Compilation / Live / Remix / …), an unparseable
-    first-release date, or an R14 pre-emphasis year-cap violation.
+    Returns ``None`` when the group is unusable as an original — an unparseable
+    first-release date, an R14 pre-emphasis year-cap violation, or (fuzzy path
+    only) a derivative secondary type.
+
+    ``is_own_rg`` marks the RG as the disc's **own** release group (the primary
+    path), which disables the derivative-secondary-type rejection: when the
+    disc *itself* is a Compilation / Live / Remix, that derivative IS the
+    product the user is archiving, so its own first-release date is the correct
+    "original release" (ABBA *Gold* → 1992). The rejection still applies on the
+    fuzzy-guess path, where a compilation RG stumbled onto by text search would
+    otherwise attribute its date to a studio album.
 
     Does NOT verify the disc tracklist against a release — that gate belongs to
     the caller, because the two paths verify *different* releases (the disc's
@@ -278,11 +298,13 @@ def _resolve_rg_original(
 
     # Reject derivative release groups (Compilation, Live, Remix, etc.) —
     # their "first release date" is the earliest derivative date, not the
-    # underlying album's first appearance.
-    secondary = set(rg.get("secondary-type-list") or [])
-    if secondary & _DERIVATIVE_SECONDARY_TYPES:
-        log.debug("RG %s rejected (secondary types: %s)", rg_id, sorted(secondary))
-        return None
+    # underlying album's first appearance. Skipped for the disc's own RG
+    # (is_own_rg): a compilation disc's own first release IS its original.
+    if not is_own_rg:
+        secondary = set(rg.get("secondary-type-list") or [])
+        if secondary & _DERIVATIVE_SECONDARY_TYPES:
+            log.debug("RG %s rejected (secondary types: %s)", rg_id, sorted(secondary))
+            return None
 
     year = _parse_year(rg.get("first-release-date") or "")
     if year is None:
@@ -318,7 +340,7 @@ def _find_original_release_via_rg(
     rg_id = disc.mb_release_group_id
     if not rg_id:
         return (False, None, None)
-    resolved = _resolve_rg_original(rg_id, disc)
+    resolved = _resolve_rg_original(rg_id, disc, is_own_rg=True)
     if resolved is None:
         return (False, None, None)
     # R3: gate the RG identification against the disc tracklist.

@@ -101,28 +101,77 @@ def test_returns_earliest_release_from_rg():
     assert year == 1983
 
 
-def test_rejects_compilation_secondary_type():
-    disc = _disc()
+def test_own_rg_compilation_is_accepted():
+    """The disc's OWN release group being a Compilation is accepted.
+
+    A compilation disc (e.g. ABBA *Gold*) IS the product the user is
+    archiving, so its own first-release date is the correct original release.
+    The derivative filter applies only to guessed fuzzy candidates
+    (test_fuzzy_path_still_rejects_derivative_candidate).
+    """
+    disc = _disc(album="Gold: Greatest Hits", release_date="1992")
     with (
         patch(
             "cdda2img.original_release._fetch_release_group",
-            return_value=_rg(secondary=["Compilation"]),
+            return_value=_rg(
+                title="Gold: Greatest Hits",
+                first_date="1992",
+                secondary=["Compilation"],
+            ),
         ),
         _no_fuzzy(),
     ):
-        assert find_original_release(disc) == (False, None, None)
+        found, title, year = find_original_release(disc)
+    assert found is True
+    assert title == "Gold: Greatest Hits"
+    assert year == 1992
 
 
-def test_rejects_live_secondary_type():
-    disc = _disc()
+def test_own_rg_live_is_accepted():
+    """The disc's OWN release group being Live is likewise accepted."""
+    disc = _disc(album="Live at Wembley", release_date="1986")
     with (
         patch(
             "cdda2img.original_release._fetch_release_group",
-            return_value=_rg(secondary=["Live"]),
+            return_value=_rg(
+                title="Live at Wembley", first_date="1986", secondary=["Live"]
+            ),
         ),
         _no_fuzzy(),
     ):
-        assert find_original_release(disc) == (False, None, None)
+        found, title, year = find_original_release(disc)
+    assert found is True
+    assert title == "Live at Wembley"
+    assert year == 1986
+
+
+def test_fuzzy_path_still_rejects_derivative_candidate():
+    """The derivative filter still applies to GUESSED fuzzy candidates.
+
+    A studio-album disc whose text search stumbles onto a compilation RG must
+    not inherit that compilation's date — only the disc's OWN RG is trusted
+    unconditionally (is_own_rg).
+    """
+    disc = _disc(album="Some Studio Album", rg_id=None)
+    fake_search = [
+        DiscMeta(
+            album="Some Studio Album",
+            mb_release_group_id="rg-comp",
+            release_date="1999",
+        )
+    ]
+    with (
+        patch("cdda2img.mb_lookup.search_releases", return_value=fake_search),
+        patch(
+            "cdda2img.original_release._fetch_release_group",
+            return_value=_rg(
+                title="Some Studio Album",
+                first_date="1999",
+                secondary=["Compilation"],
+            ),
+        ),
+    ):
+        assert find_original_release_fuzzy(disc) == (False, None, None)
 
 
 def test_returns_trio_even_when_disc_is_the_original():
@@ -522,13 +571,39 @@ def test_r3_verifier_accepts_durations_within_tolerance() -> None:
 
 
 def test_r3_verifier_rejects_durations_outside_tolerance() -> None:
-    """Sum-of-durations beyond ±2 s → reject (positive evidence)."""
+    """Sum-of-durations beyond the tolerance → reject (positive evidence)."""
     from cdda2img.original_release import _verify_release_matches_disc
 
-    # disc total = 8 s. meta total = 20 s. diff = 12 s, well past 2 s.
+    # 2 tracks → tolerance floors at 2 s. disc total = 8 s, meta = 20 s, diff 12 s.
     disc = _disc_with_tracks([(1, 300, "Same", None), (2, 300, "Same", None)])
     meta = _meta_with_tracks([(1, 10000, "Same", None), (2, 10000, "Same", None)])
     assert _verify_release_matches_disc(meta, disc) is False
+
+
+def test_r3_verifier_scales_duration_tolerance_with_track_count() -> None:
+    """A many-track disc drifting >2 s from its OWN release still verifies.
+
+    The ABBA Gold regression: MB recording-length sums vs disc frame-durations
+    accumulate ~150 ms/track, so a 19-track disc drifts ~3 s — past the old
+    fixed ±2 s cap but well within the track-count-scaled tolerance. A genuinely
+    different tracklist (a whole extra track) still exceeds it.
+    """
+    from cdda2img.original_release import _verify_release_matches_disc
+
+    # 19 tracks, each disc frame-duration ~150 ms shorter than the meta length
+    # → ~2.85 s aggregate drift (past 2 s, within 350 ms x 19 = 6.65 s).
+    disc = _disc_with_tracks([(i, 15000, f"T{i}", None) for i in range(1, 20)])
+    meta = _meta_with_tracks([
+        (i, 15000 * 1000 // 75 + 150, f"T{i}", None) for i in range(1, 20)
+    ])
+    assert _verify_release_matches_disc(meta, disc) is True
+
+    # Same track count, but a systematic 400 ms/track difference → 7.6 s aggregate,
+    # past 350 ms x 19 = 6.65 s → the duration gate still rejects (keeps its teeth).
+    meta_off = _meta_with_tracks([
+        (i, 15000 * 1000 // 75 + 400, f"T{i}", None) for i in range(1, 20)
+    ])
+    assert _verify_release_matches_disc(meta_off, disc) is False
 
 
 def test_r3_verifier_rejects_isrc_total_disagreement() -> None:
