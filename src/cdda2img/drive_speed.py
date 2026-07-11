@@ -11,9 +11,9 @@ and, if the drive is throttled, restores it to maximum.
 Reading: there is no Linux ioctl for CD speed. The trustworthy source is MODE SENSE
 page 2A read at the *correct offsets* (max = page[8:10], current = page[14:16] — the
 fields cdrdao drive-info reports; the "page 2A lies" folklore is naive readers using
-the wrong fields). ``c2read --speed-report`` reads exactly those fields (validated
+the wrong fields). ``accudisc speed-report`` reads exactly those fields (validated
 kB/s-identical to cdrdao drive-info at 4X and 40X on the PX-716A) and is the primary
-reader; ``cdrdao drive-info`` remains the fallback when the c2read helper is absent.
+reader; ``cdrdao drive-info`` remains the fallback when the AccuDisc helper is absent.
 
 Setting: the ``CDROM_SELECT_SPEED`` block-device ioctl (proven by cd-paranoia/cdspeedctl)
 needs only device access — no root, unlike a raw SG_IO ``SET CD SPEED``.
@@ -42,8 +42,9 @@ _KBPS_PER_X = 176  # 1x CD = 75 sectors/s * 2352 bytes / 1000 ≈ 176 kB/s
 
 _MAX_READ_RE = re.compile(r"Maximum reading speed:\s*(\d+)\s*kB/s")
 _CUR_READ_RE = re.compile(r"Current reading speed:\s*(\d+)\s*kB/s")
-# c2read --speed-report machine line: "speed max_kbps N current_kbps M ..."
-_C2READ_SPEED_RE = re.compile(r"speed max_kbps (\d+) current_kbps (\d+)")
+# accudisc speed-report machine line: "speed max_kbps N current_kbps M ..."
+# (byte-identical to the c2read prototype's line, so the regex is unchanged.)
+_ACCUDISC_SPEED_RE = re.compile(r"speed max_kbps (\d+) current_kbps (\d+)")
 
 # Candidate Nx values to probe for the drive's real speed ladder; the drive snaps each to a
 # supported speed and we read back the achieved value (so the ladder is the drive's own,
@@ -54,29 +55,31 @@ _SPEED_PROBE = (1, 2, 3, 4, 6, 8, 10, 12, 16, 20, 24, 32, 40, 48)
 def read_drive_speed(device: str) -> tuple[int | None, int | None]:
     """Return ``(current_kbps, max_kbps)``, or ``(None, None)``.
 
-    Primary: ``c2read --speed-report`` (page 2A, cdrdao-identical fields, ~instant).
-    Fallback: ``cdrdao drive-info`` when the c2read helper is unavailable. Never
+    Primary: ``accudisc speed-report`` (page 2A, cdrdao-identical fields, ~instant).
+    Fallback: ``cdrdao drive-info`` when the AccuDisc helper is unavailable. Never
     raises — any failure yields ``(None, None)``.
     """
-    current, maximum = _read_speed_c2read(device)
+    current, maximum = _read_speed_accudisc(device)
     if maximum is not None:
         return current, maximum
     return _read_speed_cdrdao(device)
 
 
-def _read_speed_c2read(device: str) -> tuple[int | None, int | None]:
+def _read_speed_accudisc(device: str) -> tuple[int | None, int | None]:
+    from cdda2img.accudisc_reader import _ACCUDISC
+
     try:
         result = subprocess.run(  # noqa: S603  # LINT-012
-            ["c2read", "--device", device, "--speed-report"],  # noqa: S607  # LINT-012
+            [_ACCUDISC, "--device", device, "speed-report"],  # LINT-012
             capture_output=True,
             text=True,
         )
     except (FileNotFoundError, OSError) as exc:
-        log.debug("c2read --speed-report failed for %s: %s", device, exc)
+        log.debug("accudisc speed-report failed for %s: %s", device, exc)
         return None, None
-    m = _C2READ_SPEED_RE.search(result.stdout)
+    m = _ACCUDISC_SPEED_RE.search(result.stdout)
     if result.returncode != 0 or m is None:
-        log.debug("c2read --speed-report unusable for %s", device)
+        log.debug("accudisc speed-report unusable for %s", device)
         return None, None
     return int(m.group(2)), int(m.group(1))
 

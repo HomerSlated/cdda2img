@@ -1,16 +1,15 @@
 """accudisc_reader: AccuDisc subprocess wrappers — args, combos, progress streaming.
 
-Mirrors test_c2_reader.py but asserts the AccuDisc-specific invocation: subcommand
-form, ``--c2f`` (not ``--c2``), whole-disc read via no ``--count`` (not ``--full``),
-CD-Text / full-TOC as separate lead-in subcommands, ``\\r``-updated stderr progress,
-and the exit contract (0 = ok; no non-fatal ``3``).
+Asserts the AccuDisc machine interface: subcommand form, ``--c2f`` (not ``--c2``),
+whole-disc read via no ``--count``, inline ``--cdtext`` / ``--fulltoc`` lead-in
+capture, ``--progress-fd 1`` machine tokens on stdout, and the exit contract
+(0/3 = completed, 1/2 = fatal).
 """
 
 from __future__ import annotations
 
-import os
+import io
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 
@@ -117,7 +116,7 @@ def test_read_disc_c2_sub_and_speed(monkeypatch: pytest.MonkeyPatch) -> None:
     assert cmd[cmd.index("--speed") + 1] == "8"
 
 
-def test_read_disc_c2_leadin_subcommands_order(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_read_disc_c2_inline_leadin(monkeypatch: pytest.MonkeyPatch) -> None:
     calls = _patch_run(monkeypatch)
     ar.read_disc_c2(
         "/dev/sr0",
@@ -126,25 +125,17 @@ def test_read_disc_c2_leadin_subcommands_order(monkeypatch: pytest.MonkeyPatch) 
         output_cdtext=Path("a.cdtext"),
         output_fulltoc=Path("a.fulltoc"),
     )
-    # Lead-in dumps first (fulltoc, then cdtext), then the audio read.
-    assert calls[0][:4] == [_ACC, "--device", "/dev/sr0", "fulltoc"]
-    assert calls[0][-1] == "a.fulltoc"
-    assert calls[1][:4] == [_ACC, "--device", "/dev/sr0", "cdtext"]
-    assert calls[1][-1] == "a.cdtext"
-    assert calls[2][3] == "read"
+    # Single read pass; lead-in dumps captured inline (one spin-up).
+    (cmd,) = calls
+    assert cmd[3] == "read"
+    assert cmd[cmd.index("--fulltoc") + 1] == "a.fulltoc"
+    assert cmd[cmd.index("--cdtext") + 1] == "a.cdtext"
 
 
-def test_read_disc_c2_cdtext_failure_is_benign(monkeypatch: pytest.MonkeyPatch) -> None:
-    # A no-CD-Text disc makes `cdtext` exit non-zero; must not raise.
-    def _result_for(cmd):
-        if "cdtext" in cmd:
-            return _Result(stderr=b"CD-Text: response too short", returncode=1)
-        return _Result(returncode=0)
-
-    _patch_run(monkeypatch, _result_for)
-    ar.read_disc_c2(
-        "/dev/sr0", Path("a.pcm"), Path("a.c2"), output_cdtext=Path("a.cdtext")
-    )  # no raise
+def test_read_disc_c2_exit_3_is_completed(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Exit 3 = completed with caveats (hard/suspect/residual C2) — not a failure.
+    monkeypatch.setattr(ar.subprocess, "run", lambda *a, **k: _Result(returncode=3))
+    ar.read_disc_c2("/dev/sr0", Path("a.pcm"), Path("a.c2"))  # no raise
 
 
 def test_read_disc_c2_exit_1_raises(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -189,41 +180,48 @@ def test_read_span_exit_1_raises(monkeypatch: pytest.MonkeyPatch) -> None:
         ar.read_span("/dev/sr0", 0, 10, Path("w.pcm"))
 
 
-# ── progress streaming (\\r-updated stderr line) ──────────────────────────────
+def test_read_span_exit_3_is_completed(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(ar.subprocess, "run", lambda *a, **k: _Result(returncode=3))
+    ar.read_span("/dev/sr0", 0, 10, Path("w.pcm"))  # no raise
+
+
+# ── progress streaming (--progress-fd 1 machine tokens on stdout) ─────────────
 
 
 class _FakeProc:
-    """Popen stand-in: stderr is a real pipe fd (os.read reads it), plus returncode.
+    """Popen stand-in: stdout yields the --progress-fd machine lines; returncode set.
 
-    A real fd is needed because _run_with_progress reads via os.read(fileno);
-    the bytes are pre-written into the pipe and the write end closed so os.read
-    returns them then b"" at EOF.
+    stderr is written to a real TemporaryFile by _run_with_progress (which the
+    mock ignores), so only stdout + wait()/returncode need faking here.
     """
 
-    def __init__(self, stderr_bytes: bytes, returncode: int = 0) -> None:
-        r, w = os.pipe()
-        os.write(w, stderr_bytes)
-        os.close(w)
-        self._r = r
-        self.stderr = SimpleNamespace(fileno=lambda: r)
+    def __init__(self, stdout_lines: str, returncode: int = 0) -> None:
+        self.stdout = io.StringIO(stdout_lines)
         self.returncode = returncode
 
     def wait(self) -> int:
-        os.close(self._r)
         return self.returncode
 
 
-def test_read_disc_c2_streams_stderr_progress(monkeypatch: pytest.MonkeyPatch) -> None:
-    # AccuDisc updates one stderr line in place with \r, then a \n + summary.
-    stderr = (
-        b"  23 / 100 sectors (23.0%)\r"
-        b"  100 / 100 sectors (100.0%) \n"
-        b"accudisc read summary\n"
-        b"  sectors read : 100\n"
+def _patch_popen(monkeypatch, stdout_lines: str, returncode: int = 0) -> dict:
+    captured: dict = {}
+
+    def _popen(cmd, **k):
+        captured["cmd"] = cmd
+        return _FakeProc(stdout_lines, returncode)
+
+    monkeypatch.setattr(ar.subprocess, "Popen", _popen)
+    return captured
+
+
+def test_read_disc_c2_streams_progress(monkeypatch: pytest.MonkeyPatch) -> None:
+    # --progress-fd 1 machine tokens on stdout, then the summary line.
+    stdout = (
+        "progress 23 100\n"
+        "progress 100 100\n"
+        "summary hard=0 c2=0 recovered=0 suspect=0 rereads=0 slips=0\n"
     )
-    monkeypatch.setattr(
-        ar.subprocess, "Popen", lambda *a, **k: _FakeProc(stderr, returncode=0)
-    )
+    captured = _patch_popen(monkeypatch, stdout, returncode=0)
     seen: list[tuple[int, int]] = []
     ar.read_disc_c2(
         "/dev/sr0",
@@ -232,12 +230,22 @@ def test_read_disc_c2_streams_stderr_progress(monkeypatch: pytest.MonkeyPatch) -
         progress_cb=lambda d, t: seen.append((d, t)),
     )
     assert seen == [(23, 100), (100, 100)]
+    # The machine channel is requested on fd 1, with the human line muted.
+    cmd = captured["cmd"]
+    assert cmd[cmd.index("--progress-fd") + 1] == "1"
+    assert "-q" in cmd
+
+
+def test_read_disc_c2_progress_exit_3_ok(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Exit 3 via the progress path is completed-with-caveats, not a failure.
+    _patch_popen(monkeypatch, "progress 100 100\n", returncode=3)
+    ar.read_disc_c2(
+        "/dev/sr0", Path("a.pcm"), Path("a.c2"), progress_cb=lambda d, t: None
+    )  # no raise
 
 
 def test_read_disc_c2_progress_failure_raises(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(
-        ar.subprocess, "Popen", lambda *a, **k: _FakeProc(b"fatal\n", returncode=1)
-    )
+    _patch_popen(monkeypatch, "", returncode=1)
     with pytest.raises(RuntimeError, match="exit 1"):
         ar.read_disc_c2(
             "/dev/sr0", Path("a.pcm"), Path("a.c2"), progress_cb=lambda d, t: None

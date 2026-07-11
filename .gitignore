@@ -83,6 +83,15 @@ extracted/
 album/
 *.extracted/
 
+# External / deprecated engine trees — kept local only, never shipped.
+# AccuDisc is a separate project (https://github.com/HomerSlated/accudisc); we
+# keep a local snapshot in tools/accudisc/ purely for testing/production, the
+# same way cdrdao / cd-paranoia are external dependencies. c2read is the
+# deprecated prototype AccuDisc replaced — its source is kept locally for
+# historical reference (and remains in git history), not tracked going forward.
+tools/accudisc/
+tools/c2read/
+
 # Machine-local Claude Code context (see CLAUDE.md for the committed portion)
 CLAUDE.local.md
 .claude/
