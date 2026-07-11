@@ -18,6 +18,10 @@ import importlib.metadata
 import logging
 import socket
 import time
+from collections import Counter
+from collections.abc import Iterable
+from dataclasses import replace
+from datetime import date
 
 from cdda2img.lookup_result import DiscMeta, TrackMeta
 
@@ -166,6 +170,135 @@ def _parse_xmcd(lines: list[str], n_tracks: int) -> DiscMeta:
         source="cddb",
         tracks=tracks,
     )
+
+
+# ---------------------------------------------------------------------------
+# Candidate reduction — heuristic prune + per-field plurality vote
+# ---------------------------------------------------------------------------
+#
+# gnudb returns many TOC-matched entries for one disc (10 for ABBA Gold), and
+# they are crowd-sourced free text: typo'd titles, and DYEAR values that are
+# often the *recording* year, not the CD's release year (ABBA Gold carried
+# DYEAR=1974 — a decade before the CD existed). Rather than trust the arbitrary
+# first entry, collapse the whole set to one consensus record: prune the
+# structurally-bogus, then take the per-field plurality of what survives. Fully
+# deterministic and network-free; the result still enters the resolver at the
+# lowest (fill-blank) trust, so any richer source overrides it.
+
+_CD_ERA_MIN_YEAR = 1982  # first commercial CDs shipped Oct 1982
+
+
+def _year_of(release_date: str | None) -> int | None:
+    if not release_date:
+        return None
+    try:
+        return int(str(release_date)[:4])
+    except ValueError:
+        return None
+
+
+def _year_is_plausible(release_date: str | None, max_year: int) -> bool:
+    """True when *release_date*'s year could be a real CD release date.
+
+    A year before 1982 (no CD could be sold) or in the future is a submitter
+    error — almost always the recording / original-release year rather than
+    this CD's release date, which is a different field entirely.
+    """
+    y = _year_of(release_date)
+    return y is not None and _CD_ERA_MIN_YEAR <= y <= max_year
+
+
+def _vote(values: Iterable[str | None]) -> str | None:
+    """Plurality winner among non-blank *values*.
+
+    Comparison is normalised (``strip().casefold()``) so spelling/case variants
+    of the same value vote together; the returned form is the most common raw
+    spelling of the winning group. Both tiers break ties lexicographically so
+    the result is a total, deterministic order (there is no interactive picker).
+    """
+    groups: dict[str, Counter[str]] = {}
+    for v in values:
+        s = (v or "").strip()
+        if s:
+            groups.setdefault(s.casefold(), Counter())[s] += 1
+    if not groups:
+        return None
+    best_key = min(groups, key=lambda k: (-sum(groups[k].values()), k))
+    forms = groups[best_key]
+    return min(forms, key=lambda f: (-forms[f], f))
+
+
+def _track_field(metas: list[DiscMeta], i: int, attr: str) -> Iterable[str | None]:
+    """Yield the *i*-th track's *attr* across every candidate that has it.
+
+    All candidates come from the same disc-ID query and are parsed with the same
+    track count, so index *i* addresses the same track number in each.
+    """
+    for m in metas:
+        if i < len(m.tracks):
+            yield getattr(m.tracks[i], attr)
+
+
+def consensus_from_candidates(
+    candidates: list[DiscMeta], *, max_year: int | None = None
+) -> tuple[DiscMeta | None, int]:
+    """Collapse CDDB candidates to one consensus ``DiscMeta``.
+
+    Stage 1 (heuristic prune): null any implausible ``release_date`` (year
+    outside 1982..*max_year*), and drop candidates with neither an album nor any
+    title (pure junk). Sparse-but-valid entries are kept — an empty field casts
+    no vote, so it can only help. Stage 2 (plurality): per-field majority vote
+    across the survivors — album, artist, release_date, and each track's title
+    and performer independently.
+
+    Returns ``(consensus, years_pruned)``; ``consensus`` is None when nothing
+    usable survives. *max_year* defaults to next year (allows brand-new
+    releases) and is injectable for deterministic tests.
+    """
+    if not candidates:
+        return None, 0
+    if max_year is None:
+        max_year = date.today().year + 1
+
+    years_pruned = 0
+    survivors: list[DiscMeta] = []
+    for m in candidates:
+        if not m.album and not any(t.title for t in m.tracks):
+            continue  # degenerate: nothing to contribute
+        release_date = m.release_date
+        if release_date is not None and not _year_is_plausible(release_date, max_year):
+            years_pruned += 1
+            release_date = None
+        survivors.append(replace(m, release_date=release_date))
+    if not survivors:
+        return None, years_pruned
+
+    n_tracks = max(len(m.tracks) for m in survivors)
+    voted_tracks: list[TrackMeta] = []
+    for i in range(n_tracks):
+        title = _vote(_track_field(survivors, i, "title"))
+        performer = _vote(_track_field(survivors, i, "performer"))
+        if title or performer:
+            voted_tracks.append(
+                TrackMeta(number=i + 1, title=title, performer=performer)
+            )
+
+    # Vote every string disc-field a candidate might carry, not just the three
+    # _parse_xmcd populates today: a consensus record must never silently drop a
+    # field an input set. (Real CDDB fills only album/artist/release_date/titles,
+    # so the extra votes return None and this is a no-op there.)
+    consensus = DiscMeta(
+        album=_vote(m.album for m in survivors),
+        artist=_vote(m.artist for m in survivors),
+        release_date=_vote(m.release_date for m in survivors),
+        label=_vote(m.label for m in survivors),
+        country=_vote(m.country for m in survivors),
+        catalog_number=_vote(m.catalog_number for m in survivors),
+        barcode=_vote(m.barcode for m in survivors),
+        source="cddb",
+        tracks=voted_tracks,
+    )
+    return consensus, years_pruned
 
 
 # ---------------------------------------------------------------------------

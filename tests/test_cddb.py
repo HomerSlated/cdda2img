@@ -6,8 +6,13 @@ in-track pre-gap, producing an off-by-1 disc-ID and 404s at AccurateRip.
 from __future__ import annotations
 
 from cdda2img import cddb
-from cdda2img.cddb import _parse_xmcd, compute_cddb_disc_id
-from cdda2img.lookup_result import DiscMeta
+from cdda2img.cddb import (
+    _parse_xmcd,
+    _year_is_plausible,
+    compute_cddb_disc_id,
+    consensus_from_candidates,
+)
+from cdda2img.lookup_result import DiscMeta, TrackMeta
 
 # Sheryl Crow — Sheryl Crow (1996), 14 tracks. Whipper and EAC both compute
 # CDDB id e00e160e for this disc; AccurateRip serves a 1529-byte dBAR at the
@@ -163,3 +168,125 @@ def test_query_nsecs_includes_lead_in() -> None:
     # freedb, whipper) emit 3608 for Sheryl Crow; the old lead-in-omitting
     # `(disc_last_lsn - track_lsns[0] + 1) // 75` emitted 3605.
     assert cddb._query_nsecs(_SHERYL_CROW_LAST_LSN) == 3608
+
+
+# ---------------------------------------------------------------------------
+# consensus_from_candidates — heuristic prune + per-field plurality vote
+# ---------------------------------------------------------------------------
+
+
+def _cand(album, year, titles, artist="ABBA"):
+    """Build a CDDB-shaped DiscMeta candidate from a title list."""
+    tracks = [TrackMeta(number=i + 1, title=t) for i, t in enumerate(titles)]
+    return DiscMeta(
+        album=album, artist=artist, release_date=year, source="cddb", tracks=tracks
+    )
+
+
+def test_year_is_plausible_boundary():
+    # 1982 = first commercial CD; anything earlier is a submitter error.
+    assert not _year_is_plausible("1981", 2030)
+    assert _year_is_plausible("1982", 2030)
+    assert _year_is_plausible("1992", 2030)
+    assert not _year_is_plausible("2099", 2030)  # future
+    assert not _year_is_plausible(None, 2030)
+    assert not _year_is_plausible("", 2030)
+
+
+def test_consensus_prunes_pre_cd_years_then_votes_plurality():
+    """The ABBA Gold shape: several 1974 entries + real 1992/1996 ones. The
+    pre-CD years are nulled, and the surviving plurality year wins."""
+    cands = [
+        _cand("ABBA Gold", "1974", ["Dancing Queen", "Waterloo"]),
+        _cand("Gold: Greatest Hits", "1974", ["Dancing Queen", "Waterloo"]),
+        _cand("Gold - Greatest Hits", "1992", ["Dancing Queen", "Waterloo"]),
+        _cand("Greatest Hits", "1992", ["Dancing Queen", "Waterloo"]),
+        _cand("Gold", "1996", ["Dancing Queen", "Waterloo"]),
+    ]
+    consensus, pruned = consensus_from_candidates(cands, max_year=2030)
+    assert pruned == 2  # the two 1974 entries
+    assert consensus is not None
+    assert consensus.release_date == "1992"  # plurality of the plausible years
+    assert consensus.tracks[0].title == "Dancing Queen"
+    assert consensus.tracks[1].title == "Waterloo"
+
+
+def test_consensus_votes_out_typos_per_track():
+    """A single typo'd title is outvoted per track, independent of other fields."""
+    cands = [
+        _cand("Gold", "1992", ["Dancing Queen", "Waterloo"]),
+        _cand("Gold", "1992", ["Dancing Queeen", "Waterloo"]),  # typo track 1
+        _cand("Gold", "1992", ["Dancing Queen", "Watrloo"]),  # typo track 2
+    ]
+    consensus, _ = consensus_from_candidates(cands, max_year=2030)
+    assert consensus is not None
+    assert consensus.tracks[0].title == "Dancing Queen"
+    assert consensus.tracks[1].title == "Waterloo"
+
+
+def test_consensus_normalises_case_and_whitespace_for_voting():
+    """Case/whitespace variants vote together; the winning group's most common
+    raw spelling is returned."""
+    cands = [
+        _cand("Gold", "1992", ["Dancing Queen"]),
+        _cand("Gold", "1992", ["dancing queen "]),
+        _cand("Gold", "1992", ["Dancing Queen"]),
+    ]
+    consensus, _ = consensus_from_candidates(cands, max_year=2030)
+    assert consensus is not None
+    # "dancing queen" is the plurality key (3); raw plurality is "Dancing Queen".
+    assert consensus.tracks[0].title == "Dancing Queen"
+
+
+def test_consensus_all_years_implausible_leaves_date_blank():
+    cands = [
+        _cand("Gold", "1974", ["Waterloo"]),
+        _cand("Gold", "1975", ["Waterloo"]),
+    ]
+    consensus, pruned = consensus_from_candidates(cands, max_year=2030)
+    assert pruned == 2
+    assert consensus is not None
+    assert consensus.release_date is None  # no plausible year survived
+    assert consensus.tracks[0].title == "Waterloo"
+
+
+def test_consensus_drops_degenerate_candidates():
+    """A candidate with no album AND no titles contributes nothing and is
+    dropped so it cannot dilute the album vote."""
+    cands = [
+        _cand("Real Album", "1992", ["Real Title"]),
+        DiscMeta(
+            album=None, artist=None, release_date="1992", source="cddb", tracks=[]
+        ),
+    ]
+    consensus, _ = consensus_from_candidates(cands, max_year=2030)
+    assert consensus is not None
+    assert consensus.album == "Real Album"
+    assert consensus.tracks[0].title == "Real Title"
+
+
+def test_consensus_tie_breaks_lexicographically():
+    """Two equally-common values break to the lexicographically-first (total,
+    deterministic order — there is no interactive picker)."""
+    cands = [
+        _cand("Bravo", "1992", ["x"]),
+        _cand("Alpha", "1992", ["x"]),
+    ]
+    consensus, _ = consensus_from_candidates(cands, max_year=2030)
+    assert consensus is not None
+    assert consensus.album == "Alpha"
+
+
+def test_consensus_empty_input():
+    assert consensus_from_candidates([]) == (None, 0)
+
+
+def test_consensus_sparse_entries_still_contribute_their_votes():
+    """A half-filled entry casts votes only where it has data — never harmful."""
+    cands = [
+        _cand("Gold", "1992", ["A", "B", "C"]),
+        _cand("Gold", "1992", ["A", None, None]),  # only track 1
+    ]
+    consensus, _ = consensus_from_candidates(cands, max_year=2030)
+    assert consensus is not None
+    assert [t.title for t in consensus.tracks] == ["A", "B", "C"]

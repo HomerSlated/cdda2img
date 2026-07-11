@@ -634,6 +634,21 @@ album-consistent set the agreed-facts logic already establishes — and pins the
 album the code already identified*. JT target case unaffected: all 5 finalists share the Joshua Tree
 RG → all 5 scored.
 
+**RG-tie tiebreak — barcode plurality (added 2026-07-09, user-approved).** When the candidates split
+*evenly* across release-groups (`_plurality_release_group` returns None — e.g. ABBA *Gold: Greatest
+Hits* vs *Forever Gold*, two different compilations sharing one disc-ID), the album is still
+recoverable from the candidates' own barcodes: a barcode held by a strict plurality (≥ 2 releases,
+unique max) that resolves to a **single** RG pins that RG (`_plurality_release_group_by_barcode`,
+wired as `_plurality_release_group(matches) or _plurality_release_group_by_barcode(matches)`). This
+is the `barcode_plurality` key doing *RG-establishment*, not just pressing selection — a principled
+extension of the same same-namespace signal (§1a). It fires only on positive barcode evidence: a
+plurality barcode spanning two RGs, or a barcode tie, still declines, so the TOC-collision protection
+above is preserved (no barcode plurality ⇒ no pin ⇒ leave blank for the menu). Discovered via the
+ABBA Gold "release date 1974" bug: MB applied nothing on the 2/2 RG tie, so CDDB's `DYEAR` (1974)
+filled the blank. NB this was *downstream* of a separate, prerequisite bug — `disc_id_from_rbi`
+computed the lead-out from `total_frames` (sum of pregap+duration), omitting a track-1 head offset
+(this disc's `start_frame=33`) → wrong MB disc-ID → 404 → the multi-match path never ran at all.
+
 **Behaviour change (call out + test):** the rung **refines the agreed-facts path** — instead of
 "merge only the facts every candidate agrees on" over that set, it "picks the best pressing within
 that set" (pins `mb_release_id` + that release's catalogue fields). Previously `mb_release_id`

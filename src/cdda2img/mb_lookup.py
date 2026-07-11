@@ -114,7 +114,19 @@ def disc_id_from_rbi(disc: RBIDisc) -> str | None:
     tracks = sorted(disc.tracks, key=lambda t: t.track_number)
     # INDEX 01 (audio start) per track = start_frame + pregap_frames + lead-in
     offsets = [t.start_frame + t.pregap_frames + _LEAD_IN_SECTORS for t in tracks]
-    lead_out = disc.total_frames + _LEAD_IN_SECTORS
+    # Lead-out is the absolute end LBA of the LAST track, NOT disc.total_frames
+    # (= sum of pregap+duration). Those differ whenever track 1 does not start at
+    # PCM frame 0: a leading offset before track 1 (e.g. this disc's track-1
+    # start_frame=33) is real geometry MB encodes in its disc ID, but is excluded
+    # from playable runtime. start_frame is absolute/cumulative, so the last
+    # track's end is its own start + pregap + duration. Using total_frames here
+    # shortened the lead-out by that head offset, producing a wrong SHA-1 → a
+    # spurious 404 → the whole pipeline silently fell back to CDDB (which derives
+    # its own length from disc_last_lsn and was unaffected).
+    last = tracks[-1]
+    lead_out = (
+        last.start_frame + last.pregap_frames + last.duration_frames + _LEAD_IN_SECTORS
+    )
     return compute_disc_id(
         first_track=tracks[0].track_number,
         last_track=tracks[-1].track_number,
@@ -1028,6 +1040,49 @@ def _plurality_release_group(matches: list[DiscMeta]) -> str | None:
     return ranked[0][0]
 
 
+def _plurality_release_group_by_barcode(matches: list[DiscMeta]) -> str | None:
+    """Break a release-group tie using barcode plurality.
+
+    When the candidates split evenly across release-groups (so
+    ``_plurality_release_group`` returns None — as when one disc TOC maps to two
+    different compilations, e.g. ABBA *Gold* vs *Forever Gold*), a barcode shared
+    by a strict plurality of the releases is strong same-namespace evidence of the
+    actual product: releases carrying the same service barcode are the same
+    commercial release. If the unique-plurality barcode (held by >= 2 releases,
+    strictly more than any other) resolves to a *single* release-group, adopt that
+    RG so the pressing ladder can run over it.
+
+    Returns None when no barcode holds a strict >= 2 plurality, or when the
+    plurality barcode spans more than one release-group (the barcode does not pin
+    the album — prefer no answer). The barcode is a same-namespace service key
+    legitimate for album/pressing selection (identifier_trust_model.md §1a),
+    unlike the archival on-disc MCN, which plays no part here.
+    """
+    from cdda2img.barcode import normalize_barcode
+
+    counts: Counter[str] = Counter()
+    rgs_by_barcode: dict[str, set[str]] = {}
+    for m in matches:
+        # require_check_digit=False to match _select_release_lexicographic, the
+        # rung this feeds: the two must group the same candidate barcodes
+        # identically. (Barcodes here are already R13-validated at _parse_release
+        # ingress, so this is coherence insurance, not a behaviour change today.)
+        bc = normalize_barcode(m.barcode or "", require_check_digit=False)
+        if not bc or not m.mb_release_group_id:
+            continue
+        counts[bc] += 1
+        rgs_by_barcode.setdefault(bc, set()).add(m.mb_release_group_id)
+    if not counts:
+        return None
+    ranked = counts.most_common()
+    if ranked[0][1] < 2:  # need >= 2 releases agreeing to call it a plurality
+        return None
+    if len(ranked) > 1 and ranked[0][1] == ranked[1][1]:
+        return None  # tie on barcode too — no evidence
+    winning_rgs = rgs_by_barcode[ranked[0][0]]
+    return next(iter(winning_rgs)) if len(winning_rgs) == 1 else None
+
+
 def _is_consistent(meta: DiscMeta, disc: RBIDisc) -> bool:
     """True unless *meta* contradicts the disc's per-track ISRCs.
 
@@ -1276,7 +1331,12 @@ def _prepop_multimatch(
     # no longer narrows the candidates (identifier_trust_model.md §1a — the MCN is
     # archival, never a disambiguator). Pressing selection within the RG rests on
     # the candidates' own barcodes via the lexicographic rung.
-    rg = _plurality_release_group(matches)
+    # Album by plurality release-group; on an even RG split fall through to
+    # barcode plurality (§10.3 barcode_plurality as an RG-tiebreak — user-approved
+    # 2026-07-09). Only fires on positive barcode evidence; otherwise still bails.
+    rg = _plurality_release_group(matches) or _plurality_release_group_by_barcode(
+        matches
+    )
     if rg is not None:
         rg_subset = [m for m in matches if m.mb_release_group_id == rg]
         winner, via = _select_release_lexicographic(rg_subset, disc, preferred_country)

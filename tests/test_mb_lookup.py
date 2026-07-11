@@ -24,6 +24,7 @@ from cdda2img.mb_lookup import (
     _parse_release,
     _parse_year,
     _plurality_release_group,
+    _plurality_release_group_by_barcode,
     _resolve_via_isrc_tally,
     _select_release_lexicographic,
     compute_disc_id,
@@ -155,7 +156,8 @@ def test_disc_id_from_rbi_two_tracks():
 
 
 def test_disc_id_from_rbi_lead_out():
-    """Lead-out equals total_frames + 150."""
+    """Lead-out is the last track's absolute end + 150 (== total_frames + 150 only
+    because track 1 starts at frame 0 here; see the track1-head-offset test)."""
     disc = _make_disc(tracks=[(1, 0, 10000), (2, 10000, 5000)])
     # total_frames = 15000; lead_out LBA = 15150
     # offsets: [150, 10150]
@@ -181,6 +183,51 @@ def test_disc_id_from_rbi_pregap():
     # lead_out: total_frames + 150 = (10000 + 150 + 5000) + 150 = 15300
     expected = compute_disc_id(1, 2, [150, 10300], 15300)
     assert disc_id_from_rbi(disc) == expected
+
+
+def test_disc_id_from_rbi_track1_head_offset_uses_last_track_end():
+    """Track 1 not starting at PCM frame 0 must not shorten the lead-out.
+
+    Regression for the ABBA Gold (1974) bug: this pressing has a 33-frame lead
+    offset before track 1 (start_frame=33). The lead-out must be the LAST track's
+    absolute end (start+pregap+duration+150), NOT disc.total_frames+150 — the
+    latter omits that 33-frame head, yielding a wrong SHA-1, a spurious MB 404,
+    and a silent fall-through to CDDB's unreliable DYEAR. The exact disc ID is
+    the real MusicBrainz one, live-confirmed to return the 4 ABBA Gold releases.
+    """
+    # Real INDEX-01 offsets (absolute, +150) from the disc; contiguous pregap=0.
+    offsets = [
+        183,
+        17545,
+        35720,
+        54045,
+        70058,
+        90633,
+        109695,
+        130995,
+        153145,
+        167283,
+        182408,
+        206883,
+        225858,
+        245570,
+        267208,
+        281883,
+        299733,
+        317733,
+        335083,
+    ]
+    lead_out = 347358
+    starts = [o - 150 for o in offsets]
+    durs = [offsets[i + 1] - offsets[i] for i in range(len(offsets) - 1)]
+    durs.append(lead_out - offsets[-1])
+    disc = _make_disc(tracks=[(i + 1, starts[i], durs[i]) for i in range(len(offsets))])
+    assert disc.tracks[0].start_frame == 33  # the head offset that broke the id
+    assert disc_id_from_rbi(disc) == "xu6JNKjjqvue0dEfEKJ5d7Ffipw-"
+    # The old total_frames+150 formula would have produced a different (wrong) id.
+    assert disc_id_from_rbi(disc) != compute_disc_id(
+        1, 19, offsets, disc.total_frames + 150
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -682,6 +729,104 @@ def test_prepopulate_multimatch_adopts_plurality_release_group():
     assert r.disc.mb_release_group_id == "rg-elim"
     assert r.match_count == 5
     assert r.isrc_disambiguated is False
+
+
+# ---------------------------------------------------------------------------
+# _plurality_release_group_by_barcode — RG-tie tiebreak (user-approved 2026-07-09)
+# ---------------------------------------------------------------------------
+
+
+def test_barcode_plurality_breaks_even_rg_split():
+    """ABBA Gold: 4 releases split 2/2 across two RGs; the plurality barcode
+    (held by both releases of one RG) pins that RG."""
+    matches = [
+        DiscMeta(album="Gold", mb_release_group_id="rg-gold", barcode="0731451700729"),
+        DiscMeta(album="Gold", mb_release_group_id="rg-gold", barcode="0731451700729"),
+        DiscMeta(album="Fvr", mb_release_group_id="rg-fvr", barcode="0731453308329"),
+        DiscMeta(album="Fvr", mb_release_group_id="rg-fvr", barcode="0731453335523"),
+    ]
+    assert _plurality_release_group(matches) is None  # 2/2 RG tie
+    assert _plurality_release_group_by_barcode(matches) == "rg-gold"
+
+
+def test_barcode_plurality_none_when_barcode_spans_two_rgs():
+    """A barcode plurality that does not resolve to a single RG pins nothing."""
+    matches = [
+        DiscMeta(album="A", mb_release_group_id="rg-x", barcode="0731451700729"),
+        DiscMeta(album="B", mb_release_group_id="rg-y", barcode="0731451700729"),
+        DiscMeta(album="C", mb_release_group_id="rg-z", barcode="4012345678901"),
+    ]
+    assert _plurality_release_group_by_barcode(matches) is None
+
+
+def test_barcode_plurality_none_on_barcode_tie():
+    matches = [
+        DiscMeta(album="A", mb_release_group_id="rg-x", barcode="0731451700729"),
+        DiscMeta(album="B", mb_release_group_id="rg-y", barcode="4012345678901"),
+    ]
+    assert _plurality_release_group_by_barcode(matches) is None
+
+
+def test_barcode_plurality_needs_two_agreeing():
+    """A barcode held by a single release is not a plurality (floor of 2)."""
+    matches = [
+        DiscMeta(album="A", mb_release_group_id="rg-x", barcode="0731451700729"),
+        DiscMeta(album="B", mb_release_group_id="rg-y"),  # blank barcode
+    ]
+    assert _plurality_release_group_by_barcode(matches) is None
+
+
+def test_prepopulate_multimatch_barcode_plurality_pins_pressing():
+    """End-to-end: an even RG split with a barcode plurality merges the winning
+    pressing (release_date set) rather than declining. Regression for ABBA Gold
+    being tagged 1974 (CDDB) because MB applied nothing on the 2/2 RG tie."""
+    # Blank baseline (as a no-CD-Text disc arrives), so fill-blank can set album.
+    disc = RBIDisc(album="", artist="", tracks=[RBITocEntry(1, "", "", 0, 18000)])
+    matches = [
+        DiscMeta(
+            album="Gold: Greatest Hits",
+            artist="ABBA",
+            mb_release_id="us92",
+            mb_release_group_id="rg-gold",
+            barcode="0731451700729",
+            country="US",
+            release_date="1992",
+        ),
+        DiscMeta(
+            album="Gold: Greatest Hits",
+            artist="ABBA",
+            mb_release_id="gb92",
+            mb_release_group_id="rg-gold",
+            barcode="0731451700729",
+            country="GB",
+            release_date="1992",
+        ),
+        DiscMeta(
+            album="Forever Gold",
+            artist="ABBA",
+            mb_release_id="gb96a",
+            mb_release_group_id="rg-fvr",
+            barcode="0731453308329",
+            country="GB",
+            release_date="1996",
+        ),
+        DiscMeta(
+            album="Forever Gold",
+            artist="ABBA",
+            mb_release_id="gb96b",
+            mb_release_group_id="rg-fvr",
+            barcode="0731453335523",
+            country="GB",
+            release_date="1996",
+        ),
+    ]
+    with patch("cdda2img.mb_lookup.lookup_disc_id", return_value=matches):
+        r = prepopulate_from_mb(disc, verbose=False, preferred_country=["GB", "US"])
+    assert r.disc.album == "Gold: Greatest Hits"
+    assert r.disc.release_date == "1992"  # was CDDB's 1974 before the fix
+    assert r.disc.country == "GB"  # preferred_country broke the pressing tie
+    assert r.selected_release_id == "gb92"
+    assert r.release_selected_via == "preferred_country"
 
 
 def test_prepopulate_multimatch_rg_tie_leaves_group_unset():
