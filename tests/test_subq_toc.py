@@ -93,7 +93,7 @@ def test_build_geometry_and_pregap():
     assert info.track_lsns == [0, 15]
     assert info.disc_last_lsn == 29
     assert info.prov is not None
-    assert info.prov["toc_source"] == "subq@c2read"
+    assert info.prov["toc_source"] == "subq@accudisc"
 
 
 def test_build_track1_pregap_never_set():

@@ -1679,6 +1679,34 @@ def _collect_metadata_proposals(
     return props
 
 
+def _cddb_consensus(
+    cddb_matches: list[DiscMeta], provenance: dict[str, str], cddb_verbose: bool
+) -> DiscMeta | None:
+    """Collapse gnudb's many TOC-matched entries to one consensus record.
+
+    Heuristic prune (implausible pre-CD years, degenerate entries) then per-field
+    plurality vote, instead of trusting the arbitrary first entry. Records the
+    candidate count and any pruned years in PROV. Still applied at the lowest
+    (fill-blank) precedence by the caller.
+    """
+    from cdda2img.cddb import consensus_from_candidates
+
+    cddb_meta, years_pruned = consensus_from_candidates(cddb_matches)
+    if cddb_matches:
+        provenance["cddb_candidates"] = str(len(cddb_matches))
+        if years_pruned:
+            provenance["cddb_years_pruned"] = str(years_pruned)
+    if cddb_meta is not None and cddb_verbose:
+        extra = (
+            f" (consensus of {len(cddb_matches)} matches)"
+            if len(cddb_matches) > 1
+            else ""
+        )
+        by = f" by {cddb_meta.artist}" if cddb_meta.artist else ""
+        print(f'  CDDB: matched "{cddb_meta.album}"{by}{extra} (lowest priority)')
+    return cddb_meta
+
+
 def _run_metadata_lookups(
     disc: RBIDisc,
     pcm_file: Path,
@@ -1758,11 +1786,7 @@ def _run_metadata_lookups(
             disc, verbose=mb_verbose, preferred_country=preferred_country
         )
 
-    cddb_meta = cddb_matches[0] if cddb_matches else None
-    if cddb_meta is not None and cddb_verbose:
-        extra = f" ({len(cddb_matches)} matches)" if len(cddb_matches) > 1 else ""
-        by = f" by {cddb_meta.artist}" if cddb_meta.artist else ""
-        print(f'  CDDB: matched "{cddb_meta.album}"{by}{extra} (lowest priority)')
+    cddb_meta = _cddb_consensus(cddb_matches, provenance, cddb_verbose)
 
     # MusicBrainz applied first, over the CD-Text baseline.
     disc = mb_result.disc
@@ -2378,15 +2402,15 @@ def _rip_disc_stage(
     """Read the disc, returning (info, rip_type, c2_path).
 
     Normal path (``c2_recovery = off``, the default): cdrdao read-cd — audio + subchannel
-    metadata in one pass. C2 path (``on``, or ``auto`` + drive supports C2): ONE c2read
-    pass captures audio + C2 error-pointer bitmap + raw P-W subchannel + full TOC +
-    CD-Text, and ``subq_toc.build_rip_info`` assembles the disc metadata from those
-    captures (pre-gaps/INDEX/CONTROL from the Q stream, majority-voted MCN/ISRC —
-    structurally immune to cdrdao bug #75). Only if that assembly fails (e.g. an
-    unusable full TOC) does the old two-pass fallback run: ``cdrdao read-toc``
-    (rip_type "c2read+toc").
+    metadata in one pass. C2 path (``on``, or ``auto`` + drive supports C2): ONE AccuDisc
+    ``read`` captures audio + C2 error-pointer bitmap + raw P-W subchannel (plus separate
+    instant ``fulltoc`` / ``cdtext`` lead-in dumps), and ``subq_toc.build_rip_info``
+    assembles the disc metadata from those captures (pre-gaps/INDEX/CONTROL from the Q
+    stream, majority-voted MCN/ISRC — structurally immune to cdrdao bug #75). Only if that
+    assembly fails (e.g. an unusable full TOC) does the old two-pass fallback run:
+    ``cdrdao read-toc`` (rip_type "accudisc+toc").
 
-    Both the cdrdao and c2read paths return RAW PCM (drive offset not applied); the caller
+    Both the cdrdao and AccuDisc paths return RAW PCM (drive offset not applied); the caller
     works raw through AR + ctanalyse and applies apply_offset once, late. Only a cd-paranoia
     *read* fallback (rip_type "cd-paranoia") returns already-corrected PCM.
     """
@@ -2394,13 +2418,13 @@ def _rip_disc_stage(
         cfg.c2_recovery != "off" and _drive_supports_c2(device)
     )
     if use_c2:
-        from cdda2img.c2_reader import read_disc_c2
+        from cdda2img.accudisc_reader import read_disc_c2
 
         sub_file = pcm_file.with_suffix(".sub")
         cdtext_file = pcm_file.with_suffix(".cdtext")
         fulltoc_file = pcm_file.with_suffix(".fulltoc")
 
-        c2_status = "Reading audio + C2 + subchannel (c2read)…"
+        c2_status = "Reading PCM, C2, SUB (AccuDisc)…"
         _ui_status(ui, c2_status)
 
         def _c2_cb(done: int, total: int) -> None:
@@ -2437,15 +2461,15 @@ def _rip_disc_stage(
 
             _ui_status(ui, "Reading disc metadata (cdrdao read-toc)…")
             info = read_toc_metadata(device)
-            return info, "c2read+toc", c2_file
-        return info, "c2read", c2_file
+            return info, "accudisc+toc", c2_file
+        return info, "accudisc", c2_file
 
     info, rip_type = _rip_with_fallback(device, pcm_file, read_offset, ui=ui)
     return info, rip_type, None
 
 
 def _drive_supports_c2(device: str) -> bool:
-    from cdda2img.c2_reader import drive_supports_c2
+    from cdda2img.accudisc_reader import drive_supports_c2
 
     return drive_supports_c2(device)
 
@@ -2508,7 +2532,7 @@ def _read_track_window(
     """
     from math import ceil
 
-    from cdda2img.c2_reader import read_span
+    from cdda2img.accudisc_reader import read_span
 
     leadout = disc_last_lsn + 1
     s = track_lsns[idx]
@@ -2780,7 +2804,7 @@ def rip_image(  # noqa: C901
         # returns already-corrected PCM (it applied -O at read time) → verifies at 0.
         from cdda2img.offset_correct import apply_offset
 
-        raw_domain = rip_type in ("cdrdao", "c2read", "c2read+toc")
+        raw_domain = rip_type in ("cdrdao", "accudisc", "accudisc+toc")
         ar_offset = read_offset if raw_domain else 0
 
         # R8: CDDB query now happens inside _finalize_import in parallel
@@ -2828,7 +2852,7 @@ def rip_image(  # noqa: C901
                 c2_path=c2_path,
             )
             if _ctdb.repaired:
-                rip_type = "c2read+ctdb" if c2_path is not None else "cdrdao+ctdb"
+                rip_type = "accudisc+ctdb" if c2_path is not None else "cdrdao+ctdb"
                 for _t in _ctdb.damaged_tracks:
                     recovery_outcomes[_t] = f"ctdb_repaired@{_ctdb.entry_id}"
                 _ui_status(ui, "Re-verifying AccurateRip (CTDB repair)…")
@@ -2845,12 +2869,14 @@ def rip_image(  # noqa: C901
                 if ui is not None:
                     ui.resume()
         # AR-triggered fallback: partial mismatch → read error on specific tracks.
-        # Re-read only the failed tracks via c2read (raw targeted window reads) and
+        # Re-read only the failed tracks via AccuDisc (raw targeted window reads) and
         # splice the verified corrected bytes into the still-raw PCM. Disc metadata
         # (ISRC/MCN/CD-Text from subchannel) is untouched — only audio is re-read.
-        if rip_type in ("cdrdao", "c2read", "c2read+toc") and _ar_has_partial_mismatch(
-            ar_verify.tracks
-        ):
+        if rip_type in (
+            "cdrdao",
+            "accudisc",
+            "accudisc+toc",
+        ) and _ar_has_partial_mismatch(ar_verify.tracks):
             failed_tracks = [
                 r
                 for r in ar_verify.tracks
@@ -2920,7 +2946,7 @@ def rip_image(  # noqa: C901
             apply_offset(temp.pcm_file, read_offset)
             raw_domain = False
         if c2_path is not None:
-            from cdda2img.c2_reader import park_spindle
+            from cdda2img.accudisc_reader import park_spindle
 
             park_spindle(device)
 

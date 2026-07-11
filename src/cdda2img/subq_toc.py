@@ -1,10 +1,11 @@
-"""Assemble a rip's disc metadata from a c2read single-pass capture (F7).
+"""Assemble a rip's disc metadata from an AccuDisc single-pass capture (F7).
 
-This is the join point of the c2read upgrade plan (docs/reference/
-c2read-upgrade-plan.md): it turns the raw artefacts one ``c2read --full --sub raw
---fulltoc --cdtext`` invocation produces into the same :class:`RipInfo` the
-cdrdao read paths return, letting the C2 rip path drop its second full-disc
-``cdrdao read-toc`` metadata pass.
+This is the join point of the read-only-ripping upgrade plan (docs/reference/
+c2read-upgrade-plan.md): it turns the raw artefacts one AccuDisc capture produces
+(audio + C2 + raw P-W sub from ``read``, plus the ``fulltoc``/``cdtext`` lead-in
+dumps) into the same :class:`RipInfo` the cdrdao read paths return, letting the
+C2 rip path drop its second full-disc ``cdrdao read-toc`` metadata pass. (The tool
+was the ``c2read`` prototype; the pipeline now drives its successor, AccuDisc.)
 
 Inputs and their roles:
 
@@ -19,8 +20,8 @@ Inputs and their roles:
   DISC_ID (the label catalogue string). Q remains authoritative for MCN/ISRC;
   the CD-Text 0x8E copies are ignored.
 
-Geometry mirrors the cdrdao paths exactly: the PCM from ``c2read --full`` is the
-contiguous audio area ``[0, lead-out)``, so disc LBA == PCM frame offset. A
+Geometry mirrors the cdrdao paths exactly: the PCM from an AccuDisc ``read`` is
+the contiguous audio area ``[0, lead-out)``, so disc LBA == PCM frame offset. A
 track's slot starts at its pre-gap (``start_frame``), ``track_lsns`` carry the
 INDEX 01 (audio start) positions for CDDB/AR, and track 1's 150-frame pre-gap
 lies before LBA 0 (not in the PCM), matching cdrdao read-cd BIN layout.
@@ -72,7 +73,7 @@ def build_rip_info(
         raise ValueError(msg)
     track_starts = {t.track: t.start_lba for t in toc_tracks}
 
-    prov: dict[str, str] = {"toc_source": "subq@c2read"}
+    prov: dict[str, str] = {"toc_source": "subq@accudisc"}
     layout = _derive_layout(sub_data, track_starts, leadout, prov)
     scan = scan_subcode(sub_data, leadout_lba=leadout)
     isrcs = _voted_isrcs(scan, prov)

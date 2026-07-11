@@ -1,8 +1,8 @@
-"""Speed-laddered AccurateRip recovery loop (_recover_failed_tracks, c2read engine).
+"""Speed-laddered AccurateRip recovery loop (_recover_failed_tracks, AccuDisc engine).
 
 The recovery engine re-reads each failed track's raw sector window via
-``c2_reader.read_span``, AR-verifies the offset-corrected slice, and splices the
-VERIFIED corrected bytes into the still-raw disc PCM at ``track_start*2352 +
+``accudisc_reader.read_span``, AR-verifies the offset-corrected slice, and splices
+the VERIFIED corrected bytes into the still-raw disc PCM at ``track_start*2352 +
 read_offset*4`` — sample-exact, so neighbouring tracks are never perturbed.
 """
 
@@ -13,8 +13,8 @@ from pathlib import Path
 
 import pytest
 
+import cdda2img.accudisc_reader as adr
 import cdda2img.accuraterip as ar
-import cdda2img.c2_reader as c2r
 from cdda2img.cdda2img import _recover_failed_tracks
 
 _FRAME = 2352  # _R6_BYTES_PER_FRAME
@@ -53,7 +53,7 @@ def _patch(
             return "aaaaaaaa", "bbbbbbbb", 50, None  # conf_v1=50 → match
         return "aaaaaaaa", "bbbbbbbb", None, None
 
-    monkeypatch.setattr(c2r, "read_span", fake_read_span)
+    monkeypatch.setattr(adr, "read_span", fake_read_span)
     monkeypatch.setattr(ar, "match_track_pcm", fake_match)
     return state
 
@@ -143,7 +143,7 @@ def test_recovery_read_failure_consumes_attempt(
     def fake_match(raw, track, n_tracks, responses):
         return "a", "b", 50, None  # match as soon as a read succeeds
 
-    monkeypatch.setattr(c2r, "read_span", flaky_read_span)
+    monkeypatch.setattr(adr, "read_span", flaky_read_span)
     monkeypatch.setattr(ar, "match_track_pcm", fake_match)
     pcm = _disc_pcm(tmp_path)
 
@@ -251,7 +251,7 @@ def test_recovery_tui_status_is_per_attempt(
     def fake_match(raw, track, n_tracks, responses):
         return "a", "b", 50, None  # match on the first attempt (fastest speed)
 
-    monkeypatch.setattr(c2r, "read_span", fake_read_span)
+    monkeypatch.setattr(adr, "read_span", fake_read_span)
     monkeypatch.setattr(ar, "match_track_pcm", fake_match)
 
     pcm = _disc_pcm(tmp_path)

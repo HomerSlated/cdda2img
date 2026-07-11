@@ -1,6 +1,6 @@
 """CD-Text pack decoder for raw READ TOC/PMA/ATIP format-0x05 responses.
 
-Input is the verbatim response ``c2read --cdtext`` dumps: a 4-byte TOC response
+Input is the verbatim response an ``accudisc cdtext`` dump contains: a 4-byte TOC response
 header followed by 18-byte CD-Text packs (some drives strip the trailing CRC,
 giving 16-byte packs — both strides are handled). Each pack::
 

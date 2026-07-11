@@ -108,7 +108,7 @@ def rip_cdrdao(
 def read_toc_metadata(device: str) -> RipInfo:
     """Capture disc metadata (pre-gaps, per-track ISRC, MCN, CD-Text) via ``cdrdao
     read-toc`` WITHOUT reading the audio — the C2-recovery path pairs this with a
-    separate ``c2read`` audio pass. Returns a RipInfo whose disc/LSNs come from the
+    separate AccuDisc audio pass. Returns a RipInfo whose disc/LSNs come from the
     parsed .toc; the audio is supplied by the caller (there is no BIN). ~one full-disc
     subchannel pass (fast-toc skips pre-gaps/ISRC/MCN, so it can't be used here).
 

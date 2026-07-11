@@ -118,9 +118,9 @@ class TempFiles:
 
     Every run gets a fresh ``mkdtemp`` directory under *base_dir*, so a fragment
     left by a previous run (or written by a concurrent one) can never share a
-    path with this run's output. This matters because the c2read rip path emits
+    path with this run's output. This matters because the AccuDisc rip path emits
     sidecar captures (``.cdtext``/``.sub``/``.fulltoc``/``.c2``) beside
-    :attr:`pcm_file`, and c2read only writes ``.cdtext`` when the disc actually
+    :attr:`pcm_file`, and only writes ``.cdtext`` when the disc actually
     carries CD-Text. With the old fixed ``all_tracks.*`` names in a shared
     ``/var/tmp``, a disc with no CD-Text silently inherited the previous rip's
     stale ``all_tracks.cdtext`` -- baking a wrong album into the image. The
@@ -149,7 +149,7 @@ class TempFiles:
 
     def cleanup(self) -> None:
         # Remove the whole isolated directory: every fragment (pcm, wavs,
-        # per-track temps, and any c2read .cdtext/.sub/.fulltoc/.c2 sidecars)
+        # per-track temps, and any AccuDisc .cdtext/.sub/.fulltoc/.c2 sidecars)
         # lives inside it, so one rmtree leaves nothing behind.
         shutil.rmtree(self.base, ignore_errors=True)
 
