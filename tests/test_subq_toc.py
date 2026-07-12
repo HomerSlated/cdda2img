@@ -96,12 +96,47 @@ def test_build_geometry_and_pregap():
     assert info.prov["toc_source"] == "subq@accudisc"
 
 
-def test_build_track1_pregap_never_set():
-    # Track 1's pre-gap precedes LBA 0; even a (bogus) index-00 span for track 1
-    # in the stream must not produce one.
+def test_build_track1_program_area_pregap():
+    # Track 1's INDEX 01 at LBA 3 means LBA 0..2 is a program-area pre-gap that the
+    # [0, lead-out) read captured into the PCM. It must be declared as track 1's
+    # pre-gap (start_frame=0, pregap=3), NOT dropped — dropping it shifts every
+    # track start and the lead-out down by 3 and changes the disc ID (ABBA Gold:
+    # the same bug at 33 frames).
     sub = _sub_stream((1, 0, 0, 3), (1, 1, 0, 12), (2, 1, 0, 15))
     info = build_rip_info(_fulltoc({1: 3, 2: 15}, 30), sub)
-    assert info.disc.tracks[0].pregap_frames == 0
+    t1 = info.disc.tracks[0]
+    assert (t1.start_frame, t1.pregap_frames, t1.duration_frames) == (0, 3, 12)
+    # The audio LSN (start_frame + pregap) and the lead-out are unchanged — the fix
+    # only moves the 3 frames from start_frame into pregap so the TOC lays them out.
+    assert info.track_lsns == [3, 15]
+    assert info.disc_last_lsn == 29
+
+
+def test_track1_pregap_round_trips_through_toc():
+    # End-to-end geometry gate for the ABBA-Gold class: a 33-frame track-1 pre-gap
+    # must survive generate_toc -> parse_toc so the extracted/burned disc's lead-out
+    # (hence its MB/CDDB disc ID) matches the original. Without the fix, track 1's
+    # FILE line skipped the 33 frames and the parsed lead-out came back short by 33.
+    from cdda2img.toc import generate_toc
+    from cdda2img.toc_parser import parse_toc
+
+    # 2 tracks, track 1 INDEX 01 at LBA 33 (33-frame silent pre-gap), lead-out 30000.
+    toc = _fulltoc({1: 33, 2: 15000}, 30000)
+    sub = _sub_stream((1, 0, 0, 33), (1, 1, 0, 15000 - 33), (2, 1, 0, 15000))
+    info = build_rip_info(toc, sub)
+    assert info.disc.tracks[0].pregap_frames == 33
+
+    parsed = parse_toc(generate_toc(info.disc))
+    # Reconstruct each track's absolute INDEX 01 LBA from the parsed layout and check
+    # it matches the source TOC; the lead-out is the last track's slot end.
+    lba = 0
+    index1 = []
+    for pt in parsed.tracks:
+        lba += pt.pregap_frames
+        index1.append(lba)
+        lba += pt.duration_frames
+    assert index1 == [33, 15000]  # both INDEX 01 positions preserved
+    assert lba == 30000  # lead-out preserved (was 29967 before the fix)
 
 
 def test_build_control_flags_and_aggregate():

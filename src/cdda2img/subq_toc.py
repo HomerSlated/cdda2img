@@ -22,9 +22,13 @@ Inputs and their roles:
 
 Geometry mirrors the cdrdao paths exactly: the PCM from an AccuDisc ``read`` is
 the contiguous audio area ``[0, lead-out)``, so disc LBA == PCM frame offset. A
-track's slot starts at its pre-gap (``start_frame``), ``track_lsns`` carry the
-INDEX 01 (audio start) positions for CDDB/AR, and track 1's 150-frame pre-gap
-lies before LBA 0 (not in the PCM), matching cdrdao read-cd BIN layout.
+track's slot starts at its pre-gap (``start_frame``), and ``track_lsns`` carry the
+INDEX 01 (audio start) positions for CDDB/AR. Track 1's standard 150-frame pre-gap
+lies before LBA 0 (not in the PCM), matching cdrdao read-cd BIN layout — but when
+track 1's INDEX 01 sits at LBA > 0 (a *program-area* pre-gap, e.g. ABBA *Gold*'s
+33 frames), those frames ARE in the ``[0, lead-out)`` PCM and are declared as
+track 1's pre-gap; dropping them would shift every boundary and the lead-out (and
+so the disc ID) down by that amount.
 """
 
 from __future__ import annotations
@@ -107,7 +111,18 @@ def build_rip_info(
         )
         pregap = layout.pregap_frames.get(number, 0) if layout is not None else 0
         if number == starts[0][0]:
-            pregap = 0  # track 1's pre-gap precedes LBA 0 — not in the PCM
+            # Track 1's slot begins at LBA 0 == PCM frame 0. When its INDEX 01 sits
+            # at LBA ``start`` > 0, those ``start`` frames (LBA 0..start-1) are a
+            # *program-area* pre-gap that the ``[0, lead-out)`` read already captured
+            # into the PCM, so they must be declared as track 1's pre-gap. Dropping
+            # them (the old ``pregap = 0``) left ``start_frame`` = ``start`` with no
+            # ``START`` line, which made ``generate_toc`` emit ``FILE … <start>`` —
+            # skipping and orphaning those frames, shifting every track start and the
+            # lead-out down by ``start`` and changing the MB/CDDB disc ID (ABBA
+            # *Gold*: start=33). A normal disc has INDEX 01 at LBA 0 (``start`` == 0),
+            # so this is a no-op there; the standard 150-frame lead-in pre-gap lies
+            # before LBA 0 and is genuinely not in the PCM, so it stays unrepresented.
+            pregap = start
         control = layout.control.get(number) if layout is not None else None
         audio_start = start
         indices = (
