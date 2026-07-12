@@ -87,7 +87,7 @@ This is an active prototype. A Rust reimplementation is planned once the design 
   in a single pass
 - **Flexible extraction** — `extract` flags are additive; omitting all is equivalent to `--all`:
   - `--tracks` — per-track FLAC + CUE to `extracted/<artist>/<album>/`
-  - `--raw` — TOC + BIN (disc-native s16be) to `extracted/raw/`
+  - `--raw` — TOC + WAV (s16le, self-describing RIFF header) to `extracted/`
   - `--rg` — ReplayGain block as `.rg.json`
   - `--ar` — AccurateRip report as `.accurip`
   - `--log` — rip log as `.log`

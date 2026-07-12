@@ -2,7 +2,6 @@
 container.py — RBI container writer, reader, and extractor.
 """
 
-import array
 import datetime
 import hashlib
 import importlib.metadata
@@ -520,17 +519,37 @@ def _copy_bytes(f_in, f_out, length: int) -> None:
         remaining -= len(chunk)
 
 
-def _copy_bytes_swapped(f_in, f_out, length: int) -> None:
-    """Copy *length* bytes from f_in to f_out, swapping every 16-bit word (s16le↔s16be)."""
-    remaining = length
-    while remaining > 0:
-        chunk = f_in.read(min(65536, remaining))
-        if not chunk:
-            break
-        a = array.array("h", chunk)
-        a.byteswap()
-        f_out.write(a.tobytes())
-        remaining -= len(chunk)
+def _write_wav_header(
+    f_out, data_len: int, sample_rate: int, channels: int, bit_depth: int
+) -> None:
+    """Write a canonical 44-byte RIFF/WAVE PCM header for *data_len* audio bytes.
+
+    A WAV header *defines* the samples as little-endian by construction, so it is
+    the extract's format contract: the audio needs no byte-swap (the RBI already
+    stores s16le), and no separate "byte order" note is required. Written ahead
+    of a streamed copy of the PCM, so a whole-disc image is never buffered in
+    memory. A full CD-DA disc is < 900 MB, comfortably inside the 32-bit RIFF
+    size fields.
+    """
+    byte_rate = sample_rate * channels * (bit_depth // 8)
+    block_align = channels * (bit_depth // 8)
+    f_out.write(b"RIFF")
+    f_out.write(struct.pack("<I", 36 + data_len))  # RIFF chunk size
+    f_out.write(b"WAVEfmt ")
+    f_out.write(
+        struct.pack(
+            "<IHHIIHH",
+            16,  # fmt chunk size
+            1,  # audio format: PCM
+            channels,
+            sample_rate,
+            byte_rate,
+            block_align,
+            bit_depth,
+        )
+    )
+    f_out.write(b"data")
+    f_out.write(struct.pack("<I", data_len))
 
 
 def _warn_checksum(label: str, computed: bytes, expected: bytes) -> None:
@@ -549,22 +568,6 @@ class ExtractOptions:
     embedart: bool = False
     normalize: bool = False
     warn_missing: bool = True
-
-
-def _write_bin_format_hint(out_dir: Path, stem: str) -> None:
-    hint = (
-        "BIN file format\n"
-        "===============\n"
-        "The .bin file contains raw CD-DA audio in disc-native byte order (s16be).\n"
-        "Sample rate: 44100 Hz, stereo (2 channels), 16-bit signed integer.\n"
-        "Byte order: big-endian (s16be) — byte-swapped from the s16le stored in the RBI.\n"
-        "\n"
-        "To burn with cdrdao:\n"
-        "  cdrdao write --device /dev/sr0 <stem>.toc\n"
-        "\n"
-        "The .toc file references the .bin by name; both must be in the same directory.\n"
-    )
-    (out_dir / f"{stem}.bin_format.txt").write_text(hint, encoding="utf-8")
 
 
 def _rg_json_str(rg_data: RBIReplayGain) -> str:
@@ -726,8 +729,7 @@ def extract_data(  # noqa: C901
     if opts.raw:
         _would_write += [
             base_dir / f"{stem}.toc",
-            base_dir / f"{stem}.bin",
-            base_dir / f"{stem}.bin_format.txt",
+            base_dir / f"{stem}.wav",
         ]
         if opts.albumart and art_entry is not None:
             _would_write.append(base_dir / f"{stem}.jpg")
@@ -763,18 +765,31 @@ def extract_data(  # noqa: C901
     if opts.raw:
         raw_dir = base_dir
 
+        # Reference the WAV in the extracted TOC. In cdrdao-TOC semantics the
+        # audio byte order follows the file type: a `.wav` FILE is little-endian
+        # (RIFF-defined), so the s16le PCM copies through verbatim — no swap.
         toc_text = re.sub(
-            r'FILE "[^"]*"', f'FILE "{stem}.bin"', toc_data.decode("utf-8")
+            r'FILE "[^"]*"', f'FILE "{stem}.wav"', toc_data.decode("utf-8")
         )
         (raw_dir / f"{stem}.toc").write_text(toc_text, encoding="utf-8")
         print(f"TOC saved: {raw_dir / f'{stem}.toc'}")
 
-        bin_path = raw_dir / f"{stem}.bin"
-        with open(container_file, "rb") as f_in, open(bin_path, "wb") as f_out:
+        wav_path = raw_dir / f"{stem}.wav"
+        with open(container_file, "rb") as f_in, open(wav_path, "wb") as f_out:
+            _write_wav_header(
+                f_out,
+                pcm_entry.length,
+                header.pcm_sample_rate,
+                header.pcm_channels,
+                header.pcm_bit_depth,
+            )
             f_in.seek(pcm_entry.offset)
-            _copy_bytes_swapped(f_in, f_out, pcm_entry.length)
-        print(f"BIN saved: {bin_path}  (s16le → s16be, disc-native byte order)")
-        _write_bin_format_hint(raw_dir, stem)
+            _copy_bytes(f_in, f_out, pcm_entry.length)
+        print(
+            f"WAV saved: {wav_path}  "
+            f"(s16le, {header.pcm_sample_rate} Hz "
+            f"{header.pcm_channels}ch {header.pcm_bit_depth}-bit)"
+        )
         if comment:
             print(f"Created:   {comment}")
         _print_provenance(prov)

@@ -311,9 +311,16 @@ and embedded post\-extraction.
 Writes the embedded TOC
 .RI ( .toc )
 and PCM audio
-.RI ( .bin ,
-disc\-native s16be byte order) to
-.IR extracted/raw/ .
+.RI ( .wav ,
+signed 16\-bit little\-endian in a self\-describing RIFF container) to
+.IR extracted/ .
+The TOC\(cqs
+.B FILE
+line references the
+.B .wav
+by name; in cdrdao\-TOC semantics a
+.B .wav
+file is read little\-endian, so filename and byte order agree.
 .TP
 .B \-\-rg
 Writes the ReplayGain block as a JSON sidecar

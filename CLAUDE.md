@@ -9,7 +9,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - **`rip`** — rip a physical disc via cdrdao (primary) with cd-paranoia fallback
 - **`create`** — create one or more RBIs from a directory of audio files
 - **`import`** — import a foreign disc image (cdrdao TOC+BIN, DDP 2.0 / GEAR Pro, Nero NRG, or CloneCD CCD/IMG)
-- **`extract`** — extract to per-track FLAC + CUE, or raw PCM + TOC, or both
+- **`extract`** — extract to per-track FLAC + CUE, or a TOC + s16le WAV image, or both
 - **`list`** — list container sections and track index with offsets and checksums
 - **`test`** — verify all block checksums and structural invariants (27 checks, exits 1 on failure)
 - **`burn`** — burn an RBI back to a blank CD-DA disc via cdrdao
@@ -42,7 +42,7 @@ uv run python -m cdda2img import /path/to/ddp_dir
 
 # Extract an RBI image
 uv run python -m cdda2img extract <file.rbi>                 # FLAC + CUE (default)
-uv run python -m cdda2img extract <file.rbi> --raw           # raw PCM + TOC
+uv run python -m cdda2img extract <file.rbi> --raw           # TOC + s16le WAV image
 uv run python -m cdda2img extract <file.rbi> --normalize     # FLAC normalised to −18 LUFS
 uv run python -m cdda2img extract <file.rbi> --tracks --raw  # both
 
@@ -158,7 +158,7 @@ Four source types, each producing s16le PCM, then all call `_finalize_import()`:
 ### Extract pipeline (`extract` subcommand)
 1. `container.py:read_header()` — parses the 40-byte fixed RBI header plus the block directory at end-of-file; returns `RBIHeader` with `find_block(type_id)`
 2. `toc_parser.py:parse_toc()` — parses the embedded cdrdao TOC into `ParsedDisc` / `ParsedTrack` dataclasses
-3. `container.py:extract_data()` — dispatches to raw and/or track output, plus optional `--rg`, `--ar`, `--log` sidecars
+3. `container.py:extract_data()` — dispatches to raw and/or track output, plus optional `--rg`, `--ar`, `--log` sidecars. `--raw` writes the embedded TOC (its `FILE` line rewritten to reference the `.wav`) plus an s16le WAV image built by `_write_wav_header` + a verbatim stream-copy of the stored PCM — **no byte-swap** (the RBI already stores s16le, and a `.wav` FILE is read little-endian in cdrdao-TOC semantics; this replaced the old s16be `.bin` that existed only to feed cdrdao's big-endian burn input)
 4. `track_extract.py` — slices PCM per track, wraps in WAV, encodes to FLAC via PyAV with Vorbis comment metadata; writes CUE sheet; optionally applies −18 LUFS normalisation
 
 ### Key modules

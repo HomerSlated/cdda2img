@@ -28,6 +28,7 @@ from cdda2img.container import (
 from cdda2img.rbi_format import (
     ARIP_STATUS_OK,
     BLOCK_TYPE_ARIP,
+    BLOCK_TYPE_PCM,
     BLOCK_TYPE_PROV,
     BLOCK_TYPE_RGDB,
     BLOCK_TYPE_TOC,
@@ -361,6 +362,47 @@ def test_flac_extraction_rg_tags(tmp_path, built_containers):
         stored_peak = rg_result.tracks[i].peak
         tag_peak = float(tags["REPLAYGAIN_TRACK_PEAK"])
         assert tag_peak == pytest.approx(stored_peak, abs=0.001)
+
+
+def test_raw_extract_emits_s16le_wav(tmp_path, built_containers):
+    """`extract --raw` writes a self-describing s16le WAV (not an s16be .bin).
+
+    The RBI stores raw s16le; the WAV must carry that PCM verbatim (no byte-swap)
+    with a canonical Red Book header, and the extracted TOC's FILE line must point
+    at the .wav — cdrdao-TOC semantics read a `.wav` FILE little-endian, so the
+    filename and the byte order have to agree.
+    """
+    import wave
+
+    rbi, _disc, _ = built_containers["no_rg"]
+    stem = rbi.stem
+
+    # The RBI's stored PCM is the ground truth: extraction must reproduce it exactly.
+    h = read_header(rbi)
+    pcm_entry = h.find_block(BLOCK_TYPE_PCM)
+    assert pcm_entry is not None
+    with open(rbi, "rb") as f:
+        f.seek(pcm_entry.offset)
+        stored_pcm = f.read(pcm_entry.length)
+
+    extract_data(rbi, ExtractOptions(raw=True), base_dir=tmp_path)
+
+    wav_path = tmp_path / f"{stem}.wav"
+    assert wav_path.exists(), "raw extract must produce a .wav"
+    assert not (tmp_path / f"{stem}.bin").exists(), "no s16be .bin should be written"
+    assert not (tmp_path / f"{stem}.bin_format.txt").exists()
+
+    with wave.open(str(wav_path), "rb") as w:
+        assert w.getframerate() == PCM_SAMPLE_RATE
+        assert w.getnchannels() == PCM_CHANNELS
+        assert w.getsampwidth() == PCM_BIT_DEPTH // 8
+        wav_pcm = w.readframes(w.getnframes())
+    # Verbatim, little-endian: the WAV payload is byte-identical to the stored PCM.
+    assert wav_pcm == stored_pcm
+
+    toc_text = (tmp_path / f"{stem}.toc").read_text(encoding="utf-8")
+    assert f'FILE "{stem}.wav"' in toc_text
+    assert ".bin" not in toc_text
 
 
 # ---------------------------------------------------------------------------

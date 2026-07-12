@@ -85,7 +85,7 @@ def parse_args() -> argparse.Namespace:
 
             extract options:
               --tracks              Write per-track FLAC files and CUE sheet
-              --raw                 Write TOC + BIN (s16be) to extracted/raw/
+              --raw                 Write TOC + WAV (s16le) to extracted/
               --rg                  Write ReplayGain block as .rg.json sidecar
               --ar                  Write AccurateRip report as .accurip
               --log                 Write rip log as .log
@@ -239,7 +239,7 @@ def parse_args() -> argparse.Namespace:
     x = sub.add_parser("extract", help="Extract blocks from an RBI image")
     x.add_argument("rbi_file", type=Path, help="RBI file to extract")
     x.add_argument(
-        "--raw", action="store_true", help="Extract TOC + BIN (s16be) to output dir"
+        "--raw", action="store_true", help="Extract TOC + WAV (s16le) to output dir"
     )
     x.add_argument(
         "--tracks",
