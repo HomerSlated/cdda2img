@@ -1,6 +1,15 @@
-"""Tests for disc_writer.py TOC sanitization helpers."""
+"""Tests for disc_writer.py: TOC sanitization + the AccuDisc write invocation."""
 
+import io
+from pathlib import Path
+
+import pytest
+
+from cdda2img import disc_writer
+from cdda2img.container import build_container
 from cdda2img.disc_writer import _sanitize_toc_for_burn
+from cdda2img.rbi_format import RBIDisc, RBITocEntry
+from cdda2img.toc import generate_toc
 
 
 def _toc(
@@ -37,6 +46,82 @@ def _toc(
             "",
         ]
     return "\n".join(lines)
+
+
+# ── AccuDisc write invocation (mocked subprocess) ─────────────────────────────
+
+
+def _tiny_rbi(tmp_path: Path) -> Path:
+    disc = RBIDisc(
+        album="Album",
+        artist="Artist",
+        tracks=[
+            RBITocEntry(1, "One", "Artist", start_frame=0, duration_frames=150),
+            RBITocEntry(2, "Two", "Artist", start_frame=150, duration_frames=150),
+        ],
+    )
+    pcm = tmp_path / "all.pcm"
+    pcm.write_bytes(b"\x00" * (2352 * 300))  # 300 frames of silence, s16le
+    rbi = tmp_path / "disc.rbi"
+    build_container(pcm, generate_toc(disc), disc, rbi, quiet=True)
+    return rbi
+
+
+class _FakeProc:
+    def __init__(self, stdout: str, returncode: int) -> None:
+        self.stdout = io.StringIO(stdout)
+        self.returncode = returncode
+
+    def wait(self) -> int:
+        return self.returncode
+
+
+def _patch_popen(monkeypatch, stdout: str = "", returncode: int = 0) -> dict:
+    captured: dict = {}
+
+    def _popen(cmd, **k):
+        captured["cmd"] = cmd
+        return _FakeProc(stdout, returncode)
+
+    monkeypatch.setattr(disc_writer.subprocess, "Popen", _popen)
+    return captured
+
+
+def test_burn_invokes_accudisc_write_with_raw_s16le_bin(tmp_path, monkeypatch):
+    rbi = _tiny_rbi(tmp_path)
+    cap = _patch_popen(monkeypatch, "progress 300 300\nsummary result=ok\n", 0)
+    disc_writer.burn_disc(rbi, device="/dev/sr0", speed=8, yes=True)
+    cmd = cap["cmd"]
+    assert cmd[0].endswith("accudisc")
+    assert cmd[1:4] == ["--device", "/dev/sr0", "write"]
+    # Raw s16le BIN — not a WAV, and no byte-swap (the pipeline is swap-free).
+    assert cmd[cmd.index("--bin") + 1].endswith("disc.pcm")
+    assert not any(a.endswith(".wav") for a in cmd)
+    assert "--byteswap" not in cmd
+    assert cmd[cmd.index("--speed") + 1] == "8"
+    assert cmd[cmd.index("--progress-fd") + 1] == "1"
+    assert "--simulate" not in cmd
+
+
+def test_burn_simulate_appends_flag(tmp_path, monkeypatch):
+    rbi = _tiny_rbi(tmp_path)
+    cap = _patch_popen(monkeypatch, "summary result=ok\n", 0)
+    disc_writer.burn_disc(rbi, device="/dev/sr0", simulate=True, yes=True)
+    assert "--simulate" in cap["cmd"]
+
+
+def test_burn_exit_3_reports_disc_not_blank(tmp_path, monkeypatch):
+    rbi = _tiny_rbi(tmp_path)
+    _patch_popen(monkeypatch, "", returncode=3)
+    with pytest.raises(RuntimeError, match="not blank"):
+        disc_writer.burn_disc(rbi, device="/dev/sr0", yes=True)
+
+
+def test_burn_transport_error_raises(tmp_path, monkeypatch):
+    rbi = _tiny_rbi(tmp_path)
+    _patch_popen(monkeypatch, "", returncode=2)
+    with pytest.raises(RuntimeError, match="exit 2"):
+        disc_writer.burn_disc(rbi, device="/dev/sr0", yes=True)
 
 
 # ── CATALOG sanitization ──────────────────────────────────────────────────────

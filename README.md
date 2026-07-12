@@ -92,7 +92,8 @@ This is an active prototype. A Rust reimplementation is planned once the design 
   - `--ar` — AccurateRip report as `.accurip`
   - `--log` — rip log as `.log`
   - `--normalize` — EBU R128 normalisation at −18 LUFS on extracted FLACs
-- **Burn** — `burn` subcommand writes an RBI back to disc via cdrdao; supports per-drive
+- **Burn** — `burn` subcommand writes an RBI back to disc via AccuDisc (`--simulate` for a
+  laser-off test write); supports per-drive
   write offset from config, speed selection, and optional confirmation bypass (`--yes`)
 - **Virtual disc mount** — `mount` extracts a TOC+BIN scratch copy and loads it into a
   cdemu virtual slot; the mounted disc is then visible to cdrdao, whipper, or any other
@@ -178,7 +179,7 @@ uv run python -m cdda2img extract album.rbi --tracks --rg --ar
 # Extract FLACs normalised to −18 LUFS instead of embedding RG tags
 uv run python -m cdda2img extract album.rbi --tracks --normalize
 
-# Burn an RBI back to disc via cdrdao
+# Burn an RBI back to disc via AccuDisc (--simulate for a laser-off test write)
 uv run python -m cdda2img burn album.rbi
 uv run python -m cdda2img burn album.rbi --device /dev/sr0 --speed 8
 uv run python -m cdda2img burn album.rbi --write-offset -30 --yes

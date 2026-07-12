@@ -117,6 +117,7 @@ def parse_args() -> argparse.Namespace:
               --device DEVICE       CD drive device (default: from config default_device, fallback /dev/sr0)
               --speed N             Burn speed in CD-DA drive units (default: 4)
               --write-offset N      Write offset override in samples (default: from config)
+              --simulate            Test write (laser off) — validate without consuming a blank
               --yes                 Skip confirmation prompt (non-interactive burn)
 
             mount options:
@@ -141,6 +142,7 @@ def parse_args() -> argparse.Namespace:
               cdda2img import /path/to/ddp_dir --output mydisc.rbi
               cdda2img burn album.rbi
               cdda2img burn album.rbi --device /dev/sr0 --speed 8
+              cdda2img burn album.rbi --simulate
               cdda2img burn album.rbi --write-offset -30 --yes
               cdda2img list album.rbi
               cdda2img list album.rbi --ar
@@ -417,7 +419,7 @@ def parse_args() -> argparse.Namespace:
     )
 
     w_cmd = sub.add_parser(
-        "burn", help="Burn an RBI image to a blank CD-DA disc via cdrdao"
+        "burn", help="Burn an RBI image to a blank CD-DA disc via AccuDisc"
     )
     w_cmd.add_argument("rbi_file", type=Path, help="RBI file to burn")
     w_cmd.add_argument(
@@ -440,6 +442,11 @@ def parse_args() -> argparse.Namespace:
         dest="write_offset",
         metavar="N",
         help="Write offset override in samples (default: from config)",
+    )
+    w_cmd.add_argument(
+        "--simulate",
+        action="store_true",
+        help="Test write (laser off) — validate the burn without consuming a blank",
     )
     w_cmd.add_argument(
         "--yes",
@@ -3114,6 +3121,7 @@ def burn_image(
     device: str | None = None,
     write_offset_override: int | None = None,
     speed: int = 4,
+    simulate: bool = False,
     yes: bool = False,
 ) -> None:
     import sys
@@ -3169,6 +3177,7 @@ def burn_image(
             device=device,
             write_offset=write_offset,
             speed=speed,
+            simulate=simulate,
             yes=yes,
             ui=ui,
         )
@@ -3296,6 +3305,7 @@ def _dispatch_utility(args: argparse.Namespace) -> None:
             device=args.device,
             write_offset_override=args.write_offset,
             speed=args.speed,
+            simulate=args.simulate,
             yes=args.yes,
         )
     elif args.cmd == "mount":

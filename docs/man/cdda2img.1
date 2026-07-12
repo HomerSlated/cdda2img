@@ -419,7 +419,9 @@ Same as for the
 subcommand.
 .\"
 .SS burn \(em Burn
-Burns an RBI image to a blank CD\-DA disc via cdrdao.
+Burns an RBI image to a blank CD\-DA disc via AccuDisc
+.RB ( "accudisc write \-\-toc \-\-bin" ),
+feeding the stored raw s16le PCM directly (no byte\-swap).
 Applies write offset correction to the disc stream before burning when a
 .B write_offset
 is configured for the drive in
@@ -439,6 +441,10 @@ Write offset override in samples.
 Overrides the per\-drive
 .B write_offset
 from configuration.
+.TP
+.B \-\-simulate
+Run the full write path with the laser off (test write), validating the
+image and geometry without consuming a blank disc.
 .TP
 .B \-\-yes
 Skip the confirmation prompt before burning.

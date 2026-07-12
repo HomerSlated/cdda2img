@@ -1,8 +1,19 @@
 """
-disc_writer.py — Burn an RBI container to a blank CD-DA disc via cdrdao.
+disc_writer.py — Burn an RBI container to a blank CD-DA disc via AccuDisc.
+
+AccuDisc ``write`` consumes a cdrdao-format ``.toc`` plus a raw **s16le** audio
+BIN (``write --toc FILE --bin FILE``) and writes a Disc-At-Once audio session.
+It expects little-endian PCM and handles the drive's own byte order internally
+(the PX-716A is LE), so the normal pipeline is swap-free: the RBI stores s16le,
+and the BIN is that PCM verbatim — no WAV wrapper, no byte-swap (``--byteswap``
+is AccuDisc's manual override for legacy s16be inputs only). AccuDisc is a
+separate external project (https://github.com/HomerSlated/accudisc); a
+git-ignored local snapshot in ``tools/accudisc/`` is used, resolved via
+:data:`cdda2img.accudisc_reader._ACCUDISC`. cdrdao no longer plays any role in
+burning.
 
 Public interface:
-    burn_disc(rbi_file, device, write_offset, speed, *, yes, ui) -> None
+    burn_disc(rbi_file, device, write_offset, speed, *, simulate, yes, ui) -> None
 """
 
 from __future__ import annotations
@@ -10,7 +21,6 @@ from __future__ import annotations
 import re
 import subprocess
 import tempfile
-import wave
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -45,8 +55,15 @@ _EMPTY_CDTEXT_SHELL_RE = re.compile(
 
 
 def _patch_toc_filenames(toc_text: str) -> str:
-    """Replace all FILE "..." filename fields with "disc.wav"."""
-    return _FILE_NAME_RE.sub(r'\1"disc.wav"', toc_text)
+    """Replace all FILE "..." filename fields with "disc.pcm" (the raw s16le BIN).
+
+    AccuDisc takes the audio path explicitly via ``--bin`` and reads the ``.toc``
+    only for track layout (per-track ``FILE`` frame offsets/lengths and ``START``),
+    so this filename is cosmetic — but keeping it consistent with the BIN we pass
+    avoids confusion. The frame offsets are container-agnostic and map directly
+    onto the header-less raw BIN (frame x 2352 from byte 0).
+    """
+    return _FILE_NAME_RE.sub(r'\1"disc.pcm"', toc_text)
 
 
 def _sanitize_toc_for_burn(toc_text: str) -> str:
@@ -85,54 +102,97 @@ def _ui_print(ui: TerminalUI | None, text: str) -> None:
         print(text)
 
 
-def _run_with_write_progress(
+def _run_accudisc_write(
     cmd: list[str],
-    cwd: str,
     ui: TerminalUI | None,
     n_tracks: int,
-) -> tuple[int, list[str]]:
-    """Run cdrdao write, feeding stderr into the progress parser.
+) -> tuple[int, str]:
+    """Run ``accudisc write`` with the ``--progress-fd 1`` machine channel.
 
-    Returns ``(exit_code, stderr_lines)``. *stderr_lines* contains every
-    cdrdao stderr line (used to surface error detail on failure) and is
-    only populated when *ui* is active — in non-TUI mode cdrdao stderr
-    passes directly to the terminal.
+    AccuDisc emits newline-delimited ``progress <done> <total>`` tokens (plus a
+    final ``summary …`` / ``write done …`` line) on the progress fd; we forward
+    the sector counts to the UI as a fraction and log the rest. stderr goes to a
+    temp file (never a pipe) so a chatty burn can't deadlock the single-threaded
+    stdout reader; it is read back for error detail. Returns
+    ``(returncode, stderr_text)``.
     """
-    from cdda2img.cdrdao_write_progress import CdrdaoWriteProgress
-
-    if ui is None:
-        result = subprocess.run(cmd, cwd=cwd)  # noqa: S603
-        return result.returncode, []
-
-    parser = CdrdaoWriteProgress(n_tracks)
-    stderr_lines: list[str] = []
-    with subprocess.Popen(  # noqa: S603
-        cmd,
-        cwd=cwd,
-        stderr=subprocess.PIPE,
-        text=True,
-    ) as proc:
-        assert proc.stderr is not None  # noqa: S101
-        for raw in proc.stderr:
-            stderr_lines.append(raw.rstrip("\r\n"))
-            update = parser.feed(raw)
-            if update is not None:
-                ui.set_status(update.status, update.fraction)
+    status = f"Burning {n_tracks} track(s)…"
+    with tempfile.TemporaryFile() as err_fp:
+        proc = subprocess.Popen(  # noqa: S603
+            [*cmd, "--progress-fd", "1"],
+            stdout=subprocess.PIPE,
+            stderr=err_fp,
+            text=True,
+        )
+        assert proc.stdout is not None  # noqa: S101
+        for line in proc.stdout:
+            parts = line.split()
+            if len(parts) == 3 and parts[0] == "progress" and ui is not None:
+                try:
+                    done, total = int(parts[1]), int(parts[2])
+                except ValueError:
+                    continue
+                ui.set_status(status, done / total if total > 0 else 0.0)
         proc.wait()
-        final = parser.done()
-        if final is not None:
-            ui.set_status(final.status, final.fraction)
-        return proc.returncode, stderr_lines
+        err_fp.seek(0)
+        stderr_text = err_fp.read().decode(errors="replace")
+    return proc.returncode, stderr_text
 
 
-def _print_cdrdao_error(ui: TerminalUI | None, lines: list[str]) -> None:
-    """Pause the TUI (if active) and print captured cdrdao stderr to the terminal."""
-    if ui is None or not lines:
+def _print_burn_error(ui: TerminalUI | None, stderr_text: str) -> None:
+    """Pause the TUI (if active) and print captured AccuDisc stderr to the terminal."""
+    lines = [ln for ln in stderr_text.splitlines() if ln.strip()]
+    if not lines:
         return
-    ui.pause()
+    if ui is not None:
+        ui.pause()
     for line in lines:
-        if line:
-            print(f"  {line}")
+        print(f"  {line}")
+
+
+def _write_disc(
+    device: str,
+    toc_path: Path,
+    pcm_path: Path,
+    speed: int,
+    *,
+    simulate: bool,
+    ui: TerminalUI | None,
+    track_count: int,
+) -> None:
+    """Invoke ``accudisc write`` and map its exit code to a clear error.
+
+    AccuDisc exit convention: 0 ok / 1 usage / 2 transport / 3 disc not blank.
+    Raises RuntimeError on any non-zero code, with a targeted message for the
+    common "disc not blank" case.
+    """
+    from cdda2img.accudisc_reader import _ACCUDISC
+
+    _ui_status(ui, f"Burning {track_count} track(s)…")
+    cmd = [
+        _ACCUDISC,
+        "--device",
+        device,
+        "write",
+        "--toc",
+        str(toc_path),
+        "--bin",
+        str(pcm_path),
+        "--speed",
+        str(speed),
+    ]
+    if simulate:
+        cmd.append("--simulate")
+    rc, stderr_text = _run_accudisc_write(cmd, ui, track_count)
+    if rc == 0:
+        return
+    _print_burn_error(ui, stderr_text)
+    if rc == 3:
+        msg = "disc is not blank — insert a blank CD-R/RW and retry"
+        raise RuntimeError(msg)
+    detail = stderr_text.strip().splitlines()[-1] if stderr_text.strip() else ""
+    msg = f"accudisc write failed (exit {rc}): {detail}"
+    raise RuntimeError(msg)
 
 
 def _confirm_insert(yes: bool, ui: TerminalUI | None) -> bool:
@@ -164,14 +224,17 @@ def burn_disc(
     write_offset: int = 0,
     speed: int = 4,
     *,
+    simulate: bool = False,
     yes: bool = False,
     ui: TerminalUI | None = None,
 ) -> None:
-    """Burn an RBI container to a blank disc via cdrdao.
+    """Burn an RBI container to a blank disc via AccuDisc ``write``.
 
     If *write_offset* is non-zero, applies correction to the PCM before
     burning: positive offset trims samples from the start (drive burns late);
-    negative offset prepends silence (drive burns early).
+    negative offset prepends silence (drive burns early). With *simulate* the
+    full write path runs with the laser off (test write) — useful for validating
+    the geometry without consuming a blank.
     """
     header = read_header(rbi_file)
 
@@ -198,7 +261,9 @@ def burn_disc(
     if parsed.performer or parsed.title:
         _ui_print(ui, f"  {parsed.performer} — {parsed.title}")
     _ui_print(ui, f"  {track_count} track(s), {total_s // 60}:{total_s % 60:02d}")
-    _ui_print(ui, f"  Device: {device}  Speed: {speed}x")
+    _ui_print(
+        ui, f"  Device: {device}  Speed: {speed}x{'  (SIMULATE)' if simulate else ''}"
+    )
     if write_offset != 0:
         _ui_print(ui, f"  Write offset correction: {write_offset:+d} samples")
 
@@ -210,9 +275,11 @@ def burn_disc(
     with tempfile.TemporaryDirectory() as tmp_dir:
         tmp = Path(tmp_dir)
         pcm_path = tmp / "disc.pcm"
-        wav_path = tmp / "disc.wav"
         toc_path = tmp / "disc.toc"
 
+        # Raw s16le PCM straight from the RBI — AccuDisc's write path expects
+        # little-endian and adapts to the drive itself, so no WAV wrapper and no
+        # byte-swap (the whole pipeline stays swap-free).
         _ui_status(ui, "Extracting PCM…")
         with open(rbi_file, "rb") as f_in, open(pcm_path, "wb") as f_out:
             f_in.seek(pcm_entry.offset)
@@ -226,37 +293,24 @@ def burn_disc(
                 msg = f"Cannot apply write offset: {exc}"
                 raise RuntimeError(msg) from exc
 
-        with wave.open(str(wav_path), "wb") as wf:
-            wf.setnchannels(header.pcm_channels)
-            wf.setsampwidth(header.pcm_bit_depth // 8)
-            wf.setframerate(header.pcm_sample_rate)
-            wf.writeframes(pcm_path.read_bytes())
-
         toc_path.write_text(
             _sanitize_toc_for_burn(_patch_toc_filenames(toc_text)), encoding="utf-8"
         )
 
-        _ui_status(ui, f"Burning track 1/{track_count}")
-        cmd = [
-            "cdrdao",
-            "write",
-            "--device",
+        _write_disc(
             device,
-            "--speed",
-            str(speed),
-            "--eject",
-            toc_path.name,
-        ]
-        rc, cdrdao_stderr = _run_with_write_progress(cmd, str(tmp), ui, track_count)
-        if rc != 0:
-            _print_cdrdao_error(ui, cdrdao_stderr)
-            msg = f"cdrdao write failed (exit {rc})"
-            raise RuntimeError(msg)
+            toc_path,
+            pcm_path,
+            speed,
+            simulate=simulate,
+            ui=ui,
+            track_count=track_count,
+        )
 
     _ui_status(ui, "Done.", 1.0)
     if ui is not None:
         ui.pause()
-        print("  Done.")
+        print("  Done." + ("  (simulated — no data written)" if simulate else ""))
 
 
 def _copy_bytes(f_in, f_out, length: int) -> None:

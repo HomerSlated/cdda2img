@@ -12,7 +12,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - **`extract`** — extract to per-track FLAC + CUE, or a TOC + s16le WAV image, or both
 - **`list`** — list container sections and track index with offsets and checksums
 - **`test`** — verify all block checksums and structural invariants (27 checks, exits 1 on failure)
-- **`burn`** — burn an RBI back to a blank CD-DA disc via cdrdao
+- **`burn`** — burn an RBI back to a blank CD-DA disc via AccuDisc (`write --toc --bin`; `--simulate` for a laser-off test write)
 - **`mount`** — extract a TOC+BIN scratch copy and load it into a cdemu virtual slot
 - **`catalogue`** — browse the local disc catalogue (summary, search, per-disc detail)
 
