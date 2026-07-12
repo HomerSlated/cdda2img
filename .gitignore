@@ -91,6 +91,8 @@ album/
 # historical reference (and remains in git history), not tracked going forward.
 tools/accudisc/
 tools/c2read/
+# Machine-local convenience symlink to the snapshot (never tracked)
+/accudisc
 
 # Machine-local Claude Code context (see CLAUDE.md for the committed portion)
 CLAUDE.local.md
