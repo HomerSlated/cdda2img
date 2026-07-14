@@ -255,8 +255,16 @@ def test_read_disc_c2_progress_failure_raises(monkeypatch: pytest.MonkeyPatch) -
 # ── binary resolution ────────────────────────────────────────────────────────
 
 
-def test_resolve_accudisc_prefers_snapshot() -> None:
-    # The snapshot exists in this checkout, so resolution must point at it.
+def test_resolve_accudisc_prefers_snapshot(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The snapshot is git-ignored (AccuDisc ships from its own repo), so whether it
+    # exists is an environment fact — stub the probe and assert the branch instead.
+    monkeypatch.setattr(Path, "is_file", lambda self: True)
     resolved = ar._resolve_accudisc()
     assert resolved.endswith("tools/accudisc/accudisc")
-    assert Path(resolved).is_file()
+    assert Path(resolved).is_absolute()
+
+
+def test_resolve_accudisc_falls_back_to_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    # No snapshot in the checkout (the CI case): fall back to a bare PATH lookup.
+    monkeypatch.setattr(Path, "is_file", lambda self: False)
+    assert ar._resolve_accudisc() == "accudisc"
