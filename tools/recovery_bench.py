@@ -266,13 +266,21 @@ def row_to_toml(row: BenchRow) -> str:
 # --- Live-drive orchestration (best-effort; needs a physical disc) -------------
 
 
-def accudisc_speed_current(device: str) -> int:
-    """Governor ceiling at load: page-2A ``current`` Nx via ``accudisc speed``.
-    A self-throttled ceiling flags disc-wide marginality up front (AccuDisc §5).
-    Returns 0 when unavailable."""
+def read_governor_ceiling(device: str) -> int:
+    """The firmware governor's ceiling for the loaded disc — the self-throttle
+    triage signal (§8.4, AccuDisc finding #5): a drive that caps *itself* below
+    its physical max at media-scan time is flagging disc-wide marginality.
+
+    **Requests the physical max first**, so the drive clamps to its governor and
+    reports it in page-2A ``current``. This is residual-state-independent — the
+    ceiling persists across handles (§15.1.3), so a plain ``current`` read would
+    return whatever a prior op left, not the governor. Requesting max never
+    *raises* past the governor (§15.1.1), so the clamp is the governor. The set
+    is a harmless side effect (the matrix sets ``--speed`` per read). Returns 0
+    when unavailable."""
     try:
         r = subprocess.run(  # noqa: S603 — snapshot/PATH binary, fixed argv
-            [_ACCUDISC, "--device", device, "speed"],
+            [_ACCUDISC, "--device", device, "speed", "99"],
             capture_output=True,
             text=True,
             check=False,
@@ -850,12 +858,16 @@ def main(argv: list[str] | None = None) -> int:
 
     out_dir = Path(args.out).resolve().parent
     out_dir.mkdir(parents=True, exist_ok=True)
+    # Read the governor ceiling FIRST — it's the load-time self-throttle triage
+    # signal (§8.4), sampled before probe_ladder (which leaves the drive parked at
+    # its last probed rung). Requests max to reveal the firmware clamp regardless
+    # of any residual ceiling a prior op left.
+    governor = read_governor_ceiling(args.device)
     speeds = (
         [int(x) for x in args.speeds.split(",")]
         if args.speeds
         else probe_ladder(args.device)
     )
-    governor = accudisc_speed_current(args.device)
     rungs = [r.strip() for r in args.rungs.split(",") if r.strip()]
 
     print(
