@@ -40,6 +40,7 @@ import mmap
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -128,18 +129,29 @@ class BenchRow:
 # --- Pure decision core (unit-tested) ------------------------------------------
 
 
-def rung_read_flags(rung: str, sub: bool, c2: bool) -> list[str]:
-    """AccuDisc ``read`` flags for a rung + the sub/no-sub (Axis A) and C2 (Axis F)
-    toggles. Only ``--c2-retries`` is intrinsically C2-dependent, so it is dropped
-    when C2 is off; the other knobs must function C2-less (AccuDisc §17.3)."""
+def rung_recovery_flags(rung: str, c2: bool) -> list[str]:
+    """The recovery knobs for a rung (retries/c2-retries/verify/overlap/ladder).
+
+    These are the escalating re-read aggression applied to a **flagged span only**,
+    never whole-disc: ``--verify``/``--overlap``/``--ladder`` are cache-defeated
+    (each re-read drags a ~5000-sector flush), so whole-disc they blow up to hours;
+    scoped to a span the flush cost is amortized (AccuDisc §25.1). ``--c2-retries``
+    is dropped when C2 is off — nothing to retry on (§17.3)."""
     if rung not in RUNGS:
         msg = f"unknown rung {rung!r}; known: {', '.join(RUNGS)}"
         raise ValueError(msg)
     flags: list[str] = []
     for knob, val in RUNGS[rung].items():
         if knob == "c2-retries" and not c2:
-            continue  # no C2 bitmap → nothing to retry on
+            continue  # no C2 bitmap -> nothing to retry on
         flags += [f"--{knob}", val]
+    return flags
+
+
+def capture_flags(sub: bool, c2: bool) -> list[str]:
+    """Capture-stream toggles (Axis A sub/no-sub, Axis F C2 on/off) — separate from
+    the recovery knobs so a baseline whole-disc capture carries no recovery flags."""
+    flags: list[str] = []
     if sub:
         flags += ["--sub", "raw"]
     if not c2:
@@ -203,16 +215,20 @@ def integrity_pass(row: BenchRow) -> bool:
 
 def classify(rows: list[BenchRow]) -> dict[str, str]:
     """Per-rung verdict across a disc's rows (§8.5): a rung that never functions
-    (no summary / all hard) → ``blacklist``; one that functions but yields no
-    integrity improvement over a strictly-cheaper rung → ``warn``; else ``keep``.
-    Keyed by rung label."""
+    → ``blacklist``; one that functions but yields no integrity improvement over a
+    strictly-cheaper rung → ``warn``; else ``keep``. Keyed by rung label.
+
+    A rung "functioned" if it produced a usable result — a whole-disc capture
+    (``subq_total``/``measured_cx``) *or* a span-scoped recovery (``span`` set,
+    including a legitimate ``skipped`` no-op on a clean disc). Only a rung that
+    yields nothing at all is blacklisted."""
     verdict: dict[str, str] = {}
     by_rung = {r.rung: r for r in rows}
     ordered = [lbl for lbl in RUNGS if lbl in by_rung]
     best_so_far = False
     for lbl in ordered:
         row = by_rung[lbl]
-        functioned = row.subq_total > 0 or row.measured_cx > 0
+        functioned = bool(row.span) or row.subq_total > 0 or row.measured_cx > 0
         if not functioned:
             verdict[lbl] = "blacklist"
             continue
@@ -298,39 +314,36 @@ def probe_ladder(device: str) -> list[int]:
     return reqs or list(DEFAULT_SPEED_LADDER)
 
 
-def run_capture(
+def run_read(
     device: str,
     out_dir: Path,
-    rung: str,
+    tag: str,
     speed: int,
     sub: bool,
     c2: bool,
+    *,
+    rung: str | None = None,
+    start: int | None = None,
+    count: int | None = None,
 ) -> tuple[int, dict[str, int], Path, Path]:
-    """One ``accudisc read`` pass at (rung, speed, sub, c2). Returns
-    ``(returncode, summary_dict, pcm_path, map_path)``. The summary tokens are
-    read off ``--progress-fd 1``; stderr is discarded here (the bench cares about
-    the machine channel, not the human log)."""
-    pcm = out_dir / f"{rung}_{speed}x.pcm"
-    c2f = out_dir / f"{rung}_{speed}x.c2"
-    mapf = out_dir / f"{rung}_{speed}x.map"
-    cmd = [
-        _ACCUDISC,
-        "--device",
-        device,
-        "read",
-        "--pcm",
-        str(pcm),
-        "--c2f",
-        str(c2f),
-        "--map-file",
-        str(mapf),
-        "--speed",
-        str(speed),
-        "-q",
-        "--progress-fd",
-        "1",
-        *rung_read_flags(rung, sub=sub, c2=c2),
-    ]
+    """One ``accudisc read`` -> ``(returncode, summary, pcm_path, map_path)``.
+
+    Whole-disc when *start* is None (the baseline capture — capture-stream flags
+    only, no recovery knobs); a bounded ``--start/--count`` span otherwise. A
+    *rung* adds that rung's recovery knobs (span reads only — never whole-disc,
+    §25.1). Summary tokens are read off ``--progress-fd 1``; stderr is discarded."""
+    pcm = out_dir / f"{tag}.pcm"
+    mapf = out_dir / f"{tag}.map"
+    cmd = [_ACCUDISC, "--device", device, "read", "--pcm", str(pcm)]
+    if c2:
+        cmd += ["--c2f", str(out_dir / f"{tag}.c2")]
+    cmd += ["--map-file", str(mapf), "--speed", str(speed)]
+    if start is not None:
+        cmd += ["--start", str(start), "--count", str(count)]
+    cmd += capture_flags(sub, c2)
+    if rung is not None:
+        cmd += rung_recovery_flags(rung, c2)
+    cmd += ["-q", "--progress-fd", "1"]
     summary: dict[str, int] = {}
     proc = subprocess.Popen(  # noqa: S603 — snapshot/PATH binary, fixed argv
         cmd,
@@ -344,6 +357,16 @@ def run_capture(
             summary = parse_summary(line)
     proc.wait()
     return proc.returncode, summary, pcm, mapf
+
+
+def splice_span(dst_pcm: Path, span_pcm: Path, start_lba: int) -> None:
+    """Overwrite ``dst_pcm``'s ``[start_lba, ...)`` region with ``span_pcm``'s raw
+    s16le bytes (2352 B/sector) in place — sample-exact, neighbours untouched
+    (mirrors ``_recover_failed_tracks``'s splice, raw domain both sides)."""
+    data = span_pcm.read_bytes()
+    with open(dst_pcm, "r+b") as f:
+        f.seek(start_lba * 2352)
+        f.write(data)
 
 
 def read_map_spans(map_path: Path, start_lba: int) -> list[tuple[int, int]]:
@@ -485,6 +508,182 @@ def capture_geometry(
     return geom
 
 
+# --- Matrix orchestration (baseline capture + span-targeted recovery) ----------
+
+
+def _mk_row(
+    disc_id: str,
+    drive: str,
+    rung: str,
+    speed: int,
+    governor: int,
+    summary: dict[str, int],
+    span: str = "",
+) -> BenchRow:
+    """Build a row from an accudisc read ``summary`` (relative signals only; the
+    AR/CTDB columns are filled later by :func:`_gate_row`)."""
+    return BenchRow(
+        disc_id=disc_id,
+        drive=drive,
+        rung=rung,
+        span=span,
+        set_speed=speed,
+        governor_ceiling=governor,
+        subq_ok=summary.get("subq_ok", 0),
+        subq_total=summary.get("subq_total", 0),
+        c2_sectors=summary.get("c2", 0),
+        recovered_sectors=summary.get("recovered", 0),
+        suspect_sectors=summary.get("suspect", 0),
+        hard_sectors=summary.get("hard", 0),
+    )
+
+
+def _gate_row(
+    row: BenchRow,
+    pcm: Path,
+    c2_path: Path | None,
+    geom: tuple[list[int], int, int] | None,
+    read_offset: int,
+) -> None:
+    """Fill a row's AR/CTDB columns from a whole-disc PCM. No-op without geometry."""
+    if geom is None or not pcm.is_file():
+        return
+    track_lsns, disc_last_lsn, cddb_id = geom
+    row.ar_v1_pass, row.ar_v2_pass = gate_accuraterip(
+        pcm, track_lsns, disc_last_lsn, read_offset, cddb_id
+    )
+    row.ctdb_pass, row.ctdb_repaired = gate_ctdb(
+        pcm, track_lsns, disc_last_lsn, cddb_id, read_offset, c2_path
+    )
+
+
+def _recover_rung(
+    args: argparse.Namespace,
+    geom: tuple[list[int], int, int] | None,
+    governor: int,
+    disc_id: str,
+    speed: int,
+    rung: str,
+    spans: list[tuple[int, int]],
+    base_pcm: Path,
+    out_dir: Path,
+) -> BenchRow:
+    """Apply one recovery rung to the flagged spans: re-read each span with the
+    rung's knobs, splice into a copy of the baseline PCM, re-gate whole-disc.
+    Span-scoped by construction — the cache-defeated knobs never touch the whole
+    disc (§25.1)."""
+    spliced = out_dir / f"{rung}_{speed}x.spliced.pcm"
+    shutil.copyfile(base_pcm, spliced)
+    t0 = time.monotonic()
+    recovered = c2res = 0
+    for i, (lba, cnt) in enumerate(spans):
+        stag = f"{rung}_{speed}x_s{i}"
+        _rc, ssum, spcm, _sm = run_read(
+            args.device,
+            out_dir,
+            stag,
+            speed,
+            sub=args.sub,
+            c2=args.c2,
+            rung=rung,
+            start=lba,
+            count=cnt,
+        )
+        splice_span(spliced, spcm, lba)
+        recovered += ssum.get("recovered", 0)
+        c2res += ssum.get("c2", 0)
+        for ext in (".pcm", ".c2", ".map"):
+            (out_dir / f"{stag}{ext}").unlink(missing_ok=True)
+    span_str = ",".join(f"{lba}+{cnt}" for lba, cnt in spans)
+    row = _mk_row(
+        disc_id,
+        args.device,
+        rung,
+        speed,
+        governor,
+        {"c2": c2res, "recovered": recovered},
+        span=span_str,
+    )
+    row.wall_s = round(time.monotonic() - t0, 1)
+    _gate_row(row, spliced, None, geom, args.read_offset)
+    if not args.keep_captures:
+        spliced.unlink(missing_ok=True)
+    return row
+
+
+def run_matrix(
+    args: argparse.Namespace,
+    geom: tuple[list[int], int, int] | None,
+    governor: int,
+    speeds: list[int],
+    rungs: list[str],
+    out_dir: Path,
+) -> list[BenchRow]:
+    """The bench matrix: per speed, one whole-disc baseline capture, then the
+    recovery rungs applied only to the map-flagged spans (skipped when the disc is
+    clean, §25.3). Rewrites the ranked report after every row (crash-safe over a
+    long run) and drops the big disposable captures unless ``--keep-captures``."""
+    disc_id = f"{geom[2]:08x}" if geom else args.label
+    out_path = Path(args.out)
+    rows: list[BenchRow] = []
+
+    def emit() -> None:
+        out_path.write_text("".join(row_to_toml(r) for r in rank(rows)))
+
+    for speed in speeds:
+        tag = f"base_{speed}x"
+        t0 = time.monotonic()
+        rc, summary, base_pcm, base_map = run_read(
+            args.device, out_dir, tag, speed, sub=args.sub, c2=args.c2
+        )
+        base = _mk_row(disc_id, args.device, "baseline", speed, governor, summary)
+        base.wall_s = round(time.monotonic() - t0, 1)
+        _gate_row(
+            base,
+            base_pcm,
+            (out_dir / f"{tag}.c2") if args.c2 else None,
+            geom,
+            args.read_offset,
+        )
+        rows.append(base)
+        emit()
+        spans = read_map_spans(base_map, start_lba=0)
+        print(
+            f"  baseline @ {speed}x  exit={rc}  q={base.q_health}  "
+            f"c2={base.c2_sectors}  spans={len(spans)}  ar_v2={base.ar_v2_pass}  "
+            f"ctdb={base.ctdb_pass}/{base.ctdb_repaired}  {base.wall_s}s",
+            flush=True,
+        )
+        for rung in rungs:
+            if not spans:
+                skip = _mk_row(
+                    disc_id, args.device, rung, speed, governor, {}, span="skipped"
+                )
+                skip.subq_ok, skip.subq_total = base.subq_ok, base.subq_total
+                skip.ar_v1_pass, skip.ar_v2_pass = base.ar_v1_pass, base.ar_v2_pass
+                skip.ctdb_pass, skip.ctdb_repaired = base.ctdb_pass, base.ctdb_repaired
+                rows.append(skip)
+                print(f"  {rung} @ {speed}x  skipped (0 flagged spans)", flush=True)
+                continue
+            row = _recover_rung(
+                args, geom, governor, disc_id, speed, rung, spans, base_pcm, out_dir
+            )
+            rows.append(row)
+            emit()
+            print(
+                f"  {rung} @ {speed}x  spans={len(spans)}  "
+                f"recovered={row.recovered_sectors}  c2={row.c2_sectors}  "
+                f"ar_v2={row.ar_v2_pass}  ctdb={row.ctdb_pass}/{row.ctdb_repaired}  "
+                f"{row.wall_s}s",
+                flush=True,
+            )
+        if not args.keep_captures:
+            base_pcm.unlink(missing_ok=True)
+            (out_dir / f"{tag}.c2").unlink(missing_ok=True)
+            base_map.unlink(missing_ok=True)
+    return rows
+
+
 # --- Self-test (no drive needed) -----------------------------------------------
 
 
@@ -496,11 +695,16 @@ def _check(cond: bool, msg: str) -> None:
 
 
 def _selftest() -> int:
-    # rung construction: C2 off drops --c2-retries but keeps the rest
-    f = rung_read_flags("R4", sub=True, c2=True)
-    _check("--c2-retries" in f and "--sub" in f and "--ladder" in f, str(f))
-    g = rung_read_flags("R4", sub=True, c2=False)
-    _check("--c2-retries" not in g and "--no-c2" in g and "--overlap" in g, str(g))
+    # rung recovery knobs: C2 off drops only --c2-retries; no capture flags here
+    f = rung_recovery_flags("R4", c2=True)
+    _check("--c2-retries" in f and "--ladder" in f and "--sub" not in f, str(f))
+    g = rung_recovery_flags("R4", c2=False)
+    _check("--c2-retries" not in g and "--overlap" in g, str(g))
+    # capture flags are separate (sub/no-sub, C2 on/off)
+    _check(
+        capture_flags(sub=True, c2=False) == ["--sub", "raw", "--no-c2"], "cap flags"
+    )
+    _check(capture_flags(sub=False, c2=True) == [], "cap flags default")
 
     # summary token parse (with an appended future key + a non-int guard)
     s = parse_summary("summary hard=3 c2=10 subq_ok=980 subq_total=1000 mode=x")
@@ -564,6 +768,18 @@ def _selftest() -> int:
     _check("[[result]]" in toml and "ar_v2_pass = true" in toml, "toml body")
     _check("ctdb_pass" not in toml, "None columns must be omitted")
 
+    # splice: overwrite one sector in place, neighbours byte-for-byte untouched
+    with tempfile.TemporaryDirectory() as td:
+        base = Path(td) / "b.pcm"
+        span = Path(td) / "s.pcm"
+        base.write_bytes(b"\x00" * (2352 * 4))  # 4 clean sectors
+        span.write_bytes(b"\xff" * 2352)  # 1 recovered sector
+        splice_span(base, span, 2)  # replace sector index 2
+        out = base.read_bytes()
+        _check(out[: 2352 * 2] == b"\x00" * (2352 * 2), "pre-span untouched")
+        _check(out[2352 * 2 : 2352 * 3] == b"\xff" * 2352, "span written")
+        _check(out[2352 * 3 :] == b"\x00" * 2352, "post-span untouched")
+
     # geometry: build (track_lsns, lead-out, cddb_id) from a real Tracy Chapman
     # fulltoc capture with an empty sub — proves the wired geometry path.
     fixture = _SRC.parent / "tests" / "fixtures" / "tracy.fulltoc"
@@ -620,6 +836,12 @@ def main(argv: list[str] | None = None) -> int:
         default=0,
         help="drive read offset in samples for the AR gate (e.g. +30 for PX-716A)",
     )
+    ap.add_argument(
+        "--keep-captures",
+        action="store_true",
+        help="keep per-rung PCM/C2 captures (default: delete after gating; a full "
+        "matrix is ~13 GB of disposable PCM per disc otherwise)",
+    )
     ap.add_argument("--out", default="rips/recovery_bench.toml")
     args = ap.parse_args(argv)
 
@@ -642,7 +864,7 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     # Disc geometry (track_lsns / lead-out / cddb_id) is disc-invariant — acquire
-    # once, from a cheap lead-in fulltoc, and feed every rung's AR gate.
+    # once, from a cheap lead-in fulltoc, and feed every row's AR/CTDB gate.
     geom = capture_geometry(args.device, out_dir)
     if geom is None:
         print(
@@ -655,51 +877,7 @@ def main(argv: list[str] | None = None) -> int:
             f"cddb {cddb_id:08x}, read-offset {args.read_offset:+d}"
         )
 
-    rows: list[BenchRow] = []
-    for speed in speeds:
-        for rung in rungs:
-            t0 = time.monotonic()
-            rc, summary, pcm, mapf = run_capture(
-                args.device,
-                out_dir,
-                rung,
-                speed,
-                sub=args.sub,
-                c2=args.c2,
-            )
-            wall = time.monotonic() - t0
-            row = BenchRow(
-                disc_id=(f"{cddb_id:08x}" if geom else args.label),
-                drive=args.device,
-                rung=rung,
-                set_speed=speed,
-                governor_ceiling=governor,
-                subq_ok=summary.get("subq_ok", 0),
-                subq_total=summary.get("subq_total", 0),
-                c2_sectors=summary.get("c2", 0),
-                recovered_sectors=summary.get("recovered", 0),
-                suspect_sectors=summary.get("suspect", 0),
-                hard_sectors=summary.get("hard", 0),
-                wall_s=round(wall, 1),
-            )
-            if geom is not None and pcm.is_file():
-                row.ar_v1_pass, row.ar_v2_pass = gate_accuraterip(
-                    pcm, track_lsns, disc_last_lsn, args.read_offset, cddb_id
-                )
-                c2f = (out_dir / f"{rung}_{speed}x.c2") if args.c2 else None
-                row.ctdb_pass, row.ctdb_repaired = gate_ctdb(
-                    pcm, track_lsns, disc_last_lsn, cddb_id, args.read_offset, c2f
-                )
-            rows.append(row)
-            spans = read_map_spans(mapf, start_lba=0)
-            print(
-                f"  {rung} @ {speed}x  exit={rc}  q={row.q_health}  "
-                f"c2={row.c2_sectors}  spans={len(spans)}  "
-                f"ar_v2={row.ar_v2_pass}  ctdb={row.ctdb_pass}/{row.ctdb_repaired}"
-                f"  {wall:.1f}s"
-            )
-
-    Path(args.out).write_text("".join(row_to_toml(r) for r in rank(rows)))
+    rows = run_matrix(args, geom, governor, speeds, rungs, out_dir)
     print(f"# wrote {len(rows)} rows → {args.out}")
     print(f"# classify: {classify(rows)}")
     return 0
