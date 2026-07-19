@@ -446,6 +446,8 @@ def gate_ctdb(
     cddb_id: int,
     read_offset: int,
     c2_path: Path | None = None,
+    *,
+    attempt_repair: bool = False,
 ) -> tuple[bool | None, bool | None]:
     """CTDB gate — ``(ctdb_pass, ctdb_repaired)``, both from
     :mod:`cdda2img.ctdb_repair`.
@@ -454,11 +456,13 @@ def gate_ctdb(
       every verifiable track matches (checksums only, no repair). ``None`` = disc
       not in CTDB, or the lookup failed (not-measured, non-blocking); ``False`` =
       in CTDB but a track mismatches or no entry reconciles; ``True`` = all match.
-    * **ctdb_repaired** — attempted only when ``ctdb_pass`` is False (there is
-      damage to mend). Runs ``repair_whole_disc`` on a **copy** — non-destructive,
-      the capture is left intact — C2-erasure-assisted when a bitmap is present,
-      and AR-double-gated by ``repair_whole_disc`` itself. ``None`` when not
-      attempted."""
+    * **ctdb_repaired** — attempted **only when ``attempt_repair`` is True** and
+      ``ctdb_pass`` is False. Parity repair (``repair_whole_disc``) is a heavyweight
+      whole-disc Reed-Solomon FEC decode (``ctanalyse``, CPU-minutes) — a
+      last-resort recovery *path*, not a per-cell gate — so the matrix runs it off
+      (checksums only) and it is evaluated separately. When run, it works on a
+      **copy** (non-destructive), C2-erasure-assisted, AR-double-gated. ``None``
+      when not attempted."""
     from xml.etree.ElementTree import ParseError
 
     from cdda2img.ctdb_repair import load_entries, repair_whole_disc, select_entry
@@ -476,9 +480,10 @@ def gate_ctdb(
     sel = select_entry(pcm.read_bytes(), entries, bounds, n)
     if sel is not None and not sel.damaged:
         return True, None  # all verifiable tracks match — checksum pass
+    if not attempt_repair:
+        return False, None  # damaged/no-reconcile; parity repair is a separate path
 
-    # ctdb_pass is False (a track mismatches, or no entry reconciles): try a
-    # non-destructive parity repair on a copy so the capture stays untouched.
+    # Non-destructive parity repair on a copy so the capture stays untouched.
     tmp = pcm.with_suffix(".ctdbtry.pcm")
     try:
         shutil.copyfile(pcm, tmp)
@@ -640,8 +645,8 @@ def _recover_rung(
         {"c2": c2res, "recovered": recovered},
         span=span_str,
     )
-    row.wall_s = round(time.monotonic() - t0, 1)
     _gate_row(row, spliced, None, geom, args.read_offset)
+    row.wall_s = round(time.monotonic() - t0, 1)  # whole cell: re-read + gate
     if not args.keep_captures:
         spliced.unlink(missing_ok=True)
     return row
@@ -673,7 +678,6 @@ def run_matrix(
             args.device, out_dir, tag, speed, sub=args.sub, c2=args.c2
         )
         base = _mk_row(disc_id, args.device, "baseline", speed, governor, summary)
-        base.wall_s = round(time.monotonic() - t0, 1)
         _gate_row(
             base,
             base_pcm,
@@ -681,6 +685,7 @@ def run_matrix(
             geom,
             args.read_offset,
         )
+        base.wall_s = round(time.monotonic() - t0, 1)  # whole cell: capture + gate
         rows.append(base)
         emit()
         spans = read_map_spans(base_map, start_lba=0)
