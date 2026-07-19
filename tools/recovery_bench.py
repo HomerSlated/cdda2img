@@ -266,43 +266,69 @@ def row_to_toml(row: BenchRow) -> str:
 # --- Live-drive orchestration (best-effort; needs a physical disc) -------------
 
 
-def read_governor_ceiling(device: str) -> int:
-    """The firmware governor's ceiling for the loaded disc — the self-throttle
-    triage signal (§8.4, AccuDisc finding #5): a drive that caps *itself* below
-    its physical max at media-scan time is flagging disc-wide marginality.
+def _parse_speed_line(stdout: str) -> tuple[int, int]:
+    """``(max_x, current_x)`` from an ``accudisc speed`` page-2A line; ``(0, 0)``
+    if absent. Line form: ``page2A  max 40x (...)  current 32x (...)``."""
 
-    **Requests the physical max first**, so the drive clamps to its governor and
-    reports it in page-2A ``current``. This is residual-state-independent — the
-    ceiling persists across handles (§15.1.3), so a plain ``current`` read would
-    return whatever a prior op left, not the governor. Requesting max never
-    *raises* past the governor (§15.1.1), so the clamp is the governor. The set
-    is a harmless side effect (the matrix sets ``--speed`` per read). Returns 0
-    when unavailable."""
+    def field(line: str, label: str) -> int:
+        if label not in line:
+            return 0
+        tok = line.split(label, 1)[1].strip().split("x", 1)[0]
+        try:
+            return int(tok)
+        except ValueError:
+            return 0
+
+    for line in stdout.splitlines():
+        if line.startswith("page2A"):
+            return field(line, "max "), field(line, "current ")
+    return 0, 0
+
+
+def set_speed_to_max(device: str) -> int:
+    """Request the drive's **page-2A max** (a valid, in-range value) and return the
+    resulting page-2A ``current`` — the drive clamps to its governor, so this both
+    reveals the governor ceiling *and* clears any residual speed a prior run left.
+
+    Requesting an **out-of-range** value (e.g. 99, above a 40x max) is *rejected*
+    by the drive, leaving the stale residual — the bug that misread ABBA's 32x
+    governor as a stuck 8x carried over from the un-restored ZZ Top run. Always
+    request the reported max. Returns 0 when unavailable."""
     try:
-        r = subprocess.run(  # noqa: S603 — snapshot/PATH binary, fixed argv
-            [_ACCUDISC, "--device", device, "speed", "99"],
+        rep = subprocess.run(  # noqa: S603 — snapshot/PATH binary, fixed argv
+            [_ACCUDISC, "--device", device, "speed"],
             capture_output=True,
             text=True,
             check=False,
         )
     except OSError:
         return 0
-    for line in r.stdout.splitlines():
-        if line.startswith("page2A") and "current" in line:
-            # "page2A  max 40x (...)  current 32x (...)" — grab the x after current
-            after = line.split("current", 1)[1].strip()
-            tok = after.split("x", 1)[0]
-            try:
-                return int(tok)
-            except ValueError:
-                return 0
-    return 0
+    maxx, _ = _parse_speed_line(rep.stdout)
+    if not maxx:
+        return 0
+    try:
+        r = subprocess.run(  # noqa: S603 — snapshot/PATH binary, fixed argv
+            [_ACCUDISC, "--device", device, "speed", str(maxx)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except OSError:
+        return 0
+    _, cur = _parse_speed_line(r.stdout)
+    return cur
 
 
 def probe_ladder(device: str) -> list[int]:
-    """Per-disc speed ladder from ``accudisc speeds`` — the authoritative source
-    (``measured`` = ground truth). Returns the requested rungs it reported, or the
-    default set when unavailable."""
+    """The drive's **distinct achievable** read speeds for the loaded disc, from
+    ``accudisc speeds`` (timed reads — ground truth, and they warm the disc so the
+    governor settles to its true ceiling). Descending; default set when empty.
+
+    The drive quantizes requests to discrete accepted ceilings and caps at its
+    governor, so several requests collapse to one speed (ABBA req 40/32 -> 32x).
+    Dedupe on the accepted ceiling (``page2a``) so the matrix sweeps each real
+    speed once, not redundant requests that all deliver the same rate. The highest
+    entry is the governor ceiling."""
     try:
         r = subprocess.run(  # noqa: S603 — snapshot/PATH binary, fixed argv
             [_ACCUDISC, "--device", device, "speeds"],
@@ -312,14 +338,16 @@ def probe_ladder(device: str) -> list[int]:
         )
     except OSError:
         return list(DEFAULT_SPEED_LADDER)
-    reqs: list[int] = []
+    achieved: set[int] = set()
     for line in r.stdout.splitlines():
-        if line.startswith("speed ") and "req=" in line:
+        if line.startswith("speed ") and "page2a=" in line:
             for tok in line.split():
-                if tok.startswith("req="):
+                if tok.startswith("page2a="):
                     with contextlib.suppress(ValueError):
-                        reqs.append(int(tok[4:]))
-    return reqs or list(DEFAULT_SPEED_LADDER)
+                        v = int(tok[7:])
+                        if v:
+                            achieved.add(v)
+    return sorted(achieved, reverse=True) or list(DEFAULT_SPEED_LADDER)
 
 
 def run_read(
@@ -858,16 +886,19 @@ def main(argv: list[str] | None = None) -> int:
 
     out_dir = Path(args.out).resolve().parent
     out_dir.mkdir(parents=True, exist_ok=True)
-    # Read the governor ceiling FIRST — it's the load-time self-throttle triage
-    # signal (§8.4), sampled before probe_ladder (which leaves the drive parked at
-    # its last probed rung). Requests max to reveal the firmware clamp regardless
-    # of any residual ceiling a prior op left.
-    governor = read_governor_ceiling(args.device)
+    # Clear any residual speed a prior run/disc left (a valid max request — an
+    # un-restored slow drive from the previous disc otherwise contaminates this
+    # one, e.g. ZZ Top's 4x carrying into ABBA and masking its 32x governor).
+    set_speed_to_max(args.device)
+    # The ladder comes from a warm `speeds` probe (distinct achievable speeds); the
+    # governor ceiling is simply its highest entry (max achievable). The probe's
+    # real reads spin the disc, so the governor settles to its true value.
     speeds = (
         [int(x) for x in args.speeds.split(",")]
         if args.speeds
         else probe_ladder(args.device)
     )
+    governor = speeds[0] if speeds else 0
     rungs = [r.strip() for r in args.rungs.split(",") if r.strip()]
 
     print(
@@ -890,6 +921,9 @@ def main(argv: list[str] | None = None) -> int:
         )
 
     rows = run_matrix(args, geom, governor, speeds, rungs, out_dir)
+    # Courtesy restore for the next disc/consumer — the ceiling persists across
+    # handles (§15.1.3), so a slow last rung would otherwise carry over.
+    set_speed_to_max(args.device)
     print(f"# wrote {len(rows)} rows → {args.out}")
     print(f"# classify: {classify(rows)}")
     return 0
