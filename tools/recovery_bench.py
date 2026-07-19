@@ -704,6 +704,7 @@ def run_matrix(
                 skip.ar_v1_pass, skip.ar_v2_pass = base.ar_v1_pass, base.ar_v2_pass
                 skip.ctdb_pass, skip.ctdb_repaired = base.ctdb_pass, base.ctdb_repaired
                 rows.append(skip)
+                emit()  # write every row — otherwise a trailing run of skips is lost
                 print(f"  {rung} @ {speed}x  skipped (0 flagged spans)", flush=True)
                 continue
             row = _recover_rung(
