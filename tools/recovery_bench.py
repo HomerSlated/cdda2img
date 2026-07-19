@@ -652,6 +652,39 @@ def _recover_rung(
     return row
 
 
+def _ctdb_repair_rung(
+    args: argparse.Namespace,
+    geom: tuple[list[int], int, int] | None,
+    governor: int,
+    disc_id: str,
+    speed: int,
+    base_pcm: Path,
+    base_c2: Path | None,
+) -> BenchRow:
+    """The CTDB 'repair without reads' path — CTDB checksum reconcile + Reed-Solomon
+    parity rebuild on the baseline PCM, **zero extra reads**, so on an in-CTDB disc
+    it is plausibly the *fastest* recovery path (capture once, rebuild by maths, no
+    re-reading damaged spans). C2-erasure-assisted from the baseline C2, AR-double-
+    gated inside ``repair_whole_disc``. Operates on the shared baseline capture,
+    independent of the audio-recovery rungs; ``wall_s`` is the repair itself (the
+    capture cost lives on the baseline row). Isolate it with ``--rungs ctdb``."""
+    t0 = time.monotonic()
+    row = _mk_row(disc_id, args.device, "ctdb", speed, governor, {}, span="parity")
+    if geom is not None and base_pcm.is_file():
+        track_lsns, disc_last_lsn, cddb_id = geom
+        row.ctdb_pass, row.ctdb_repaired = gate_ctdb(
+            base_pcm,
+            track_lsns,
+            disc_last_lsn,
+            cddb_id,
+            args.read_offset,
+            base_c2 if (base_c2 and base_c2.exists()) else None,
+            attempt_repair=True,
+        )
+    row.wall_s = round(time.monotonic() - t0, 1)
+    return row
+
+
 def run_matrix(
     args: argparse.Namespace,
     geom: tuple[list[int], int, int] | None,
@@ -696,6 +729,26 @@ def run_matrix(
             flush=True,
         )
         for rung in rungs:
+            if rung == "ctdb":
+                # "repair without reads": parity rebuild on the baseline, no re-reads
+                # and no dependence on the flagged spans (whole-disc RS FEC).
+                row = _ctdb_repair_rung(
+                    args,
+                    geom,
+                    governor,
+                    disc_id,
+                    speed,
+                    base_pcm,
+                    (out_dir / f"{tag}.c2") if args.c2 else None,
+                )
+                rows.append(row)
+                emit()
+                print(
+                    f"  ctdb @ {speed}x  parity  "
+                    f"ctdb={row.ctdb_pass}/{row.ctdb_repaired}  {row.wall_s}s",
+                    flush=True,
+                )
+                continue
             if not spans:
                 skip = _mk_row(
                     disc_id, args.device, rung, speed, governor, {}, span="skipped"
@@ -851,7 +904,11 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--device", default="/dev/sr0")
     ap.add_argument("--label", default="disc", help="human disc label for the report")
     ap.add_argument(
-        "--rungs", default="R0,R1,R2,R3,R4", help="comma-separated rungs to run"
+        "--rungs",
+        default="R0,R1,R2,R3,R4",
+        help="comma-separated rungs: R0-R4 (audio span recovery) and/or 'ctdb' "
+        "(CTDB parity repair on the baseline, zero extra reads). "
+        "'--rungs ctdb' isolates the CTDB path.",
     )
     ap.add_argument(
         "--speeds",
@@ -906,6 +963,9 @@ def main(argv: list[str] | None = None) -> int:
     )
     governor = speeds[0] if speeds else 0
     rungs = [r.strip() for r in args.rungs.split(",") if r.strip()]
+    unknown = [r for r in rungs if r != "ctdb" and r not in RUNGS]
+    if unknown:
+        ap.error(f"unknown rung(s) {unknown}; valid: {list(RUNGS)} + ['ctdb']")
 
     print(
         f"# bench: {args.label} on {args.device} "
