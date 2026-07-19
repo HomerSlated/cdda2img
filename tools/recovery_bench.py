@@ -350,6 +350,57 @@ def probe_ladder(device: str) -> list[int]:
     return sorted(achieved, reverse=True) or list(DEFAULT_SPEED_LADDER)
 
 
+def _flagged_bbox(
+    spans: list[tuple[int, int]], cap: int = 20000
+) -> tuple[int, int] | None:
+    """Bounding ``(start, count)`` window over the flagged spans, for a c2lag probe.
+    c2lag needs a *streaming window* of C2-firing sectors (a 1-sector post-seek
+    reread flags nothing), so the whole damaged region beats a single span; capped
+    so a disc-wide-scattered defect doesn't probe the entire disc. None if empty."""
+    if not spans:
+        return None
+    start = min(s for s, _ in spans)
+    end = max(s + c for s, c in spans)
+    return start, min(end - start, cap)
+
+
+def probe_c2lag(device: str, start: int, count: int) -> int | None:
+    """Measure the C2/audio erasure alignment (``accudisc c2lag``) over a damaged
+    span, in :mod:`cdda2img.ctdb_repair`'s convention — **negated**: AccuDisc reports
+    ``pairs=+2``, the erasure decode wants ``align=-2`` (the same physical lag, the
+    opposite sign convention).
+
+    Per-drive, and must be measured on C2-firing media under a streaming read.
+    Returns None when inconclusive (no C2 fired / evidence too thin — c2lag exits 3
+    with no ``pairs=`` line), so the caller falls back to **error-only** decode
+    rather than assume a lag. Measure the drive fact; never hardcode it."""
+    try:
+        r = subprocess.run(  # noqa: S603 — snapshot/PATH binary, fixed argv
+            [
+                _ACCUDISC,
+                "--device",
+                device,
+                "c2lag",
+                "--start",
+                str(start),
+                "--count",
+                str(count),
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except OSError:
+        return None
+    for line in r.stdout.splitlines():
+        if line.startswith("c2lag ") and "pairs=" in line:
+            for tok in line.split():
+                if tok.startswith("pairs="):
+                    with contextlib.suppress(ValueError):
+                        return -int(tok.partition("=")[2])
+    return None  # inconclusive ('absent' / thin evidence)
+
+
 def run_read(
     device: str,
     out_dir: Path,
@@ -448,9 +499,12 @@ def gate_ctdb(
     c2_path: Path | None = None,
     *,
     attempt_repair: bool = False,
+    c2_align: int = -2,
 ) -> tuple[bool | None, bool | None]:
     """CTDB gate — ``(ctdb_pass, ctdb_repaired)``, both from
-    :mod:`cdda2img.ctdb_repair`.
+    :mod:`cdda2img.ctdb_repair`. *c2_align* is the C2/audio erasure alignment in
+    sample pairs (per-drive; measured via ``accudisc c2lag``, default -2 for the
+    PX-716A) — only used when *c2_path* feeds the erasure-assisted decode.
 
     * **ctdb_pass** — this rip's per-track CRC32s reconcile with a CTDB entry and
       every verifiable track matches (checksums only, no repair). ``None`` = disc
@@ -494,6 +548,7 @@ def gate_ctdb(
             cddb_id,
             read_offset,
             c2_path=c2_path if (c2_path and c2_path.exists()) else None,
+            c2_align=c2_align,
             cache_dir=cache,
         )
     finally:
@@ -660,6 +715,7 @@ def _ctdb_repair_rung(
     speed: int,
     base_pcm: Path,
     base_c2: Path | None,
+    c2_align: int = -2,
     label: str = "ctdb",
 ) -> BenchRow:
     """The CTDB 'repair without reads' path — CTDB checksum reconcile + Reed-Solomon
@@ -670,11 +726,11 @@ def _ctdb_repair_rung(
     ``wall_s`` is the repair itself (the capture cost lives on the baseline row).
 
     *base_c2* is the erasure feed: when present, decode is erasure-assisted (up to
-    npar known-position erasures per column); when None, decode is error-only
-    (⌊npar/2⌋ unknown-position errors) — the ``ctdb-noc2`` rung, which is a faithful
-    stand-in for a **drive with no C2 support** (identical PCM, no erasure feed).
-    Isolate with ``--rungs ctdb`` (or ``ctdb,ctdb-noc2`` for the controlled pair on
-    one capture)."""
+    npar known-position erasures per column) at the measured *c2_align*; when None,
+    decode is error-only (⌊npar/2⌋ unknown-position errors) — the ``ctdb-noc2`` rung,
+    a faithful stand-in for a **drive with no C2 support** (identical PCM, no erasure
+    feed), and also the fallback when c2lag can't be measured. Isolate with
+    ``--rungs ctdb`` (or ``ctdb,ctdb-noc2`` for the controlled pair on one capture)."""
     t0 = time.monotonic()
     row = _mk_row(disc_id, args.device, label, speed, governor, {}, span="parity")
     if geom is not None and base_pcm.is_file():
@@ -687,6 +743,7 @@ def _ctdb_repair_rung(
             args.read_offset,
             base_c2 if (base_c2 and base_c2.exists()) else None,
             attempt_repair=True,
+            c2_align=c2_align,
         )
     row.wall_s = round(time.monotonic() - t0, 1)
     return row
@@ -707,6 +764,12 @@ def run_matrix(
     disc_id = f"{geom[2]:08x}" if geom else args.label
     out_path = Path(args.out)
     rows: list[BenchRow] = []
+    # C2/audio erasure alignment for the ctdb rung — measured once (per drive) on
+    # the first C2-firing baseline via accudisc c2lag, never assumed. None until
+    # measured; stays None if inconclusive, which makes the ctdb rung fall back to
+    # error-only decode rather than trust a mis-aligned erasure feed.
+    disc_c2_align: int | None = None
+    c2lag_done = False
 
     def emit() -> None:
         out_path.write_text("".join(row_to_toml(r) for r in rank(rows)))
@@ -735,17 +798,38 @@ def run_matrix(
             f"ctdb={base.ctdb_pass}/{base.ctdb_repaired}  {base.wall_s}s",
             flush=True,
         )
+        # Measure the C2/audio lag once, on the first C2-firing baseline (the ctdb
+        # rung's erasure feed needs it; probing here reuses this baseline's damage).
+        if not c2lag_done and args.c2 and "ctdb" in rungs and spans:
+            c2lag_done = True
+            bbox = _flagged_bbox(spans)
+            if bbox is not None:
+                disc_c2_align = probe_c2lag(args.device, *bbox)
+                print(
+                    f"# c2lag: align={disc_c2_align} "
+                    f"(probed {bbox[1]} sectors @ lba {bbox[0]})"
+                    if disc_c2_align is not None
+                    else "# c2lag: inconclusive — ctdb rung uses error-only decode",
+                    flush=True,
+                )
         for rung in rungs:
             if rung in ("ctdb", "ctdb-noc2"):
                 # "repair without reads": parity rebuild on the baseline, no re-reads
                 # and no dependence on the flagged spans (whole-disc RS FEC).
-                # ctdb = erasure-assisted (C2 feed); ctdb-noc2 = error-only on the
-                # same PCM (the no-C2-drive stand-in).
-                c2_feed = (
-                    (out_dir / f"{tag}.c2") if (args.c2 and rung == "ctdb") else None
-                )
+                # ctdb = erasure-assisted (C2 feed at the measured c2lag); ctdb-noc2,
+                # and an unmeasurable c2lag, fall back to error-only on the same PCM.
+                use_c2 = rung == "ctdb" and args.c2 and disc_c2_align is not None
+                c2_feed = (out_dir / f"{tag}.c2") if use_c2 else None
                 row = _ctdb_repair_rung(
-                    args, geom, governor, disc_id, speed, base_pcm, c2_feed, label=rung
+                    args,
+                    geom,
+                    governor,
+                    disc_id,
+                    speed,
+                    base_pcm,
+                    c2_feed,
+                    c2_align=disc_c2_align if disc_c2_align is not None else -2,
+                    label=rung,
                 )
                 rows.append(row)
                 emit()
@@ -816,6 +900,11 @@ def _selftest() -> int:
     states = bytes([0x1, 0x2, 0x12, 0x1, 0x3, 0x3, 0x1, 0x5])
     spans = cluster_spans(states, 100)
     _check(spans == [(101, 2), (104, 2), (107, 1)], str(spans))
+
+    # c2lag bbox: whole damaged region, capped, None when empty
+    _check(_flagged_bbox([(100, 2), (105, 3)]) == (100, 8), "bbox over spans")
+    _check(_flagged_bbox([]) is None, "empty spans -> None bbox")
+    _check(_flagged_bbox([(0, 100000)], cap=20000) == (0, 20000), "bbox capped")
 
     # integrity gate: v2 fail blocks; transient Q collapse blocks; None is ok
     _check(not integrity_pass(BenchRow("d", "drv", "R0", ar_v2_pass=False)), "v2 fail")
