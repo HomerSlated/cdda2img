@@ -660,16 +660,23 @@ def _ctdb_repair_rung(
     speed: int,
     base_pcm: Path,
     base_c2: Path | None,
+    label: str = "ctdb",
 ) -> BenchRow:
     """The CTDB 'repair without reads' path — CTDB checksum reconcile + Reed-Solomon
     parity rebuild on the baseline PCM, **zero extra reads**, so on an in-CTDB disc
     it is plausibly the *fastest* recovery path (capture once, rebuild by maths, no
-    re-reading damaged spans). C2-erasure-assisted from the baseline C2, AR-double-
-    gated inside ``repair_whole_disc``. Operates on the shared baseline capture,
-    independent of the audio-recovery rungs; ``wall_s`` is the repair itself (the
-    capture cost lives on the baseline row). Isolate it with ``--rungs ctdb``."""
+    re-reading damaged spans). AR-double-gated inside ``repair_whole_disc``. Operates
+    on the shared baseline capture, independent of the audio-recovery rungs;
+    ``wall_s`` is the repair itself (the capture cost lives on the baseline row).
+
+    *base_c2* is the erasure feed: when present, decode is erasure-assisted (up to
+    npar known-position erasures per column); when None, decode is error-only
+    (⌊npar/2⌋ unknown-position errors) — the ``ctdb-noc2`` rung, which is a faithful
+    stand-in for a **drive with no C2 support** (identical PCM, no erasure feed).
+    Isolate with ``--rungs ctdb`` (or ``ctdb,ctdb-noc2`` for the controlled pair on
+    one capture)."""
     t0 = time.monotonic()
-    row = _mk_row(disc_id, args.device, "ctdb", speed, governor, {}, span="parity")
+    row = _mk_row(disc_id, args.device, label, speed, governor, {}, span="parity")
     if geom is not None and base_pcm.is_file():
         track_lsns, disc_last_lsn, cddb_id = geom
         row.ctdb_pass, row.ctdb_repaired = gate_ctdb(
@@ -729,22 +736,21 @@ def run_matrix(
             flush=True,
         )
         for rung in rungs:
-            if rung == "ctdb":
+            if rung in ("ctdb", "ctdb-noc2"):
                 # "repair without reads": parity rebuild on the baseline, no re-reads
                 # and no dependence on the flagged spans (whole-disc RS FEC).
+                # ctdb = erasure-assisted (C2 feed); ctdb-noc2 = error-only on the
+                # same PCM (the no-C2-drive stand-in).
+                c2_feed = (
+                    (out_dir / f"{tag}.c2") if (args.c2 and rung == "ctdb") else None
+                )
                 row = _ctdb_repair_rung(
-                    args,
-                    geom,
-                    governor,
-                    disc_id,
-                    speed,
-                    base_pcm,
-                    (out_dir / f"{tag}.c2") if args.c2 else None,
+                    args, geom, governor, disc_id, speed, base_pcm, c2_feed, label=rung
                 )
                 rows.append(row)
                 emit()
                 print(
-                    f"  ctdb @ {speed}x  parity  "
+                    f"  {rung} @ {speed}x  parity  "
                     f"ctdb={row.ctdb_pass}/{row.ctdb_repaired}  {row.wall_s}s",
                     flush=True,
                 )
@@ -906,9 +912,10 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument(
         "--rungs",
         default="R0,R1,R2,R3,R4",
-        help="comma-separated rungs: R0-R4 (audio span recovery) and/or 'ctdb' "
-        "(CTDB parity repair on the baseline, zero extra reads). "
-        "'--rungs ctdb' isolates the CTDB path.",
+        help="comma-separated rungs: R0-R4 (audio span recovery), 'ctdb' (CTDB "
+        "parity repair on the baseline, zero extra reads, C2-erasure-assisted), "
+        "'ctdb-noc2' (error-only parity on the same PCM — the no-C2-drive stand-in). "
+        "'--rungs ctdb,ctdb-noc2' is the controlled C2-vs-no-C2 pair.",
     )
     ap.add_argument(
         "--speeds",
@@ -963,9 +970,12 @@ def main(argv: list[str] | None = None) -> int:
     )
     governor = speeds[0] if speeds else 0
     rungs = [r.strip() for r in args.rungs.split(",") if r.strip()]
-    unknown = [r for r in rungs if r != "ctdb" and r not in RUNGS]
+    _ctdb_rungs = ("ctdb", "ctdb-noc2")
+    unknown = [r for r in rungs if r not in _ctdb_rungs and r not in RUNGS]
     if unknown:
-        ap.error(f"unknown rung(s) {unknown}; valid: {list(RUNGS)} + ['ctdb']")
+        ap.error(
+            f"unknown rung(s) {unknown}; valid: {list(RUNGS)} + {list(_ctdb_rungs)}"
+        )
 
     print(
         f"# bench: {args.label} on {args.device} "
