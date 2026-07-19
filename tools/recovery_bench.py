@@ -129,14 +129,20 @@ class BenchRow:
 # --- Pure decision core (unit-tested) ------------------------------------------
 
 
-def rung_recovery_flags(rung: str, c2: bool) -> list[str]:
+def rung_recovery_flags(
+    rung: str, c2: bool, *, overlap_needed: bool = True
+) -> list[str]:
     """The recovery knobs for a rung (retries/c2-retries/verify/overlap/ladder).
 
     These are the escalating re-read aggression applied to a **flagged span only**,
     never whole-disc: ``--verify``/``--overlap``/``--ladder`` are cache-defeated
     (each re-read drags a ~5000-sector flush), so whole-disc they blow up to hours;
     scoped to a span the flush cost is amortized (AccuDisc §25.1). ``--c2-retries``
-    is dropped when C2 is off — nothing to retry on (§17.3)."""
+    is dropped when C2 is off — nothing to retry on (§17.3). ``overlap_needed=False``
+    (Accurate Stream confirmed — see ``probe_accurate_stream``) drops ``--overlap``:
+    its seam check exists to catch positioning drift between chunk reads, which an
+    Accurate Stream drive doesn't have. Defaults True — keep it unless a probe has
+    positively confirmed the drive doesn't need it."""
     if rung not in RUNGS:
         msg = f"unknown rung {rung!r}; known: {', '.join(RUNGS)}"
         raise ValueError(msg)
@@ -144,6 +150,8 @@ def rung_recovery_flags(rung: str, c2: bool) -> list[str]:
     for knob, val in RUNGS[rung].items():
         if knob == "c2-retries" and not c2:
             continue  # no C2 bitmap -> nothing to retry on
+        if knob == "overlap" and not overlap_needed:
+            continue  # Accurate Stream confirmed -> no positioning drift to catch
         flags += [f"--{knob}", val]
     return flags
 
@@ -401,6 +409,34 @@ def probe_c2lag(device: str, start: int, count: int) -> int | None:
     return None  # inconclusive ('absent' / thin evidence)
 
 
+def probe_accurate_stream(device: str) -> bool | None:
+    """Probe Accurate Stream (``accudisc features --stream``) — whether the drive
+    returns the exact same samples for the exact same LBA on every read. When
+    confirmed, ``--overlap``'s boundary-seam check (extend + verify against
+    positioning drift) has nothing to catch and is pure overhead; when absent or
+    unmeasurable, keep it — capitalise on a *confirmed* guarantee, never assume
+    one (governing bench principle: no drive-specific bias, only drive-specific
+    advantage where earned). Disc-independent: a drive capability, not a per-disc
+    fact, so one probe per run suffices."""
+    try:
+        r = subprocess.run(  # noqa: S603 — snapshot/PATH binary, fixed argv
+            [_ACCUDISC, "--device", device, "features", "--stream"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except OSError:
+        return None
+    for line in r.stdout.splitlines():
+        if line.startswith("accurate_stream "):
+            val = line.split(maxsplit=1)[1].strip()
+            if val == "yes":
+                return True
+            if val == "no":
+                return False
+    return None  # unparseable / drive doesn't report it
+
+
 def run_read(
     device: str,
     out_dir: Path,
@@ -412,13 +448,16 @@ def run_read(
     rung: str | None = None,
     start: int | None = None,
     count: int | None = None,
+    overlap_needed: bool = True,
 ) -> tuple[int, dict[str, int], Path, Path]:
     """One ``accudisc read`` -> ``(returncode, summary, pcm_path, map_path)``.
 
     Whole-disc when *start* is None (the baseline capture — capture-stream flags
     only, no recovery knobs); a bounded ``--start/--count`` span otherwise. A
     *rung* adds that rung's recovery knobs (span reads only — never whole-disc,
-    §25.1). Summary tokens are read off ``--progress-fd 1``; stderr is discarded."""
+    §25.1); *overlap_needed* (default True) gates whether that rung's ``--overlap``
+    knob survives — see ``probe_accurate_stream``. Summary tokens are read off
+    ``--progress-fd 1``; stderr is discarded."""
     pcm = out_dir / f"{tag}.pcm"
     mapf = out_dir / f"{tag}.map"
     cmd = [_ACCUDISC, "--device", device, "read", "--pcm", str(pcm)]
@@ -429,7 +468,7 @@ def run_read(
         cmd += ["--start", str(start), "--count", str(count)]
     cmd += capture_flags(sub, c2)
     if rung is not None:
-        cmd += rung_recovery_flags(rung, c2)
+        cmd += rung_recovery_flags(rung, c2, overlap_needed=overlap_needed)
     cmd += ["-q", "--progress-fd", "1"]
     summary: dict[str, int] = {}
     proc = subprocess.Popen(  # noqa: S603 — snapshot/PATH binary, fixed argv
@@ -663,11 +702,13 @@ def _recover_rung(
     spans: list[tuple[int, int]],
     base_pcm: Path,
     out_dir: Path,
+    *,
+    overlap_needed: bool = True,
 ) -> BenchRow:
     """Apply one recovery rung to the flagged spans: re-read each span with the
     rung's knobs, splice into a copy of the baseline PCM, re-gate whole-disc.
     Span-scoped by construction — the cache-defeated knobs never touch the whole
-    disc (§25.1)."""
+    disc (§25.1). *overlap_needed* forwards to ``run_read`` (Accurate Stream gate)."""
     spliced = out_dir / f"{rung}_{speed}x.spliced.pcm"
     shutil.copyfile(base_pcm, spliced)
     t0 = time.monotonic()
@@ -684,6 +725,7 @@ def _recover_rung(
             rung=rung,
             start=lba,
             count=cnt,
+            overlap_needed=overlap_needed,
         )
         splice_span(spliced, spcm, lba)
         recovered += ssum.get("recovered", 0)
@@ -756,11 +798,17 @@ def run_matrix(
     speeds: list[int],
     rungs: list[str],
     out_dir: Path,
+    *,
+    accurate_stream: bool | None = None,
 ) -> list[BenchRow]:
     """The bench matrix: per speed, one whole-disc baseline capture, then the
     recovery rungs applied only to the map-flagged spans (skipped when the disc is
     clean, §25.3). Rewrites the ranked report after every row (crash-safe over a
-    long run) and drops the big disposable captures unless ``--keep-captures``."""
+    long run) and drops the big disposable captures unless ``--keep-captures``.
+    *accurate_stream* (from ``probe_accurate_stream``, a drive fact, not a disc
+    fact) gates ``--overlap`` on every recovery rung: only a positive confirmation
+    (``True``) drops it — ``None``/``False`` keep it, the conservative default."""
+    overlap_needed = accurate_stream is not True
     disc_id = f"{geom[2]:08x}" if geom else args.label
     out_path = Path(args.out)
     rows: list[BenchRow] = []
@@ -851,7 +899,16 @@ def run_matrix(
                 print(f"  {rung} @ {speed}x  skipped (0 flagged spans)", flush=True)
                 continue
             row = _recover_rung(
-                args, geom, governor, disc_id, speed, rung, spans, base_pcm, out_dir
+                args,
+                geom,
+                governor,
+                disc_id,
+                speed,
+                rung,
+                spans,
+                base_pcm,
+                out_dir,
+                overlap_needed=overlap_needed,
             )
             rows.append(row)
             emit()
@@ -885,6 +942,13 @@ def _selftest() -> int:
     _check("--c2-retries" in f and "--ladder" in f and "--sub" not in f, str(f))
     g = rung_recovery_flags("R4", c2=False)
     _check("--c2-retries" not in g and "--overlap" in g, str(g))
+    # Accurate Stream confirmed -> --overlap dropped; unconfirmed (default) -> kept
+    h = rung_recovery_flags("R4", c2=True, overlap_needed=False)
+    _check("--overlap" not in h and "--ladder" in h, str(h))
+    _check(
+        "--overlap" in rung_recovery_flags("R4", c2=True, overlap_needed=True),
+        "AS default keeps overlap",
+    )
     # capture flags are separate (sub/no-sub, C2 on/off)
     _check(
         capture_flags(sub=True, c2=False) == ["--sub", "raw", "--no-c2"], "cap flags"
@@ -1066,6 +1130,16 @@ def main(argv: list[str] | None = None) -> int:
             f"unknown rung(s) {unknown}; valid: {list(RUNGS)} + {list(_ctdb_rungs)}"
         )
 
+    # Accurate Stream is a drive fact, not a disc fact — probe once, up front, and
+    # only capitalise on a *positive* confirmation (drop --overlap); an absent or
+    # unmeasurable answer keeps --overlap, the conservative default (de-bias
+    # principle: never assume a drive feature that wasn't actually confirmed).
+    accurate_stream = probe_accurate_stream(args.device)
+    print(
+        f"# accurate_stream={accurate_stream} "
+        f"(--overlap {'dropped' if accurate_stream is True else 'kept'} on R3/R4)"
+    )
+
     print(
         f"# bench: {args.label} on {args.device} "
         f"(governor {governor}x, speeds {speeds}, rungs {rungs})"
@@ -1085,7 +1159,15 @@ def main(argv: list[str] | None = None) -> int:
             f"cddb {cddb_id:08x}, read-offset {args.read_offset:+d}"
         )
 
-    rows = run_matrix(args, geom, governor, speeds, rungs, out_dir)
+    rows = run_matrix(
+        args,
+        geom,
+        governor,
+        speeds,
+        rungs,
+        out_dir,
+        accurate_stream=accurate_stream,
+    )
     # Courtesy restore for the next disc/consumer — the ceiling persists across
     # handles (§15.1.3), so a slow last rung would otherwise carry over.
     set_speed_to_max(args.device)
