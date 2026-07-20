@@ -305,6 +305,10 @@ class BenchRow:
     ctdb_pass: bool | None = None
     ctdb_repaired: bool | None = None
     discid_green: bool | None = None
+    # Per-track ladder-recovery outcome for R0-R4 span recovery, e.g.
+    # "t8@8X,t5@unrec" — which swept speed first made each flagged track AR-verify
+    # (or unrecovered). None for non-recovery rows (baseline / skip / ctdb).
+    recovered_at: str | None = None
     wall_s: float = 0.0
 
     @property
@@ -742,26 +746,92 @@ def read_map_spans(map_path: Path, start_lba: int) -> list[tuple[int, int]]:
             m.close()
 
 
+def fetch_ar_once(
+    track_lsns: list[int], disc_last_lsn: int, cddb_id: int, tries: int = 4
+) -> list[list[dict]]:
+    """Fetch the AccurateRip dBAR **once per disc** (item 2 — the whole matrix then
+    gates against this cache instead of re-fetching per cell, removing the
+    per-cell network confound the run2 log exposed).
+
+    ``fetch_ar_responses`` never raises: it returns ``(responses, transport, _)``
+    where ``transport is None`` means *both* HTTPS and HTTP failed at the network
+    level (retry-worthy on a flaky link), while a non-None transport with empty
+    responses is a definitive 404 (disc genuinely not in the DB — do not retry, do
+    not let a real negative masquerade as a transient). So we retry with backoff
+    only while the answer is inconclusive."""
+    from cdda2img.accuraterip import fetch_ar_responses
+
+    responses: list[list[dict]] = []
+    for attempt in range(1, tries + 1):
+        responses, transport, _ = fetch_ar_responses(track_lsns, disc_last_lsn, cddb_id)
+        if responses or transport is not None:
+            return responses  # definitive: found, or reached-server 404
+        if attempt < tries:
+            time.sleep(min(2**attempt, 8))  # network-level failure — back off, retry
+    return responses  # give up: still empty
+
+
+def _track_ar_conf(
+    pcm: Path,
+    i: int,
+    track_lsns: list[int],
+    disc_last_lsn: int,
+    read_offset: int,
+    responses: list[list[dict]],
+) -> tuple[int | None, int | None]:
+    """``(conf_v1, conf_v2)`` for track index *i* from the raw PCM against the
+    *cached* dBAR *responses* — mirrors :func:`verify_rip`'s per-track offset-window
+    read + zero-pad, then the public :func:`match_track_pcm` (no re-fetch). A conf is
+    None when no block matched that variant."""
+    from cdda2img.accuraterip import match_track_pcm
+
+    n = len(track_lsns)
+    offset_bytes = read_offset * 4
+    pcm_size = pcm.stat().st_size
+    byte_start = track_lsns[i] * 2352 + offset_bytes
+    byte_end = (
+        track_lsns[i + 1] if i < n - 1 else disc_last_lsn + 1
+    ) * 2352 + offset_bytes
+    read_start = max(0, byte_start)
+    read_end = min(pcm_size, byte_end)
+    with open(pcm, "rb") as f:
+        f.seek(read_start)
+        raw = f.read(read_end - read_start)
+    # Zero-pad the offset window outside the file — the pad falls inside AR's
+    # ±2940-frame exclusion zone, so it is checksum-neutral (as in verify_rip).
+    if byte_start < 0:
+        raw = bytes(-byte_start) + raw
+    if byte_end > pcm_size:
+        raw = raw + bytes(byte_end - pcm_size)
+    _v1, _v2, conf_v1, conf_v2 = match_track_pcm(raw, i + 1, n, responses)
+    return conf_v1, conf_v2
+
+
 def gate_accuraterip(
     pcm: Path,
     track_lsns: list[int],
     disc_last_lsn: int,
     read_offset: int,
-    cddb_id: int,
+    responses: list[list[dict]],
 ) -> tuple[bool | None, bool | None]:
-    """Whole-disc AR gate via :func:`cdda2img.accuraterip.verify_rip`. Returns
-    ``(ar_v1_pass, ar_v2_pass)``: True/False when the disc is in the DB, ``None``
-    when it is not (absence of evidence, not a failure)."""
-    from cdda2img.accuraterip import verify_rip
+    """Whole-disc AR gate from the **cached** dBAR *responses* (item 2 — no network
+    re-fetch). Returns ``(ar_v1_pass, ar_v2_pass)``: True/False when the disc is in
+    the DB, ``None`` when it is not (absence of evidence, not a failure).
 
-    res = verify_rip(pcm, track_lsns, disc_last_lsn, read_offset, cddb_id)
-    in_db = [t for t in res.tracks if t.max_confidence is not None]
-    if not in_db:
+    When *responses* is non-empty the disc is in the DB and every track appears in
+    every block, so the ``max_confidence is not None`` in-DB filter that
+    :func:`verify_rip` applied is simply "all tracks" — a v1/v2 pass is then every
+    track matching that variant (:func:`_track_ar_conf` per track)."""
+    if not responses:
         return None, None
-    return (
-        all(t.confidence_v1 is not None for t in in_db),
-        all(t.confidence_v2 is not None for t in in_db),
-    )
+    all_v1 = all_v2 = True
+    for i in range(len(track_lsns)):
+        cv1, cv2 = _track_ar_conf(
+            pcm, i, track_lsns, disc_last_lsn, read_offset, responses
+        )
+        all_v1 = all_v1 and cv1 is not None
+        all_v2 = all_v2 and cv2 is not None
+    return all_v1, all_v2
 
 
 def gate_ctdb(
@@ -914,20 +984,22 @@ def _gate_row(
     c2_path: Path | None,
     geom: tuple[list[int], int, int] | None,
     read_offset: int,
+    responses: list[list[dict]],
     *,
     on_stage: Callable[[str], None] | None = None,
 ) -> None:
     """Fill a row's AR/CTDB columns from a whole-disc PCM. No-op without geometry.
-    *on_stage* (optional) is called with a human label right before each gate
-    starts — the two are opaque single calls into production code (accuraterip
-    / ctdb_repair), so this is coarse (which one is running), not a sub-progress."""
+    *responses* is the once-per-disc cached dBAR (:func:`fetch_ar_once`) — the AR gate
+    never re-fetches. *on_stage* (optional) is called with a human label right before
+    each gate starts — the two are opaque single calls into production code
+    (accuraterip / ctdb_repair), so this is coarse (which one is running)."""
     if geom is None or not pcm.is_file():
         return
     track_lsns, disc_last_lsn, cddb_id = geom
     if on_stage:
         on_stage("AR gate")
     row.ar_v1_pass, row.ar_v2_pass = gate_accuraterip(
-        pcm, track_lsns, disc_last_lsn, read_offset, cddb_id
+        pcm, track_lsns, disc_last_lsn, read_offset, responses
     )
     if on_stage:
         on_stage("CTDB gate (checksum)")
@@ -936,69 +1008,128 @@ def _gate_row(
     )
 
 
+def _spans_by_track(
+    spans: list[tuple[int, int]], track_lsns: list[int]
+) -> dict[int, list[tuple[int, int]]]:
+    """Group flagged ``(lba, count)`` spans by the track index that owns each span's
+    start LBA (the last track start ≤ lba). Spans that begin before track 0 are
+    dropped — a program-area pre-gap / lead-in is not an AR-verifiable track."""
+    import bisect
+
+    by_track: dict[int, list[tuple[int, int]]] = {}
+    for lba, cnt in spans:
+        i = bisect.bisect_right(track_lsns, lba) - 1
+        if i < 0:
+            continue
+        by_track.setdefault(i, []).append((lba, cnt))
+    return by_track
+
+
 def _recover_rung(
     args: argparse.Namespace,
     geom: tuple[list[int], int, int] | None,
     governor: int,
     disc_id: str,
-    speed: int,
+    base_speed: int,
     rung: str,
     spans: list[tuple[int, int]],
     base_pcm: Path,
     out_dir: Path,
+    ladder: list[int],
+    responses: list[list[dict]],
     *,
     overlap_needed: bool = True,
     bp: BenchProgress | None = None,
 ) -> BenchRow:
-    """Apply one recovery rung to the flagged spans: re-read each span with the
-    rung's knobs, splice into a copy of the baseline PCM, re-gate whole-disc.
-    Span-scoped by construction — the cache-defeated knobs never touch the whole
-    disc (§25.1). *overlap_needed* forwards to ``run_read`` (Accurate Stream
-    gate). *bp*, if given, reports stage x/y (one stage per span, plus a final
-    re-gate stage) and live sector progress within each span read."""
-    spliced = out_dir / f"{rung}_{speed}x.spliced.pcm"
+    """Recover the flagged spans by **sweeping the probed speed ladder**
+    (fastest→slowest) per affected track — mirroring production
+    ``_recover_failed_tracks`` — instead of re-reading only at the capture speed
+    (the run2 defect: the old rung never used the fact that another speed read a
+    region clean). For each track that owns a flagged span: at each ladder speed,
+    re-read that track's spans with the rung's knobs, splice into a working copy of
+    the baseline, and AR-verify the track against the cached *responses*; stop at the
+    first speed whose result makes the track match (fast attempts first, so a
+    high-speed match exits early — §3.5, speed diversity is the lever). *base_speed*
+    only selected which spans the baseline flagged. Still span-scoped — the
+    cache-defeated knobs never touch the whole disc (§4.2).
+
+    Without AR *responses* (disc not in the DB, no gate to stop the sweep on) it
+    falls back to a single re-read at *base_speed* — there is nothing to verify a
+    ladder attempt against, so a blind sweep would just pick the last read."""
+    spliced = out_dir / f"{rung}_{base_speed}x.spliced.pcm"
     shutil.copyfile(base_pcm, spliced)
     t0 = time.monotonic()
+    track_lsns, disc_last_lsn, _cddb = geom if geom else ([], 0, 0)
+    by_track = _spans_by_track(spans, track_lsns) if track_lsns else {}
+    # No verifier → cannot select across speeds; keep the original single-speed read.
+    sweep = (ladder or [base_speed]) if responses else [base_speed]
     recovered = c2res = 0
-    n_stages = len(spans) + 1
-    for i, (lba, cnt) in enumerate(spans):
-        stag = f"{rung}_{speed}x_s{i}"
-        if bp:
-            bp.stage(
-                i + 1, n_stages, f"read span {i + 1}/{len(spans)} (lba {lba}+{cnt})"
-            )
-        _rc, ssum, spcm, _sm = run_read(
-            args.device,
-            out_dir,
-            stag,
-            speed,
-            sub=args.sub,
-            c2=args.c2,
-            rung=rung,
-            start=lba,
-            count=cnt,
-            overlap_needed=overlap_needed,
-            on_progress=bp.progress_cb() if bp else None,
+    outcomes: list[str] = []
+    n_stages = (len(by_track) or 1) + 1
+
+    for stage_i, (tidx, tspans) in enumerate(sorted(by_track.items()), start=1):
+        matched_speed: int | None = None
+        for speed in sweep:
+            if bp:
+                bp.stage(
+                    stage_i,
+                    n_stages,
+                    f"track {tidx + 1}: recover {len(tspans)} span(s) @ {speed}x",
+                )
+            for si, (lba, cnt) in enumerate(tspans):
+                stag = f"{rung}_{base_speed}x_t{tidx}_{speed}x_s{si}"
+                _rc, ssum, spcm, _sm = run_read(
+                    args.device,
+                    out_dir,
+                    stag,
+                    speed,
+                    sub=args.sub,
+                    c2=args.c2,
+                    rung=rung,
+                    start=lba,
+                    count=cnt,
+                    overlap_needed=overlap_needed,
+                    on_progress=bp.progress_cb() if bp else None,
+                )
+                splice_span(spliced, spcm, lba)
+                recovered += ssum.get("recovered", 0)
+                c2res += ssum.get("c2", 0)
+                for ext in (".pcm", ".c2", ".map"):
+                    (out_dir / f"{stag}{ext}").unlink(missing_ok=True)
+            # Stop at the first swept speed that makes THIS track AR-verify.
+            if responses:
+                cv1, cv2 = _track_ar_conf(
+                    spliced,
+                    tidx,
+                    track_lsns,
+                    disc_last_lsn,
+                    args.read_offset,
+                    responses,
+                )
+                if cv1 is not None or cv2 is not None:
+                    matched_speed = speed
+                    break
+            else:
+                break  # no gate → single base_speed pass only
+        outcomes.append(
+            f"t{tidx + 1}@{matched_speed}X" if matched_speed else f"t{tidx + 1}@unrec"
         )
-        splice_span(spliced, spcm, lba)
-        recovered += ssum.get("recovered", 0)
-        c2res += ssum.get("c2", 0)
-        for ext in (".pcm", ".c2", ".map"):
-            (out_dir / f"{stag}{ext}").unlink(missing_ok=True)
+
     span_str = ",".join(f"{lba}+{cnt}" for lba, cnt in spans)
     row = _mk_row(
         disc_id,
         args.device,
         rung,
-        speed,
+        base_speed,
         governor,
         {"c2": c2res, "recovered": recovered},
         span=span_str,
     )
+    row.recovered_at = ",".join(outcomes) if outcomes else None
     if bp:
         bp.stage(n_stages, n_stages, "re-gate (AR + CTDB checksum)")
-    _gate_row(row, spliced, None, geom, args.read_offset)
-    row.wall_s = round(time.monotonic() - t0, 1)  # whole cell: re-read + gate
+    _gate_row(row, spliced, None, geom, args.read_offset, responses)
+    row.wall_s = round(time.monotonic() - t0, 1)  # whole cell: ladder re-reads + gate
     if not args.keep_captures:
         spliced.unlink(missing_ok=True)
     return row
@@ -1056,6 +1187,28 @@ def _ctdb_repair_rung(
     return row
 
 
+def _prewarm_ctdb_cache(
+    track_lsns: list[int], disc_last_lsn: int, out_dir: Path
+) -> None:
+    """Fetch the CTDB lookup once into ``out_dir/ctdb.xml`` so every ``gate_ctdb``
+    reads the cache (``load_entries`` already reuses ``xml_cache`` when present)
+    rather than the first cell fetching under load (item 2). Best-effort: a failure
+    just means the first gate fetches instead. The XML cache is keyed by file path,
+    not disc — reusing an ``out_dir`` across different discs would read a stale
+    lookup, same as the existing gate; use a fresh out dir per disc."""
+    from xml.etree.ElementTree import ParseError
+
+    from cdda2img.ctdb_repair import load_entries
+
+    bounds = [*track_lsns, disc_last_lsn + 1]
+    try:
+        entries = load_entries(bounds, len(track_lsns), xml_cache=out_dir / "ctdb.xml")
+    except (OSError, ParseError) as exc:
+        print(f"# ctdb: pre-warm skipped ({exc})")
+        return
+    print(f"# ctdb: cache pre-warmed ({len(entries)} parity entries)")
+
+
 def run_matrix(
     args: argparse.Namespace,
     geom: tuple[list[int], int, int] | None,
@@ -1068,11 +1221,15 @@ def run_matrix(
 ) -> list[BenchRow]:
     """The bench matrix: per speed, one whole-disc baseline capture, then the
     recovery rungs applied only to the map-flagged spans (skipped when the disc is
-    clean, §25.3). Rewrites the ranked report after every row (crash-safe over a
-    long run) and drops the big disposable captures unless ``--keep-captures``.
-    *accurate_stream* (from ``probe_accurate_stream``, a drive fact, not a disc
-    fact) gates ``--overlap`` on every recovery rung: only a positive confirmation
-    (``True``) drops it — ``None``/``False`` keep it, the conservative default."""
+    clean, §4.2). The R0-R4 rungs sweep the probed speed ladder per flagged track
+    (``_recover_rung`` mirrors production ``_recover_failed_tracks``), not just the
+    capture speed. The AccurateRip dBAR is fetched **once** up front and every gate
+    matches against that cache (``fetch_ar_once`` — no per-cell re-fetch); CTDB is
+    cached the same way via its xml file. Rewrites the ranked report after every row
+    (crash-safe over a long run) and drops the big disposable captures unless
+    ``--keep-captures``. *accurate_stream* (a drive fact, not a disc fact) gates
+    ``--overlap`` on every recovery rung: only a positive confirmation (``True``)
+    drops it — ``None``/``False`` keep it, the conservative default."""
     overlap_needed = accurate_stream is not True
     disc_id = f"{geom[2]:08x}" if geom else args.label
     out_path = Path(args.out)
@@ -1085,6 +1242,21 @@ def run_matrix(
     c2lag_done = False
     total_cells = len(speeds) * (1 + len(rungs))
     bp = BenchProgress(total_cells, out_dir)
+
+    # Fetch the AccurateRip dBAR ONCE for the whole matrix (item 2): every gate then
+    # matches against this cache (fetch_ar_once → gate_accuraterip) instead of the
+    # per-cell re-fetch the run2 log caught timing out mid-run. Empty when the disc
+    # isn't in AR (the gate then reports None — non-blocking). CTDB gets the same
+    # once-per-disc treatment via its on-disk xml cache, pre-warmed here.
+    ar_responses: list[list[dict]] = []
+    if geom is not None:
+        g_lsns, g_last, g_cddb = geom
+        ar_responses = fetch_ar_once(g_lsns, g_last, g_cddb)
+        print(
+            f"# ar: fetched {len(ar_responses)} dBAR block(s) once "
+            f"(cached for all {total_cells} cells)"
+        )
+        _prewarm_ctdb_cache(g_lsns, g_last, out_dir)
 
     def emit() -> None:
         out_path.write_text("".join(row_to_toml(r) for r in rank(rows)))
@@ -1111,6 +1283,7 @@ def run_matrix(
                 (out_dir / f"{tag}.c2") if args.c2 else None,
                 geom,
                 args.read_offset,
+                ar_responses,
                 on_stage=lambda label: bp.stage(
                     2 if label == "AR gate" else 3, 3, label
                 ),
@@ -1194,6 +1367,8 @@ def run_matrix(
                     spans,
                     base_pcm,
                     out_dir,
+                    speeds,
+                    ar_responses,
                     overlap_needed=overlap_needed,
                     bp=bp,
                 )
@@ -1202,6 +1377,7 @@ def run_matrix(
                 print(
                     f"  {rung} @ {speed}x  spans={len(spans)}  "
                     f"recovered={row.recovered_sectors}  c2={row.c2_sectors}  "
+                    f"via={row.recovered_at}  "
                     f"ar_v2={row.ar_v2_pass}  ctdb={row.ctdb_pass}/{row.ctdb_repaired}  "
                     f"{row.wall_s}s",
                     flush=True,
@@ -1366,6 +1542,22 @@ def _selftest() -> int:
     )
     vr = classify([noc2_fail, c2_win])
     _check(vr == {"ctdb-noc2": "keep", "ctdb": "keep"}, str(vr))
+
+    # _spans_by_track: group flagged spans by the owning track (last start <= lba);
+    # a span before track 0 (a head-offset pre-gap) is dropped as non-AR-verifiable.
+    bt = _spans_by_track([(50, 2), (150, 1), (250, 3), (0, 1)], [0, 100, 200])
+    _check(bt == {0: [(50, 2), (0, 1)], 1: [(150, 1)], 2: [(250, 3)]}, str(bt))
+    _check(
+        _spans_by_track([(5, 1), (50, 1)], [10, 100]) == {0: [(50, 1)]},
+        "pre-track-0 span dropped",
+    )
+
+    # gate_accuraterip with an empty (disc-not-in-DB) cache returns (None, None)
+    # before touching the file — absence of evidence, not failure.
+    _check(
+        gate_accuraterip(Path("/nonexistent"), [0, 100], 200, 30, []) == (None, None),
+        "empty AR cache -> (None, None)",
+    )
 
     # row round-trips to TOML without nulls
     toml = row_to_toml(good)
