@@ -37,11 +37,14 @@ import argparse
 import contextlib
 import dataclasses
 import mmap
+import os
 import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -73,6 +76,15 @@ RUNGS: dict[str, dict[str, str]] = {
     },
 }
 
+# The CTDB parity family — a separate recovery exit from the R0-R4 audio ladder
+# (zero extra reads; §25 first-exit). Ordered cheapest-capability-first for
+# classification: error-only (``ctdb-noc2``, the no-C2-drive stand-in) before
+# C2-erasure-assisted (``ctdb``), so a disc that error-only already repairs marks
+# the C2-assisted rung redundant (``warn``) rather than the reverse. Classified as
+# its own ``best_so_far`` chain, never cross-warned against the audio ladder —
+# the two are alternative exits, both worth keeping in a per-disc profile.
+CTDB_RUNGS: tuple[str, ...] = ("ctdb-noc2", "ctdb")
+
 # --map-file low-nibble states (AccuDisc §15.4 / accudisc.h). "Needs recovery"
 # is the exact predicate AccuDisc's span-finder uses.
 MAP_STATE_NAME = {
@@ -93,6 +105,180 @@ DEFAULT_SPEED_LADDER = (40, 32, 24, 16, 8, 4)
 # Q-health gate: a whole-pass ratio below this is a transient collapse to discard
 # and re-read, not a real speed characterisation (AccuDisc §15.6).
 Q_HEALTH_FLOOR = 0.90
+
+# Process names watched for the resource sampler (external subprocesses this
+# bench spawns and cares about — accudisc's own read/repair CPU, ctanalyse's
+# Reed-Solomon decode). Matched against /proc/<pid>/comm (15-char truncated
+# kernel form), not the full argv.
+WATCHED_PROC_NAMES = ("accudisc", "ctanalyse")
+
+# Resource sampler tick interval (seconds) — frequent enough to catch which
+# stage is pegging CPU/RAM, sparse enough that a long run's log stays readable.
+PROGRESS_SAMPLE_INTERVAL = 3.0
+
+# Live sector-progress print throttle (seconds) — AccuDisc emits progress
+# tokens up to 4 Hz; that's too dense for a tee'd log over a multi-minute read.
+PROGRESS_PRINT_THROTTLE = 2.0
+
+
+# --- Fine-grained progress reporting (§ live stage/resource tracking) ---------
+
+
+def _read_pid_rss_mb(proc_dir: Path) -> float:
+    """``VmRSS`` from ``/proc/<pid>/status``, in MB (0.0 if unreadable/absent)."""
+    try:
+        status = (proc_dir / "status").read_text()
+    except OSError:
+        return 0.0
+    for line in status.splitlines():
+        if line.startswith("VmRSS:"):
+            return int(line.split()[1]) / 1024  # kB -> MB
+    return 0.0
+
+
+def _read_pid_cpu_ticks(proc_dir: Path) -> int | None:
+    """``utime + stime`` (clock ticks) from ``/proc/<pid>/stat``, None if unreadable.
+
+    Fields after ``(comm)`` start at 3 (state); utime/stime are 14/15, so index
+    11/12 once split past the comm-closing ``)`` (``rsplit`` handles a comm that
+    itself contains ``)``, per proc(5))."""
+    try:
+        stat = (proc_dir / "stat").read_text()
+    except OSError:
+        return None
+    rest = stat.rsplit(")", 1)[1].split()
+    return int(rest[11]) + int(rest[12])
+
+
+def _watched_proc_stats(
+    names: tuple[str, ...], prev: dict[int, tuple[int, float]]
+) -> tuple[float, float, list[str]]:
+    """Sum RSS (MB) and CPU% across every live process whose ``comm`` is in
+    *names*, via ``/proc`` directly (no psutil dependency, matches this
+    project's subprocess-first style). CPU% needs a wall-time delta, so *prev*
+    (``pid -> (cpu_ticks, wall_time)``) is mutated in place across calls; a
+    pid's first sample reports 0% until the next tick. Stale pids (process
+    exited) are pruned from *prev* each call. Returns ``(rss_mb, cpu_pct,
+    matched_comm_names)`` — empty/zero when nothing is running, never raises
+    (a process can vanish between listing and reading; that pid is just
+    skipped)."""
+    hz = os.sysconf("SC_CLK_TCK")
+    now = time.monotonic()
+    total_rss = 0.0
+    total_cpu = 0.0
+    seen: set[int] = set()
+    found: list[str] = []
+    for entry in Path("/proc").iterdir():
+        if not entry.name.isdigit():
+            continue
+        pid = int(entry.name)
+        try:
+            comm = (entry / "comm").read_text().strip()
+        except OSError:
+            continue
+        if comm not in names:
+            continue
+        seen.add(pid)
+        found.append(comm)
+        total_rss += _read_pid_rss_mb(entry)
+        cpu_ticks = _read_pid_cpu_ticks(entry)
+        if cpu_ticks is None:
+            continue
+        prev_ticks, prev_wall = prev.get(pid, (cpu_ticks, now))
+        dt = now - prev_wall
+        if dt > 0:
+            total_cpu += (cpu_ticks - prev_ticks) / hz / dt * 100
+        prev[pid] = (cpu_ticks, now)
+    for pid in list(prev):
+        if pid not in seen:
+            del prev[pid]
+    return total_rss, total_cpu, found
+
+
+class BenchProgress:
+    """Fine-grained progress reporting for a matrix run: which cell (a/b) is
+    running, which stage within it (x/y), and a background resource sampler
+    (CPU/RSS of the watched subprocesses, disk free on *out_dir*) ticking
+    independently of stage transitions. Three orthogonal signals, not one
+    forced hierarchy — live sector-read progress is reported separately via
+    :meth:`progress_cb` since reads dominate wall time and deserve their own
+    sub-percentage, not a slot in the coarse stage count."""
+
+    def __init__(self, total_cells: int, out_dir: Path) -> None:
+        self.total_cells = total_cells
+        self.out_dir = out_dir
+        self.cell_idx = 0
+        self.cell_label = ""
+        self.stage_label = ""
+        self.stage_idx = 0
+        self.stage_total = 0
+        self._prev_cpu: dict[int, tuple[int, float]] = {}
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._loop, daemon=True)
+        self._thread.start()
+
+    def cell(self, label: str) -> None:
+        """Advance to the next matrix cell (baseline capture or one rung)."""
+        self.cell_idx += 1
+        self.cell_label = label
+        self.stage_label = ""
+        self.stage_idx = self.stage_total = 0
+        print(f"[{self.cell_idx}/{self.total_cells}] {label}", flush=True)
+
+    def stage(self, idx: int, total: int, label: str) -> None:
+        """Set the current stage within the active cell (e.g. 2/3 'AR gate')."""
+        self.stage_idx, self.stage_total, self.stage_label = idx, total, label
+        print(
+            f"  [{self.cell_idx}/{self.total_cells}] stage {idx}/{total}: {label}",
+            flush=True,
+        )
+
+    def progress_cb(self, unit: str = "sectors") -> Callable[[int, int], None]:
+        """A throttled ``on_progress(done, total)`` callback for ``run_read``,
+        printed against the currently active cell/stage context."""
+        last = {"t": 0.0}
+
+        def cb(done: int, total: int) -> None:
+            if total <= 0:
+                return
+            now = time.monotonic()
+            done_ratio_complete = done >= total
+            if not done_ratio_complete and now - last["t"] < PROGRESS_PRINT_THROTTLE:
+                return
+            last["t"] = now
+            pct = done / total * 100
+            print(
+                f"    [{self.cell_idx}/{self.total_cells}] "
+                f"{self.stage_label or 'reading'}: {done}/{total} {unit} "
+                f"({pct:.1f}%)",
+                flush=True,
+            )
+
+        return cb
+
+    def stop(self) -> None:
+        self._stop.set()
+        self._thread.join(timeout=PROGRESS_SAMPLE_INTERVAL + 2)
+
+    def _loop(self) -> None:
+        while not self._stop.wait(PROGRESS_SAMPLE_INTERVAL):
+            self._sample()
+
+    def _sample(self) -> None:
+        rss_mb, cpu_pct, names = _watched_proc_stats(WATCHED_PROC_NAMES, self._prev_cpu)
+        try:
+            free_gb = shutil.disk_usage(self.out_dir).free / 1e9
+        except OSError:
+            free_gb = -1.0
+        proc_str = "+".join(sorted(set(names))) if names else "idle"
+        print(
+            f"  … [{self.cell_idx}/{self.total_cells}] "
+            f"{self.cell_label}"
+            f"{' / ' + self.stage_label if self.stage_label else ''}  "
+            f"proc={proc_str}  rss={rss_mb:.0f}MB  cpu={cpu_pct:.0f}%  "
+            f"disk_free={free_gb:.1f}G",
+            flush=True,
+        )
 
 
 @dataclass
@@ -221,30 +407,70 @@ def integrity_pass(row: BenchRow) -> bool:
     return not (row.ar_v2_pass is False or row.ctdb_pass is False)
 
 
-def classify(rows: list[BenchRow]) -> dict[str, str]:
-    """Per-rung verdict across a disc's rows (§8.5): a rung that never functions
-    → ``blacklist``; one that functions but yields no integrity improvement over a
-    strictly-cheaper rung → ``warn``; else ``keep``. Keyed by rung label.
+def _rung_functioned(rung_rows: list[BenchRow]) -> bool:
+    """A rung "functioned" if *any* of its speed rows produced a usable result — a
+    whole-disc capture (``subq_total``/``measured_cx``) or a span-scoped recovery
+    (``span`` set, including a legitimate ``skipped`` no-op on a clean disc). Only a
+    rung that yields nothing at all at every speed is blacklisted."""
+    return any(bool(r.span) or r.subq_total > 0 or r.measured_cx > 0 for r in rung_rows)
 
-    A rung "functioned" if it produced a usable result — a whole-disc capture
-    (``subq_total``/``measured_cx``) *or* a span-scoped recovery (``span`` set,
-    including a legitimate ``skipped`` no-op on a clean disc). Only a rung that
-    yields nothing at all is blacklisted."""
+
+def _rung_integrity(rung_rows: list[BenchRow]) -> bool:
+    """Whether a rung achieved integrity, aggregating across its speed rows.
+
+    Credit comes from rows where the rung did **genuine recovery work** — a real
+    flagged span (R0-R4) or a ``parity`` repair (ctdb) — never from a ``skipped``
+    no-op that merely inherited a clean baseline's green (crediting the skip is the
+    masking bug: it lets an audio rung that recovered *nothing* on the damaged
+    passes look like a passer off the clean-speed skips). Among genuine attempts,
+    "any speed passed" is the measure — a per-disc profile asks *can this method
+    recover this disc (at its best speed)*, and you would run it at that speed. Only
+    when the rung never had real work to do (skipped at every speed — a clean disc)
+    does it inherit the baseline verdict from its skip rows."""
+    active = [r for r in rung_rows if r.span not in ("", "skipped")]
+    return any(integrity_pass(r) for r in (active or rung_rows))
+
+
+def _classify_family(
+    by_rung: dict[str, list[BenchRow]], order: tuple[str, ...]
+) -> dict[str, str]:
+    """Classify one ordered rung family (cheapest→dearest) with its own
+    ``best_so_far`` chain: a rung that never functions → ``blacklist``; one that
+    functions and passes but adds no integrity improvement over a strictly-cheaper
+    rung in the *same* family that already passed → ``warn``; else ``keep``.
+    Families are classified independently so the audio ladder and the CTDB parity
+    exit never cross-warn each other (they are alternative exits, §1)."""
     verdict: dict[str, str] = {}
-    by_rung = {r.rung: r for r in rows}
-    ordered = [lbl for lbl in RUNGS if lbl in by_rung]
     best_so_far = False
-    for lbl in ordered:
-        row = by_rung[lbl]
-        functioned = bool(row.span) or row.subq_total > 0 or row.measured_cx > 0
-        if not functioned:
+    for lbl in order:
+        rung_rows = by_rung.get(lbl)
+        if not rung_rows:
+            continue
+        if not _rung_functioned(rung_rows):
             verdict[lbl] = "blacklist"
             continue
-        ok = integrity_pass(row)
-        # Soft error: this (more expensive) rung didn't improve on a cheaper one
-        # that already passed.
+        ok = _rung_integrity(rung_rows)
+        # Soft error: this (more expensive) rung didn't improve on a cheaper one in
+        # the same family that already passed.
         verdict[lbl] = "warn" if (best_so_far and ok) else "keep"
         best_so_far = best_so_far or ok
+    return verdict
+
+
+def classify(rows: list[BenchRow]) -> dict[str, str]:
+    """Per-rung verdict across a disc's rows (§8.5), keyed by rung label:
+    ``blacklist`` (never functions) / ``warn`` (functions but redundant with a
+    strictly-cheaper rung in its family) / ``keep``.
+
+    Aggregates **all** of a rung's speed rows (never an arbitrary single one) and
+    covers **both** rung families — the R0-R4 audio ladder and the CTDB parity
+    family (``ctdb``/``ctdb-noc2``) — each on its own cost-ordered chain. A
+    ctdb-only run therefore classifies its rungs instead of returning ``{}``."""
+    by_rung: dict[str, list[BenchRow]] = {}
+    for r in rows:
+        by_rung.setdefault(r.rung, []).append(r)
+    verdict = _classify_family(by_rung, tuple(RUNGS))
+    verdict.update(_classify_family(by_rung, CTDB_RUNGS))
     return verdict
 
 
@@ -449,6 +675,7 @@ def run_read(
     start: int | None = None,
     count: int | None = None,
     overlap_needed: bool = True,
+    on_progress: Callable[[int, int], None] | None = None,
 ) -> tuple[int, dict[str, int], Path, Path]:
     """One ``accudisc read`` -> ``(returncode, summary, pcm_path, map_path)``.
 
@@ -457,7 +684,10 @@ def run_read(
     *rung* adds that rung's recovery knobs (span reads only — never whole-disc,
     §25.1); *overlap_needed* (default True) gates whether that rung's ``--overlap``
     knob survives — see ``probe_accurate_stream``. Summary tokens are read off
-    ``--progress-fd 1``; stderr is discarded."""
+    ``--progress-fd 1``; stderr is discarded. *on_progress* (optional), when
+    given, is called with AccuDisc's own live ``progress <done> <total>``
+    tokens off the same fd — this is the fine-grained sector-level progress
+    ``BenchProgress.progress_cb`` feeds, distinct from the final summary."""
     pcm = out_dir / f"{tag}.pcm"
     mapf = out_dir / f"{tag}.map"
     cmd = [_ACCUDISC, "--device", device, "read", "--pcm", str(pcm)]
@@ -481,6 +711,11 @@ def run_read(
     for line in proc.stdout:
         if line.startswith("summary"):
             summary = parse_summary(line)
+        elif on_progress is not None and line.startswith("progress "):
+            parts = line.split()
+            if len(parts) == 3:
+                with contextlib.suppress(ValueError):
+                    on_progress(int(parts[1]), int(parts[2]))
     proc.wait()
     return proc.returncode, summary, pcm, mapf
 
@@ -679,14 +914,23 @@ def _gate_row(
     c2_path: Path | None,
     geom: tuple[list[int], int, int] | None,
     read_offset: int,
+    *,
+    on_stage: Callable[[str], None] | None = None,
 ) -> None:
-    """Fill a row's AR/CTDB columns from a whole-disc PCM. No-op without geometry."""
+    """Fill a row's AR/CTDB columns from a whole-disc PCM. No-op without geometry.
+    *on_stage* (optional) is called with a human label right before each gate
+    starts — the two are opaque single calls into production code (accuraterip
+    / ctdb_repair), so this is coarse (which one is running), not a sub-progress."""
     if geom is None or not pcm.is_file():
         return
     track_lsns, disc_last_lsn, cddb_id = geom
+    if on_stage:
+        on_stage("AR gate")
     row.ar_v1_pass, row.ar_v2_pass = gate_accuraterip(
         pcm, track_lsns, disc_last_lsn, read_offset, cddb_id
     )
+    if on_stage:
+        on_stage("CTDB gate (checksum)")
     row.ctdb_pass, row.ctdb_repaired = gate_ctdb(
         pcm, track_lsns, disc_last_lsn, cddb_id, read_offset, c2_path
     )
@@ -704,17 +948,25 @@ def _recover_rung(
     out_dir: Path,
     *,
     overlap_needed: bool = True,
+    bp: BenchProgress | None = None,
 ) -> BenchRow:
     """Apply one recovery rung to the flagged spans: re-read each span with the
     rung's knobs, splice into a copy of the baseline PCM, re-gate whole-disc.
     Span-scoped by construction — the cache-defeated knobs never touch the whole
-    disc (§25.1). *overlap_needed* forwards to ``run_read`` (Accurate Stream gate)."""
+    disc (§25.1). *overlap_needed* forwards to ``run_read`` (Accurate Stream
+    gate). *bp*, if given, reports stage x/y (one stage per span, plus a final
+    re-gate stage) and live sector progress within each span read."""
     spliced = out_dir / f"{rung}_{speed}x.spliced.pcm"
     shutil.copyfile(base_pcm, spliced)
     t0 = time.monotonic()
     recovered = c2res = 0
+    n_stages = len(spans) + 1
     for i, (lba, cnt) in enumerate(spans):
         stag = f"{rung}_{speed}x_s{i}"
+        if bp:
+            bp.stage(
+                i + 1, n_stages, f"read span {i + 1}/{len(spans)} (lba {lba}+{cnt})"
+            )
         _rc, ssum, spcm, _sm = run_read(
             args.device,
             out_dir,
@@ -726,6 +978,7 @@ def _recover_rung(
             start=lba,
             count=cnt,
             overlap_needed=overlap_needed,
+            on_progress=bp.progress_cb() if bp else None,
         )
         splice_span(spliced, spcm, lba)
         recovered += ssum.get("recovered", 0)
@@ -742,6 +995,8 @@ def _recover_rung(
         {"c2": c2res, "recovered": recovered},
         span=span_str,
     )
+    if bp:
+        bp.stage(n_stages, n_stages, "re-gate (AR + CTDB checksum)")
     _gate_row(row, spliced, None, geom, args.read_offset)
     row.wall_s = round(time.monotonic() - t0, 1)  # whole cell: re-read + gate
     if not args.keep_captures:
@@ -759,6 +1014,7 @@ def _ctdb_repair_rung(
     base_c2: Path | None,
     c2_align: int = -2,
     label: str = "ctdb",
+    bp: BenchProgress | None = None,
 ) -> BenchRow:
     """The CTDB 'repair without reads' path — CTDB checksum reconcile + Reed-Solomon
     parity rebuild on the baseline PCM, **zero extra reads**, so on an in-CTDB disc
@@ -772,7 +1028,16 @@ def _ctdb_repair_rung(
     decode is error-only (⌊npar/2⌋ unknown-position errors) — the ``ctdb-noc2`` rung,
     a faithful stand-in for a **drive with no C2 support** (identical PCM, no erasure
     feed), and also the fallback when c2lag can't be measured. Isolate with
-    ``--rungs ctdb`` (or ``ctdb,ctdb-noc2`` for the controlled pair on one capture)."""
+    ``--rungs ctdb`` (or ``ctdb,ctdb-noc2`` for the controlled pair on one capture).
+
+    *bp*, if given, announces a single opaque stage — ``gate_ctdb``/
+    ``repair_whole_disc`` are one production-code call from here (entry lookup,
+    candidate selection, parity fetch, and the ``ctanalyse`` RS decode all
+    happen inside it), so there's no sub-stage to report without instrumenting
+    that production module; the resource sampler still shows ``ctanalyse``
+    CPU/RAM live while this runs, even though the stage itself doesn't subdivide."""
+    if bp:
+        bp.stage(1, 1, f"{label}: checksum reconcile + parity repair (ctanalyse)")
     t0 = time.monotonic()
     row = _mk_row(disc_id, args.device, label, speed, governor, {}, span="parity")
     if geom is not None and base_pcm.is_file():
@@ -818,111 +1083,135 @@ def run_matrix(
     # error-only decode rather than trust a mis-aligned erasure feed.
     disc_c2_align: int | None = None
     c2lag_done = False
+    total_cells = len(speeds) * (1 + len(rungs))
+    bp = BenchProgress(total_cells, out_dir)
 
     def emit() -> None:
         out_path.write_text("".join(row_to_toml(r) for r in rank(rows)))
 
-    for speed in speeds:
-        tag = f"base_{speed}x"
-        t0 = time.monotonic()
-        rc, summary, base_pcm, base_map = run_read(
-            args.device, out_dir, tag, speed, sub=args.sub, c2=args.c2
-        )
-        base = _mk_row(disc_id, args.device, "baseline", speed, governor, summary)
-        _gate_row(
-            base,
-            base_pcm,
-            (out_dir / f"{tag}.c2") if args.c2 else None,
-            geom,
-            args.read_offset,
-        )
-        base.wall_s = round(time.monotonic() - t0, 1)  # whole cell: capture + gate
-        rows.append(base)
-        emit()
-        spans = read_map_spans(base_map, start_lba=0)
-        print(
-            f"  baseline @ {speed}x  exit={rc}  q={base.q_health}  "
-            f"c2={base.c2_sectors}  spans={len(spans)}  ar_v2={base.ar_v2_pass}  "
-            f"ctdb={base.ctdb_pass}/{base.ctdb_repaired}  {base.wall_s}s",
-            flush=True,
-        )
-        # Measure the C2/audio lag once, on the first C2-firing baseline (the ctdb
-        # rung's erasure feed needs it; probing here reuses this baseline's damage).
-        if not c2lag_done and args.c2 and "ctdb" in rungs and spans:
-            c2lag_done = True
-            bbox = _flagged_bbox(spans)
-            if bbox is not None:
-                disc_c2_align = probe_c2lag(args.device, *bbox)
-                print(
-                    f"# c2lag: align={disc_c2_align} "
-                    f"(probed {bbox[1]} sectors @ lba {bbox[0]})"
-                    if disc_c2_align is not None
-                    else "# c2lag: inconclusive — ctdb rung uses error-only decode",
-                    flush=True,
-                )
-        for rung in rungs:
-            if rung in ("ctdb", "ctdb-noc2"):
-                # "repair without reads": parity rebuild on the baseline, no re-reads
-                # and no dependence on the flagged spans (whole-disc RS FEC).
-                # ctdb = erasure-assisted (C2 feed at the measured c2lag); ctdb-noc2,
-                # and an unmeasurable c2lag, fall back to error-only on the same PCM.
-                use_c2 = rung == "ctdb" and args.c2 and disc_c2_align is not None
-                c2_feed = (out_dir / f"{tag}.c2") if use_c2 else None
-                row = _ctdb_repair_rung(
+    try:
+        for speed in speeds:
+            tag = f"base_{speed}x"
+            bp.cell(f"baseline @ {speed}x")
+            bp.stage(1, 3, "read (whole disc)")
+            t0 = time.monotonic()
+            rc, summary, base_pcm, base_map = run_read(
+                args.device,
+                out_dir,
+                tag,
+                speed,
+                sub=args.sub,
+                c2=args.c2,
+                on_progress=bp.progress_cb(),
+            )
+            base = _mk_row(disc_id, args.device, "baseline", speed, governor, summary)
+            _gate_row(
+                base,
+                base_pcm,
+                (out_dir / f"{tag}.c2") if args.c2 else None,
+                geom,
+                args.read_offset,
+                on_stage=lambda label: bp.stage(
+                    2 if label == "AR gate" else 3, 3, label
+                ),
+            )
+            base.wall_s = round(time.monotonic() - t0, 1)  # whole cell: capture + gate
+            rows.append(base)
+            emit()
+            spans = read_map_spans(base_map, start_lba=0)
+            print(
+                f"  baseline @ {speed}x  exit={rc}  q={base.q_health}  "
+                f"c2={base.c2_sectors}  spans={len(spans)}  ar_v2={base.ar_v2_pass}  "
+                f"ctdb={base.ctdb_pass}/{base.ctdb_repaired}  {base.wall_s}s",
+                flush=True,
+            )
+            # Measure the C2/audio lag once, on the first C2-firing baseline (the
+            # ctdb rung's erasure feed needs it; probing reuses this damage).
+            if not c2lag_done and args.c2 and "ctdb" in rungs and spans:
+                c2lag_done = True
+                bbox = _flagged_bbox(spans)
+                if bbox is not None:
+                    disc_c2_align = probe_c2lag(args.device, *bbox)
+                    print(
+                        f"# c2lag: align={disc_c2_align} "
+                        f"(probed {bbox[1]} sectors @ lba {bbox[0]})"
+                        if disc_c2_align is not None
+                        else "# c2lag: inconclusive — ctdb rung uses error-only decode",
+                        flush=True,
+                    )
+            for rung in rungs:
+                if rung in ("ctdb", "ctdb-noc2"):
+                    # "repair without reads": parity rebuild on the baseline, no
+                    # re-reads and no dependence on the flagged spans (whole-disc
+                    # RS FEC). ctdb = erasure-assisted (C2 feed at the measured
+                    # c2lag); ctdb-noc2, and an unmeasurable c2lag, fall back to
+                    # error-only on the same PCM.
+                    bp.cell(f"{rung} @ {speed}x")
+                    use_c2 = rung == "ctdb" and args.c2 and disc_c2_align is not None
+                    c2_feed = (out_dir / f"{tag}.c2") if use_c2 else None
+                    row = _ctdb_repair_rung(
+                        args,
+                        geom,
+                        governor,
+                        disc_id,
+                        speed,
+                        base_pcm,
+                        c2_feed,
+                        c2_align=disc_c2_align if disc_c2_align is not None else -2,
+                        label=rung,
+                        bp=bp,
+                    )
+                    rows.append(row)
+                    emit()
+                    print(
+                        f"  {rung} @ {speed}x  parity  "
+                        f"ctdb={row.ctdb_pass}/{row.ctdb_repaired}  {row.wall_s}s",
+                        flush=True,
+                    )
+                    continue
+                if not spans:
+                    bp.cell(f"{rung} @ {speed}x")
+                    bp.stage(1, 1, "skip (clean baseline, 0 flagged spans)")
+                    skip = _mk_row(
+                        disc_id, args.device, rung, speed, governor, {}, span="skipped"
+                    )
+                    skip.subq_ok, skip.subq_total = base.subq_ok, base.subq_total
+                    skip.ar_v1_pass, skip.ar_v2_pass = base.ar_v1_pass, base.ar_v2_pass
+                    skip.ctdb_pass = base.ctdb_pass
+                    skip.ctdb_repaired = base.ctdb_repaired
+                    rows.append(skip)
+                    emit()  # write every row — a trailing run of skips isn't lost
+                    print(f"  {rung} @ {speed}x  skipped (0 flagged spans)", flush=True)
+                    continue
+                bp.cell(f"{rung} @ {speed}x")
+                row = _recover_rung(
                     args,
                     geom,
                     governor,
                     disc_id,
                     speed,
+                    rung,
+                    spans,
                     base_pcm,
-                    c2_feed,
-                    c2_align=disc_c2_align if disc_c2_align is not None else -2,
-                    label=rung,
+                    out_dir,
+                    overlap_needed=overlap_needed,
+                    bp=bp,
                 )
                 rows.append(row)
                 emit()
                 print(
-                    f"  {rung} @ {speed}x  parity  "
-                    f"ctdb={row.ctdb_pass}/{row.ctdb_repaired}  {row.wall_s}s",
+                    f"  {rung} @ {speed}x  spans={len(spans)}  "
+                    f"recovered={row.recovered_sectors}  c2={row.c2_sectors}  "
+                    f"ar_v2={row.ar_v2_pass}  ctdb={row.ctdb_pass}/{row.ctdb_repaired}  "
+                    f"{row.wall_s}s",
                     flush=True,
                 )
-                continue
-            if not spans:
-                skip = _mk_row(
-                    disc_id, args.device, rung, speed, governor, {}, span="skipped"
-                )
-                skip.subq_ok, skip.subq_total = base.subq_ok, base.subq_total
-                skip.ar_v1_pass, skip.ar_v2_pass = base.ar_v1_pass, base.ar_v2_pass
-                skip.ctdb_pass, skip.ctdb_repaired = base.ctdb_pass, base.ctdb_repaired
-                rows.append(skip)
-                emit()  # write every row — otherwise a trailing run of skips is lost
-                print(f"  {rung} @ {speed}x  skipped (0 flagged spans)", flush=True)
-                continue
-            row = _recover_rung(
-                args,
-                geom,
-                governor,
-                disc_id,
-                speed,
-                rung,
-                spans,
-                base_pcm,
-                out_dir,
-                overlap_needed=overlap_needed,
-            )
-            rows.append(row)
-            emit()
-            print(
-                f"  {rung} @ {speed}x  spans={len(spans)}  "
-                f"recovered={row.recovered_sectors}  c2={row.c2_sectors}  "
-                f"ar_v2={row.ar_v2_pass}  ctdb={row.ctdb_pass}/{row.ctdb_repaired}  "
-                f"{row.wall_s}s",
-                flush=True,
-            )
-        if not args.keep_captures:
-            base_pcm.unlink(missing_ok=True)
-            (out_dir / f"{tag}.c2").unlink(missing_ok=True)
-            base_map.unlink(missing_ok=True)
+            if not args.keep_captures:
+                base_pcm.unlink(missing_ok=True)
+                (out_dir / f"{tag}.c2").unlink(missing_ok=True)
+                base_map.unlink(missing_ok=True)
+    finally:
+        bp.stop()
     return rows
 
 
@@ -954,6 +1243,28 @@ def _selftest() -> int:
         capture_flags(sub=True, c2=False) == ["--sub", "raw", "--no-c2"], "cap flags"
     )
     _check(capture_flags(sub=False, c2=True) == [], "cap flags default")
+
+    # resource sampler: a name nothing matches -> zero/empty, never raises
+    rss, cpu, names = _watched_proc_stats(("no-such-process-xyz",), {})
+    _check(rss == 0.0 and cpu == 0.0 and names == [], "unmatched name -> empty")
+    # real self-process comm (from /proc) must be found with nonzero RSS — other
+    # live processes can share the same comm (e.g. "python3" under `uv run`), so
+    # this only checks self is among the matches, not an exact single match.
+    own_comm = (Path("/proc") / str(os.getpid()) / "comm").read_text().strip()
+    rss2, _cpu2, names2 = _watched_proc_stats((own_comm,), {})
+    _check(rss2 > 0.0 and own_comm in names2, f"self-match: rss={rss2} {names2}")
+
+    # BenchProgress: cell/stage counters advance and the sampler thread starts
+    # and stops cleanly (a live disc-free smoke test of the reporting plumbing).
+    with tempfile.TemporaryDirectory() as td:
+        bp = BenchProgress(total_cells=2, out_dir=Path(td))
+        bp.cell("baseline @ 40x")
+        _check(bp.cell_idx == 1 and bp.total_cells == 2, "cell advance")
+        bp.stage(1, 3, "read (whole disc)")
+        _check(bp.stage_idx == 1 and bp.stage_total == 3, "stage set")
+        cb = bp.progress_cb()
+        cb(50, 100)  # must not raise; throttled, so no assertion on print output
+        bp.stop()
 
     # summary token parse (with an appended future key + a non-int guard)
     s = parse_summary("summary hard=3 c2=10 subq_ok=980 subq_total=1000 mode=x")
@@ -1016,6 +1327,45 @@ def _selftest() -> int:
     redun = BenchRow("d", "drv", "R2", ar_v2_pass=True, subq_ok=98, subq_total=100)
     v = classify([dead, good, redun])
     _check(v == {"R0": "blacklist", "R1": "keep", "R2": "warn"}, str(v))
+
+    # classify covers the ctdb family (previously dropped → classify returned {}),
+    # and the error-only rung outranks the C2-assisted one when it already repairs
+    # (Tracy finding: error-only parity sufficient → C2-assist redundant). Input
+    # order is deliberately reversed to prove verdicts don't depend on row order.
+    c2rep = BenchRow(
+        "d", "drv", "ctdb", span="parity", ctdb_pass=False, ctdb_repaired=True
+    )
+    noc2rep = BenchRow(
+        "d", "drv", "ctdb-noc2", span="parity", ctdb_pass=False, ctdb_repaired=True
+    )
+    vc = classify([c2rep, noc2rep])
+    _check(vc == {"ctdb-noc2": "keep", "ctdb": "warn"}, str(vc))
+
+    # multi-speed aggregation (the collapse bug): a rung's verdict must combine ALL
+    # its speed rows, not an arbitrary last one. R2 recovers real flagged spans at
+    # two speeds and FAILS both; a clean-speed `skipped` row (green, inherited) must
+    # NOT credit it as a passer — so R2 stays "keep", never "warn"ed off the skip.
+    r0_skip = BenchRow(
+        "d", "drv", "R0", span="skipped", ar_v2_pass=True, subq_ok=98, subq_total=100
+    )
+    r2_skip = BenchRow(
+        "d", "drv", "R2", span="skipped", ar_v2_pass=True, subq_ok=98, subq_total=100
+    )
+    r2_fail_a = BenchRow("d", "drv", "R2", span="100+1", ar_v2_pass=False)
+    r2_fail_b = BenchRow("d", "drv", "R2", span="200+1", ar_v2_pass=False)
+    vm = classify([r0_skip, r2_skip, r2_fail_a, r2_fail_b])
+    _check(vm == {"R0": "keep", "R2": "keep"}, str(vm))
+
+    # controlled C2-vs-no-C2 pair where error-only FAILS and C2-assist REPAIRS: the
+    # C2-assisted rung is then the keeper, not redundant (the reach advantage shows).
+    noc2_fail = BenchRow(
+        "d", "drv", "ctdb-noc2", span="parity", ctdb_pass=False, ctdb_repaired=False
+    )
+    c2_win = BenchRow(
+        "d", "drv", "ctdb", span="parity", ctdb_pass=False, ctdb_repaired=True
+    )
+    vr = classify([noc2_fail, c2_win])
+    _check(vr == {"ctdb-noc2": "keep", "ctdb": "keep"}, str(vr))
 
     # row round-trips to TOML without nulls
     toml = row_to_toml(good)
@@ -1123,11 +1473,10 @@ def main(argv: list[str] | None = None) -> int:
     )
     governor = speeds[0] if speeds else 0
     rungs = [r.strip() for r in args.rungs.split(",") if r.strip()]
-    _ctdb_rungs = ("ctdb", "ctdb-noc2")
-    unknown = [r for r in rungs if r not in _ctdb_rungs and r not in RUNGS]
+    unknown = [r for r in rungs if r not in CTDB_RUNGS and r not in RUNGS]
     if unknown:
         ap.error(
-            f"unknown rung(s) {unknown}; valid: {list(RUNGS)} + {list(_ctdb_rungs)}"
+            f"unknown rung(s) {unknown}; valid: {list(RUNGS)} + {list(CTDB_RUNGS)}"
         )
 
     # Accurate Stream is a drive fact, not a disc fact — probe once, up front, and
