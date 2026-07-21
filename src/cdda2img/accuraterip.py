@@ -5,6 +5,7 @@ Public interface:
     verify_rip(pcm_path, track_lsns, disc_last_lsn, drive_offset, cddb_id) -> list[ARTrackResult]
     fetch_ar_responses(track_lsns, disc_last_lsn, cddb_id) -> (responses, transport, b3sum)
     match_track_pcm(raw, track, n_tracks, responses) -> (v1_hex, v2_hex, conf_v1, conf_v2)
+    detect_offset(pcm, track_lsns, disc_last_lsn, responses) -> list[OffsetMatch]
     print_ar_report(results) -> None
     pack_arip_block(results, track_lsns, disc_last_lsn, cddb_id) -> bytes
     unpack_arip_block(data, track_count) -> RBIArip
@@ -93,28 +94,35 @@ class ARVerifyResult:
     dbar_b3sum: str | None = None
 
 
-def _ar_checksums(
-    frames: array.array, track: int, total_tracks: int
-) -> tuple[int, int]:
-    """Return (v1_crc, v2_crc) AccurateRip checksums for one track's frames.
+def _checksum_bounds(n: int, track: int, total_tracks: int) -> tuple[int, int]:
+    """Return the (lo, sum_to) half-open frame window a track's v1/v2 checksum
+    covers, given its length *n* in frames.
 
-    frames: array.array('I') of unsigned 32-bit stereo frame values (s16le pairs).
-    track, total_tracks: 1-based.
-
-    Algorithm mirrors ARver arver/audio/_audio.c:accuraterip(). Multiplier is
-    always 1-based from frame 0; boundary exclusion uses sum_from/sum_to guards
-    without resetting the multiplier. csum_hi accumulates overflow bits for v2.
+    Track 1 skips the first 2940 frames (mult 1..2939 excluded; >= 2940
+    included); the last track skips the last 2940 (mult <= n-2940 included).
+    sum_from/sum_to map to a contiguous slice: mult >= sum_from ↔ i >= sum_from-1.
+    The multiplier is *not* reset by the exclusion — the first included frame
+    carries multiplier lo+1, which is why the window is described by its
+    absolute bounds rather than a length alone.
     """
-    n = len(frames)
-    # Track 1: skip first 2940 frames (mult 1..2939 excluded; >= 2940 included)
-    # Last track: skip last 2940 frames (mult <= n-2940 included)
     sum_from = _SKIP_FRAMES if track == 1 else 0
     sum_to = n - _SKIP_FRAMES if track == total_tracks else n
-    # sum_from/sum_to map to a contiguous slice: mult >= sum_from ↔ i >= sum_from-1
-    lo = max(0, sum_from - 1)
+    return max(0, sum_from - 1), sum_to
+
+
+def _ar_checksums_arr(
+    arr32: np.ndarray, track: int, total_tracks: int
+) -> tuple[int, int]:
+    """(v1_crc, v2_crc) for one track, from a uint32 ndarray of stereo frames.
+
+    Algorithm mirrors ARver arver/audio/_audio.c:accuraterip(). csum_hi
+    accumulates overflow bits for v2.
+    """
+    n = len(arr32)
+    lo, sum_to = _checksum_bounds(n, track, total_tracks)
     if sum_to <= lo or n == 0:
         return 0, 0
-    arr = np.frombuffer(frames, dtype=np.uint32)[lo:sum_to].astype(np.uint64)
+    arr = arr32[lo:sum_to].astype(np.uint64)
     mults = np.arange(lo + 1, sum_to + 1, dtype=np.uint64)
     products = arr * mults
     csum_lo = int((products & np.uint64(0xFFFFFFFF)).sum())
@@ -122,7 +130,30 @@ def _ar_checksums(
     return csum_lo & 0xFFFFFFFF, (csum_lo + csum_hi) & 0xFFFFFFFF
 
 
+def _ar_checksums(
+    frames: array.array, track: int, total_tracks: int
+) -> tuple[int, int]:
+    """Return (v1_crc, v2_crc) AccurateRip checksums for one track's frames.
+
+    frames: array.array('I') of unsigned 32-bit stereo frame values (s16le pairs).
+    track, total_tracks: 1-based.
+    """
+    return _ar_checksums_arr(
+        np.frombuffer(frames, dtype=np.uint32), track, total_tracks
+    )
+
+
 _CRC450_FRAME = 450  # sector offset into the track of the sub-CRC window
+_CRC450_LO = _CRC450_FRAME * 588  # first frame of the sub-CRC window
+
+
+def _ar_crc450_arr(arr32: np.ndarray) -> int | None:
+    """Frame-450 sub-CRC from a uint32 ndarray of one track's stereo frames."""
+    if len(arr32) < _CRC450_LO + 588:
+        return None
+    arr = arr32[_CRC450_LO : _CRC450_LO + 588].astype(np.uint64)
+    mults = np.arange(1, 589, dtype=np.uint64)
+    return int((arr * mults).sum()) & 0xFFFFFFFF
 
 
 def _ar_crc450(frames: array.array) -> int | None:
@@ -135,12 +166,7 @@ def _ar_crc450(frames: array.array) -> int | None:
     disc: all 11 tracks match their dBAR ``crc450`` fields, and track 8's
     value equals the one cyanrip reports for the same disc.
     """
-    lo = _CRC450_FRAME * 588
-    if len(frames) < lo + 588:
-        return None
-    arr = np.frombuffer(frames, dtype=np.uint32)[lo : lo + 588].astype(np.uint64)
-    mults = np.arange(1, 589, dtype=np.uint64)
-    return int((arr * mults).sum()) & 0xFFFFFFFF
+    return _ar_crc450_arr(np.frombuffer(frames, dtype=np.uint32))
 
 
 def _ar_disc_ids(track_lsns: list[int], disc_last_lsn: int) -> tuple[str, str]:
@@ -474,6 +500,324 @@ def verify_rip(
             )
 
     return ARVerifyResult(tracks=results, transport=transport, dbar_b3sum=dbar_b3sum)
+
+
+# ── Blind offset detection ────────────────────────────────────────────────────
+#
+# What "blind" means: recover the sample offset of a rip with no knowledge of
+# the drive that produced it, by sliding the checksum window against the
+# AccurateRip database until it agrees. The answer is in the same sign
+# convention as verify_rip's *read_offset* — the value that makes the rip
+# verify.
+#
+# Search radius is AccurateRip's own: 5 frames minus one sample. That is one
+# sample short of the 2940-frame boundary exclusion zone, which is exactly the
+# point — a larger offset would drag real audio across the exclusion boundary
+# and change which samples are checksummed at all, so no single shift could
+# reconcile it.
+
+_CHECK_RADIUS = 5 * 588 - 1  # 2939 samples
+
+
+def _as_frames(pcm: Path | bytes | np.ndarray) -> np.ndarray:
+    """View whole-disc s16le PCM as uint32 stereo frames. A Path is memory
+    mapped — the crc450 sweep below touches only a few kB per track, so a
+    850 MB disc image is never read in full."""
+    if isinstance(pcm, Path):
+        return np.memmap(pcm, dtype="<u4", mode="r")
+    if isinstance(pcm, (bytes, bytearray, memoryview)):
+        raw = bytes(pcm)
+        return np.frombuffer(raw[: len(raw) - len(raw) % 4], dtype="<u4")
+    return np.asarray(pcm, dtype="<u4")
+
+
+def _window(a: np.ndarray, start: int, length: int) -> np.ndarray:
+    """*length* frames of *a* from *start*, zero-padded outside the array.
+
+    Zero-padding rather than clamping is what verify_rip does, and it is
+    correct rather than merely convenient: the pad only ever lands inside the
+    ±2940-frame exclusion zone at the disc edges, so it cannot perturb a
+    checksum — but omitting it would shift the exclusion boundary itself.
+    Returns a view (no copy) whenever the window is fully in range.
+    """
+    n = len(a)
+    if start >= 0 and start + length <= n:
+        return a[start : start + length]
+    out = np.zeros(length, dtype=np.uint32)
+    src_lo, src_hi = max(0, start), min(n, start + length)
+    if src_hi > src_lo:
+        out[src_lo - start : src_hi - start] = a[src_lo:src_hi]
+    return out
+
+
+def _sliding_v1(a: np.ndarray, base: int, n: int, m0: int, radius: int) -> np.ndarray:
+    """Every AccurateRip-style weighted sum in a ±*radius* sweep, in one pass.
+
+    Computes ``V(o) = sum_{k=0}^{n-1} a[base+o+k] * (k+m0)`` for every
+    ``o`` in ``[-radius, radius]``, returned as uint32 indexed by ``o+radius``.
+
+    The recurrence is what makes a full sweep affordable — shifting the window
+    one sample right decrements every multiplier by one, which costs a window
+    sum rather than a re-multiplication::
+
+        V(o+1) = V(o) - T(o) - (m0-1)*a[base+o] + (n+m0-1)*a[base+o+n]
+
+    with ``T(o)`` the plain window sum, itself a difference of two prefix sums.
+    So the whole sweep is two cumulative sums and no inner loop: O(n + radius)
+    instead of O(n * radius).
+
+    Overflow is not a hazard here even though the intermediates far exceed the
+    32-bit result: every step is add/subtract/multiply, so wrapping mod 2**64
+    and then reducing mod 2**32 gives the same answer as exact arithmetic
+    reduced mod 2**32. Increments are reduced early anyway to keep the
+    cumulative sum comfortably inside uint64.
+    """
+    mask = np.uint64(0xFFFFFFFF)
+    seg = _window(a, base - radius, 2 * radius + n + 1).astype(np.uint64)
+    prefix = np.zeros(len(seg) + 1, dtype=np.uint64)
+    np.cumsum(seg, out=prefix[1:])
+
+    t = np.arange(2 * radius + 1, dtype=np.int64)
+    window_sum = prefix[t + n] - prefix[t]
+    delta = (
+        np.uint64(n + m0 - 1) * seg[t + n] - window_sum - np.uint64(m0 - 1) * seg[t]
+    ) & mask
+
+    # V at the left end of the sweep, computed directly.
+    head = seg[:n] * (np.arange(n, dtype=np.uint64) + np.uint64(m0))
+    v_first = int((head & mask).sum()) & 0xFFFFFFFF
+
+    out = np.empty(2 * radius + 1, dtype=np.uint64)
+    out[0] = v_first
+    if radius:
+        np.cumsum(delta[:-1], out=out[1:])
+        out[1:] += np.uint64(v_first)
+    return (out & mask).astype(np.uint32)
+
+
+@dataclass
+class OffsetMatch:
+    """One candidate offset and the evidence for it.
+
+    *tracks_450* counts tracks whose frame-450 sub-CRC matched at this offset
+    (the prefilter); *tracks_v1* / *tracks_v2* count tracks whose full-track
+    checksum matched (the confirmation). A candidate with a full-track
+    confirmation across most of the disc is conclusive; one with only sub-CRC
+    hits is a lead, not an answer — that combination has been observed on a
+    real disc. *tracks_450* is 0 when no block carried frame-450 data and
+    detection fell back to sweeping full-track checksums.
+
+    *confidence* sums, per track, the confidence of every dBAR block that
+    matched — i.e. the population of the cohort this offset belongs to, not
+    the single best block. Two offsets tying on it is a real outcome, not a
+    defect: see :func:`detect_offset`.
+    """
+
+    offset: int
+    tracks_450: int
+    tracks_v1: int
+    tracks_v2: int
+    confidence: int
+    total_tracks: int
+
+    @property
+    def confirmed(self) -> bool:
+        """True when whole-track checksums agree, not merely the 588-frame probe."""
+        return self.tracks_v1 > 0 or self.tracks_v2 > 0
+
+    @property
+    def tracks_matched(self) -> int:
+        return max(self.tracks_v1, self.tracks_v2)
+
+    def _rank(self) -> tuple[int, int, int, int]:
+        return (
+            self.tracks_matched,
+            self.tracks_450,
+            self.confidence,
+            -abs(self.offset),
+        )
+
+
+def _track_frame_bounds(
+    track_lsns: list[int], disc_last_lsn: int
+) -> list[tuple[int, int]]:
+    """Per-track [start, end) in stereo frames, offset 0."""
+    ends = [*track_lsns[1:], disc_last_lsn + 1]
+    return [(s * 588, e * 588) for s, e in zip(track_lsns, ends)]
+
+
+def _sweep_hits(
+    a: np.ndarray,
+    bounds: list[tuple[int, int]],
+    responses: list[list[dict]],
+    radius: int,
+    *,
+    key: str,
+) -> dict[int, dict[int, int]]:
+    """Sweep every track and tally, per offset, which tracks matched the DB.
+
+    *key* selects the reference field: ``"crc450"`` sweeps the cheap 588-frame
+    probe window, ``"crc"`` sweeps the whole track. Returns
+    ``{offset: {track_index: best_confidence}}``.
+    """
+    hits: dict[int, dict[int, int]] = {}
+    n_tracks = len(bounds)
+    for ti, (start, end) in enumerate(bounds):
+        targets = _reference_values(responses, ti, key)
+        params = _sweep_window(start, end, ti, n_tracks, key)
+        if not targets or params is None:
+            continue
+        sweep = _sliding_v1(a, *params, radius)
+        for value, conf in targets.items():
+            for idx in np.flatnonzero(sweep == np.uint32(value)):
+                per_track = hits.setdefault(int(idx) - radius, {})
+                if conf > per_track.get(ti, -1):
+                    per_track[ti] = conf
+    return hits
+
+
+def _reference_values(
+    responses: list[list[dict]], track_index: int, key: str
+) -> dict[int, int]:
+    """{checksum: best confidence} the DB holds for one track. Zero means "no
+    data submitted" for both fields, so it is never a target."""
+    targets: dict[int, int] = {}
+    for resp in responses:
+        entry = resp[track_index]
+        value = entry[key]
+        if value:
+            targets[value] = max(targets.get(value, 0), entry["conf"])
+    return targets
+
+
+def _sweep_window(
+    start: int, end: int, track_index: int, n_tracks: int, key: str
+) -> tuple[int, int, int] | None:
+    """(base, length, first multiplier) for one track's sweep, or None when the
+    track cannot carry the requested window."""
+    if key == "crc450":
+        if end - start < _CRC450_LO + 588:
+            return None  # track shorter than ~6 s has no probe window
+        return start + _CRC450_LO, 588, 1
+    lo, sum_to = _checksum_bounds(end - start, track_index + 1, n_tracks)
+    if sum_to <= lo:
+        return None
+    return start + lo, sum_to - lo, lo + 1
+
+
+def detect_offset(
+    pcm: Path | bytes | np.ndarray,
+    track_lsns: list[int],
+    disc_last_lsn: int,
+    responses: list[list[dict]],
+    *,
+    radius: int = _CHECK_RADIUS,
+    max_candidates: int = 8,
+) -> list[OffsetMatch]:
+    """Find the sample offset at which a rip agrees with AccurateRip.
+
+    *pcm* is whole-disc raw s16le in the domain the offset applies to (i.e.
+    uncorrected). The returned offsets carry verify_rip's ``read_offset``
+    sign convention: passing the winner as ``read_offset`` makes the disc
+    verify. Best candidate first; empty when the disc is not in the database.
+
+    Two stages, in cost order:
+
+    1. **Prefilter** — sweep the frame-450 sub-CRC. This is the field's whole
+       reason to exist: it covers 588 frames at a fixed position, so the sweep
+       reads ~6 k frames per track instead of the entire track, roughly a
+       thousandfold less work than sweeping full checksums.
+    2. **Confirm** — recompute exact full-track v1/v2 checksums at each
+       surviving candidate, using the same window arithmetic as verify_rip.
+
+    When no dBAR block carries frame-450 data (the field is often zero in
+    older submissions) the prefilter is skipped and full-track checksums are
+    swept directly — same answer, more work.
+
+    **The answer is not always unique.** A widely-submitted disc can verify at
+    several offsets at once, because the same master gets pressed at different
+    absolute positions and every such pressing is its own AccurateRip cohort.
+    Tracy Chapman's debut verifies fully at 0, -669, -1333 and -1997, the first
+    two at identical confidence — and the -669 twin also appears in CTDB, so it
+    is a property of the discs, not of one database. Callers must treat the
+    result as a ranked list of *equally valid* readings and disambiguate with
+    something outside the audio (a known drive offset, a CTDB cross-check, or
+    the user). The final ranking tiebreak is proximity to zero, which suits
+    verifying an already-corrected rip and is only a heuristic for anything else.
+    """
+    if not responses:
+        return []
+
+    a = _as_frames(pcm)
+    n_tracks = len(track_lsns)
+    bounds = _track_frame_bounds(track_lsns, disc_last_lsn)
+
+    hits = _sweep_hits(a, bounds, responses, radius, key="crc450")
+    used_450 = bool(hits)
+    if not hits:
+        log.debug("AccurateRip: no frame-450 hits; sweeping full-track checksums")
+        hits = _sweep_hits(a, bounds, responses, radius, key="crc")
+
+    # Confirmation costs a full pass over the disc per candidate, so only
+    # offsets the prefilter liked on a decent share of the disc are worth
+    # confirming. Random collisions are not the concern — a 32-bit probe over
+    # the whole search space predicts ~0.0003 of them per disc — but SYSTEMATIC
+    # false positives are real and were observed: ABBA "Gold" has an offset
+    # where the frame-450 probe hits all 19 tracks and not one full-track
+    # checksum agrees, which is what submitters computing crc450 under a
+    # different convention look like. Hence the prefilter only ever nominates;
+    # confirmation below decides.
+    floor = max(2, n_tracks // 2)
+    ranked = sorted(
+        hits.items(), key=lambda kv: (-len(kv[1]), -sum(kv[1].values()), abs(kv[0]))
+    )
+    candidates = [
+        off for off, tracks in ranked[:max_candidates] if len(tracks) >= floor
+    ]
+    if 0 not in candidates:
+        candidates.append(0)  # always report the as-ripped offset for reference
+
+    matches: list[OffsetMatch] = []
+    for off in candidates:
+        tracks_v1 = tracks_v2 = 0
+        confidence = 0
+        for ti, (start, end) in enumerate(bounds):
+            v1, v2 = _ar_checksums_arr(
+                _window(a, start + off, end - start), ti + 1, n_tracks
+            )
+            matched_v1 = matched_v2 = False
+            for resp in responses:
+                entry = resp[ti]
+                # One checksum field per block; whether it holds a v1 or a v2
+                # value depends on the era of the submitting ripper, so both
+                # locally-computed variants are tested against it. A cohort is
+                # typically represented by two blocks — one from each era —
+                # so confidences are summed, not maxed.
+                hit_v1 = entry["crc"] == v1
+                hit_v2 = entry["crc"] == v2
+                if hit_v1 or hit_v2:
+                    matched_v1 |= hit_v1
+                    matched_v2 |= hit_v2
+                    confidence += entry["conf"]
+            tracks_v1 += matched_v1
+            tracks_v2 += matched_v2
+        probe = hits.get(off, {})
+        matches.append(
+            OffsetMatch(
+                # Honest field: frame-450 evidence only. On the fallback path
+                # the sweep matched full-track checksums, which is already
+                # reported by tracks_v1/tracks_v2 — not restated here.
+                tracks_450=len(probe) if used_450 else 0,
+                offset=off,
+                tracks_v1=tracks_v1,
+                tracks_v2=tracks_v2,
+                confidence=confidence or sum(probe.values()),
+                total_tracks=n_tracks,
+            )
+        )
+
+    matches.sort(key=lambda m: m._rank(), reverse=True)
+    return matches
 
 
 def _track_status(r: ARTrackResult) -> str:

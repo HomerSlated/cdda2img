@@ -64,6 +64,10 @@ packages = ["src/cdda2img"]
 [tool.ty.environment]
 python = "./.venv"
 python-version = "3.14"
+# tools/ holds standalone scripts that are not part of the installed package;
+# they import each other (and are imported by their tests) via a sys.path
+# insert, which ty cannot see. Listing the directory lets those resolve.
+extra-paths = ["tools"]
 
 [tool.ty.src]
 # scratch/ holds throwaway prototypes — not production code, not type-checked.

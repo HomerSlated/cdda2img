@@ -11,7 +11,7 @@ The single source of record for read-recovery across the two-project system:
   network I/O, ever.
 
 This file is **hardlinked** at `cdda2img/docs/reference/RECOVERY.md` and
-`accudisc/docs/RECOVERY.md`: one document, both repos. It supersedes and
+`accudisc/docs/reference/RECOVERY.md`: one document, both repos. It supersedes and
 replaces the former three (`cdda2img/docs/reference/RECOVERY.md`,
 `accudisc/reference/RECOVERY_STRATEGY.md`, `accudisc/docs/ACCUDISC_RECOVERY.md`).
 
@@ -929,9 +929,9 @@ subchannel-Q frames whose **CRC-16 validated**. Operationally:
 
 ## Part IX — Open questions
 
-- **crc450 blind-offset detection**: the partial-verification half shipped
-  (DAMAGED grading); testing candidate offsets against the one-sector sub-CRC
-  (foreign imports, unknown-offset drives) remains open.
+- ~~**crc450 blind-offset detection**~~ — **CLOSED 2026-07-21**, shipped as
+  `accuraterip.detect_offset`. See Part XI, which also records what building it
+  exposed: a rip can verify at *several* offsets at once.
 - **CTDB CRC as a sweep gate** for discs in CTDB but not AR (the sweep gates on AR
   only). A read/gate split is the moment to make the gate pluggable rather than
   hardcoded to AR.
@@ -952,7 +952,7 @@ The MMC command semantics behind the speed/streaming behaviour (SET STREAMING
 in **T10 MMC-5**, a proprietary, licensed document that must never be
 redistributed. The *summaries and empirical findings* here are transformative and
 fact-based (field offsets and observed drive behaviour are not copyrightable) and
-are freely shareable. AccuDisc's `reference/*` git-ignore rule enforces the
+are freely shareable. AccuDisc's `private/` git-ignore rule enforces the
 non-redistribution of the source document by construction.
 
 ---
@@ -1186,3 +1186,93 @@ SPEED-OPTIMISED VARIANT (only when Q is NOT required):
 Because targeted Q recovery is (strongly indicated to be) ineffective, "do we need
 Q recovery" reduces to "do we need Q *at all*" — an archival-policy decision, not a
 recovery-engine capability.
+
+---
+
+## Part XI — Offset detection: three mechanisms compared (2026-07-21)
+
+Recovering *what offset a rip was made at* is a different question from recovering
+*audio*, but it uses the same corpora and it settles two practical matters: whether
+an unknown rip can be normalised to a known alignment, and whether a disc is a
+pressing or a copy. A pressed disc read on a correctly-configured drive detects at
+≈0; a CD-R detects at whatever composite its burner baked in, so a stable non-zero
+reading on otherwise clean audio is positive evidence of a copy — and the value
+fingerprints the machine that made it.
+
+Three mechanisms now exist in this codebase. They are not redundant.
+
+### 11.1 The three
+
+| | `accuraterip.detect_offset` | `ctdb_repair.select_entry` / `tools/ctdb_probe.py` | ctanalyse `FindOffset` |
+|---|---|---|---|
+| **Corpus** | AccurateRip dBAR | CTDB per-track CRC32 | CTDB parity (RS syndromes) |
+| **Search radius** | ±2939 samples | ±700 samples (`_SWEEP_WINDOW`) | ±2939 samples (internal stride 11760) |
+| **Method** | frame-450 sub-CRC sweep, then exact v1/v2 confirmation | `zlib.crc32` of a whole track at every shift | one-column syndrome + Berlekamp–Massey per candidate |
+| **Complexity** | O(n + radius) — sliding recurrence | O(n × radius) — a full CRC per shift | one whole-disc syndrome pass, then ~µs per candidate |
+| **Damage tolerance** | prefilter survives damage outside 588 frames; confirmation is per-track, so a bad track costs one track | none — one bad sample voids that track's CRC | **yes, by construction** — accepts up to `allowed_errors`, escalating 0 → npar/2−1 |
+| **Ambiguity** | reports every cohort, ranked | first qualifying candidate wins | first accepted offset wins |
+| **Also tells you** | per-track match counts, cohort population | *which pressing* (CTDB entry id), which tracks are damaged | enough state to then repair |
+
+### 11.2 The convergent ±2939
+
+Both bounds are five sectors, arrived at independently. AccurateRip excludes 2940
+frames at each disc edge from its checksums, so a larger shift would drag real audio
+across the exclusion boundary and change *which samples are summed at all* — no
+single shift could then reconcile it. CTDB excludes one full stride at each end of
+the codeword grid (§3.4), and its internal stride of 11760 words is 5880 stereo
+samples, half of which is again 2940. Different structures, same limit: **an offset
+search is only ever meaningful inside the guard band the format reserved for it.**
+
+### 11.3 What the AccurateRip detector exposed
+
+Two things worth carrying forward, neither of which the other two mechanisms would
+have surfaced, because both stop at the first answer they like.
+
+**A rip can verify at several offsets at once, and the alternatives are not noise.**
+Tracy Chapman's debut verifies fully at 8 offsets; the top two (0 and −669) tie at
+identical cohort confidence. ABBA *Gold* verifies at 5, but decisively — 0 at
+confidence 3575 against 1127 for the runner-up. The −669 twin also appears in CTDB
+(entry 67116, long noted as "unexplained"), so it is a property of the *discs*, not
+of one database: the same master pressed at different absolute positions, each
+pressing its own cohort. Confidence ranks cohorts by population, which is not the
+same as correctness. **Disambiguation has to come from outside the audio** — a known
+drive offset, cross-corpus agreement, or the user. `detect_offset` therefore returns
+a ranked list and `tools/fix_offset.py` refuses to rewrite a rip when the top two
+candidates tie.
+
+**The frame-450 prefilter has a systematic false-positive class.** ABBA *Gold* has an
+offset where the sub-CRC matches on all 19 tracks and not one full-track checksum
+agrees. Random collision is excluded (~1.4 M comparisons against 2³² predicts
+0.0003 of them); the shape of it — every track, one offset — is what submitters
+computing crc450 under a different convention look like. Hence the two-stage design
+is not an optimisation with a safety net bolted on: the prefilter *nominates* and
+only exact checksums *decide*. Anything gated on `.offset` without `.confirmed` is
+wrong.
+
+### 11.4 Which to reach for
+
+1. **Disc in AccurateRip** → `detect_offset`. Widest corpus, widest radius, and the
+   only one that shows you the alternatives.
+2. **Disc in CTDB but not AR** → `ctdb_repair.select_entry`. It also names the
+   pressing, which `detect_offset` cannot.
+3. **Disc too damaged for either CRC to match** → ctanalyse `FindOffset`. The only
+   mechanism that still works, because it asks "can this be *decoded* at this
+   offset", not "does this *equal* the reference". This is its whole point and the
+   reason it stays.
+4. **When the answer matters** → run more than one. Agreement across two corpora is
+   the practical answer to §11.3's ambiguity, since a coincidental cohort tie in
+   AccurateRip is unlikely to be mirrored by the same tie in CTDB.
+
+### 11.5 Carried forward
+
+- The CTDB CRC sweep is the expensive one: 1401 whole-track CRC32 passes, which is
+  why `select_entry` deliberately sweeps the *smallest* interior track. The
+  sliding-window recurrence that makes the AccurateRip sweep O(n + radius) does not
+  port directly — CRC32 is not a weighted sum — but rolling-CRC techniques exist and
+  this is the obvious candidate for the same treatment. Not attempted; noted.
+- `tools/fix_offset.py` covers the repair half: concatenate a per-track rip, shift
+  the single stream, re-split at the original lengths. Doing it per file cannot be
+  correct, because a shift moves samples **across track boundaries** — verified on a
+  real rip, where a +100-sample shift moved audio at all 10 track boundaries (2 of
+  them non-silent; the silent 8 are exactly why per-file shifting looks fine and
+  quietly corrupts the ones that matter).

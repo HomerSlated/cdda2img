@@ -1042,3 +1042,209 @@ def test_match_track_pcm_takes_highest_confidence() -> None:
     )
     _v1h, _v2h, conf_v1, _conf_v2 = match_track_pcm(raw, 2, 3, responses)
     assert conf_v1 == 40  # highest confidence across the two matching blocks
+
+
+# ---------------------------------------------------------------------------
+# 4c. Blind offset detection — sliding-window sweep + detect_offset
+# ---------------------------------------------------------------------------
+
+
+def _synthetic_disc(
+    n_tracks: int = 3, sectors: int = 460, seed: int = 7
+) -> tuple[bytes, list[int], int]:
+    """Random-content disc long enough for every track to carry a frame-450
+    window (451 sectors) plus the 5-sector boundary exclusions."""
+    import numpy as np
+
+    rng = np.random.default_rng(seed)
+    total = n_tracks * sectors
+    pcm = rng.integers(0, 2**32, size=total * 588, dtype=np.uint64)
+    return (
+        pcm.astype("<u4").tobytes(),
+        [i * sectors for i in range(n_tracks)],
+        total - 1,
+    )
+
+
+def _reference_checksums(
+    pcm: bytes, track_lsns: list[int], disc_last_lsn: int
+) -> list[tuple[int, int, int]]:
+    """(v1, v2, crc450) per track at offset 0, via the shipped scalar helpers."""
+    import numpy as np
+
+    from cdda2img.accuraterip import (
+        _ar_checksums_arr,
+        _ar_crc450_arr,
+        _track_frame_bounds,
+    )
+
+    a = np.frombuffer(pcm, dtype="<u4")
+    out = []
+    n = len(track_lsns)
+    for ti, (s, e) in enumerate(_track_frame_bounds(track_lsns, disc_last_lsn)):
+        window = a[s:e]
+        v1, v2 = _ar_checksums_arr(window, ti + 1, n)
+        out.append((v1, v2, _ar_crc450_arr(window) or 0))
+    return out
+
+
+def _shift_pcm(pcm: bytes, offset: int) -> bytes:
+    """Same semantics as offset_correct.apply_offset, on bytes."""
+    n = abs(offset) * 4
+    if offset == 0:
+        return pcm
+    return pcm[n:] + bytes(n) if offset > 0 else bytes(n) + pcm[: len(pcm) - n]
+
+
+def test_sliding_v1_matches_the_definition() -> None:
+    """The O(n + radius) recurrence must equal the O(n * radius) definition,
+    including windows that run off both ends of the array."""
+    import numpy as np
+
+    from cdda2img.accuraterip import _sliding_v1, _window
+
+    rng = np.random.default_rng(99)
+    for _ in range(25):
+        size = int(rng.integers(200, 2000))
+        a = rng.integers(0, 2**32, size=size, dtype=np.uint64).astype(np.uint32)
+        n = int(rng.integers(1, 200))
+        m0 = int(rng.integers(1, 5000))
+        radius = int(rng.integers(0, 40))
+        base = int(rng.integers(-20, size + 20))  # deliberately allow overhang
+        sweep = _sliding_v1(a, base, n, m0, radius)
+        for o in range(-radius, radius + 1):
+            w = _window(a, base + o, n).astype(np.uint64)
+            mults = np.arange(n, dtype=np.uint64) + np.uint64(m0)
+            want = int(((w * mults) & np.uint64(0xFFFFFFFF)).sum()) & 0xFFFFFFFF
+            assert int(sweep[o + radius]) == want, (base, n, m0, o)
+
+
+def test_window_zero_pads_outside_the_array() -> None:
+    import numpy as np
+
+    from cdda2img.accuraterip import _window
+
+    a = np.arange(1, 6, dtype=np.uint32)
+    assert list(_window(a, -2, 4)) == [0, 0, 1, 2]
+    assert list(_window(a, 3, 4)) == [4, 5, 0, 0]
+    assert list(_window(a, 1, 3)) == [2, 3, 4]
+
+
+def test_sliding_v1_at_zero_reproduces_crc450() -> None:
+    """The sweep's centre sample must equal the shipped sub-CRC exactly."""
+    import numpy as np
+
+    from cdda2img.accuraterip import _CRC450_LO, _ar_crc450_arr, _sliding_v1
+
+    rng = np.random.default_rng(3)
+    track = rng.integers(0, 2**32, size=455 * 588, dtype=np.uint64).astype(np.uint32)
+    sweep = _sliding_v1(track, _CRC450_LO, 588, 1, 5)
+    assert int(sweep[5]) == _ar_crc450_arr(track)
+
+
+def test_sliding_v1_at_zero_reproduces_v1_including_exclusions() -> None:
+    """Track 1 and the last track carry boundary exclusions that shift both the
+    window and its first multiplier; the sweep must honour both."""
+    import numpy as np
+
+    from cdda2img.accuraterip import (
+        _ar_checksums_arr,
+        _checksum_bounds,
+        _sliding_v1,
+    )
+
+    rng = np.random.default_rng(4)
+    track = rng.integers(0, 2**32, size=8000 * 588, dtype=np.uint64).astype(np.uint32)
+    for tno in (1, 2, 3):
+        lo, sum_to = _checksum_bounds(len(track), tno, 3)
+        sweep = _sliding_v1(track, lo, sum_to - lo, lo + 1, 3)
+        v1, _v2 = _ar_checksums_arr(track, tno, 3)
+        assert int(sweep[3]) == v1, tno
+
+
+def test_detect_offset_without_responses_is_empty() -> None:
+    from cdda2img.accuraterip import detect_offset
+
+    assert detect_offset(b"\x00" * 2352, [0], 0, []) == []
+
+
+def _dbar_for(refs: list[tuple[int, int, int]], *, with_450: bool = True):
+    """Two blocks — one v1-era, one v2-era — as AccurateRip really stores a cohort."""
+    v1_block = [(30, v1, c450 if with_450 else 0) for v1, _v2, c450 in refs]
+    v2_block = [(20, v2, c450 if with_450 else 0) for _v1, v2, c450 in refs]
+    return _parse_dbar(_build_dbar(len(refs), [v1_block, v2_block]), len(refs))
+
+
+def test_detect_offset_confirms_zero_on_an_unshifted_rip() -> None:
+    from cdda2img.accuraterip import detect_offset
+
+    pcm, lsns, last = _synthetic_disc()
+    responses = _dbar_for(_reference_checksums(pcm, lsns, last))
+    best = detect_offset(pcm, lsns, last, responses)[0]
+    assert best.offset == 0
+    assert best.confirmed
+    assert best.tracks_v1 == best.tracks_v2 == best.total_tracks == 3
+    assert best.tracks_450 == 3
+    assert best.confidence == 3 * (30 + 20)
+
+
+def test_detect_offset_recovers_an_applied_shift() -> None:
+    """Shifting the PCM by +d must be reported as offset -d — the value that,
+    passed to verify_rip as read_offset, undoes the shift."""
+    from cdda2img.accuraterip import detect_offset
+
+    pcm, lsns, last = _synthetic_disc()
+    responses = _dbar_for(_reference_checksums(pcm, lsns, last))
+    for d in (+100, -100, +2939, -2939):
+        best = detect_offset(_shift_pcm(pcm, d), lsns, last, responses)[0]
+        assert best.offset == -d, d
+        assert best.tracks_v1 == 3, d
+
+
+def test_detect_offset_falls_back_when_no_block_carries_crc450() -> None:
+    """Older submissions store crc450=0. The prefilter then finds nothing and
+    the full-track sweep must produce the same answer."""
+    from cdda2img.accuraterip import detect_offset
+
+    pcm, lsns, last = _synthetic_disc()
+    responses = _dbar_for(_reference_checksums(pcm, lsns, last), with_450=False)
+    best = detect_offset(_shift_pcm(pcm, 77), lsns, last, responses)[0]
+    assert best.offset == -77
+    assert best.tracks_450 == 0  # nothing to prefilter on
+    assert best.tracks_v1 == 3  # but full-track checksums still confirm
+
+
+def test_detect_offset_reports_unconfirmed_baseline_for_a_foreign_disc() -> None:
+    """No offset reconciles a rip against another disc's checksums: the only
+    entry returned is the offset-0 baseline, and it is not confirmed."""
+    from cdda2img.accuraterip import detect_offset
+
+    pcm, lsns, last = _synthetic_disc()
+    other, _l, _d = _synthetic_disc(seed=1234)
+    responses = _dbar_for(_reference_checksums(other, lsns, last))
+    matches = detect_offset(pcm, lsns, last, responses)
+    assert [m.offset for m in matches] == [0]
+    assert not matches[0].confirmed
+    assert matches[0].tracks_450 == 0
+
+
+def test_detect_offset_probe_only_candidate_is_never_marked_confirmed() -> None:
+    """Observed on ABBA "Gold": an offset where the frame-450 probe hits every
+    track and no full-track checksum agrees — submitters using a different
+    crc450 convention. Such a candidate may still rank first (it is the best
+    lead available), so the contract is that callers gate on .confirmed, never
+    on .offset alone."""
+    from cdda2img.accuraterip import detect_offset
+
+    pcm, lsns, last = _synthetic_disc()
+    shifted_refs = _reference_checksums(_shift_pcm(pcm, 250), lsns, last)
+    # crc450 from the shifted disc, full checksums deliberately unmatchable.
+    blocks = [[(30, 0xDEADBEEF, c450) for _v1, _v2, c450 in shifted_refs]]
+    responses = _parse_dbar(_build_dbar(3, blocks), 3)
+
+    matches = detect_offset(pcm, lsns, last, responses)
+    lead = matches[0]
+    assert lead.offset == 250  # the probe does nominate it
+    assert lead.tracks_450 == 3
+    assert lead.tracks_v1 == lead.tracks_v2 == 0
+    assert not lead.confirmed
