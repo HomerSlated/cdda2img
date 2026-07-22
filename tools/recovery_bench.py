@@ -85,6 +85,10 @@ RUNGS: dict[str, dict[str, str]] = {
 # the two are alternative exits, both worth keeping in a per-disc profile.
 CTDB_RUNGS: tuple[str, ...] = ("ctdb-noc2", "ctdb")
 
+# Q-yield floor below which a whole pass is treated as a transient disturbed spin
+# rather than that speed's real yield (AccuDisc 2026-07-18, §15.6).
+_Q_TRANSIENT_FLOOR = 0.90
+
 # --map-file low-nibble states (AccuDisc §15.4 / accudisc.h). "Needs recovery"
 # is the exact predicate AccuDisc's span-finder uses.
 MAP_STATE_NAME = {
@@ -309,11 +313,25 @@ class BenchRow:
     # "t8@8X,t5@unrec" — which swept speed first made each flagged track AR-verify
     # (or unrecovered). None for non-recovery rows (baseline / skip / ctdb).
     recovered_at: str | None = None
+    # Which repeat this baseline was, 1-based, when --passes > 1; 0 for a single
+    # pass. Every pass is emitted (data is never discarded); `pass_role` marks
+    # which one fed the recovery rungs.
+    pass_n: int = 0
+    pass_role: str = ""  # "median" (drove the rungs) | "repeat" | "" (single pass)
     wall_s: float = 0.0
 
     @property
     def q_health(self) -> float | None:
         return self.subq_ok / self.subq_total if self.subq_total else None
+
+    @property
+    def q_transient(self) -> bool:
+        """Whole-pass Q collapse: AccuDisc measured ~33-39% global Q on 1-in-4
+        (ZZ Top 32x) and 2-in-3 (Tracy 16x) passes where the neighbouring speed
+        held ~98%, at no throughput benefit. Below ~0.90 the pass is a disturbed
+        spin, not that speed's real yield."""
+        q = self.q_health
+        return q is not None and q < _Q_TRANSIENT_FLOOR
 
 
 # --- Pure decision core (unit-tested) ------------------------------------------
@@ -900,6 +918,31 @@ def gate_ctdb(
     return False, res.repaired
 
 
+def select_median_pass(rows: list[BenchRow]) -> int:
+    """Index of the pass whose Q yield is the median — the representative capture.
+
+    AccuDisc's caveat (§15.6): a single capture at a rung can mislabel that speed
+    entirely, because specific request values produce a *whole-pass* Q collapse
+    (~33-39% global Q where a neighbouring speed holds ~98%) on some fraction of
+    attempts — 1-in-4 on ZZ Top 32x, 2-in-3 on Tracy 16x. Median-of-N is what
+    separates the speed's real yield from one disturbed spin.
+
+    Median, not best: taking the best pass would launder exactly the variance we
+    are trying to measure, and would make a rung that collapses 2-in-3 look as
+    good as one that never collapses. With an even count the lower of the two
+    middle passes is chosen, which is the conservative half.
+
+    Falls back to the first pass when no capture yielded any Q at all (``--no-sub``,
+    or a disc whose Q is unreadable throughout) — there is nothing to rank on, and
+    every pass is equally representative.
+    """
+    scored = [(r.q_health, i) for i, r in enumerate(rows) if r.q_health is not None]
+    if not scored:
+        return 0
+    scored.sort()
+    return scored[(len(scored) - 1) // 2][1]
+
+
 def geometry_from_fulltoc(
     fulltoc_raw: bytes,
 ) -> tuple[list[int], int, int] | None:
@@ -1241,6 +1284,87 @@ def _prewarm_ctdb_cache(
     print(f"# ctdb: cache pre-warmed ({len(entries)} parity entries)")
 
 
+def _baseline_passes(
+    args: argparse.Namespace,
+    geom: tuple[list[int], int, int] | None,
+    governor: int,
+    disc_id: str,
+    speed: int,
+    out_dir: Path,
+    ar_responses: list[list[dict]],
+    bp: BenchProgress,
+) -> tuple[list[BenchRow], list[tuple[str, Path, Path]], int]:
+    """``--passes`` whole-disc baseline captures at one speed.
+
+    Returns every pass's row (data is never discarded), its capture files, and
+    the index of the median-Q pass — the one representative of this speed, which
+    alone feeds the recovery rungs. Non-representative captures are deleted
+    immediately: 3 passes x 5 speeds is ~6.5 GB of PCM per disc on top of the
+    rung captures.
+    """
+    n_passes = max(1, args.passes)
+    pass_rows: list[BenchRow] = []
+    pass_files: list[tuple[str, Path, Path]] = []  # (tag, pcm, map)
+
+    for p in range(1, n_passes + 1):
+        tag = f"base_{speed}x" if n_passes == 1 else f"base_{speed}x_p{p}"
+        suffix = "" if n_passes == 1 else f" (pass {p}/{n_passes})"
+        bp.cell(f"baseline @ {speed}x{suffix}")
+        bp.stage(1, 3, "read (whole disc)")
+        t0 = time.monotonic()
+        rc, summary, p_pcm, p_map = run_read(
+            args.device,
+            out_dir,
+            tag,
+            speed,
+            sub=args.sub,
+            c2=args.c2,
+            on_progress=bp.progress_cb(),
+        )
+        row = _mk_row(disc_id, args.device, "baseline", speed, governor, summary)
+        _gate_row(
+            row,
+            p_pcm,
+            (out_dir / f"{tag}.c2") if args.c2 else None,
+            geom,
+            args.read_offset,
+            ar_responses,
+            on_stage=lambda label: bp.stage(2 if label == "AR gate" else 3, 3, label),
+        )
+        row.wall_s = round(time.monotonic() - t0, 1)  # capture + gate
+        if n_passes > 1:
+            row.pass_n = p
+        pass_rows.append(row)
+        pass_files.append((tag, p_pcm, p_map))
+        flag = "  <-- Q TRANSIENT" if row.q_transient else ""
+        print(
+            f"  baseline @ {speed}x{'' if n_passes == 1 else f' p{p}'}  exit={rc}  "
+            f"q={row.q_health}  c2={row.c2_sectors}  ar_v2={row.ar_v2_pass}  "
+            f"{row.wall_s}s{flag}",
+            flush=True,
+        )
+
+    pick = select_median_pass(pass_rows)
+    if n_passes > 1:
+        for i, row in enumerate(pass_rows):
+            row.pass_role = "median" if i == pick else "repeat"
+        qs = ", ".join(
+            f"{r.q_health:.3f}" if r.q_health is not None else "-" for r in pass_rows
+        )
+        n_bad = sum(1 for r in pass_rows if r.q_transient)
+        bad = f", {n_bad}/{n_passes} below {_Q_TRANSIENT_FLOOR}" if n_bad else ""
+        print(f"# q-yield @ {speed}x: {qs} — median pass {pick + 1}{bad}", flush=True)
+
+    if not args.keep_captures:
+        for i, (t, pcm_f, map_f) in enumerate(pass_files):
+            if i == pick:
+                continue
+            for f in (pcm_f, map_f, out_dir / f"{t}.c2", out_dir / f"{t}.sub"):
+                f.unlink(missing_ok=True)
+
+    return pass_rows, pass_files, pick
+
+
 def run_matrix(
     args: argparse.Namespace,
     geom: tuple[list[int], int, int] | None,
@@ -1272,7 +1396,7 @@ def run_matrix(
     # error-only decode rather than trust a mis-aligned erasure feed.
     disc_c2_align: int | None = None
     c2lag_done = False
-    total_cells = len(speeds) * (1 + len(rungs))
+    total_cells = len(speeds) * (max(1, args.passes) + len(rungs))
     bp = BenchProgress(total_cells, out_dir)
 
     # Fetch the AccurateRip dBAR ONCE for the whole matrix (item 2): every gate then
@@ -1295,39 +1419,17 @@ def run_matrix(
 
     try:
         for speed in speeds:
-            tag = f"base_{speed}x"
-            bp.cell(f"baseline @ {speed}x")
-            bp.stage(1, 3, "read (whole disc)")
-            t0 = time.monotonic()
-            rc, summary, base_pcm, base_map = run_read(
-                args.device,
-                out_dir,
-                tag,
-                speed,
-                sub=args.sub,
-                c2=args.c2,
-                on_progress=bp.progress_cb(),
+            pass_rows, pass_files, pick = _baseline_passes(
+                args, geom, governor, disc_id, speed, out_dir, ar_responses, bp
             )
-            base = _mk_row(disc_id, args.device, "baseline", speed, governor, summary)
-            _gate_row(
-                base,
-                base_pcm,
-                (out_dir / f"{tag}.c2") if args.c2 else None,
-                geom,
-                args.read_offset,
-                ar_responses,
-                on_stage=lambda label: bp.stage(
-                    2 if label == "AR gate" else 3, 3, label
-                ),
-            )
-            base.wall_s = round(time.monotonic() - t0, 1)  # whole cell: capture + gate
-            rows.append(base)
+            base = pass_rows[pick]
+            tag, base_pcm, base_map = pass_files[pick]
+            rows.extend(pass_rows)
             emit()
             spans = read_map_spans(base_map, start_lba=0)
             print(
-                f"  baseline @ {speed}x  exit={rc}  q={base.q_health}  "
-                f"c2={base.c2_sectors}  spans={len(spans)}  ar_v2={base.ar_v2_pass}  "
-                f"ctdb={base.ctdb_pass}/{base.ctdb_repaired}  {base.wall_s}s",
+                f"  -> using pass {pick + 1} @ {speed}x  spans={len(spans)}  "
+                f"ctdb={base.ctdb_pass}/{base.ctdb_repaired}",
                 flush=True,
             )
             # Measure the C2/audio lag once, on the first C2-firing baseline (the
@@ -1575,6 +1677,23 @@ def _selftest() -> int:
     vr = classify([noc2_fail, c2_win])
     _check(vr == {"ctdb-noc2": "keep", "ctdb": "keep"}, str(vr))
 
+    # select_median_pass: MEDIAN Q, never best. AccuDisc measured whole-pass Q
+    # collapse on a fraction of attempts at some speeds (2-in-3 on Tracy 16x), so
+    # picking the best pass would launder exactly the variance being measured.
+    def _q(ok: int) -> BenchRow:
+        return BenchRow("d", "drv", "baseline", subq_ok=ok, subq_total=100)
+
+    _check(select_median_pass([_q(98), _q(35), _q(97)]) == 2, "median of 3 (one bad)")
+    _check(select_median_pass([_q(35), _q(37), _q(98)]) == 1, "median of 3 (two bad)")
+    _check(select_median_pass([_q(98)]) == 0, "single pass")
+    # even count -> lower middle (the conservative half): sorted 30,90,95,99 picks
+    # 90, which is index 0 in the original order
+    _check(select_median_pass([_q(90), _q(99), _q(95), _q(30)]) == 0, "even count")
+    # no Q at all (--no-sub): nothing to rank on, first pass is representative
+    _check(select_median_pass([BenchRow("d", "drv", "baseline")] * 3) == 0, "no Q")
+    # q_transient flags a disturbed spin, not merely an imperfect one
+    _check(_q(35).q_transient and not _q(98).q_transient, "q_transient floor")
+
     # _spans_by_track: group flagged spans by the owning track (last start <= lba);
     # a span before track 0 (a head-offset pre-gap) is dropped as non-AR-verifiable.
     bt = _spans_by_track([(50, 2), (150, 1), (250, 3), (0, 1)], [0, 100, 200])
@@ -1668,6 +1787,15 @@ def main(argv: list[str] | None = None) -> int:
         type=int,
         default=0,
         help="drive read offset in samples for the AR gate (e.g. +30 for PX-716A)",
+    )
+    ap.add_argument(
+        "--passes",
+        type=int,
+        default=1,
+        help="whole-disc baseline captures per speed (default 1). Use 3+ to get a "
+        "median Q yield: a single capture can mislabel a speed, because some "
+        "request values collapse Q for a whole pass on a fraction of attempts. "
+        "Every pass is recorded; the median-Q pass feeds the recovery rungs",
     )
     ap.add_argument(
         "--keep-captures",
