@@ -40,8 +40,10 @@ all-ones), so the PCM/C2/sub streams always stay length-consistent.
 from __future__ import annotations
 
 import logging
+import re
 import subprocess
 import tempfile
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -64,6 +66,146 @@ def _resolve_accudisc() -> str:
 
 
 _ACCUDISC = _resolve_accudisc()
+
+
+# ── TOC geometry (READ TOC, with the 0x02 → 0x00 degrade) ─────────────────────
+
+
+@dataclass
+class TocGeometry:
+    """Track boundaries from ``accudisc toc``, plus how they were obtained.
+
+    ``accudisc toc`` prefers READ TOC format 0x02 (the lead-in) and falls back to
+    format 0x00 (the drive's cooked track list) when the lead-in cannot be read,
+    reporting which served the answer. The ``track``/``leadout`` lines are
+    identical either way — AccuDisc cross-checked both decodes of the same disc
+    byte-for-byte — so *geometry does not depend on the path*. What the fallback
+    loses is **session structure**, which is why :attr:`session_safe` exists.
+    """
+
+    track_lsns: list[int]  # audio track start LBAs, in order
+    disc_last_lsn: int  # last audio sector (lead-out - 1)
+    source: str  # "fulltoc" (0x02) | "toc" (0x00)
+    degrade: str  # "none" | leadin_unreadable | leadin_absent | leadin_malformed
+    sessions: str | None = None  # "1..1" range (0x02); a bare count on degrade
+    data_tracks: list[int] = field(default_factory=list)  # 1-based, CTRL bit 2
+
+    @property
+    def degraded(self) -> bool:
+        return self.degrade != "none"
+
+    @property
+    def session_safe(self) -> tuple[bool, str]:
+        """Whether the session-1-only policy can be applied to this geometry.
+
+        The policy (``subchannel.session1_audio_tracks``) needs per-track session
+        membership and session 1's lead-out. Format 0x02 carries both; format
+        0x00 carries neither — it returns a flat track list and the **last**
+        session's lead-out. On a multi-session disc that lead-out is not session
+        1's, so building geometry from it yields a wrong disc ID silently.
+
+        Two ways a degraded disc can still be safe, in order of strength:
+
+        1. AccuDisc reports a session **count** (from READ DISC INFORMATION,
+           which does not re-read the lead-in). ``1`` is a measured fact and
+           settles it whatever the tracks are.
+        2. No count available: fall back to "no data track anywhere". This rules
+           out an Enhanced CD (whose session 2 is always data) but **not** a
+           multi-session all-audio disc (e.g. an audio CD-R written in two TAO
+           sessions) — AccuDisc caught that hole in our first formulation. So it
+           is an inference, not a measurement, and is reported as such.
+        """
+        if not self.degraded:
+            return True, "full TOC"
+        if self.sessions is not None and ".." not in self.sessions:
+            if self.sessions.strip() == "1":
+                return True, "single session (measured)"
+            return False, f"{self.sessions} sessions and no session structure"
+        if self.data_tracks:
+            return False, (
+                f"data track(s) {self.data_tracks} and no session structure — "
+                "cannot distinguish mixed-mode (refuse) from Enhanced CD (exclude)"
+            )
+        return True, "all-audio, single session inferred (NOT measured)"
+
+
+_TRACK_RE = re.compile(r"^track\s+(\d+)\s+lba\s+(-?\d+)\s+sectors\s+(\d+)\s+(\w+)")
+_LEADOUT_RE = re.compile(r"^leadout\s+lba\s+(\d+)")
+
+
+def parse_toc_output(stdout: str) -> TocGeometry:
+    """Parse ``accudisc toc`` output. Frozen in AccuDisc's cli-machine-interface.md.
+
+    The acquisition line is ``key=value`` tokens and may gain keys, so it is
+    parsed as tokens, never by position.
+    """
+    lsns: list[int] = []
+    data_tracks: list[int] = []
+    leadout: int | None = None
+    tokens: dict[str, str] = {}
+
+    for line in stdout.splitlines():
+        track = _TRACK_RE.match(line)
+        if track:
+            number, lba, _sectors, kind = track.groups()
+            lsns.append(int(lba))
+            if kind != "audio":
+                data_tracks.append(int(number))
+            continue
+        tail = _LEADOUT_RE.match(line)
+        if tail:
+            leadout = int(tail.group(1))
+            continue
+        if "=" in line:
+            for item in line.split():
+                key, _, value = item.partition("=")
+                if value:
+                    tokens[key] = value
+
+    if not lsns or leadout is None:
+        msg = f"could not parse accudisc toc output:\n{stdout}"
+        raise ValueError(msg)
+
+    return TocGeometry(
+        track_lsns=lsns,
+        disc_last_lsn=leadout - 1,
+        # Pre-degrade AccuDisc builds emit no acquisition line; they only ever
+        # answered from the lead-in, so "fulltoc"/"none" is the honest default.
+        source=tokens.get("source", "fulltoc"),
+        degrade=tokens.get("degrade", "none"),
+        sessions=tokens.get("sessions"),
+        data_tracks=data_tracks,
+    )
+
+
+def read_toc(device: str) -> TocGeometry:
+    """Track geometry via ``accudisc toc``, tolerating an unreadable lead-in.
+
+    Raises RuntimeError when the command itself fails; a *degrade* is a success
+    (exit 0) and is reported in the result, not raised — failing it would break
+    exactly the discs the fallback exists to serve.
+    """
+    try:
+        proc = subprocess.run(  # noqa: S603 — snapshot/PATH binary, fixed argv
+            [_ACCUDISC, "--device", device, "toc"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except OSError as exc:
+        msg = f"accudisc toc failed to run: {exc}"
+        raise RuntimeError(msg) from exc
+    if proc.returncode not in (0, 3):
+        msg = f"accudisc toc exited {proc.returncode}: {proc.stderr.strip()}"
+        raise RuntimeError(msg)
+    geom = parse_toc_output(proc.stdout)
+    if geom.degraded:
+        log.warning(
+            "TOC lead-in unavailable (%s) — geometry from the cooked track list; "
+            "session structure is unknown",
+            geom.degrade,
+        )
+    return geom
 
 
 def _run_features(device: str) -> tuple[int, str] | None:

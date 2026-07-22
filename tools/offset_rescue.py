@@ -104,41 +104,35 @@ def capture(device: str, out: Path, speed: int | None) -> dict[str, Path]:
 
 
 def read_geometry(device: str):
-    """Track LSNs and lead-out via ``accudisc toc`` (READ TOC format 0x00).
+    """Track LSNs and lead-out via ``accudisc toc``.
 
-    Deliberately not the full TOC (format 0x02): the PX-716A returns a
-    transport I/O failure for 0x02 on the CD-R under test while format 0x00
-    reads perfectly, and offset rescue needs only boundaries and lead-out.
-    Pre-gaps and INDEX detail, which only the full TOC/Q path supplies, do not
-    enter any checksum.
+    ``toc`` prefers READ TOC format 0x02 (lead-in) and degrades to format 0x00
+    automatically, reporting which served the answer via ``source=`` /
+    ``degrade=``. We parse only the track/leadout lines, which are identical
+    either way, so the degrade is transparent here — offset rescue needs
+    boundaries and lead-out and nothing else.
+
+    Note that *neither* format carries pre-gaps: format 0x02's descriptors hold
+    INDEX 01 (track starts) and A0/A1/A2, never INDEX 00. Pre-gaps live only in
+    the program-area Q subchannel, which is why the rip pipeline derives them
+    from the ``--sub raw`` capture (``subq_toc._derive_layout``) and not from
+    any TOC. Verified on the Stanley Road CD-R, whose lead-in is completely
+    unreadable yet yields all 11 pre-gaps from Q.
+
+    Offset rescue needs boundaries and lead-out only, so a degrade is harmless
+    here — but it is surfaced, because a dying lead-in is provenance worth
+    seeing next to a verification result.
     """
-    import re
-    import subprocess
+    from cdda2img.accudisc_reader import read_toc
 
-    from cdda2img.accudisc_reader import _ACCUDISC
-
-    proc = subprocess.run(  # noqa: S603
-        [_ACCUDISC, "--device", device, "toc"],
-        capture_output=True,
-        text=True,
-        check=True,
-    )
-    lsns: list[int] = []
-    leadout: int | None = None
-    for line in proc.stdout.splitlines():
-        track = re.match(
-            r"track\s+(\d+)\s+lba\s+(-?\d+)\s+sectors\s+(\d+)\s+audio", line
-        )
-        if track:
-            lsns.append(int(track.group(2)))
-            continue
-        tail = re.match(r"leadout\s+lba\s+(\d+)", line)
-        if tail:
-            leadout = int(tail.group(1))
-    if not lsns or leadout is None:
-        msg = f"could not parse accudisc toc output:\n{proc.stdout}"
-        raise SystemExit(msg)
-    return lsns, leadout - 1
+    toc = read_toc(device)
+    if toc.degraded:
+        safe, why = toc.session_safe
+        print(f"  TOC: source={toc.source} degrade={toc.degrade} — {why}")
+        if not safe:
+            msg = f"refusing degraded TOC: {why}"
+            raise SystemExit(msg)
+    return toc.track_lsns, toc.disc_last_lsn
 
 
 def load_rbi(rbi: Path, out: Path) -> tuple[dict[str, Path], list[int], int]:

@@ -1276,3 +1276,87 @@ wrong.
   real rip, where a +100-sample shift moved audio at all 10 track boundaries (2 of
   them non-silent; the silent 8 are exactly why per-file shifting looks fine and
   quietly corrupts the ones that matter).
+
+---
+
+## Part XII — The limit of recovery: discs that can never verify (2026-07-21)
+
+Every other Part in this document is about closing the gap between a read and
+the truth. This one bounds the exercise: **some discs have no truth left to
+reach, and the recovery engine working perfectly is what proves it.**
+
+### 12.1 The observation
+
+Two CD-R copies from Keith's shelf failed AccurateRip on *every* track. Both
+read flawlessly — zero HARD sectors, zero C2, clean subchannel at 24× — so
+nothing in Part II–IV had anything to act on. Neither could be offset-rescued
+(Part XI), and the negative is trustworthy rather than merely unexplained:
+
+- A **planted-offset positive control** passed on both discs. Synthesise
+  reference checksums from the disc's own PCM at a known offset, then sweep: the
+  machinery recovers it at full track count, on that exact data path. So a
+  failure to find a real offset is a fact about the disc, not the code.
+- The stronger case (disc 2) was swept **±500 000 samples (±11 s)** against a
+  usable reference — AccurateRip confidence 4, CTDB 5, frame-450 data on all 10
+  tracks. Zero hits at any offset on any track.
+- **Not lossy-sourced.** Applying the auCDtect discriminator (it is the
+  *consistency of the spectral cutoff across time segments* that betrays a
+  codec, never the cutoff value — a quiet or dull passage has no cutoff to find):
+  per-second cutoff spread sd 3.25 kHz / 2.72 kHz where a codec gives < 0.3 kHz,
+  5–15 % of segments above 21 kHz, and both discs reach 22.05 kHz — exactly
+  Nyquist. Genuine full-bandwidth audio.
+
+### 12.2 The explanation, and why it is unfixable
+
+One of the two still carries an authentic TOC: its MusicBrainz disc ID matches
+the real release, so it is a copy of a real pressing, not a reassembly from
+files. That original, Keith reports, was **badly damaged** before it was
+discarded years ago.
+
+A period ripper does not fail on unrecoverable samples — it **conceals** them,
+interpolating from neighbours. Concealment does not lowpass anything, so
+bandwidth stays full and the audio sounds fine; it simply makes the samples
+*different*. Every checksum over that track is destroyed, permanently, and the
+CD-R faithfully preserves the concealed audio.
+
+So: **a disc can be correctly identified, perfectly playable, physically clean
+to read, and permanently unverifiable.** The loss happened once, at rip time,
+years before the disc reached this drive. No re-read strategy in Part II — no
+speed diversity, no C2 erasure decode, no CTDB parity, no offset sweep — can
+recover information that was never written to the disc.
+
+### 12.3 Why this matters to the architecture
+
+This is the cleanest demonstration yet of the §1 relative/absolute split.
+
+- **The relative signals said the read was perfect, and they were right.** Zero
+  HARD, zero C2, clean Q. AccuDisc returning that on a permanently unverifiable
+  disc is a *correct and complete* result, not a missed recovery. Anything that
+  treated "AR failed" as "the reader should try harder" would burn hours here
+  and find nothing, on a disc that is being read exactly right.
+- **Only the absolute gate can say the audio is not the pressing's**, and it
+  did — immediately, on the first pass, at zero extra cost.
+
+The practical rule: **an all-tracks AccurateRip mismatch is not a read problem
+and must never trigger the re-read ladder.** It is either an offset (rescuable,
+Part XI) or a provenance fact about the disc (not rescuable by anyone). The
+production gate at `cdda2img.py:_ar_has_partial_mismatch` already encodes half
+of this — it lets only *partial* mismatches reach recovery, on the reasoning
+that a total mismatch means misconfiguration rather than read errors. Part XI
+supplies what to do with the other half.
+
+### 12.4 What a rip of such a disc should record
+
+Verification is not achievable, so the honest deliverable is **provenance, not a
+pass**: the identification (which succeeded — CD-Text, disc ID, MusicBrainz),
+the read-quality evidence (zero HARD/C2, Q yield), the offset sweep's negative
+*and its search radius*, the reference strength that negative was measured
+against (a confidence-1 reference makes a mismatch nearly meaningless; the two
+discs differed sharply here), and the lead-in health signal
+(`degrade=leadin_unreadable` — on the Stanley Road disc the lead-in is entirely
+dead while the program area still returns 147–150 good Q frames per boundary,
+which is the lead-in failing *first*).
+
+That set lets a future reader distinguish "we never checked" from "we checked
+thoroughly and this disc cannot be verified" — which is the only useful thing
+left to say about it.

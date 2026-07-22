@@ -928,7 +928,14 @@ def capture_geometry(
 ) -> tuple[list[int], int, int] | None:
     """Acquire disc geometry for the AR/CTDB gate from a cheap standalone
     ``fulltoc`` (lead-in only, no full spin), then :func:`geometry_from_fulltoc`.
-    Disc-invariant — acquire once per disc."""
+    Disc-invariant — acquire once per disc.
+
+    Falls back to ``accudisc toc`` when the lead-in cannot be read. Without this
+    a disc with a dead lead-in but a perfectly healthy program area (the Paul
+    Weller CD-R, 2026-07-21) yields **no geometry at all**, which silently means
+    no AR/CTDB gate for that disc — the bench would score its whole matrix with
+    the absolute columns blank and look merely uninteresting rather than broken.
+    """
     ftoc = out_dir / "geometry.fulltoc"
     try:
         r = subprocess.run(  # noqa: S603 — snapshot/PATH binary, fixed argv
@@ -938,14 +945,39 @@ def capture_geometry(
         )
     except OSError as exc:
         print(f"# geometry: fulltoc capture failed ({exc})")
-        return None
+        return _geometry_from_toc(device)
     if r.returncode not in (0, 3) or not ftoc.is_file():
-        print(f"# geometry: fulltoc unavailable (exit {r.returncode})")
-        return None
+        print(f"# geometry: fulltoc unavailable (exit {r.returncode}) — trying toc")
+        return _geometry_from_toc(device)
     geom = geometry_from_fulltoc(ftoc.read_bytes())
     if geom is None:
         print("# geometry: disc not in CD-DA archival model")
     return geom
+
+
+def _geometry_from_toc(device: str) -> tuple[list[int], int, int] | None:
+    """Geometry from ``accudisc toc``, which degrades past an unreadable lead-in.
+
+    Refuses when the session-1-only policy cannot be established (see
+    ``TocGeometry.session_safe``): on a multi-session disc format 0x00 reports the
+    *last* session's lead-out, which would yield a wrong disc ID silently — and a
+    wrong disc ID means every AR/CTDB lookup 404s, i.e. the gate reads "not in the
+    database" when the truth is "we asked the wrong question"."""
+    from cdda2img.accudisc_reader import read_toc
+    from cdda2img.cddb import compute_cddb_disc_id
+
+    try:
+        toc = read_toc(device)
+    except (RuntimeError, ValueError) as exc:
+        print(f"# geometry: toc unavailable ({exc})")
+        return None
+    safe, why = toc.session_safe
+    if not safe:
+        print(f"# geometry: refusing degraded TOC — {why}")
+        return None
+    print(f"# geometry: source={toc.source} degrade={toc.degrade} ({why})")
+    cddb_id = int(compute_cddb_disc_id(toc.track_lsns, toc.disc_last_lsn), 16)
+    return toc.track_lsns, toc.disc_last_lsn, cddb_id
 
 
 # --- Matrix orchestration (baseline capture + span-targeted recovery) ----------
