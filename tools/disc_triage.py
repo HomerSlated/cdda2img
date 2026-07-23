@@ -81,6 +81,31 @@ def resolve_ar(track_lsns: list[int], disc_last_lsn: int):
     return [], compute_cddb_disc_id(track_lsns, disc_last_lsn), "none resolved"
 
 
+def _profile(n: int) -> str:
+    """Predicted cheapest working strategy for a track with ``n`` flagged sectors.
+
+    PROVISIONAL — three anchor discs (n = 1, ~3, >=7), one drive. Report it as a
+    prediction to be checked, never as a setting to apply blind.
+
+    The reasoning needs no physical mechanism. AccurateRip verifies a whole TRACK, so
+    a re-read only counts if EVERY bad sector in it comes back correct at once (~p^n).
+    As n grows, strategies drop out cheapest-first, because only reads whose single
+    attempt covers all n stay viable:
+
+      n = 1   everything works (fixing the one bad sector fixes the track)
+      n ~ 3   small varied reads still assemble it; fixed-parameter ones stop working
+      n >= 7  only a whole-track read covers them all in one attempt
+
+    Measured cost of guessing wrong: 566x wall time at n=1 (1 s vs 566 s for the same
+    recovered track), and outright failure at n >= 7.
+    """
+    if n <= 1:
+        return "→ sector-hammer (~1 s; anything works at n=1)"
+    if n <= 5:
+        return "→ max-variation (~10 s; sector-level starts failing)"
+    return "→ track-ladder (~54 s; whole-track reads only)"
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=(__doc__ or "").splitlines()[0])
     ap.add_argument("--device", default="/dev/sr0")
@@ -163,7 +188,9 @@ def main(argv: list[str] | None = None) -> int:
     target = ranked[0]
     print("\nVERDICT: BENCHABLE.")
     for t in ranked:
-        print(f"  track {t:2d}: {len(per_track[t])} flagged sector(s)")
+        print(
+            f"  track {t:2d}: {len(per_track[t])} flagged sector(s)  {_profile(len(per_track[t]))}"
+        )
     print(
         f"\n  suggested target: track {target} "
         f"({len(per_track[target])} flagged — hardest, so most discriminating)\n"
