@@ -383,15 +383,17 @@ def test_session_safe_degraded_with_a_data_track_refuses() -> None:
 
 
 def test_session_safe_measured_single_session_beats_the_inference() -> None:
-    """A bare sessions=<count> on the degrade path (READ DISC INFORMATION, which
-    does not re-read the lead-in) settles it as a measured fact."""
+    """session_count=1 on the degrade path (READ DISC INFORMATION, a separate
+    opcode that does not re-read the lead-in) settles it as a measured fact —
+    even against a data track that the inference alone would refuse on."""
     from cdda2img.accudisc_reader import parse_toc_output
 
     geom = parse_toc_output(
         "track 1 lba 0 sectors 100 audio\n"
         "track 2 lba 100 sectors 200 data\n"
-        "leadout lba 300\nsource=toc degrade=leadin_unreadable sessions=1\n"
+        "leadout lba 300\nsource=toc degrade=leadin_unreadable session_count=1\n"
     )
+    assert geom.session_count == 1
     safe, why = geom.session_safe
     assert safe  # measured single session outranks the data-track inference
     assert "measured" in why
@@ -406,8 +408,85 @@ def test_session_safe_measured_multisession_refuses_even_if_all_audio() -> None:
     geom = parse_toc_output(
         "track 1 lba 0 sectors 100 audio\n"
         "track 2 lba 100 sectors 200 audio\n"
-        "leadout lba 300\nsource=toc degrade=leadin_unreadable sessions=2\n"
+        "leadout lba 300\nsource=toc degrade=leadin_unreadable session_count=2\n"
     )
     safe, why = geom.session_safe
     assert not safe
     assert "2 sessions" in why
+
+
+def test_session_count_is_ignored_when_the_toc_is_healthy() -> None:
+    """session_count is always emitted now, including on a full TOC. It must not
+    override the full-TOC path — degrade=none is already the strongest evidence."""
+    from cdda2img.accudisc_reader import parse_toc_output
+
+    body = (
+        "track 1 lba 0 sectors 100 audio\nleadout lba 100\n"
+        "source=fulltoc degrade=none sessions=1..1 session_count=2\n"
+    )
+    geom = parse_toc_output(body)
+    assert geom.session_count == 2
+    safe, why = geom.session_safe
+    assert safe  # a full TOC carries real session structure regardless of the count
+    assert why == "full TOC"
+
+
+def test_session_count_zero_on_degrade_falls_back_to_the_inference() -> None:
+    """session_count=0 means READ DISC INFORMATION could not say — indistinguishable
+    from a pre-count build, so the conservative data-track inference governs."""
+    from cdda2img.accudisc_reader import parse_toc_output
+
+    geom = parse_toc_output(
+        "track 1 lba 0 sectors 100 audio\n"
+        "track 2 lba 100 sectors 200 data\n"
+        "leadout lba 300\nsource=toc degrade=leadin_unreadable session_count=0\n"
+    )
+    assert geom.session_count == 0
+    safe, why = geom.session_safe
+    assert not safe  # falls through to the data-track refusal
+    assert "mixed-mode" in why
+
+
+def test_untrusted_toc_geometry_refuses_regardless_of_sessions() -> None:
+    """toc_trusted=0 (a self-contradicting lead-in, usually copy protection) makes
+    the track map unbelievable — refuse even though the disc claims one session."""
+    from cdda2img.accudisc_reader import parse_toc_output
+
+    geom = parse_toc_output(
+        "track 1 lba 0 sectors 100 audio\n"
+        "track 2 lba 100 sectors 200 audio\n"
+        "leadout lba 300\n"
+        "source=fulltoc degrade=none sessions=1..1 session_count=1 "
+        "anomalies=lba_order,overlap toc_trusted=0\n"
+    )
+    assert geom.anomalies == ["lba_order", "overlap"]
+    assert not geom.toc_trusted
+    safe, why = geom.session_safe
+    assert not safe
+    assert "untrusted" in why
+    assert "lba_order" in why
+
+
+def test_clean_disc_reports_trusted_geometry_and_no_anomalies() -> None:
+    from cdda2img.accudisc_reader import parse_toc_output
+
+    geom = parse_toc_output(_HEALTHY)
+    assert geom.toc_trusted
+    assert geom.anomalies == []
+
+
+def test_report_only_anomalies_do_not_make_the_toc_untrusted() -> None:
+    """The six report-only slugs (e.g. empty_track) are recorded but the disc still
+    rips — only lba_order/overlap/leadout_before set toc_trusted=0, and AccuDisc
+    signals that separately with the token. We key on the token, not the slugs."""
+    from cdda2img.accudisc_reader import parse_toc_output
+
+    geom = parse_toc_output(
+        "track 1 lba 0 sectors 100 audio\nleadout lba 100\n"
+        "source=fulltoc degrade=none sessions=1..1 session_count=1 "
+        "anomalies=empty_track\n"
+    )
+    assert geom.anomalies == ["empty_track"]
+    assert geom.toc_trusted  # no toc_trusted=0 token → still trusted
+    safe, _why = geom.session_safe
+    assert safe

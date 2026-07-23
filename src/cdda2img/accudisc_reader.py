@@ -39,6 +39,7 @@ all-ones), so the PCM/C2/sub streams always stay length-consistent.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import re
 import subprocess
@@ -87,8 +88,17 @@ class TocGeometry:
     disc_last_lsn: int  # last audio sector (lead-out - 1)
     source: str  # "fulltoc" (0x02) | "toc" (0x00)
     degrade: str  # "none" | leadin_unreadable | leadin_absent | leadin_malformed
-    sessions: str | None = None  # "1..1" range (0x02); a bare count on degrade
+    sessions: str | None = None  # "1..1" range — fulltoc only; the lead-in's numbering
     data_tracks: list[int] = field(default_factory=list)  # 1-based, CTRL bit 2
+    # READ DISC INFORMATION session count. A separate token from `sessions`, and a
+    # different opcode — answered from the drive's disc model, not the groove — so
+    # it survives a degrade where the `sessions` range does not. 0 = unknown; None
+    # = a pre-count AccuDisc build that never emitted it.
+    session_count: int | None = None
+    # A malformed lead-in that contradicts itself (copy protection, usually). When
+    # `toc_trusted` is False the track map cannot be believed; `anomalies` names why.
+    anomalies: list[str] = field(default_factory=list)
+    toc_trusted: bool = True
 
     @property
     def degraded(self) -> bool:
@@ -104,23 +114,31 @@ class TocGeometry:
         session's lead-out. On a multi-session disc that lead-out is not session
         1's, so building geometry from it yields a wrong disc ID silently.
 
-        Two ways a degraded disc can still be safe, in order of strength:
+        The decision follows AccuDisc's §2026-07-22e/f table verbatim, strongest
+        evidence first:
 
-        1. AccuDisc reports a session **count** (from READ DISC INFORMATION,
-           which does not re-read the lead-in). ``1`` is a measured fact and
-           settles it whatever the tracks are.
-        2. No count available: fall back to "no data track anywhere". This rules
-           out an Enhanced CD (whose session 2 is always data) but **not** a
-           multi-session all-audio disc (e.g. an audio CD-R written in two TAO
-           sessions) — AccuDisc caught that hole in our first formulation. So it
-           is an inference, not a measurement, and is reported as such.
+        0. ``toc_trusted`` is False — a self-contradicting lead-in (copy
+           protection). The map is unbelievable whatever the sessions say; refuse
+           and surface it as needing a human.
+        1. ``session_count`` from READ DISC INFORMATION. This is a *separate*
+           opcode that does not re-read the lead-in, so it is present on a
+           degrade. ``1`` is a measured fact and settles it whatever the tracks
+           are; ``>1`` is the multi-session hole and is refused.
+        2. No count (a pre-count build, or ``0`` = unknown): fall back to "no data
+           track anywhere". This rules out an Enhanced CD (whose session 2 is
+           always data) but **not** a multi-session all-audio disc (an audio CD-R
+           written in two TAO sessions) — AccuDisc caught that hole in our first
+           formulation. So it is an inference, not a measurement, reported as such.
         """
+        if not self.toc_trusted:
+            detail = ", ".join(self.anomalies) or "self-contradicting lead-in"
+            return False, f"untrusted TOC geometry ({detail}) — needs a human"
         if not self.degraded:
             return True, "full TOC"
-        if self.sessions is not None and ".." not in self.sessions:
-            if self.sessions.strip() == "1":
-                return True, "single session (measured)"
-            return False, f"{self.sessions} sessions and no session structure"
+        if self.session_count == 1:
+            return True, "single session (measured)"
+        if self.session_count is not None and self.session_count > 1:
+            return False, f"{self.session_count} sessions and no session structure"
         if self.data_tracks:
             return False, (
                 f"data track(s) {self.data_tracks} and no session structure — "
@@ -166,6 +184,11 @@ def parse_toc_output(stdout: str) -> TocGeometry:
         msg = f"could not parse accudisc toc output:\n{stdout}"
         raise ValueError(msg)
 
+    session_count: int | None = None
+    if "session_count" in tokens:
+        with contextlib.suppress(ValueError):
+            session_count = int(tokens["session_count"])
+
     return TocGeometry(
         track_lsns=lsns,
         disc_last_lsn=leadout - 1,
@@ -175,6 +198,11 @@ def parse_toc_output(stdout: str) -> TocGeometry:
         degrade=tokens.get("degrade", "none"),
         sessions=tokens.get("sessions"),
         data_tracks=data_tracks,
+        session_count=session_count,
+        # `anomalies=` is absent when clean; `toc_trusted=0` appears only when the
+        # geometry is untrusted (its absence means trusted).
+        anomalies=tokens["anomalies"].split(",") if tokens.get("anomalies") else [],
+        toc_trusted=tokens.get("toc_trusted") != "0",
     )
 
 
@@ -199,11 +227,18 @@ def read_toc(device: str) -> TocGeometry:
         msg = f"accudisc toc exited {proc.returncode}: {proc.stderr.strip()}"
         raise RuntimeError(msg)
     geom = parse_toc_output(proc.stdout)
-    if geom.degraded:
+    if not geom.toc_trusted:
+        log.warning(
+            "TOC geometry is untrusted (anomalies: %s) — the track map contradicts "
+            "itself; this usually means copy protection, not damage",
+            ", ".join(geom.anomalies) or "unspecified",
+        )
+    elif geom.degraded:
         log.warning(
             "TOC lead-in unavailable (%s) — geometry from the cooked track list; "
-            "session structure is unknown",
+            "session count is %s",
             geom.degrade,
+            geom.session_count if geom.session_count else "unknown",
         )
     return geom
 
