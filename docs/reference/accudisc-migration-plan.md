@@ -440,3 +440,169 @@ recovery_profile = "archive"   # or compat / fast / paranoid / blind / <user pro
 Migration for existing TOMLs: the old `c2_recovery = off|auto|on` key is dropped; a loader
 shim maps a present legacy key to the nearest profile (`off`→`fast`, `auto`/`on`→`archive`) with
 a one-time deprecation warning, then ignores it.
+
+---
+
+## 9. Bench-grounded profiles, validator, and strict config (2026-07-24)
+
+Supersedes the profile *taxonomy* of §8.3 and the *default semantics* of §8.7. The §8
+rationale (sub/no-sub, C2 toggle, verify, CTDB, the axis space) stays; only the profile
+**names/values** and the **no-profile fallback** change, now that the recovery bench has
+run (4 discs, 1 drive, n=3/cell; `private/bench/runs/run3/SUMMARY.md`). **Not yet code.**
+
+### 9.1 What the bench settled (replaces the §8.3 buzzword profiles)
+
+The `archive`/`compat`/`fast`/`paranoid`/`blind` names were coined before any measurement
+and don't map to a measured behaviour. They are **retired**. The shipped profiles are the
+strategies the bench actually ranked. Aggregate (8 targets):
+
+```
+track-ladder     19/20  0.95   most reliable; sole 3/3 at the hardest target (ABBA t19, n=47)
+track-constant   14/19  0.74
+max-variation    13/20  0.65   fast at low n; 0/9 at high n
+whole-disc       11/20  0.55
+sector-runup      2/20  0.10   experimental
+sector-hammer     2/20  0.10   experimental (= the old _recover_rung shape)
+span-fixed        1/16  0.06   experimental
+```
+
+Established, mechanism-free: recovery happens at **track granularity**; the **speed ladder
+earns its cost at high n** (t19: ladder 3/3 vs constant 1/3), so the ladder is not
+optional; sector-level recovery is **not viable** (2/20, both wins one degenerate n=1
+target); **n (flagged sectors in the track), not damage radius, governs** which strategy
+wins (ABBA inner-edge t1 n=1 == outer-edge disc t19 n=1). Values are provisional data;
+the validator + resolution are the stable interface.
+
+### 9.2 Profile schema (one shape; folds the §8 axes in as fields)
+
+```toml
+name         = "track-ladder"    # sanitised [a-z0-9_-]; the default profile
+experimental = false             # true => hidden from triage suggestions, still selectable
+
+# capture (pass 1)
+sub          = true              # true = full PROV (§8.1); false = no-sub fast path
+c2           = true              # request C2 bitmap; auto-forced off on C2_UNSUPPORTED/UNVERIFIED
+
+# recovery re-read (pass 2 — the bench axis)
+granularity  = "track"           # sector | track | whole-disc
+ladder       = "full"            # full | single   (bound at runtime, §9.3)
+speed        = "max"             # single only: max | mid | min | 0.0–1.0
+passes       = 3
+run_up       = 0                 # sectors before target (sector granularity)
+span         = 0                 # span-fixed only
+variation    = "none"            # none | speed | full   (full = max-variation)
+
+# recovery adjuncts
+ctdb         = "auto"            # off | auto (parity repair when it is the fastest verified path)
+verify       = false             # false = informational | true = require-green-before-accept
+budget_s     = 300
+```
+
+- **`sub` is a profile field AND a `--sub/--no-sub` override flag** — the profile stays a
+  complete recovery spec; the flag preserves the quick toggle. **DECIDED 2026-07-24 (Keith):
+  `sub` is a per-profile field, not a §8.1-style orthogonal axis.**
+- **`ctdb="auto"` default** — parity repair fires only when CTDB has the disc and it beats
+  a re-read (Keith: "no reason not to use parity repair when it's the fastest path").
+- **`c2` auto-degrades** — `c2=true` on a C2-incapable drive runs C2-off, logged; no
+  profile fails merely because a drive lacks C2 (§8 Axis F stays load-bearing).
+
+### 9.3 Speed ladder — bound to `accudisc speeds`, never hardcoded
+
+`probe_speed_ladder` is retired (§4.3). The ladder is derived per disc from `accudisc
+speeds`, admitting **only rungs the drive honoured exactly**:
+
+> `ladder = [page2a for (req, page2a, measured) in rows if req == page2a]`, descending.
+
+`measured` is informational only (throughput telemetry, never a settable value); a row
+where `req != page2a` means the drive quantised the request and is dropped. Worked example
+(PX-716A): rows 40/32→✗, 32/32→32, 24/24→24, 16/8→✗, 8/8→8, 4/4→4 ⇒ **[32, 24, 8, 4]**.
+Setting a speed the drive overrides is pointless, and non-Plextor drives have no cap
+mechanism at all — so trust what the drive reports it accepted. Policy resolution:
+`full` → the whole filtered list fastest→slowest; `single`+`speed` → the admitted rung
+nearest max / mid / min / `fraction×max`; `variation="full"` → random admitted rung per
+attempt.
+
+### 9.4 No-profile fallback (replaces §8.7's ffmpeg-style default)
+
+§8.7 assumed AccuDisc flags carry integrity-targeting defaults, so "no profile → bare
+flags" was safe. AccuDisc has **no flag defaults**, so that fallback is unsafe and is
+**superseded**. Resolution (single pure, unit-testable `resolve_recovery`):
+
+```
+1. any --ad-* recovery flag present   → honour AccuDisc flags ONLY; no profile; no merge
+2. --profile NAME                      → load+validate NAME; error+exit if absent/invalid
+3. cfg.default_profile set             → load+validate it
+4. none of the above                   → built-in "track-ladder" (the bench winner)
+```
+
+`--ad-*` is a namespaced AccuDisc passthrough (`--ad-speed`, `--ad-retries`, `--ad-c2`,
+`--ad-recovery …`; final set pinned from AccuDisc `docs/cli-machine-interface.md`).
+`ResolvedStrategy` is the only object the rip path sees; the source (flags/profile/default/
+builtin) is recorded in PROV as `recovery_source`.
+
+### 9.5 Two-stage validator (modular, schema-driven, shared config↔profile)
+
+New `src/cdda2img/validation.py`, generic engine + per-consumer schema.
+
+- **Stage 1 — spec (structural):** declarative `FIELD_SPECS` — per field `(type, required,
+  enum?, default?)`. Presence, type, shape, enum membership, unknown-key report.
+- **Stage 2 — sanity (semantic):** ordered `SANITY_RULES` predicates over the spec-valid
+  dict — `passes>=1`, `budget_s>0`, `run_up>=0`, `span>=0`, `speed` fraction in `[0,1]`;
+  coherence: `variation="speed"` ⇒ `ladder="full"`; `span>0` ⇒ `granularity="sector"`;
+  `ladder="single"` ⇒ a `speed` selector.
+
+```python
+def validate_spec(data, schema)   -> list[Error]   # stage 1
+def validate_sanity(data, schema) -> list[Error]   # stage 2
+def validate(data, schema)        -> list[Error]   # 1 then 2, short-circuit
+```
+
+Two schemas (`PROFILE_SCHEMA`, `CONFIG_SCHEMA`) over one engine — upstream change edits a
+table, not code. The two stages are distinct because a field can pass format yet hold an
+illegal value (Keith).
+
+### 9.6 Config becomes strict
+
+- `load_config(strict=True)` (default) raises `ConfigError` listing every stage-1/stage-2
+  failure. **An invalid config forces error + exit in every subcommand except `setup`.**
+- `main()` loads once, early; on `ConfigError`, if `cmd != "setup"` print errors + "run
+  `cdda2img setup`" and exit non-zero; `setup` uses a raw/lenient load so it can repair.
+  Migrate the ~8 in-body `load_config()` calls to the single early `cfg`.
+- New `setup` section **"Config: Edit ($EDITOR)"** — open config in `$EDITOR`, re-validate
+  on save. `setup --validate-config` becomes the real two-stage validator (today it only
+  checks TOML-parses + unknown-keys — neither stage).
+- Lenient per-field fallbacks (`_bounded_int`, `_parse_c2_recovery`) are replaced by the
+  schema; "warn and default" is dropped.
+
+### 9.7 Profile creation (new `setup` section "Profiles: Create")
+
+Emits a profile from selected flags/answers into the user profiles dir. Guards:
+1. **Name sanitiser** — lowercase, `[a-z0-9_-]` only; any other char → error, no silent
+   mangling.
+2. **Overwrite guard** — reject a name matching any **shipped** or existing **user**
+   profile: "Profile already exists, please choose a different name." No `--force`.
+
+Storage: shipped → package `conf/profiles/*.toml` (immutable, ships all 7); user →
+`$XDG_CONFIG_HOME/cdda2img/profiles/*.toml`. Resolution searches **user then shipped**;
+shipped names reserved. Creation writes atomically (`.tmp`+rename) through §9.5's validator
+so a profile cannot be born invalid.
+
+### 9.8 Delta to the §5 phasing
+
+Insert before §5 Phase E (dead-module removal), after the read/write migration:
+
+- **Phase P1** — `validation.py` engine + both schemas + unit tests (pure, no HW).
+- **Phase P2** — `conf/profiles/` (7 files) + loader + `resolve_recovery` + ladder binder
+  (§9.3) + tests.
+- **Phase P3** — config → strict: `load_config(strict)`, `main()` bootstrap, `setup`
+  Config:Edit, migrate in-body loads, retire the §8.7 legacy-key shim into this path.
+- **Phase P4** — `setup` Profiles:Create (§9.7).
+- **Phase P5** — `rip --profile` + `--ad-*` passthrough; wire `ResolvedStrategy` into
+  `_recover_failed_tracks` (which already implements `track-ladder` — the whole-track
+  ladder sweep — so the default path is largely a no-op rename + explicit binding).
+
+Verification additions: `--profile nope`→exit; same profile on two drives → each binds its
+own admitted ladder; invalid config → every non-setup subcommand exits, `setup` repairs;
+shipped-name collision and illegal-char both rejected; `--ad-*` present → profile ignored
+(`recovery_source=ad-flags`); AccuDisc mid-rip error → we exit non-zero, temp dir gone,
+AccuDisc's message shown verbatim.
