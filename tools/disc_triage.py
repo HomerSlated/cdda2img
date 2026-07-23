@@ -82,28 +82,35 @@ def resolve_ar(track_lsns: list[int], disc_last_lsn: int):
 
 
 def _profile(n: int) -> str:
-    """Predicted cheapest working strategy for a track with ``n`` flagged sectors.
+    """Suggested recovery strategy for a track with ``n`` C2-flagged sectors.
 
-    PROVISIONAL — three anchor discs (n = 1, ~3, >=7), one drive. Report it as a
-    prediction to be checked, never as a setting to apply blind.
+    Aggregate over every target benched so far (5 targets, 4 discs, one drive):
 
-    The reasoning needs no physical mechanism. AccurateRip verifies a whole TRACK, so
-    a re-read only counts if EVERY bad sector in it comes back correct at once (~p^n).
-    As n grows, strategies drop out cheapest-first, because only reads whose single
-    attempt covers all n stay viable:
+        track-ladder    13/14  0.93   never zeroed on ANY target
+        track-constant  10/13  0.77
+        max-variation   10/14  0.71   but 0/3 on the worst target (ABBA t19)
+        whole-disc       9/14  0.64
+        sector-runup      2/14 0.14   both wins from one degenerate n=1 target
+        sector-hammer     2/14 0.14   likewise
+        span-fixed        1/10 0.10
 
-      n = 1   everything works (fixing the one bad sector fixes the track)
-      n ~ 3   small varied reads still assemble it; fixed-parameter ones stop working
-      n >= 7  only a whole-track read covers them all in one attempt
+    So the recommendation is a CASCADE, not a choice: try ``max-variation`` first
+    because it is cheap (4-10 s) and usually works, then fall back to ``track-ladder``
+    which is the only strategy that has never failed a whole target. That captures the
+    speed win without inheriting max-variation's failure mode at high n.
 
-    Measured cost of guessing wrong: 566x wall time at n=1 (1 s vs 566 s for the same
-    recovered track), and outright failure at n >= 7.
+    An earlier version of this function recommended ``sector-hammer`` at n=1 on the
+    strength of one disc where it won in 1 second. It went 0/3 at n~1 on the very next
+    disc. **n is not sufficient** -- it predicts when max-variation becomes unsafe, but
+    it does not make single-sector reads reliable. Sector-level recovery is 2/14
+    overall and is not recommended at any n.
+
+    PROVISIONAL: one drive, few discs, n=3 trials per cell. A prediction to check, not
+    a setting to apply blind.
     """
-    if n <= 1:
-        return "→ sector-hammer (~1 s; anything works at n=1)"
-    if n <= 5:
-        return "→ max-variation (~10 s; sector-level starts failing)"
-    return "→ track-ladder (~54 s; whole-track reads only)"
+    if n >= 6:
+        return "→ track-ladder (max-variation went 0/3 at this n; skip the fast path)"
+    return "→ try max-variation (~4-10 s), fall back to track-ladder if it stalls"
 
 
 def main(argv: list[str] | None = None) -> int:

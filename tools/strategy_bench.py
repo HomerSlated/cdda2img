@@ -401,6 +401,19 @@ def main(argv: list[str] | None = None) -> int:
             )
         ]
         print(f"# baseline: {len(flagged)} C2-flagged, AR-failing tracks {failing}")
+        # Per-failing-track flagged LBAs. Without these a run is not diagnosable: a
+        # track can fail AR with ZERO C2 flags (silent mis-correction — the drive
+        # believes the read was clean), and then every sector-targeted strategy has no
+        # valid target and falls back to the track start, so it fails for a reason
+        # that has nothing to do with the strategy. That case must be distinguishable
+        # from a genuine sector-level failure, and the count alone cannot do it.
+        for t in failing:
+            t_start, t_end = _track_bounds(t, lsns, leadout)
+            in_t = [f for f in flagged if t_start <= f < t_end]
+            note = (
+                "  <-- NO C2 TARGET: sector strategies cannot aim" if not in_t else ""
+            )
+            print(f"#   track {t:2d}: n={len(in_t)} {in_t[:12]}{note}")
         if not failing:
             print(
                 "# baseline is fully AR-clean — nothing to recover, so no strategy "
