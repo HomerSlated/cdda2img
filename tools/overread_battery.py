@@ -45,8 +45,18 @@ from pathlib import Path
 
 _SECTOR_BYTES = 2352  # one CD-DA sector = 588 frames x 4 bytes
 
-# Default targets: the 12 distinct C2-flagged LBAs observed across Tracy Chapman's
-# run3 matrix (tracks 2, 7, 8, 9). Override with --sectors.
+# Seed targets only: the 12 distinct C2-flagged LBAs observed across Tracy Chapman's
+# run3 matrix (tracks 2, 7, 8, 9).
+#
+# DO NOT sweep these blind. This disc's C2 flicker moves between passes: the zone
+# (~114000-114500) is stable but the individual flagged LBA is not. On 2026-07-23 a
+# fresh capture flagged exactly ONE sector, 114436 -- and this list has 114437, i.e.
+# ZERO overlap. Sweeping the stale set produced an all-1.00 null result because none
+# of its sectors was mis-reading at the time.
+#
+# Always take a fresh whole-disc C2 capture first and pass the live flagged set via
+# --sectors. These stay as a ground-truth seed (banking extra sectors is free -- a
+# whole-disc GT pass costs the same however many are tracked) and as the zone map.
 _TRACY_FLAGGED = [
     15268,
     110657,
@@ -71,10 +81,25 @@ class Cell:
     actual_leadin: int  # K after clamping to LBA >= 0
     successes: int = 0
     reps: int = 0
+    read_seconds: float = 0.0  # target reads only; excludes the cache-flush read
 
     @property
     def rate(self) -> float:
         return self.successes / self.reps if self.reps else 0.0
+
+    @property
+    def mean_read_s(self) -> float:
+        return self.read_seconds / self.reps if self.reps else 0.0
+
+    @property
+    def expected_s_to_success(self) -> float | None:
+        """Expected wall seconds to the FIRST correct read of this sector, retrying
+        this (speed, K) until it lands: mean attempt cost / success rate.
+
+        This is the quantity to minimise -- not the success rate. A large run-up can
+        win on rate and still lose on time, and a cheap 0.2-rate cell can beat an
+        expensive 0.6-rate one. None when the cell never succeeded (unbounded)."""
+        return self.mean_read_s / self.rate if self.successes else None
 
 
 @dataclass
@@ -117,16 +142,62 @@ def _verify_track(
     read_offset: int,
     responses: list[list[dict]],
 ) -> bool:
-    """AR-verify one track's offset-corrected slice out of a whole-disc raw capture."""
+    """AR-verify one track's offset-corrected slice out of a whole-disc raw capture.
+
+    Mirrors ``accuraterip.verify_rip``'s window arithmetic, zero-pad included. The
+    pad is not cosmetic: at a positive read offset the last track's window runs past
+    the end of the capture, and at track 1 the window starts before its head. A bare
+    slice silently returns a SHORT buffer, which moves ``_ar_checksums``' exclusion
+    boundary (``sum_to = n - 2939``) and shifts every sample's multiplier -- so the
+    checksum misses and the track reads as unverified even on a perfect capture. The
+    padded zeros themselves land inside the +/-2940-frame exclusion zone and so never
+    reach the sum.
+    """
     from cdda2img.accuraterip import match_track_pcm
 
     idx = track - 1
-    s = track_lsns[idx]
-    e = track_lsns[idx + 1] if idx + 1 < len(track_lsns) else leadout
-    base = s * _SECTOR_BYTES + read_offset * 4
-    corrected = pcm[base : e * _SECTOR_BYTES + read_offset * 4]
+    byte_start = track_lsns[idx] * _SECTOR_BYTES + read_offset * 4
+    end_lsn = track_lsns[idx + 1] if idx + 1 < len(track_lsns) else leadout
+    byte_end = end_lsn * _SECTOR_BYTES + read_offset * 4
+
+    corrected = pcm[max(0, byte_start) : min(len(pcm), byte_end)]
+    if byte_start < 0:
+        corrected = bytes(-byte_start) + corrected
+    if byte_end > len(pcm):
+        corrected = corrected + bytes(byte_end - len(pcm))
+
     _v1, _v2, c1, c2 = match_track_pcm(corrected, track, len(track_lsns), responses)
     return c1 is not None or c2 is not None
+
+
+def discover_flagged(device: str, speed: int, tmp_dir: Path) -> list[int]:
+    """One whole-disc C2 capture → the LBAs currently flagged by the drive.
+
+    The reason this exists: pre-selecting target LBAs does not work on a disc whose
+    C2 flicker migrates. On 2026-07-23 the sectors flagged an hour apart had ZERO
+    overlap, and a battery swept over the stale list scored 1.00 everywhere simply
+    because none of those sectors was mis-reading any more. Discovery has to happen
+    in the same session as the sweep -- ideally immediately before it.
+    """
+    from cdda2img.accudisc_reader import read_disc_c2
+
+    pcm_p, c2_p = tmp_dir / ".discover.pcm", tmp_dir / ".discover.c2"
+    print(f"# discovery pass: whole-disc C2 capture @ {speed}x", flush=True)
+    try:
+        read_disc_c2(device, pcm_p, c2_p, read_speed=speed)
+        c2 = c2_p.read_bytes()
+    finally:
+        pcm_p.unlink(missing_ok=True)
+
+    stride = 294  # C2 bits per sector: 2352 samples / 8
+    flagged = [
+        i for i in range(len(c2) // stride) if any(c2[i * stride : (i + 1) * stride])
+    ]
+    c2_p.unlink(missing_ok=True)
+    print(
+        f"# discovery: {len(flagged)} C2-flagged sector(s) {flagged[:40]}", flush=True
+    )
+    return flagged
 
 
 def build_ground_truth(
@@ -141,43 +212,71 @@ def build_ground_truth(
     tmp: Path,
     min_agree: int = 3,
 ) -> GroundTruth:
-    """Establish each target sector's true bytes by **consensus across whole-disc
-    passes**. A full sequential pass reads each sector correctly the large majority
-    of the time (only a handful of 162k sectors flag per pass), so the modal value
-    over a few passes converges to the truth — no live AccurateRip dependency, which
-    matters because the AR endpoint 404s intermittently.
+    """Establish each target sector's true bytes over N whole-disc passes, by the
+    strongest evidence available, in this order:
 
-    A sector is banked only if its most-common value was seen in ``>= min_agree``
-    passes (a strict majority guards against a deterministic mis-read winning). When
-    AR blocks *are* available, each banked sector's enclosing track is AR-checked as
-    a bonus cross-check and recorded in ``verified_tracks`` — but AR is never
-    required."""
+    1. **AR-certified** — a pass whose *enclosing track* matches an AccurateRip
+       block is byte-correct across that whole track (tens of thousands of
+       independent rips agree), so the target sector's value in that pass is
+       ground truth, not a vote. One such pass settles the sector outright.
+    2. **Consensus** — no AR (disc not in the database, or every pass failed the
+       track): fall back to the modal value, banked only at ``>= min_agree``
+       passes so a lone deterministic mis-read cannot win.
+
+    Rung 1 is what makes the experiment sound: a run-up that "recovers" a sector
+    is only meaningful against a value something external vouches for. The
+    fallback keeps the rig usable on discs AccurateRip has never seen.
+
+    Each pass is scored and released immediately — retaining every pass would
+    hold ``passes`` x ~383 MB of PCM resident for a check that is per-pass."""
     from collections import Counter
 
     from cdda2img.accudisc_reader import read_span
 
     want = {lba: _track_of(lba, track_lsns, leadout) for lba in targets}
+    tracks = sorted(set(want.values()))
     observed: dict[int, Counter[bytes]] = {lba: Counter() for lba in targets}
-    passes_pcm: list[bytes] = []
+    certified: dict[int, bytes] = {}
+    gt = GroundTruth()
 
     for attempt in range(1, passes + 1):
-        print(f"# ground truth pass {attempt}/{passes} (consensus)", flush=True)
+        print(f"# ground truth pass {attempt}/{passes}", flush=True)
         read_span(device, 0, leadout, tmp, read_speed=speed)
         pcm = tmp.read_bytes()
-        passes_pcm.append(pcm)
+
+        ar_ok = {
+            t
+            for t in tracks
+            if responses
+            and _verify_track(pcm, t, track_lsns, leadout, read_offset, responses)
+        }
+        if ar_ok:
+            gt.verified_tracks |= ar_ok
+            print(f"#   AR-verified this pass: tracks {sorted(ar_ok)}")
+
         for lba in targets:
             sec = pcm[lba * _SECTOR_BYTES : (lba + 1) * _SECTOR_BYTES]
             observed[lba][sec] += 1
+            if want[lba] in ar_ok and lba not in certified:
+                certified[lba] = sec
+        del pcm  # ~383 MB per pass — do not accumulate
 
-    gt = GroundTruth()
     for lba in targets:
         value, count = observed[lba].most_common(1)[0]
         distinct = len(observed[lba])
-        if count >= min_agree:
+        if lba in certified:
+            gt.sector_bytes[lba] = certified[lba]
+            agrees = observed[lba][certified[lba]]
+            note = "" if certified[lba] == value else " (DISAGREES with the mode)"
+            print(
+                f"#   lba {lba}: AR-certified (track {want[lba]}), "
+                f"{agrees}/{passes} passes agree, {distinct} distinct{note}"
+            )
+        elif count >= min_agree:
             gt.sector_bytes[lba] = value
             print(
                 f"#   lba {lba}: consensus {count}/{passes} "
-                f"({distinct} distinct value(s) seen)"
+                f"({distinct} distinct value(s) seen) — NOT AR-certified"
             )
         else:
             print(
@@ -185,16 +284,6 @@ def build_ground_truth(
                 f"(top {count}/{passes}, {distinct} distinct) — dropped",
                 file=sys.stderr,
             )
-
-    if responses:  # optional AR cross-check, best-effort
-        for track in sorted({want[lba] for lba in gt.sector_bytes}):
-            if any(
-                _verify_track(pcm, track, track_lsns, leadout, read_offset, responses)
-                for pcm in passes_pcm
-            ):
-                gt.verified_tracks.add(track)
-        if gt.verified_tracks:
-            print(f"#   AR cross-check: tracks {sorted(gt.verified_tracks)} verified")
 
     return gt
 
@@ -238,55 +327,128 @@ def run_battery(
     flush_sectors: int,
     tmp: Path,
     flush_tmp: Path,
+    seed: int = 0,
 ) -> list[Cell]:
+    """Sweep every (speed, sector, run-up) cell, ``reps`` times each.
+
+    **Cells are sampled in ROUNDS with a shuffled order, not swept sequentially.**
+    This disc's C2 flicker drifts on a minutes timescale, so a nested
+    ``for speed: for K:`` loop would run each speed rung in one contiguous slot and
+    confound the speed effect with elapsed time -- the first rung and the last rung
+    would be measuring the disc in different states. Interleaving spreads every
+    cell's reps across the whole run window, so drift becomes shared noise across
+    cells instead of a systematic per-speed bias. ``seed`` keeps it reproducible.
+    """
+    import random
+    import time
+
     targets = sorted(gt.sector_bytes)
-    cells: list[Cell] = []
-    total = len(speeds) * len(targets) * len(leadins)
-    done = 0
-    for speed in speeds:
-        for lba in targets:
-            start_lba = None
-            for k in leadins:
-                start_lba = max(0, lba - k)
-                cell = Cell(speed, lba, k, lba - start_lba, reps=reps)
-                for _ in range(reps):
-                    _flush_cache(device, lba, leadout, flush_sectors, speed, flush_tmp)
-                    got = _read_target_sector(device, lba, k, tail, speed, tmp)
-                    if got == gt.sector_bytes[lba]:
-                        cell.successes += 1
-                cells.append(cell)
-                done += 1
-                print(
-                    f"[{done}/{total}] {speed:>2}x  lba {lba}  K={k:<4} "
-                    f"(actual {cell.actual_leadin})  "
-                    f"{cell.successes}/{reps}  rate={cell.rate:.2f}",
-                    flush=True,
-                )
-    return cells
+    cells: dict[tuple[int, int, int], Cell] = {
+        (speed, lba, k): Cell(speed, lba, k, lba - max(0, lba - k))
+        for speed in speeds
+        for lba in targets
+        for k in leadins
+    }
+    order = list(cells)
+    rng = random.Random(seed)  # noqa: S311 — experiment ordering, not security
+
+    for rnd in range(1, reps + 1):
+        rng.shuffle(order)
+        t_round = time.monotonic()
+        for speed, lba, k in order:
+            cell = cells[(speed, lba, k)]
+            _flush_cache(device, lba, leadout, flush_sectors, speed, flush_tmp)
+            t0 = time.monotonic()
+            got = _read_target_sector(device, lba, k, tail, speed, tmp)
+            cell.read_seconds += time.monotonic() - t0
+            cell.reps += 1
+            if got == gt.sector_bytes[lba]:
+                cell.successes += 1
+        hits = sum(c.successes for c in cells.values())
+        att = sum(c.reps for c in cells.values())
+        print(
+            f"[round {rnd}/{reps}] {len(order)} cells in "
+            f"{time.monotonic() - t_round:.0f}s — cumulative {hits}/{att} "
+            f"({hits / att:.2f})",
+            flush=True,
+        )
+
+    return list(cells.values())
 
 
 # --- reporting -----------------------------------------------------------------
 
 
-def summarise(cells: list[Cell], speeds: list[int], leadins: list[int]) -> str:
-    """Aggregate success rate per (speed, K) across all target sectors — the headline
-    speed x run-up interaction."""
-    agg: dict[tuple[int, int], list[int]] = {}
+def _pool(cells: list[Cell]) -> dict[tuple[int, int], list[float]]:
+    """Pool cells by (speed, K) across sectors → [successes, reps, read_seconds]."""
+    agg: dict[tuple[int, int], list[float]] = {}
     for c in cells:
-        s, r = agg.setdefault((c.speed, c.leadin), [0, 0])
-        agg[(c.speed, c.leadin)] = [s + c.successes, r + c.reps]
+        acc = agg.setdefault((c.speed, c.leadin), [0.0, 0.0, 0.0])
+        acc[0] += c.successes
+        acc[1] += c.reps
+        acc[2] += c.read_seconds
+    return agg
 
+
+def _rate_table(
+    agg: dict[tuple[int, int], list[float]], speeds: list[int], leadins: list[int]
+) -> list[str]:
     lines = ["", "=== success rate by speed x run-up (all target sectors pooled) ==="]
-    header = "speed\\K " + "".join(f"{k:>8}" for k in leadins)
-    lines.append(header)
+    lines.append("speed\\K " + "".join(f"{k:>8}" for k in leadins))
     for speed in speeds:
         row = f"{speed:>5}x "
         for k in leadins:
-            s, r = agg.get((speed, k), [0, 0])
-            row += f"{(s / r if r else 0):>8.2f}"
+            hits, reps, _ = agg.get((speed, k), [0.0, 0.0, 0.0])
+            row += f"{(hits / reps if reps else 0):>8.2f}"
         lines.append(row)
     lines.append("(cell = fraction of attempts byte-exact vs a known-good pass)")
-    return "\n".join(lines)
+    return lines
+
+
+def _cost_table(
+    agg: dict[tuple[int, int], list[float]], speeds: list[int], leadins: list[int]
+) -> list[str]:
+    """Expected wall seconds to the first correct read, per (speed, K).
+
+    The rate table alone does not identify the best strategy: a bigger run-up costs
+    more per attempt, so it can win on rate and still lose on wall time. This is the
+    quantity to minimise. Cells that never succeeded are unbounded and print "--".
+    """
+    if not any(acc[2] for acc in agg.values()):
+        return []
+    lines = [
+        "",
+        "=== expected seconds to first correct read (lower is better) ===",
+        "speed\\K " + "".join(f"{k:>8}" for k in leadins),
+    ]
+    best: tuple[float, int, int] | None = None
+    for speed in speeds:
+        row = f"{speed:>5}x "
+        for k in leadins:
+            hits, reps, secs = agg.get((speed, k), [0.0, 0.0, 0.0])
+            if not hits or not reps:
+                row += f"{'--':>8}"
+                continue
+            exp = secs / hits  # (secs/reps) / (hits/reps)
+            row += f"{exp:>8.2f}"
+            if best is None or exp < best[0]:
+                best = (exp, speed, k)
+        lines.append(row)
+    if best:
+        lines.append(
+            f"fastest cell: {best[1]}x with K={best[2]} "
+            f"({best[0]:.2f}s expected per recovered sector)"
+        )
+    lines.append("(mean attempt seconds / success rate; excludes cache-flush read)")
+    return lines
+
+
+def summarise(cells: list[Cell], speeds: list[int], leadins: list[int]) -> str:
+    """Headline speed x run-up interaction: success rate, then expected time cost."""
+    agg = _pool(cells)
+    return "\n".join(
+        _rate_table(agg, speeds, leadins) + _cost_table(agg, speeds, leadins)
+    )
 
 
 def write_toml(path: Path, cells: list[Cell], gt: GroundTruth, meta: dict) -> None:
@@ -305,6 +467,10 @@ def write_toml(path: Path, cells: list[Cell], gt: GroundTruth, meta: dict) -> No
         lines.append(f"successes = {c.successes}")
         lines.append(f"reps = {c.reps}")
         lines.append(f"rate = {c.rate:.4f}")
+        lines.append(f"read_seconds = {c.read_seconds:.4f}")
+        lines.append(f"mean_read_s = {c.mean_read_s:.4f}")
+        exp = c.expected_s_to_success
+        lines.append(f"expected_s_to_success = {exp:.4f}" if exp else "# never matched")
         lines.append("")
     path.write_text("\n".join(lines))
 
@@ -359,6 +525,20 @@ def main(argv: list[str] | None = None) -> int:
     )
     ap.add_argument("--reps", type=int, default=5)
     ap.add_argument(
+        "--discover",
+        action="store_true",
+        help="take one whole-disc C2 capture first and sweep the LIVE flagged "
+        "sectors (overrides --sectors). Strongly preferred: this disc's flagged "
+        "set migrates between passes, so a pre-selected list goes stale in minutes.",
+    )
+    ap.add_argument("--discover-speed", type=int, default=32)
+    ap.add_argument(
+        "--seed",
+        type=int,
+        default=0,
+        help="RNG seed for the interleaved cell order (reproducible runs)",
+    )
+    ap.add_argument(
         "--flush-sectors",
         type=int,
         default=1100,
@@ -399,16 +579,23 @@ def main(argv: list[str] | None = None) -> int:
 
     geom = read_toc(args.device)
     track_lsns = geom.track_lsns
+    # Two quantities one sector apart, and they are NOT interchangeable:
+    #   disc_last_lsn -- LSN of the last audio sector (the disc-ID input)
+    #   leadout       -- first sector past the audio, i.e. the program-area
+    #                    sector count (the read/geometry bound used below)
+    # Both compute_cddb_disc_id and _ar_disc_ids take disc_last_lsn and add the
+    # 1 themselves. Passing leadout here adds it twice: id1 is off by 1 and id2
+    # by n+1, which yields a well-formed URL for a disc that does not exist, and
+    # AccurateRip answers 404 -- indistinguishable from "disc not in database".
+    # That bug is what made the 2026-07-23 pilot look like an AR outage.
     leadout = geom.disc_last_lsn + 1
-    cddb_hex = compute_cddb_disc_id(track_lsns, leadout)
+    cddb_hex = compute_cddb_disc_id(track_lsns, geom.disc_last_lsn)
     responses, _transport, _b3 = fetch_ar_responses(
-        track_lsns, leadout, int(cddb_hex, 16)
+        track_lsns, geom.disc_last_lsn, int(cddb_hex, 16)
     )
-    # AR is only a bonus cross-check now; ground truth is consensus-based, so an AR
-    # 404 (the endpoint 404s intermittently) does not block the experiment.
     print(
         f"# disc cddb {cddb_hex}, {len(track_lsns)} tracks, lead-out {leadout}, "
-        f"{len(responses)} AR block(s){' (AR unavailable — consensus only)' if not responses else ''};"
+        f"{len(responses)} AR block(s){' (AR unreachable — consensus only)' if not responses else ''};"
         f" gt {gt_targets}; sweep {battery_targets}",
         flush=True,
     )
@@ -422,6 +609,20 @@ def main(argv: list[str] | None = None) -> int:
     gt_cache = Path(args.gt_cache).resolve() if args.gt_cache else None
     try:
         set_speed_to_max(args.device)
+        if args.discover:
+            live = discover_flagged(args.device, args.discover_speed, out.parent)
+            if not live:
+                print(
+                    "# discovery found no C2-flagged sector — the disc is reading "
+                    "clean right now, so there is no defect to recover and every "
+                    "cell would score 1.00. Aborting rather than banking a null.",
+                    file=sys.stderr,
+                )
+                return 4
+            battery_targets = live
+            gt_targets = sorted(set(gt_targets) | set(live))
+            gt_cache = None  # live targets are new; never reuse a stale bank
+            print(f"# sweeping live flagged set: {battery_targets}", flush=True)
         gt = load_gt_cache(gt_cache, gt_targets) if gt_cache else None
         if gt is not None:
             print(
@@ -466,6 +667,7 @@ def main(argv: list[str] | None = None) -> int:
             args.flush_sectors,
             tmp,
             flush_tmp,
+            args.seed,
         )
     finally:
         for f in (tmp, flush_tmp, gt_tmp):
@@ -481,6 +683,8 @@ def main(argv: list[str] | None = None) -> int:
         "tail": args.tail,
         "reps": args.reps,
         "flush_sectors": args.flush_sectors,
+        "seed": args.seed,
+        "cell_order": "interleaved-rounds",
     }
     write_toml(out, cells, sweep_gt, meta)
     print(summarise(cells, speeds, leadins))
