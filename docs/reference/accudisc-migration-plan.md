@@ -654,3 +654,70 @@ own admitted ladder; invalid config → every non-setup subcommand exits, `setup
 shipped-name collision and illegal-char both rejected; `--ad-*` present → profile ignored
 (`recovery_source=ad-flags`); AccuDisc mid-rip error → we exit non-zero, temp dir gone,
 AccuDisc's message shown verbatim.
+
+---
+
+## 10. Cross-project contracts and findings from the 2026-07-24 coordination round
+
+Correspondence: our §32–§40, AccuDisc's 07-24 → 07-24h, in the AccuDisc repo's
+`private/docs/c2read-to-accudisc.md`. Work items live in `TODO.md`; this section
+records what is **binding between the two projects**.
+
+### 10.1 `escape_toc_string` is a cross-project contract — do not weaken it
+
+AccuDisc's `adsc_toc_parse_cue` is line-oriented with no quote tracking. A newline
+inside a quoted `CD_TEXT` value is parsed as TOC directives: their PoC produced a
+phantom track, a shifted lead-out and an attacker-chosen ISRC, returned as
+`ACCUDISC_OK`. Until their quote-aware parse ships, **our `escape_toc_string` is the
+only thing protecting their burn layout** from MusicBrainz free text — it strips
+control characters first and unconditionally. Verified holding under their payload.
+Not a cdrdao-only concern; do not refactor on that assumption. They will report when
+the fix lands, at which point this reverts to defence in depth.
+
+### 10.2 CD-Text write: pass-through, and the acceptance corpus
+
+`write --cdtext FILE` consumes byte-identically what `read --cdtext FILE` emits — no
+transcoding, structurally guaranteed (no code path reads the payload). Accepted on
+`len >= 22 && (len-4) % 18 == 0` plus a header cross-check. **The multiple-of-4 pack
+refusal was killed before shipping** — three counterexamples: 33 packs (CDEmu), 35
+(real PX-716A, redumper), 42 (libmirage encoder). AccuDisc ring-fills across the wrap
+rather than padding short blocks, a deliberate divergence from cdrdao.
+
+Zero-CRC (approved by Keith): valid → write; **all zeroes → recompute from payload,
+payload untouched, noted on stderr**; non-zero-and-wrong → refuse (escape flag). This
+is the one place "AccuDisc only moves bits" carries an asterisk, and it is documented
+in their man page and machine interface, not buried. Origin is drive-side, not
+redumper (redumper's dump path is a verbatim pass-through; `cd/toc.ixx:423` documents
+`PLEXTOR PX-W5224TA: crc of last pack is always zeroed`). Open hypothesis: an
+allocation-length short transfer — our two real-hardware captures show valid at 148 B
+and zeroed at 634 B.
+
+### 10.3 The burn invariant (adopted both sides)
+
+> Exit 0 must never mean "burned the disc but silently dropped metadata." A metadata
+> failure is a hard failure, not a downgrade. If any requested CD-Text cannot be
+> written, refuse the burn — never write the audio and drop the metadata.
+
+Earned from cdrdao: a single U+2010 dropped all 20 CD_TEXT blocks and exited 0. The
+sharper defect is that `CdTextItem::updateEncoding()` returns **void** — there is no
+channel by which a caller *could* learn the encode failed. Validate at intake, before
+any media is touched. Every diagnostic must name the offending item (cdrdao's cannot:
+`log_message(-2, "…\"%s\"…")` has no vararg).
+
+### 10.4 Step D CD-Text acceptance needs a physical disc
+
+**No stored image of ours can serve** — every RBI carries a *synthesised* TOC whose
+`CD_TEXT` comes from metadata lookup, not from the pressing. ABBA *Gold* is the proof:
+`accudisc cdtext` on the real disc returns `absent`. ABBA remains the article for
+audio, MCN, ISRC and pre-gaps, which it does carry. Requirement: **any physical CD
+that genuinely carries CD-Text**, read once, no burn. Pending Keith.
+
+### 10.5 The review question (adopted verbatim by both projects)
+
+> **What does this accept if the producer is hostile, or merely wrong?**
+
+Three instances in one session, three projects, same shape — *the boundary was trusted
+because the usual producer happens to be well-behaved*: cdrdao assumed encodable input;
+AccuDisc assumed escaped input; we assume a benign foreign `.toc` on import. AccuDisc
+is running it across their drive-response parsers too, on the grounds that a drive is a
+producer as well.

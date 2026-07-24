@@ -2,6 +2,60 @@
 
 ## Open
 
+### SECURITY AUDIT — `toc_parser.py` accepts untrusted foreign TOCs (2026-07-24)
+
+Found while cross-checking AccuDisc's parser injection report. `toc_parser.py` is
+regex-based with `re.MULTILINE` and **no quote-context tracking**: `_START_RE`,
+`_PRE_EMPH_RE`, `_COPY_RE`, `_INDEX_RE` anchor `^` per line and will match a line
+sitting *inside* a quoted string.
+
+**Exposure is the `import` subcommand**, which parses foreign cdrdao TOC+BIN images
+that nothing of ours ever escaped. `escape_toc_string` is on the *write* side and gives
+zero protection here.
+
+Demonstrated so far: **field substitution only** (payload in a track's `CD_TEXT` block
+changed the parsed title `'Normal'` → `'x'`). A phantom track, injected ISRC, pre-gap
+and pre-emphasis were **not** achieved by that payload — but a five-minute payload is
+not an audit and the structural susceptibility is real.
+
+Fix shape (same as AccuDisc's): quote-aware scan; an unterminated quote at end-of-line
+is a hard parse error. Start from AccuDisc's injected-TOC fixture. Their equivalent bug
+produced a phantom track, shifted lead-out and attacker-chosen ISRC returned as OK.
+
+**Do NOT weaken `escape_toc_string`** — until AccuDisc's quote-aware parse ships it is
+the only thing protecting *their* burn layout from MusicBrainz free text. Cross-project
+contract, recorded in `accudisc-migration-plan.md`.
+
+### CD-Text transliteration — one character silently drops the whole lead-in (2026-07-24)
+
+A real burn proved it: `TITLE "Voulez‐Vous (edit)"` carries **U+2010 HYPHEN** (from
+MusicBrainz). cdrdao cannot encode it into the CD-Text charset, so it **dropped all 20
+CD_TEXT blocks, exited 0, and logged "Writing CD-TEXT lead-in..."**. The disc has
+perfect audio and no CD-Text.
+
+Root cause is a layering collision, not a short list:
+- `TITLE` → `escape_toc_string` only, **Unicode deliberately preserved** (GRD-2026-0531-01,
+  for FLAC-extraction fidelity).
+- `PERFORMER` → `sanitize_title`, ASCII-only.
+A `CD_TEXT` block is not free text — it is input to a charset-limited encoder.
+
+`sanitize_title` is separately wrong: `re.sub(r"[^\x00-\x7F]+", "", text)` **deletes**
+unmapped characters, so `Voulez‐Vous` → `VoulezVous`. Silent, lossy, and indistinguishable
+from success to every layer above.
+
+Agreed fix (with AccuDisc, 2026-07-24): **transliterate, do not refuse** — this is
+*authored* metadata synthesised from MusicBrainz, not preserved data (ABBA's pressing
+carries no CD-Text at all), so "prefer no data over wrong data" does not reach it.
+1. Decide at **TOC-generation** time, never at burn time (by then the cost is media).
+2. **Report every substitution**, per string. Silence is the actual defect.
+3. Refuse only an **unmappable field**, loudly — never the whole lead-in.
+
+Mechanism: do **not** extend the 6-entry table (same bug, longer table). Use published
+Latin-ASCII folding (ICU/CLDR, or `unidecode` — not currently a dependency), then attempt
+the target-charset encode, and treat whatever still fails as the reportable set. Note
+**normalisation will not help**: U+2010 has an empty decomposition and NFD/NFC/NFKD/NFKC
+all leave it unchanged (verified).
+
 ### NEXT SESSION — USER-AUTHORIZED (2026-07-05): default flip + pre-emphasis virtual disc
 
 The user gave the go-ahead for both; deferred to next session for execution.
