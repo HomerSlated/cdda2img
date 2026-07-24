@@ -511,22 +511,47 @@ budget_s     = 300
 `probe_speed_ladder` is retired (§4.3). The ladder is derived per disc from `accudisc
 speeds`, admitting **only rungs the drive honoured exactly**:
 
-> `ladder = [page2a for (req, page2a, measured) in rows if req == page2a]`, descending.
+> **Strict rule** (whenever *any* row reports a non-zero `page2a`):
+> `ladder = [page2a for (req, page2a, _) in rows if req == page2a]`, descending.
+> **Fallback** (when *every* row reports `page2a == 0`): admit on `measured`,
+> collapsing rungs with equal `measured`.
+> **Outcome guard:** if the ladder resolves **empty by any path**, degrade to a single
+> rung at the drive's reported maximum and warn.
 
-`measured` is informational only (throughput telemetry, never a settable value); a row
-where `req != page2a` means the drive quantised the request and is dropped. Worked example
-(PX-716A): rows 40/32→✗, 32/32→32, 24/24→24, 16/8→✗, 8/8→8, 4/4→4 ⇒ **[32, 24, 8, 4]**.
-Setting a speed the drive overrides is pointless, and non-Plextor drives have no cap
-mechanism at all — so trust what the drive reports it accepted. Policy resolution:
-`full` → the whole filtered list fastest→slowest; `single`+`speed` → the admitted rung
-nearest max / mid / min / `fraction×max`; `variation="full"` → random admitted rung per
-attempt.
+`measured` is informational for admission ordering only (throughput telemetry, never a
+settable value, radius-dependent on CAV and only *ordinally* comparable across drives —
+AccuDisc probes the middle half); a row where `req != page2a` means the drive quantised
+the request and is dropped. Worked example (PX-716A): rows 40/32→✗, 32/32→32, 24/24→24,
+16/8→✗, 8/8→8, 4/4→4 ⇒ **[32, 24, 8, 4]**.
+
+**Why the fallback and the guard exist (AccuDisc 2026-07-24 §32.4 + our §33.5).**
+`page2a == 0` means "mode page 2A did not report", **not** "quantised to zero" — on a
+drive with no usable page 2A every row is 0, so the bare equality test admits nothing and
+the ladder is silently **empty**. AccuDisc caught that. A second cause we then found: a
+drive reporting a real `page2a` that never *equals* `req` (supports only 10×/20× while we
+probe {40,32,24,16,8,4}) — non-zero, so the fallback won't fire, empty again. Hence the
+guard is on the **outcome**, not the cause: an empty ladder is not a reachable state.
+
+Policy resolution: `full` → the whole admitted list fastest→slowest; `single`+`speed` →
+the admitted rung nearest max / mid / min / `fraction×max`; `variation="full"` → random
+admitted rung per attempt.
 
 ### 9.4 No-profile fallback (replaces §8.7's ffmpeg-style default)
 
 §8.7 assumed AccuDisc flags carry integrity-targeting defaults, so "no profile → bare
-flags" was safe. AccuDisc has **no flag defaults**, so that fallback is unsafe and is
-**superseded**. Resolution (single pure, unit-testable `resolve_recovery`):
+flags" was safe. That fallback is **superseded** — but note the corrected reasoning below,
+because the premise this section originally gave was wrong.
+
+**CORRECTION (AccuDisc 2026-07-24 §32.3).** We asserted "AccuDisc has no flag defaults".
+Wrong for exactly one flag: **`--retries` defaults to 2** when omitted (and `0` is treated
+as omitted — zero retries cannot be requested). The other four are off-when-omitted as
+assumed. So "bare flags" is not *nothing*; it is `retries=2` with everything else off,
+i.e. effectively AccuDisc's **R0** rung. **The decision stands on better ground:** R0 is a
+real recovery floor but well below our measured best (`track-ladder`, 19/20 over 8
+targets), so a rip with no profile requested still gets our default profile rather than
+falling through to bare flags.
+
+Resolution (single pure, unit-testable `resolve_recovery`):
 
 ```
 1. any --ad-* recovery flag present   → honour AccuDisc flags ONLY; no profile; no merge
@@ -560,6 +585,29 @@ def validate(data, schema)        -> list[Error]   # 1 then 2, short-circuit
 Two schemas (`PROFILE_SCHEMA`, `CONFIG_SCHEMA`) over one engine — upstream change edits a
 table, not code. The two stages are distinct because a field can pass format yet hold an
 illegal value (Keith).
+
+**Frozen AccuDisc recovery-flag contract (AccuDisc 2026-07-24 §32.3).** Stage-1 ranges for
+the `--ad-*` passthrough and the profile fields that map onto these bind here:
+
+| flag | type | legal range | omitted | no-op when |
+|---|---|---|---|---|
+| `--retries K` | u8 | 1–255 (`0` → 2) | **2** | never |
+| `--c2-retries N` | u8 | 0–255 | 0 = off | **silently** when C2 is off |
+| `--verify P` | u8 | 0–255 (`0` and `1` = one pass) | 1 pass | `P < 2` |
+| `--overlap K` | u8 | 0–255, **silently clamped to 8** | 0 = off | clamped below chunk size |
+| `--ladder LIST` | ≤ **8** u16 rungs, comma/space separated | — | reread at current speed | nothing triggers a reread |
+
+Semantics the profile schema must respect: `--retries` is per-sector attempts *after a
+chunk read fails*; `--ladder` rung *n* serves rescue/consensus attempt *n*, saturating at
+the last rung; **verify passes stream at the base speed**, so a speed-diverse sweep means
+whole passes at different `--speed`, not per-chunk switching (which is what
+`_recover_failed_tracks` already does).
+
+**We must range-check these ourselves.** AccuDisc parses all five with `strtol` cast to
+`uint8_t` *unguarded*, so `--retries 256` silently becomes 0→2 and `--verify 258` becomes
+2; negatives wrap. They will make out-of-range a hard argument error (exit 2); until that
+lands our stage 1 is the only guard. This is the canonical example of why the two stages
+are separate — `256` parses as a perfectly good integer and is an illegal value.
 
 ### 9.6 Config becomes strict
 
