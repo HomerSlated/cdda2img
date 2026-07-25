@@ -27,6 +27,9 @@
 #include "galois16.h"
 #include "rs16.h"
 
+/* CD frame = 588 stereo sample-pairs = 1176 16-bit words. */
+#define WORDS_PER_FRAME 1176
+
 static void die(const char *msg)
 {
 	fprintf(stderr, "ctanalyse: %s\n", msg);
@@ -229,7 +232,10 @@ static int selftest(void)
 
 /* ---- JSON output ---------------------------------------------------------- */
 
-static void emit_json(const cta_ctx *c, const cta_result *r)
+/* *word_base* is the image origin as a word offset into the --pcm file, so every
+ * emitted position is absolute in that file regardless of where --toc put the
+ * image. Zero when --toc is absent. */
+static void emit_json(const cta_ctx *c, const cta_result *r, size_t word_base)
 {
 	printf("{\n");
 	printf("  \"can_recover\": %s,\n", r->can_recover ? "true" : "false");
@@ -238,20 +244,25 @@ static void emit_json(const cta_ctx *c, const cta_result *r)
 	else
 		printf("  \"offset\": null,\n");
 	printf("  \"npar\": %d,\n", c->npar);
+	/* Image window actually analysed. Callers use its presence to detect a stale
+	 * binary: one built before --toc was honoured emits neither key, and silently
+	 * analysing the wrong window produces confident nonsense rather than an error. */
+	printf("  \"image_first_frame\": %zu,\n", word_base / WORDS_PER_FRAME);
+	printf("  \"image_frames\": %zu,\n", c->nwords / WORDS_PER_FRAME);
 	printf("  \"dirty_columns\": %d,\n", r->dirty_columns);
 	printf("  \"corrected_errors\": %d,\n", r->corrected_errors);
 	printf("  \"erasure_columns\": %d,\n", r->erasure_columns);
 
 	printf("  \"corrections\": [");
 	for (size_t i = 0; i < r->n_corr; i++)
-		printf("%s\n    {\"byte\": %zu, \"old\": %u, \"new\": %u}",
-		       i ? "," : "", r->corr[i].word * 2, r->corr[i].old, r->corr[i].new_);
+		printf("%s\n    {\"byte\": %zu, \"old\": %u, \"new\": %u}", i ? "," : "",
+		       (r->corr[i].word + word_base) * 2, r->corr[i].old, r->corr[i].new_);
 	printf("%s],\n", r->n_corr ? "\n  " : "");
 
 	printf("  \"affected_sectors\": [");
 	size_t prev = (size_t)-1, nout = 0;
 	for (size_t i = 0; i < r->n_corr; i++) {
-		size_t sec = r->corr[i].word / 1176;
+		size_t sec = (r->corr[i].word + word_base) / 1176;
 		if (sec != prev)
 			printf("%s%zu", nout++ ? ", " : "", sec), prev = sec;
 	}
@@ -269,14 +280,46 @@ static void emit_json(const cta_ctx *c, const cta_result *r)
 
 /* ---- main ----------------------------------------------------------------- */
 
+/* Parse "a:b:...:leadout" into the image bounds. CTDB's parity is computed over
+ * [first track INDEX 01, lead-out) — NOT over the whole [LBA 0, lead-out) audio
+ * area. The two coincide only when track 1's INDEX 01 is at LBA 0; on a disc with
+ * a program-area pre-gap (ABBA *Gold*: 33 frames) they differ, and analysing the
+ * wrong one shifts the RS grid by whole strides. That shift is invisible to the
+ * offset search (capped at stride/2) so it decodes to plausible garbage rather
+ * than failing — see private/research/incoming/ctdb-failure-abba-gold-20260725.md. */
+static bool parse_toc(const char *s, long *first, long *last)
+{
+	char *end;
+	long v = strtol(s, &end, 10);
+	if (end == s || v < 0)
+		return false;
+	*first = v;
+	*last = v;
+	while (*end == ':') {
+		const char *p = end + 1;
+		v = strtol(p, &end, 10);
+		if (end == p || v < *last)
+			return false;
+		*last = v;
+	}
+	return *end == '\0' && *last > *first;
+}
+
 static const char *usage =
     "usage: ctanalyse --pcm F --parity F --npar N --stride N(wire) [--toc a:b:...]\n"
     "                 [--erasures F] [--threads N] [--max-offset N] [--impl auto]\n"
-    "                 | --selftest\n";
+    "                 | --selftest\n"
+    "\n"
+    "  --toc       track INDEX 01 LBAs then the lead-out. The analysed image is\n"
+    "              [toc[0], toc[last]) — CTDB's domain. Without it the whole --pcm\n"
+    "              file is analysed, which is only equivalent when toc[0] == 0.\n"
+    "  --erasures  one bit per word of the whole --pcm file (not of the image).\n"
+    "  Emitted \"byte\" and \"affected_sectors\" are absolute in the --pcm file.\n";
 
 int main(int argc, char **argv)
 {
 	const char *pcm_path = NULL, *par_path = NULL, *eras_path = NULL;
+	const char *toc_arg = NULL;
 	int npar = 0, stride_wire = 0, threads = 0, max_offset = 0;
 	int do_selftest = 0;
 
@@ -297,8 +340,10 @@ int main(int argc, char **argv)
 			max_offset = atoi(argv[++i]);
 		else if (!strcmp(argv[i], "--erasures") && i + 1 < argc)
 			eras_path = argv[++i];
-		else if ((!strcmp(argv[i], "--toc") || !strcmp(argv[i], "--impl")) && i + 1 < argc)
-			++i; /* accepted for contract compatibility; unused in v1 */
+		else if (!strcmp(argv[i], "--toc") && i + 1 < argc)
+			toc_arg = argv[++i];
+		else if (!strcmp(argv[i], "--impl") && i + 1 < argc)
+			++i; /* accepted for contract compatibility; single impl in v1 */
 		else {
 			fputs(usage, stderr);
 			return 1;
@@ -337,6 +382,20 @@ int main(int argc, char **argv)
 	if (pcm == MAP_FAILED)
 		die("mmap of --pcm failed");
 	close(fd);
+
+	/* Narrow the mapped file to CTDB's image domain, [toc[0], toc[last]). */
+	size_t word_base = 0;
+	if (toc_arg) {
+		long first, last;
+		if (!parse_toc(toc_arg, &first, &last))
+			die("--toc must be a non-decreasing LBA list 'a:b:...:leadout'");
+		word_base = (size_t)first * WORDS_PER_FRAME;
+		size_t image = (size_t)(last - first) * WORDS_PER_FRAME;
+		if (word_base + image > nwords)
+			die("--pcm file is shorter than the --toc lead-out implies");
+		nwords = image;
+	}
+	pcm += word_base;
 
 	if (nwords / stride < 3)
 		die("PCM too short for this stride");
@@ -385,7 +444,11 @@ int main(int argc, char **argv)
 		if (eras_path) {
 			size_t esz;
 			uint8_t *bits = read_file(eras_path, &esz);
-			cta_build_erasures(&c, res.offset, bits, esz * 8, &er);
+			/* The bitmap spans the whole --pcm file; skip to the image origin.
+			 * WORDS_PER_FRAME is a multiple of 8, so this is always byte-aligned. */
+			size_t skip = word_base / 8;
+			size_t nbits = esz > skip ? (esz - skip) * 8 : 0;
+			cta_build_erasures(&c, res.offset, bits + skip, nbits, &er);
 			free(bits);
 			have_er = 1;
 			fprintf(stderr, "ctanalyse: %ld C2 erasures bucketed\n", er.total);
@@ -400,7 +463,7 @@ int main(int argc, char **argv)
 		fprintf(stderr, "ctanalyse: no syndrome-consistent offset found\n");
 	}
 
-	emit_json(&c, &res);
+	emit_json(&c, &res, word_base);
 	if (have_er)
 		cta_free_erasures(&er);
 	free(res.corr);

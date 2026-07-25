@@ -3,9 +3,12 @@ toc.py - TOC generation and track duration utilities.
 """
 
 import json
+import logging
 import re
 import wave
 from pathlib import Path
+
+from unidecode import unidecode
 
 from cdda2img.barcode import normalize_barcode
 from cdda2img.rbi_format import (
@@ -15,15 +18,7 @@ from cdda2img.rbi_format import (
     timestamp_from_frames,
 )
 
-_TITLE_REPLACEMENTS: dict[str, str] = {
-    "\u2018": "'",  # left single quote
-    "\u2019": "'",  # right single quote
-    "\u201c": '"',  # left double quote
-    "\u201d": '"',  # right double quote
-    "\u2013": "-",  # en dash
-    "—": "-",  # em dash
-    "\u2026": "...",  # ellipsis
-}
+logger = logging.getLogger(__name__)
 
 # Control characters (incl. newline/CR/tab and DEL) - these must never reach a
 # quoted TOC string: a newline breaks out of the string and lets the rest of the
@@ -45,26 +40,71 @@ def escape_toc_string(text: str) -> str:
        (this also neutralises ``\\NNN`` octal and ``\\"`` sequences);
     3. convert the ``"`` delimiter to ``'``.
 
-    Non-ASCII is preserved - callers needing ASCII-only output (see
-    :func:`sanitize_title`) strip it separately.
+    Non-ASCII is preserved - callers needing charset-safe output (see
+    :func:`fold_cdtext`) fold it separately.
     """
     text = _CONTROL_CHARS.sub("", text)
     text = text.replace("\\", "\\\\")
     return text.replace('"', "'")
 
 
-def sanitize_title(text: str) -> str:
+def fold_cdtext(text: str, field: str = "field") -> str:
+    """Transliterate *text* to CD-Text-safe ASCII, reporting every change.
+
+    The CD-Text character set cannot hold arbitrary Unicode, and cdrdao drops
+    the **entire** CD-Text lead-in - silently, exit 0 - if any single character
+    fails to encode (its ``CdTextItem::updateEncoding`` returns void, so no
+    caller can even learn it failed). A real burn lost all CD-Text to one
+    ``U+2010 HYPHEN`` that MusicBrainz put in a title. We therefore fold to
+    ASCII here, at TOC-generation time (never at burn time, where the cost is
+    physical media), using a published transliteration table (``unidecode``)
+    rather than a hand-kept list that will always miss the next character.
+
+    Every substitution is reported so the change is never silent - the previous
+    ``re.sub(r"[^\\x00-\\x7F]+", "", text)`` deleted unmapped characters
+    indistinguishably from success. A character with no transliteration at all
+    is dropped from *this one field only*, loudly - it can never take down the
+    whole lead-in. ASCII (incl. control characters) passes through untouched;
+    control characters are stripped downstream by :func:`escape_toc_string`.
+
+    Normalisation is deliberately not used: ``U+2010`` has an empty Unicode
+    decomposition and all four NF forms leave it unchanged.
+    """
+    out: list[str] = []
+    mapped: list[str] = []
+    dropped: list[str] = []
+    for ch in text:
+        if ord(ch) < 0x80:
+            out.append(ch)
+            continue
+        repl = unidecode(ch)
+        out.append(repl)
+        if repl:
+            mapped.append(f"{ch!r}->{repl!r}")
+        else:
+            dropped.append(f"U+{ord(ch):04X}")
+    if mapped:
+        logger.info("CD-Text %s: transliterated %s", field, ", ".join(mapped))
+    if dropped:
+        logger.warning(
+            "CD-Text %s: dropped %d untransliterable character(s): %s",
+            field,
+            len(dropped),
+            " ".join(dropped),
+        )
+    return "".join(out)
+
+
+def sanitize_title(text: str, field: str = "title") -> str:
     """Sanitize a track or album title for embedding in the TOC.
 
-    Replaces common Unicode punctuation with ASCII, strips a leading track
-    number and any remaining non-ASCII, then applies :func:`escape_toc_string`
-    so the result is both ASCII-only (for CD-Text) and injection-safe.
+    Strips a leading track number, transliterates to CD-Text-safe ASCII
+    (reporting every substitution, see :func:`fold_cdtext`), then applies
+    :func:`escape_toc_string` so the result is both charset-safe and
+    injection-safe.
     """
-    for bad, good in _TITLE_REPLACEMENTS.items():
-        text = text.replace(bad, good)
     text = re.sub(r"^\d{1,2}[-. ]+", "", text)
-    text = re.sub(r"[^\x00-\x7F]+", "", text)
-    return escape_toc_string(text)
+    return escape_toc_string(fold_cdtext(text, field))
 
 
 def get_track_durations(wav_files: list[Path]) -> list[int]:
@@ -97,6 +137,29 @@ def build_toc_entries(
     return entries
 
 
+def _track_cdtext_title(
+    track: RBITocEntry, raw_title: str | None
+) -> tuple[str, str | None]:
+    """Return (charset-safe CD-Text TITLE, Unicode-original to archive or None).
+
+    The TITLE is folded to ASCII (:func:`fold_cdtext`); the pristine Unicode is
+    preserved for FLAC extraction whenever the TOC would otherwise lose it — the
+    caller's raw original if supplied, else the stored title when folding
+    altered it (folding is the lossy step, so the archival comment must fire
+    even when raw_titles was not supplied).
+    """
+    folded_title = (
+        fold_cdtext(track.title, f"track {track.track_number} title")
+        if track.title
+        else ""
+    )
+    if raw_title and raw_title != track.title:
+        return folded_title, raw_title
+    if track.title and folded_title != track.title:
+        return folded_title, track.title
+    return folded_title, None
+
+
 def generate_toc(
     disc: RBIDisc,
     raw_titles: list[str] | None = None,
@@ -108,8 +171,8 @@ def generate_toc(
     comment. This preserves the original Unicode title (e.g. curly quotes) for
     use as the FLAC TITLE tag on extraction, without breaking the TOC grammar.
     """
-    album = sanitize_title(disc.album)
-    artist = sanitize_title(disc.artist)
+    album = sanitize_title(disc.album, "album")
+    artist = sanitize_title(disc.artist, "artist")
     pcm_filename = f"{album}.bin"
 
     lines: list[str] = ["CD_DA\n"]
@@ -131,9 +194,8 @@ def generate_toc(
     if artist:
         disc_text_lines.append(f'    PERFORMER "{artist}"')
     if disc.cdtext_catalog_ref:
-        disc_text_lines.append(
-            f'    DISC_ID "{escape_toc_string(disc.cdtext_catalog_ref)}"'
-        )
+        disc_id = escape_toc_string(fold_cdtext(disc.cdtext_catalog_ref, "disc_id"))
+        disc_text_lines.append(f'    DISC_ID "{disc_id}"')
 
     if disc_text_lines:
         lines += [
@@ -148,10 +210,14 @@ def generate_toc(
         ]
 
     for idx, track in enumerate(disc.tracks):
+        # CD-Text TITLE must be charset-safe ASCII (one un-encodable character
+        # makes cdrdao silently drop the whole lead-in); the pristine Unicode is
+        # archived in the TRACK_TITLE_UNICODE comment for FLAC fidelity.
         raw_title = raw_titles[idx] if raw_titles and idx < len(raw_titles) else None
+        folded_title, unicode_original = _track_cdtext_title(track, raw_title)
         unicode_lines = (
-            [f"// TRACK_TITLE_UNICODE: {json.dumps(raw_title)}"]
-            if raw_title and raw_title != track.title
+            [f"// TRACK_TITLE_UNICODE: {json.dumps(unicode_original)}"]
+            if unicode_original
             else []
         )
 
@@ -168,13 +234,11 @@ def generate_toc(
         ]
 
         track_cdtext_lines = []
-        if track.title:
-            # GRD-2026-0531-01: track.title is free-text from MB/CDDB and reaches
-            # cdrdao raw. Escape (preserving non-ASCII) so it cannot inject TOC
-            # directives; the exact Unicode title is still recoverable from the
-            # TRACK_TITLE_UNICODE comment above for FLAC extraction.
-            track_cdtext_lines.append(f'    TITLE "{escape_toc_string(track.title)}"')
-        track_performer = sanitize_title(track.performer) or sanitize_title(disc.artist)
+        if folded_title:
+            track_cdtext_lines.append(f'    TITLE "{escape_toc_string(folded_title)}"')
+        track_performer = sanitize_title(
+            track.performer, "performer"
+        ) or sanitize_title(disc.artist, "artist")
         if track_performer:
             track_cdtext_lines.append(f'    PERFORMER "{track_performer}"')
         track_cdtext_block = (

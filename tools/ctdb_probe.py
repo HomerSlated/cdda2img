@@ -182,22 +182,21 @@ def bad_rip(entries: list[Entry], speed: int) -> None:
     print(f"\n== Negative test: fresh {speed}x cd-paranoia rip of track {_TRACK} ==")
     import tempfile
 
+    from cdda2img.accudisc_reader import read_span
     from cdda2img.accuraterip import fetch_ar_responses, match_track_pcm
-    from cdda2img.disc_reader import rip_single_track
+    from cdda2img.offset_correct import apply_offset
+
+    start_lba = _LSNS[_TRACK - 1]
+    count = (_LSNS[_TRACK] if len(_LSNS) > _TRACK else _LEADOUT) - start_lba
 
     with tempfile.TemporaryDirectory() as td:
         out = Path(td) / "t8.pcm"
-        print(
-            f"  ripping track {_TRACK} at {speed}x (paranoia off, -O {_READ_OFFSET})…"
-        )
-        rip_single_track(
-            _DEVICE,
-            _TRACK,
-            out,
-            paranoia="off",
-            read_offset=_READ_OFFSET,
-            read_speed=speed,
-        )
+        print(f"  reading track {_TRACK} at {speed}x via AccuDisc (raw, then +offset)…")
+        # AccuDisc returns RAW PCM; the old rip_single_track applied the read offset
+        # itself via cd-paranoia's -O. Apply it explicitly so what match_track_pcm
+        # sees is unchanged.
+        read_span(_DEVICE, start_lba, count, out, read_speed=speed)
+        apply_offset(out, _READ_OFFSET)
         raw = out.read_bytes()
     print(f"  ripped {len(raw)} bytes = {len(raw) // _FRAME} frames")
 

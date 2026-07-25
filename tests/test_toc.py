@@ -5,7 +5,12 @@ test_toc.py — Round-trip and canonical-format tests for generate_toc / parse_t
 from cdda2img.barcode import normalize_barcode
 from cdda2img.cdrdao_reader import parsed_to_rbi_disc
 from cdda2img.rbi_format import RBIDisc, RBITocEntry
-from cdda2img.toc import escape_toc_string, generate_toc, sanitize_title
+from cdda2img.toc import (
+    escape_toc_string,
+    fold_cdtext,
+    generate_toc,
+    sanitize_title,
+)
 from cdda2img.toc_parser import parse_toc
 
 # ---------------------------------------------------------------------------
@@ -426,10 +431,53 @@ def test_track_title_trailing_backslash_cannot_escape_quote() -> None:
     assert len(parsed.tracks) == 1
 
 
-def test_track_title_preserves_non_ascii_in_toc() -> None:
-    """Non-ASCII track titles survive into the TOC (FLAC fidelity)."""
-    toc_text = generate_toc(_disc_with_track_title("Café")).decode("utf-8")
-    assert 'TITLE "Café"' in toc_text
+def test_track_title_folded_in_cdtext_but_preserved_in_comment() -> None:
+    """The CD-Text TITLE line is folded to charset-safe ASCII (cdrdao drops the
+    whole lead-in on one un-encodable char), while the pristine Unicode is
+    preserved in the TRACK_TITLE_UNICODE comment for FLAC fidelity — even with
+    no raw_titles supplied, because folding is now the lossy step."""
+    toc_bytes = generate_toc(_disc_with_track_title("Café"))
+    toc_text = toc_bytes.decode("utf-8")
+    assert 'TITLE "Cafe"' in toc_text  # folded in the CD-Text block
+    assert 'TITLE "Café"' not in toc_text  # raw Unicode never reaches cdrdao
+    assert '// TRACK_TITLE_UNICODE: "Caf\\u00e9"' in toc_text  # archived
+    assert parse_toc(toc_bytes).tracks[0].title == "Café"  # round-trips
+
+
+def test_u2010_hyphen_folded_not_dropped() -> None:
+    """The exact bug: U+2010 HYPHEN (from MusicBrainz) folds to '-'. Previously
+    cdrdao silently dropped ALL CD-Text on it; the sanitiser deleted it."""
+    toc_text = generate_toc(_disc_with_track_title("Voulez‐Vous")).decode("utf-8")  # noqa: RUF001
+    assert 'TITLE "Voulez-Vous"' in toc_text
+
+
+def test_fold_cdtext_subsumes_the_old_replacement_table() -> None:
+    """Curly quotes, dashes and ellipsis fold without a hand-kept table."""
+    assert fold_cdtext("‘’") == "''"  # noqa: RUF001  # curly single quotes
+    assert fold_cdtext("“”") == '""'  # curly double quotes
+    assert fold_cdtext("–") == "-"  # noqa: RUF001  # en dash
+    assert fold_cdtext("…") == "..."  # ellipsis
+
+
+def test_fold_cdtext_leaves_ascii_untouched() -> None:
+    """ASCII (incl. control chars, handled downstream) passes through."""
+    assert fold_cdtext("Plain ASCII 123!") == "Plain ASCII 123!"
+
+
+def test_fold_cdtext_reports_untranslatable_drop(caplog) -> None:
+    """A codepoint with no transliteration is dropped from that one field and
+    logged at WARNING — never silently, never taking down the lead-in."""
+    with caplog.at_level("WARNING"):
+        result = fold_cdtext("A\U0001f600B", field="track 1 title")
+    assert result == "AB"  # emoji dropped, rest survives
+    assert "dropped" in caplog.text
+    assert "U+1F600" in caplog.text
+    assert "track 1 title" in caplog.text
+
+
+def test_sanitize_title_transliterates_instead_of_deleting() -> None:
+    """Accented Latin folds to ASCII rather than being deleted (é -> e)."""
+    assert sanitize_title("Beyoncé") == "Beyonce"
 
 
 def test_isrc_with_injection_payload_is_escaped() -> None:

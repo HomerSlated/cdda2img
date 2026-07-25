@@ -13,12 +13,12 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from cdda2img.cdrdao_progress import ProgressUpdate
     from cdda2img.config import Config
-    from cdda2img.disc_reader import RipInfo
+    from cdda2img.ctdb_repair import CtdbRepairResult
     from cdda2img.field_resolver import FieldProposal
     from cdda2img.lookup_result import DiscMeta
     from cdda2img.mb_lookup import MBPrepopResult
+    from cdda2img.rbi_format import RipInfo
     from cdda2img.rip_log import RipLogBuilder
     from cdda2img.terminal_ui import TerminalUI
     from cdda2img.track_preview import TrackPreview
@@ -104,7 +104,7 @@ def parse_args() -> argparse.Namespace:
             rip options:
               --loudness {rg|none}  rg: embed EBU R128 ReplayGain block (default); none: skip
               --output <path>       Output .rbi file, or a directory to receive an album-derived filename (default: CWD, name from album)
-              Note: rip captures audio verbatim (1:1 via cdrdao; falls back to cd-paranoia); no silence trim or gap insertion
+              Note: rip captures audio verbatim (1:1 via AccuDisc, single pass); no silence trim or gap insertion
 
             import options:
               --loudness {rg|none}  rg: embed EBU R128 ReplayGain block (default); none: skip
@@ -2239,29 +2239,56 @@ def _phase_progress_cb(
 
 
 def _fast_scan_disc(device: str):
-    """Read the disc TOC quickly via ``cdrdao read-toc --fast-toc`` → RBIDisc.
+    """Read the disc geometry + CD-Text quickly via AccuDisc → RBIDisc (M3).
 
     Cosmetic only — used to derive the disc-title preview line. Returns None on
     any failure (no disc, drive busy, parse error); never raises into the rip.
     Must run *before* the track-1 grab: both touch the single optical drive.
+
+    Uses the two standalone lead-in subcommands (``fulltoc`` + ``cdtext``) rather
+    than a ``read``: both answer from the lead-in without spinning the program
+    area, which is what made the old ``--fast-toc`` cheap enough to run in the
+    banner. CD-Text absence is normal and is not an error.
     """
-    import subprocess
     import tempfile
 
-    from cdda2img.cdrdao_reader import parsed_to_rbi_disc
-    from cdda2img.toc_parser import parse_toc
+    from cdda2img.accudisc_reader import read_lead_in
+    from cdda2img.cdtext import parse_cdtext
+    from cdda2img.rbi_format import RBIDisc, RBITocEntry
+    from cdda2img.subchannel import parse_fulltoc, session1_audio_tracks
 
     try:
         with tempfile.TemporaryDirectory() as tmp:
-            out = Path(tmp) / "preview.toc"
-            cmd = ["cdrdao", "read-toc", "--fast-toc", "--device", device, str(out)]
-            result = subprocess.run(  # noqa: S603  # LINT-013
-                cmd, capture_output=True, timeout=60
-            )
-            if result.returncode != 0 or not out.exists():
+            fulltoc_path = Path(tmp) / "preview.fulltoc"
+            cdtext_path = Path(tmp) / "preview.cdtext"
+            read_lead_in(device, fulltoc_path, cdtext_path)
+            if not fulltoc_path.exists():
                 return None
-            toc_bytes = out.read_bytes()
-        return parsed_to_rbi_disc(parse_toc(toc_bytes))
+            full = parse_fulltoc(fulltoc_path.read_bytes())
+            cdtext_raw = cdtext_path.read_bytes() if cdtext_path.exists() else b""
+
+        audio, leadout = session1_audio_tracks(full)
+        if not audio:
+            return None
+        blocks = parse_cdtext(cdtext_raw) if cdtext_raw else []
+        block = blocks[0] if blocks else None
+
+        bounds = [t.start_lba for t in audio] + [leadout]
+        tracks = [
+            RBITocEntry(
+                track_number=t.track,
+                title=(block.track_title(t.track) if block else None) or "",
+                performer=(block.track_performer(t.track) if block else None) or "",
+                start_frame=bounds[i],
+                duration_frames=bounds[i + 1] - bounds[i],
+            )
+            for i, t in enumerate(audio)
+        ]
+        return RBIDisc(
+            album=(block.album_title if block else None) or "",
+            artist=(block.album_performer if block else None) or "",
+            tracks=tracks,
+        )
     except Exception as exc:
         log.debug("fast TOC scan for disc preview failed: %s", exc)
         return None
@@ -2346,58 +2373,6 @@ def _stop_preview(preview: TrackPreview | None) -> None:
         preview.stop()
 
 
-def _rip_with_fallback(
-    device: str,
-    output_pcm: Path,
-    read_offset: int = 0,
-    ui: TerminalUI | None = None,
-):
-    """Try cdrdao read-cd first; fall back to cd-paranoia (full) on failure.
-
-    *read_offset* is passed through to cd-paranoia via ``-O`` so that the
-    fallback path stores offset-corrected PCM.  The cdrdao path returns raw
-    PCM; the caller applies ``apply_drive_offset`` after this function returns.
-
-    When *ui* is provided, cdrdao stdout is captured and fed to the TUI
-    progress bar. Without *ui*, behaviour is unchanged.
-    """
-    from cdda2img.cdrdao_ripper import rip_cdrdao
-    from cdda2img.disc_reader import rip_disc
-
-    _ui_status(ui, f"Ripping {device} via cdrdao…")
-
-    def _cb(update: ProgressUpdate) -> None:
-        if ui is not None:
-            ui.set_status(
-                update.status,
-                update.fraction,
-                detail=update.note
-                or f"({update.elapsed_frames}/{update.total_frames})",
-            )
-
-    progress_cb = _cb if ui is not None else None
-
-    try:
-        return rip_cdrdao(device, output_pcm, progress_cb=progress_cb), "cdrdao"
-    except RuntimeError as exc:
-        if ui is not None:
-            ui.pause()
-            print(f"  cdrdao failed: {exc}")
-            print("  Falling back to cd-paranoia (paranoia=full) …")
-            ui.resume()
-        else:
-            print(f"  cdrdao failed: {exc}")
-            print("  Falling back to cd-paranoia (paranoia=full) ...")
-        _ui_status(ui, "cd-paranoia (full paranoia)…")
-        return rip_disc(
-            device,
-            output_pcm,
-            paranoia="full",
-            read_offset=read_offset,
-            progress_cb=progress_cb,
-        ), "cd-paranoia"
-
-
 def _rip_disc_stage(
     device: str,
     pcm_file: Path,
@@ -2408,71 +2383,63 @@ def _rip_disc_stage(
 ) -> tuple[RipInfo, str, Path | None]:
     """Read the disc, returning (info, rip_type, c2_path).
 
-    Normal path (``c2_recovery = off``, the default): cdrdao read-cd — audio + subchannel
-    metadata in one pass. C2 path (``on``, or ``auto`` + drive supports C2): ONE AccuDisc
-    ``read`` captures audio + C2 error-pointer bitmap + raw P-W subchannel (plus separate
-    instant ``fulltoc`` / ``cdtext`` lead-in dumps), and ``subq_toc.build_rip_info``
-    assembles the disc metadata from those captures (pre-gaps/INDEX/CONTROL from the Q
-    stream, majority-voted MCN/ISRC — structurally immune to cdrdao bug #75). Only if that
-    assembly fails (e.g. an unusable full TOC) does the old two-pass fallback run:
-    ``cdrdao read-toc`` (rip_type "accudisc+toc").
+    **One engine, one pass (M1/M2/M4).** A single AccuDisc ``read`` captures audio +
+    C2 error-pointer bitmap + raw P-W subchannel, plus the ``fulltoc``/``cdtext``
+    lead-in dumps in the same spin-up, and ``subq_toc.build_rip_info`` assembles the
+    disc metadata from those captures: pre-gaps/INDEX/CONTROL from the Q stream,
+    majority-voted MCN/ISRC (structurally immune to cdrdao bug #75), track starts from
+    the error-corrected full TOC. There is no second metadata pass and no other engine
+    — cdrdao and cd-paranoia are gone from the read path.
 
-    Both the cdrdao and AccuDisc paths return RAW PCM (drive offset not applied); the caller
-    works raw through AR + ctanalyse and applies apply_offset once, late. Only a cd-paranoia
-    *read* fallback (rip_type "cd-paranoia") returns already-corrected PCM.
+    ``cfg.c2_recovery = "off"`` skips the C2 bitmap (the audio + Q capture is unchanged);
+    the bitmap is what lets ctanalyse treat flagged sectors as erasures downstream, so
+    turning it off costs recovery power, not fidelity.
+
+    The PCM returned is RAW — the drive offset is not applied here. The caller works raw
+    through AR + ctanalyse and calls apply_offset exactly once, at storage.
     """
-    use_c2 = cfg.c2_recovery == "on" or (
-        cfg.c2_recovery != "off" and _drive_supports_c2(device)
+    from cdda2img.accudisc_reader import read_disc_c2
+
+    want_c2 = cfg.c2_recovery != "off"
+    sub_file = pcm_file.with_suffix(".sub")
+    cdtext_file = pcm_file.with_suffix(".cdtext")
+    fulltoc_file = pcm_file.with_suffix(".fulltoc")
+
+    status = "Reading PCM, C2, SUB (AccuDisc)…" if want_c2 else "Reading PCM, SUB…"
+    _ui_status(ui, status)
+
+    def _cb(done: int, total: int) -> None:
+        if ui is not None:
+            ui.set_status(
+                status,
+                done / total if total > 0 else 0.0,
+                detail=f"({done}/{total})",
+            )
+
+    read_disc_c2(
+        device,
+        pcm_file,
+        c2_file if want_c2 else None,
+        output_sub=sub_file,
+        output_cdtext=cdtext_file,
+        output_fulltoc=fulltoc_file,
+        progress_cb=_cb if ui is not None else None,
     )
-    if use_c2:
-        from cdda2img.accudisc_reader import read_disc_c2
+    try:
+        from cdda2img.subq_toc import build_rip_info
 
-        sub_file = pcm_file.with_suffix(".sub")
-        cdtext_file = pcm_file.with_suffix(".cdtext")
-        fulltoc_file = pcm_file.with_suffix(".fulltoc")
-
-        c2_status = "Reading PCM, C2, SUB (AccuDisc)…"
-        _ui_status(ui, c2_status)
-
-        def _c2_cb(done: int, total: int) -> None:
-            if ui is not None:
-                ui.set_status(
-                    c2_status,
-                    done / total if total > 0 else 0.0,
-                    detail=f"({done}/{total})",
-                )
-
-        read_disc_c2(
-            device,
-            pcm_file,
-            c2_file,
-            output_sub=sub_file,
-            output_cdtext=cdtext_file,
-            output_fulltoc=fulltoc_file,
-            progress_cb=_c2_cb if ui is not None else None,
+        info = build_rip_info(
+            fulltoc_file.read_bytes(),
+            sub_file.read_bytes(),
+            cdtext_file.read_bytes() if cdtext_file.exists() else None,
         )
-        try:
-            from cdda2img.subq_toc import build_rip_info
-
-            info = build_rip_info(
-                fulltoc_file.read_bytes(),
-                sub_file.read_bytes(),
-                cdtext_file.read_bytes() if cdtext_file.exists() else None,
-            )
-        except (ValueError, OSError) as exc:
-            log.warning(
-                "subchannel TOC assembly failed (%s) — falling back to cdrdao read-toc",
-                exc,
-            )
-            from cdda2img.cdrdao_ripper import read_toc_metadata
-
-            _ui_status(ui, "Reading disc metadata (cdrdao read-toc)…")
-            info = read_toc_metadata(device)
-            return info, "accudisc+toc", c2_file
-        return info, "accudisc", c2_file
-
-    info, rip_type = _rip_with_fallback(device, pcm_file, read_offset, ui=ui)
-    return info, rip_type, None
+    except (ValueError, OSError) as exc:
+        # subq_toc already degrades to TOC-only geometry when the Q stream cannot be
+        # anchored, so reaching here means the full TOC itself is unusable — there is
+        # nothing left to build a disc from, and no second engine to ask.
+        msg = f"disc metadata assembly failed: {exc}"
+        raise RuntimeError(msg) from exc
+    return info, "accudisc", (c2_file if want_c2 else None)
 
 
 def _drive_supports_c2(device: str) -> bool:
@@ -2698,8 +2665,9 @@ def rip_image(  # noqa: C901
     # Drive offset resolution may prompt the user (input()) — must happen before TUI.
     read_offset, _write_offset, drive_name = _resolve_drive_offsets(device, cfg)
 
-    # A prior rip's cd-paranoia -S slowdown persists on the drive; un-throttle before the
-    # first cdrdao op (fast-toc/scan) so it — and the album-art fetch — run at full speed.
+    # A drive left throttled by a previous run (recovery ladder, an interrupted read)
+    # keeps that speed; un-throttle before the lead-in scan so it — and the album-art
+    # fetch — run at full speed.
     from cdda2img import drive_speed
 
     drive_speed.restore_drive_speed(device)
@@ -2805,14 +2773,15 @@ def rip_image(  # noqa: C901
             f"{track_count} track(s), {int(total_s) // 60}:{int(total_s) % 60:02d} total",
         )
 
-        # Offset domain (unified model): the cdrdao and c2read reads return RAW PCM. We
-        # work raw through AR + ctanalyse + the c2read recovery ladder and apply the
-        # drive offset exactly once, at storage. Only a cd-paranoia *read* fallback
-        # returns already-corrected PCM (it applied -O at read time) → verifies at 0.
+        # Offset domain (unified model): AccuDisc returns RAW PCM — always, now that it
+        # is the only read engine. We work raw through AR + ctanalyse + the recovery
+        # ladder and apply the drive offset exactly once, at storage. `raw_domain` is
+        # therefore a *state* flag, not an engine test: it starts True and flips when
+        # apply_offset runs below.
         from cdda2img.offset_correct import apply_offset
 
-        raw_domain = rip_type in ("cdrdao", "accudisc", "accudisc+toc")
-        ar_offset = read_offset if raw_domain else 0
+        raw_domain = True
+        ar_offset = read_offset
 
         # R8: CDDB query now happens inside _finalize_import in parallel
         # with the MB disc-ID lookup. The standalone call is gone; we just
@@ -2825,6 +2794,9 @@ def rip_image(  # noqa: C901
         # Speed-laddered AR recovery outcome (populated only if a track fails AR).
         recovery_outcomes: dict[int, str] = {}
         recovery_ladder: list[int] = []
+        # CTDB attempt outcome, kept whether it succeeded or declined — a declined
+        # repair is the interesting case and used to leave no trace at all.
+        ctdb_result: CtdbRepairResult | None = None
 
         _ui_status(ui, "Verifying AccurateRip…")
         ar_verify = verify_rip(
@@ -2850,7 +2822,7 @@ def rip_image(  # noqa: C901
             from cdda2img.ctdb_repair import repair_whole_disc
 
             _ui_status(ui, "Trying CTDB parity repair…")
-            _ctdb = repair_whole_disc(
+            ctdb_result = _ctdb = repair_whole_disc(
                 temp.pcm_file,
                 final_track_lsns,
                 final_disc_last_lsn,
@@ -2879,11 +2851,7 @@ def rip_image(  # noqa: C901
         # Re-read only the failed tracks via AccuDisc (raw targeted window reads) and
         # splice the verified corrected bytes into the still-raw PCM. Disc metadata
         # (ISRC/MCN/CD-Text from subchannel) is untouched — only audio is re-read.
-        if rip_type in (
-            "cdrdao",
-            "accudisc",
-            "accudisc+toc",
-        ) and _ar_has_partial_mismatch(ar_verify.tracks):
+        if _ar_has_partial_mismatch(ar_verify.tracks):
             failed_tracks = [
                 r
                 for r in ar_verify.tracks
@@ -2990,6 +2958,18 @@ def rip_image(  # noqa: C901
             provenance["arip_transport"] = ar_verify.transport
         if ar_verify.dbar_b3sum is not None:
             provenance["arip_dbar_b3sum"] = ar_verify.dbar_b3sum
+        # CTDB provenance. The declined case matters most: without it a failed parity
+        # repair is invisible in the container and has to be reverse-engineered from
+        # the finished RBI (which is exactly what happened on 2026-07-25).
+        if ctdb_result is not None:
+            if ctdb_result.entry_id is not None:
+                provenance["ctdb_entry"] = ctdb_result.entry_id
+            if ctdb_result.ctdb_offset is not None:
+                provenance["ctdb_offset"] = f"{ctdb_result.ctdb_offset:+d}"
+            if ctdb_result.used_c2:
+                provenance["ctdb_erasures"] = "c2"
+            if not ctdb_result.repaired:
+                provenance["ctdb_declined"] = ctdb_result.reason
         # Speed-laddered recovery provenance: what was tried and the per-track outcome.
         if recovery_ladder:
             provenance["recovery_passes"] = str(cfg.recovery_passes)

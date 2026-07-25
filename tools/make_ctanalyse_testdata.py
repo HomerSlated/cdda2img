@@ -113,7 +113,7 @@ def rip_bad(dest: Path) -> bytes:
     if dest.exists() and dest.stat().st_size == _DISC_BYTES:
         print(f"  {dest.name}: cached")
         return dest.read_bytes()
-    from cdda2img.disc_reader import rip_single_track
+    from cdda2img.accudisc_reader import read_span
     from cdda2img.drive_speed import restore_drive_speed
 
     n_tracks = len(_LSNS)
@@ -127,14 +127,16 @@ def rip_bad(dest: Path) -> bytes:
                     f"  ripping track {t:2d}/{n_tracks} at {_RIP_SPEED}x "
                     f"({expected} sectors)…"
                 )
-                rip_single_track(
+                # AccuDisc reads a raw sector span and does NOT restore the speed
+                # per call, so the ladder stays put across the loop; the `finally`
+                # below restores once. Reads are raw (no offset applied) — this
+                # testdata is compared against other raw captures.
+                read_span(
                     _DEVICE,
-                    t,
+                    bounds[t - 1],
+                    expected,
                     tmp,
-                    paranoia="off",
-                    read_offset=_READ_OFFSET,
                     read_speed=_RIP_SPEED,
-                    restore_speed=False,
                 )
                 raw = tmp.read_bytes()
                 tmp.unlink()

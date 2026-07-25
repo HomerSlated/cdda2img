@@ -1,24 +1,16 @@
-"""drive_speed: read current/max via cdrdao drive-info, restore to max via ioctl."""
+"""drive_speed: read current/max via ``accudisc speed``, restore to max via ioctl."""
 
 from __future__ import annotations
 
 import pytest
 
-import cdda2img.disc_reader as dr
 import cdda2img.drive_speed as ds
 
-# Real `cdrdao drive-info --device /dev/sr0` output (PLEXTOR PX-716A): current 706 kB/s
-# (4X), max 7056 kB/s (40X) — the post -S 1 throttled state.
-_DRIVE_INFO = """\
-/dev/sr0: PLEXTOR DVDR   PX-716A\tRev: 1.11
-CD-TEXT writing is supported.
-Using driver: Generic SCSI-3/MMC - Version 2.0 (options 0x0010)
-
-Maximum reading speed: 7056 kB/s
-Current reading speed: 706 kB/s
-Maximum writing speed: 8467 kB/s
-Current writing speed: 8467 kB/s
-BurnProof supported: yes
+# Real `accudisc --device /dev/sr0 speed` output (PLEXTOR PX-716A), throttled to 8x.
+_SPEED_OUT = """\
+page2A     max 40x (7056 kB/s)  current 8x (1411 kB/s)
+rotation   CAV (constant angular velocity)
+  curve[0] lba 0..359999  17.0x..40.0x (nominal)
 """
 
 
@@ -36,46 +28,50 @@ def test_read_drive_speed_parses_current_and_max(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
-        ds.subprocess, "run", lambda *a, **k: _Result(stdout=_DRIVE_INFO)
+        ds.subprocess, "run", lambda *a, **k: _Result(stdout=_SPEED_OUT)
     )
-    assert ds.read_drive_speed("/dev/sr0") == (706, 7056)
+    assert ds.read_drive_speed("/dev/sr0") == (1411, 7056)
 
 
-def test_read_drive_speed_prefers_accudisc(monkeypatch: pytest.MonkeyPatch) -> None:
-    # accudisc speed-report machine line wins; cdrdao must not even be invoked.
-    calls: list[str] = []
-
-    def _run(cmd: list[str], **k: object) -> _Result:
-        calls.append(cmd[0])
-        if cmd[0].endswith("accudisc"):
-            return _Result(
-                stdout="speed max_kbps 7056 current_kbps 706 max_x 40 current_x 4\n"
-            )
-        return _Result(stdout=_DRIVE_INFO)
-
-    monkeypatch.setattr(ds.subprocess, "run", _run)
-    assert ds.read_drive_speed("/dev/sr0") == (706, 7056)
-    assert len(calls) == 1 and calls[0].endswith("accudisc")
-
-
-def test_read_drive_speed_falls_back_to_cdrdao(
+def test_read_drive_speed_calls_accudisc_speed_only(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """One command, and it is the `speed` subcommand.
+
+    The name matters: this used to call `speed-report`, which AccuDisc removed —
+    so it failed on every invocation and silently fell through to cdrdao. There
+    is no fallback now, which is exactly why the subcommand name is asserted.
+    """
+    calls: list[list[str]] = []
+
     def _run(cmd: list[str], **k: object) -> _Result:
-        if cmd[0].endswith("accudisc"):
-            raise FileNotFoundError  # helper not installed
-        return _Result(stdout=_DRIVE_INFO)
+        calls.append(cmd)
+        return _Result(stdout=_SPEED_OUT)
 
     monkeypatch.setattr(ds.subprocess, "run", _run)
-    assert ds.read_drive_speed("/dev/sr0") == (706, 7056)
+    assert ds.read_drive_speed("/dev/sr0") == (1411, 7056)
+    assert len(calls) == 1
+    assert calls[0][0].endswith("accudisc")
+    assert calls[0][-1] == "speed"
 
 
 def test_read_drive_speed_scans_stderr_too(monkeypatch: pytest.MonkeyPatch) -> None:
-    # Some cdrdao builds print drive-info to stderr; the reader must scan both streams.
     monkeypatch.setattr(
-        ds.subprocess, "run", lambda *a, **k: _Result(stderr=_DRIVE_INFO)
+        ds.subprocess, "run", lambda *a, **k: _Result(stderr=_SPEED_OUT)
     )
-    assert ds.read_drive_speed("/dev/sr0") == (706, 7056)
+    assert ds.read_drive_speed("/dev/sr0") == (1411, 7056)
+
+
+def test_read_drive_speed_max_without_current(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A max with no current line still yields the max — callers need only that."""
+    monkeypatch.setattr(
+        ds.subprocess,
+        "run",
+        lambda *a, **k: _Result(stdout="page2A     max 40x (7056 kB/s)\n"),
+    )
+    assert ds.read_drive_speed("/dev/sr0") == (None, 7056)
 
 
 def test_read_drive_speed_missing_lines(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -85,12 +81,12 @@ def test_read_drive_speed_missing_lines(monkeypatch: pytest.MonkeyPatch) -> None
 
 def test_read_drive_speed_nonzero_exit(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
-        ds.subprocess, "run", lambda *a, **k: _Result(stdout=_DRIVE_INFO, returncode=1)
+        ds.subprocess, "run", lambda *a, **k: _Result(stdout=_SPEED_OUT, returncode=1)
     )
     assert ds.read_drive_speed("/dev/sr0") == (None, None)
 
 
-def test_read_drive_speed_cdrdao_absent(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_read_drive_speed_binary_absent(monkeypatch: pytest.MonkeyPatch) -> None:
     def boom(*a, **k):
         raise FileNotFoundError
 
@@ -155,39 +151,6 @@ def test_restore_swallows_open_oserror(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setattr(ds.os, "open", boom)
     ds.restore_drive_speed("/dev/sr0")  # must not raise
-
-
-# ── disc_reader finally hook ─────────────────────────────────────────────────
-
-
-def _stub_single_track(monkeypatch: pytest.MonkeyPatch) -> list[str]:
-    """Stub the rip_single_track innards; return the list of restored devices."""
-    restored: list[str] = []
-    import cdda2img.container as container
-
-    monkeypatch.setattr(dr, "query_disc", lambda d: (0, 999, [(1, 0, 1000)]))
-    monkeypatch.setattr(
-        dr.subprocess, "run", lambda *a, **k: type("P", (), {"returncode": 0})()
-    )
-    monkeypatch.setattr(container, "wav_to_raw_pcm", lambda *a, **k: None)
-    monkeypatch.setattr(ds, "restore_drive_speed", lambda dev: restored.append(dev))
-    return restored
-
-
-def test_rip_single_track_restores_speed_when_slowed(
-    monkeypatch: pytest.MonkeyPatch, tmp_path
-) -> None:
-    restored = _stub_single_track(monkeypatch)
-    dr.rip_single_track("/dev/sr0", 1, tmp_path / "o.pcm", read_speed=1)
-    assert restored == ["/dev/sr0"]
-
-
-def test_rip_single_track_no_restore_at_default_speed(
-    monkeypatch: pytest.MonkeyPatch, tmp_path
-) -> None:
-    restored = _stub_single_track(monkeypatch)
-    dr.rip_single_track("/dev/sr0", 1, tmp_path / "o.pcm")  # read_speed=None
-    assert restored == []
 
 
 # ── probe_speed_ladder ───────────────────────────────────────────────────────

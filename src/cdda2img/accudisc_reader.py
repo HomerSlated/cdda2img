@@ -206,6 +206,35 @@ def parse_toc_output(stdout: str) -> TocGeometry:
     )
 
 
+def read_lead_in(
+    device: str, fulltoc_path: Path, cdtext_path: Path | None = None
+) -> None:
+    """Dump the raw full TOC (and optionally CD-Text) from the lead-in only.
+
+    The two standalone subcommands answer from the lead-in without spinning the
+    program area, which is what makes this cheap enough for the pre-rip banner
+    (M3, replacing ``cdrdao read-toc --fast-toc``).
+
+    Best-effort by contract: **CD-Text absence is normal** — most discs have
+    none — so a missing or failed ``cdtext`` leaves no file and is not an error.
+    A failed ``fulltoc`` likewise leaves no file; the caller checks for it rather
+    than catching, because every caller of this is cosmetic.
+    """
+    for sub, out in (("fulltoc", fulltoc_path), ("cdtext", cdtext_path)):
+        if out is None:
+            continue
+        try:
+            subprocess.run(  # noqa: S603 — snapshot/PATH binary, fixed argv
+                [_ACCUDISC, "--device", device, sub, str(out)],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=60,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            log.debug("accudisc %s failed for %s: %s", sub, device, exc)
+
+
 def read_toc(device: str) -> TocGeometry:
     """Track geometry via ``accudisc toc``, tolerating an unreadable lead-in.
 
@@ -320,8 +349,8 @@ def _run_read(
 
 def read_disc_c2(
     device: str,
-    output_pcm: Path,
-    output_c2: Path,
+    output_pcm: Path | None = None,
+    output_c2: Path | None = None,
     output_sub: Path | None = None,
     output_cdtext: Path | None = None,
     output_fulltoc: Path | None = None,
@@ -330,27 +359,25 @@ def read_disc_c2(
 ) -> None:
     """Full-disc raw audio (s16le, no byte-swap) + C2 bitmap via ``accudisc read``.
 
-    *output_sub*, when given, additionally captures the raw P-W subchannel stream
-    (96 B/sector) in the same pass; *output_cdtext* / *output_fulltoc* are captured
-    **inline** on the same read (``--cdtext`` / ``--fulltoc``, single spin-up). A
-    disc without CD-Text simply produces no cdtext file (absence does not affect
-    the read's exit code) — check for existence. *progress_cb(done, total)*
-    receives sector counts from the ``--progress-fd`` machine channel.
+    Every output is opt-in — ``accudisc read`` reads the disc and writes only the
+    streams asked for. *output_pcm* / *output_c2* write the audio and C2 bitmap;
+    *output_sub* captures the raw P-W subchannel (96 B/sector); *output_cdtext* /
+    *output_fulltoc* are captured **inline** on the same read (``--cdtext`` /
+    ``--fulltoc``, single spin-up). Omitting *output_pcm* still reads the whole
+    disc (the sub stream needs it) but skips the ~600 MB PCM write — the
+    metadata-only pass the parity gate uses. A disc without CD-Text simply
+    produces no cdtext file (absence does not affect the read's exit code) — check
+    for existence. *progress_cb(done, total)* receives sector counts from the
+    ``--progress-fd`` machine channel.
 
     Raises RuntimeError only on a genuine read failure (exit 1/2); exit 3
     (completed with caveats) is not a failure."""
-    # Whole-disc audio + inline lead-in dumps: `read` with no --count defaults
-    # through the lead-out.
-    cmd = [
-        _ACCUDISC,
-        "--device",
-        device,
-        "read",
-        "--pcm",
-        str(output_pcm),
-        "--c2f",
-        str(output_c2),
-    ]
+    # Whole-disc read (no --count → through the lead-out); each output is opt-in.
+    cmd = [_ACCUDISC, "--device", device, "read"]
+    if output_pcm is not None:
+        cmd += ["--pcm", str(output_pcm)]
+    if output_c2 is not None:
+        cmd += ["--c2f", str(output_c2)]
     if output_sub is not None:
         cmd += ["--sub", "raw", "--subf", str(output_sub)]
     if output_fulltoc is not None:

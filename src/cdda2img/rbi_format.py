@@ -10,6 +10,7 @@ See rbi_spec.md for the full human-readable specification.
 
 import struct
 from dataclasses import dataclass, field
+from typing import NamedTuple
 
 # ---------------------------------------------------------------------------
 # Identity
@@ -530,3 +531,19 @@ def format_original(disc: RBIDisc) -> str:
         disc.original_release_title,
         disc.original_release_year,
     )
+
+
+class RipInfo(NamedTuple):
+    """Result of reading a physical disc: the disc skeleton plus raw geometry.
+
+    Lived in ``disc_reader`` while cd-paranoia was a read engine; moved here when
+    that module was deleted (AccuDisc migration Phase E). It is a pipeline type,
+    not a container type, but every producer and consumer of it already imports
+    this module, so it costs no new edge in the import graph.
+    """
+
+    disc: RBIDisc
+    track_lsns: list[int]  # absolute first_lsn per track, needed for CDDB lookup
+    disc_last_lsn: int
+    prov: dict[str, str] | None = None  # read-stage provenance keys (e.g. the
+    # subq_toc toc_source / ISRC vote counts); merged into PROV by rip_image

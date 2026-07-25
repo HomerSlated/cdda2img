@@ -23,12 +23,18 @@ log = logging.getLogger(__name__)
 
 
 def _get_engine_version(rip_type: str) -> str:
-    """Return '<engine> <version>' or '<engine> (version unknown)' on failure."""
-    cmd = "cdrdao" if rip_type == "cdrdao" else "cd-paranoia"
-    args = [cmd, "version"] if rip_type == "cdrdao" else [cmd, "--version"]
+    """Return the read engine's version string for the rip log.
+
+    Every live drive path is AccuDisc now (M8 of the migration), so *rip_type*
+    no longer selects a binary — it is kept in the signature because it still
+    names the *path* taken (``accudisc`` / ``accudisc+toc``, plus ``+c2rec``
+    when the recovery ladder ran) and callers pass it positionally.
+    """
+    from cdda2img.accudisc_reader import _ACCUDISC
+
     try:
         result = subprocess.run(  # noqa: S603
-            args,
+            [_ACCUDISC, "--version"],  # LINT-012
             capture_output=True,
             text=True,
             timeout=5,
@@ -36,12 +42,9 @@ def _get_engine_version(rip_type: str) -> str:
         )
         out = (result.stdout + result.stderr).splitlines()
         first = next((ln for ln in out if ln.strip()), None)
-        if first:
-            return f"{cmd} {first.strip()}"
-        else:
-            return f"{cmd} (version unknown)"
+        return first.strip() if first else "accudisc (version unknown)"
     except (OSError, subprocess.TimeoutExpired):
-        return f"{cmd} (version unknown)"
+        return "accudisc (version unknown)"
 
 
 class RipLogBuilder:

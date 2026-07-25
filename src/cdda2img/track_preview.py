@@ -1,13 +1,13 @@
 """
 track_preview.py — background audio preview for the rip pipeline.
 
-Grabs track 1 of the disc via cd-paranoia to a temporary WAV, then plays it on
-a loop in the background (ffplay) while the rest of the rip runs — through the
+Grabs track 1 of the disc via AccuDisc to a temporary WAV, then plays it on a
+loop in the background (ffplay) while the rest of the rip runs — through the
 metadata menu, loudness analysis and container build, until the rip ends.
 
 Purely cosmetic: every failure path is swallowed so a rip is never affected.
 Because there is a single optical drive, the track-1 grab must complete before
-the main cdrdao rip starts; playback then overlaps everything that follows.
+the main rip starts; playback then overlaps everything that follows.
 
 Public interface:
     preview = start_preview(device, work_dir, progress_cb=...) -> TrackPreview | None
@@ -19,15 +19,11 @@ from __future__ import annotations
 import logging
 import shutil
 import subprocess
-import time
 from collections.abc import Callable
 from pathlib import Path
 
 log = logging.getLogger(__name__)
 
-_BYTES_PER_FRAME = 2352  # one CD sector / frame (588 stereo s16 sample-pairs)
-_WAV_HEADER = 44  # canonical PCM WAV header cd-paranoia writes before the data
-_POLL_S = 0.15  # file-size poll interval while grabbing track 1
 _PREVIEW_WAV = "preview_track01.wav"
 
 
@@ -62,8 +58,8 @@ def start_preview(
     unaffected. *progress_cb(done_frames, total_frames)* is invoked during the
     grab so the caller can drive a progress bar.
     """
-    if shutil.which("cd-paranoia") is None or shutil.which("ffplay") is None:
-        log.info("track preview skipped — cd-paranoia or ffplay not installed")
+    if shutil.which("ffplay") is None:
+        log.info("track preview skipped — ffplay not installed")
         return None
     try:
         return _grab_and_play(device, work_dir, progress_cb)
@@ -77,13 +73,18 @@ def _grab_and_play(
     work_dir: Path,
     progress_cb: Callable[[int, int], None] | None,
 ) -> TrackPreview:
-    from cdda2img.disc_reader import query_disc
+    from cdda2img.accudisc_reader import read_toc
 
-    _, _, tracks = query_disc(device)
-    track1_frames = tracks[0][2]  # (track_number, first_lsn, length_frames)
+    geom = read_toc(device)
+    if not geom.track_lsns:
+        msg = "no audio tracks reported"
+        raise RuntimeError(msg)
+    start = geom.track_lsns[0]
+    end = geom.track_lsns[1] if len(geom.track_lsns) > 1 else geom.disc_last_lsn + 1
+    track1_frames = max(0, end - start)
 
     wav_path = work_dir / _PREVIEW_WAV
-    _grab_track1(device, wav_path, track1_frames, progress_cb)
+    _grab_track1(device, wav_path, start, track1_frames, progress_cb)
 
     cmd = ["ffplay", "-nodisp", "-loop", "0", "-loglevel", "quiet", str(wav_path)]
     proc = subprocess.Popen(  # noqa: S603  # LINT-008
@@ -98,31 +99,29 @@ def _grab_and_play(
 def _grab_track1(
     device: str,
     wav_path: Path,
+    start_lba: int,
     track1_frames: int,
     progress_cb: Callable[[int, int], None] | None,
 ) -> None:
-    """Rip track 1 to *wav_path* via cd-paranoia.
+    """Grab track 1 to *wav_path* via ``accudisc read`` (M5).
 
-    Progress is derived by polling the growing WAV file size against the known
-    track length — robust and tool-agnostic, unlike parsing cd-paranoia's
-    per-sector progress display. ``-Z`` disables paranoia: this is a throwaway
-    preview, so speed beats jitter correction.
+    AccuDisc reports real per-sector progress on its machine fd, so this no
+    longer polls a growing file — the callback is driven by the reader itself.
+    The read is raw (uncorrected) and no C2/sub is captured: this is a throwaway
+    preview, so speed beats fidelity, and nothing here reaches the container.
     """
-    cmd = ["cd-paranoia", "-d", device, "-Z", "--", "1", str(wav_path)]
-    proc = subprocess.Popen(  # noqa: S603  # LINT-012
-        cmd,
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
-    while proc.poll() is None:
-        if progress_cb is not None:
-            done = wav_path.stat().st_size if wav_path.exists() else 0
-            done_frames = max(0, done - _WAV_HEADER) // _BYTES_PER_FRAME
-            progress_cb(min(done_frames, track1_frames), track1_frames)
-        time.sleep(_POLL_S)
-    if proc.returncode != 0:
-        msg = f"cd-paranoia track-1 grab exited with code {proc.returncode}"
-        raise RuntimeError(msg)
+    from cdda2img.accudisc_reader import read_span
+    from cdda2img.container import _write_wav_header
+
+    pcm_path = wav_path.with_suffix(".pcm")
+    try:
+        read_span(device, start_lba, track1_frames, pcm_path, progress_cb=progress_cb)
+        data_len = pcm_path.stat().st_size
+        with wav_path.open("wb") as f_out:
+            _write_wav_header(f_out, data_len, 44100, 2, 16)
+            with pcm_path.open("rb") as f_in:
+                shutil.copyfileobj(f_in, f_out)
+    finally:
+        pcm_path.unlink(missing_ok=True)
     if progress_cb is not None:
         progress_cb(track1_frames, track1_frames)

@@ -40,11 +40,13 @@ log = logging.getLogger(__name__)
 _CDROM_SELECT_SPEED = 0x5322
 _KBPS_PER_X = 176  # 1x CD = 75 sectors/s * 2352 bytes / 1000 ≈ 176 kB/s
 
-_MAX_READ_RE = re.compile(r"Maximum reading speed:\s*(\d+)\s*kB/s")
-_CUR_READ_RE = re.compile(r"Current reading speed:\s*(\d+)\s*kB/s")
-# accudisc speed-report machine line: "speed max_kbps N current_kbps M ..."
-# (byte-identical to the c2read prototype's line, so the regex is unchanged.)
-_ACCUDISC_SPEED_RE = re.compile(r"speed max_kbps (\d+) current_kbps (\d+)")
+# `accudisc speed` page-2A line, e.g.
+#   page2A     max 40x (7056 kB/s)  current 8x (1411 kB/s)
+# The Nx figure is the drive's own rounding; we take the kB/s, which is what every
+# caller compares against. `speed-report` (the name this used to call) was removed
+# upstream — calling it silently failed and fell through to cdrdao for months.
+_AD_MAX_RE = re.compile(r"\bmax\s+\d+x\s+\((\d+)\s*kB/s\)")
+_AD_CUR_RE = re.compile(r"\bcurrent\s+\d+x\s+\((\d+)\s*kB/s\)")
 
 # Candidate Nx values to probe for the drive's real speed ladder; the drive snaps each to a
 # supported speed and we read back the achieved value (so the ladder is the drive's own,
@@ -55,57 +57,33 @@ _SPEED_PROBE = (1, 2, 3, 4, 6, 8, 10, 12, 16, 20, 24, 32, 40, 48)
 def read_drive_speed(device: str) -> tuple[int | None, int | None]:
     """Return ``(current_kbps, max_kbps)``, or ``(None, None)``.
 
-    Primary: ``accudisc speed-report`` (page 2A, cdrdao-identical fields, ~instant).
-    Fallback: ``cdrdao drive-info`` when the AccuDisc helper is unavailable. Never
-    raises — any failure yields ``(None, None)``.
+    ``accudisc speed`` (page 2A, ~instant, no disc spin-up needed). There is no
+    longer a cdrdao fallback — M6 of the AccuDisc migration. Never raises: any
+    failure yields ``(None, None)`` and callers treat that as "unknown".
     """
-    current, maximum = _read_speed_accudisc(device)
-    if maximum is not None:
-        return current, maximum
-    return _read_speed_cdrdao(device)
-
-
-def _read_speed_accudisc(device: str) -> tuple[int | None, int | None]:
     from cdda2img.accudisc_reader import _ACCUDISC
 
     try:
         result = subprocess.run(  # noqa: S603  # LINT-012
-            [_ACCUDISC, "--device", device, "speed-report"],  # LINT-012
+            [_ACCUDISC, "--device", device, "speed"],  # LINT-012
             capture_output=True,
             text=True,
         )
     except (FileNotFoundError, OSError) as exc:
-        log.debug("accudisc speed-report failed for %s: %s", device, exc)
-        return None, None
-    m = _ACCUDISC_SPEED_RE.search(result.stdout)
-    if result.returncode != 0 or m is None:
-        log.debug("accudisc speed-report unusable for %s", device)
-        return None, None
-    return int(m.group(2)), int(m.group(1))
-
-
-def _read_speed_cdrdao(device: str) -> tuple[int | None, int | None]:
-    try:
-        result = subprocess.run(  # noqa: S603  # LINT-012
-            ["cdrdao", "drive-info", "--device", device],  # noqa: S607  # LINT-012
-            capture_output=True,
-            text=True,
-        )
-    except (FileNotFoundError, OSError) as exc:
-        log.debug("cdrdao drive-info failed for %s: %s", device, exc)
+        log.debug("accudisc speed failed for %s: %s", device, exc)
         return None, None
 
     if result.returncode != 0:
-        log.debug("cdrdao drive-info exited %d for %s", result.returncode, device)
+        log.debug("accudisc speed exited %d for %s", result.returncode, device)
         return None, None
 
-    # drive-info prints to stdout on some builds, stderr on others — scan both.
     text = result.stdout + "\n" + result.stderr
-    cur_m = _CUR_READ_RE.search(text)
-    max_m = _MAX_READ_RE.search(text)
-    current = int(cur_m.group(1)) if cur_m else None
-    maximum = int(max_m.group(1)) if max_m else None
-    return current, maximum
+    max_m = _AD_MAX_RE.search(text)
+    cur_m = _AD_CUR_RE.search(text)
+    if max_m is None:
+        log.debug("accudisc speed output unparseable for %s", device)
+        return None, None
+    return (int(cur_m.group(1)) if cur_m else None), int(max_m.group(1))
 
 
 def _select_speed(device: str, nx: int) -> bool:

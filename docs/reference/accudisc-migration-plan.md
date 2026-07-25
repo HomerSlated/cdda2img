@@ -45,6 +45,41 @@ subchannel data; blind re-reads + the position model are the only recovery lever
 
 ---
 
+## 1b. STATUS — M1–M8 landed 2026-07-25 (Phases A–E)
+
+**cdrdao and cd-paranoia are gone from `src/`.** `grep -rnE '"(cdrdao|cd-paranoia)"'
+src/cdda2img/` returns nothing. 1237 tests pass; `make check` clean.
+
+| # | Done | Note |
+|---|------|------|
+| M1 | ✅ | `_rip_disc_stage` is a single AccuDisc `read` — no engine choice left |
+| M2 | ✅ | second metadata pass deleted; assembly failure now raises (no fallback) |
+| M3 | ✅ | banner uses `fulltoc` + `cdtext` via new `accudisc_reader.read_lead_in` |
+| M4 | ✅ | **O1 resolved as (a) — full removal.** `disc_reader.py` deleted |
+| M5 | ✅ | `track_preview` uses `read_span`; real progress replaces file-size polling |
+| M6 | ✅ | **was already broken** — it called `speed-report`, which AccuDisc removed, so it failed every call and silently fell through to cdrdao |
+| M7 | ✅ | `write_offset` on `accudisc write`/`read`; **byte-swap removed** (cdrdao BIN was s16be, AccuDisc is s16le — a mechanical port would have corrupted every measurement) and the `FILE` line now emits both fields in MSF, which AccuDisc's parser requires |
+| M8 | ✅ | version stamp from `accudisc --version` |
+
+**Deleted (Phase E):** `cdrdao_ripper.py`, `cdrdao_progress.py`, `cdrdao_write_progress.py`,
+`disc_reader.py`, plus their tests and the two retired cd-paranoia tools
+(`paranoia_recovery_test.py`, `replay_paranoia_progress.py`). `RipInfo` moved to
+`rbi_format.py` — it was the one live symbol `disc_reader` still owned.
+
+**Also landed:** `disc_writer` now keys disc-not-blank on AccuDisc's `result=not_blank`
+machine token (shipped in their `a76ede2`), retiring the stderr scrape that their contract
+warned against.
+
+**Not done, deliberately:** §9's profile/validator/strict-config block (P1–P5) — a feature
+layer the plan already sequences separately. **Not yet validated:** a full live rip through
+the single-engine path.
+
+**cdrdao still invoked in `tools/`** — by design in `toc_parity.py` (it *is* the independent
+reference side of the parity gate) and opportunistically in `compare_discid.py`,
+`disc_scan.py`, `trace_album_live.py`, `trace_metadata_provenance.py`.
+
+---
+
 ## 2. Scope — migrate vs. keep vs. already done
 
 ### 2a. MIGRATE — live-drive binary call sites (the actual work)
@@ -82,13 +117,14 @@ Grounded in a full `rg` sweep of `src/` (2026-07-17):
 
 ### 2d. TOOLS (`tools/`, tracked, lower priority — opportunistic)
 
-- `tools/toc_parity.py:41` — still drives **c2read** (`c2read --full`); the acceptance gate
-  must diff **AccuDisc** vs `cdrdao read-toc` to stay meaningful. High value: this is the
-  parity gate that authorises preferring the single pass.
+- `tools/toc_parity.py` — **DONE 2026-07-24**: retargeted from c2read to AccuDisc via
+  `accudisc_reader.read_disc_c2` (metadata-only pass, no PCM). The gate now diffs
+  **AccuDisc** vs `cdrdao read-toc`, exactly its purpose; the cdrdao reference side stays
+  until cdrdao is removed. `tools/ctdb_repair.py` likewise retargeted (`read_toc` /
+  `drive_supports_c2` / `read_disc_c2` + `park_spindle`).
 - `tools/measure_write_offset.py` — pairs with M7 (`cdrdao write` + `read-cd`).
-- Diagnostic/experiment scripts still on c2read or cd-paranoia (`cx_census.py`,
-  `c2read_recovery_test.py`, `c2timing.py`, `modepage_experiment.py`,
-  `paranoia_recovery_test.py`, `compare_discid.py`, `replay_paranoia_progress.py`,
+- Diagnostic/experiment scripts still on cd-paranoia (`paranoia_recovery_test.py`,
+  `compare_discid.py`, `replay_paranoia_progress.py`,
   `disc_scan.py`, `trace_*`). Reference/retired-baseline scripts; migrate as touched, keep
   the paranoia ones as historical comparison baselines.
 
@@ -410,8 +446,10 @@ passes (`ar_v2_pass ∧ ctdb_pass ∧ subq_ok/subq_total ≥ 0.90`, or `ctdb_rep
 
 Our half is the half AccuRip excludes — the **absolute** gate (AR v1/v2 + CTDB checksums **+
 CTDB parity repair as one path**, §5) — combined with AccuDisc's relative-signal half into one
-suite. Lives in `tools/` (evolving `toc_parity.py` + `c2read_recovery_test.py`, retargeted to
-AccuDisc + AR/CTDB). Drives `accudisc read` at each rung × swept speed, gates the audio,
+suite. Lives in `tools/` (`toc_parity.py` for the metadata gate + the strategy bench
+`strategy_bench.py`/`disc_triage.py` for recovery, all on AccuDisc + AR/CTDB; the retired
+`c2read_recovery_test.py` was its prototype, archived in `private/deprecated/`). Drives
+`accudisc read` at each rung × swept speed, gates the audio,
 emits §8.4 rows, and prints the correlation table that confirms/refutes Keith's "each speed ≈
 ±the same success rate" hypothesis. Static-Q recoverability (axis D consensus) is a hypothesis
 the bench tests, **not** a settled negative. Bench-shippable for user-submitted profiles.
@@ -674,6 +712,20 @@ control characters first and unconditionally. Verified holding under their paylo
 Not a cdrdao-only concern; do not refactor on that assumption. They will report when
 the fix lands, at which point this reverts to defence in depth.
 
+> **UPDATE 2026-07-24 (AccuDisc §2026-07-24i):** their fix **shipped** — `a619854`
+> on `accudisc` `main`. `adsc_toc_parse_cue` now tracks quote context; an
+> unterminated quote at end-of-line is `ACCUDISC_ERR_INVAL` (cdrdao's own
+> flex-lexer rule), and `accudisc_write()` refuses the injected shape at intake,
+> before SEND CUE SHEET. Regression pinned in their `tests/test_tocparse.c`, suite
+> 19/19. `escape_toc_string` is therefore **defence in depth on the burn side, not
+> load-bearing** — but we **keep it**, for two reasons AccuDisc and we both hold:
+> (1) our `import` path reads foreign `.toc` on the *read* side, where
+> `accudisc_write()` never runs, so escaping is still the **primary** guard there
+> (this is the open `toc_parser.py` audit in `TODO.md`); (2) belt-and-suspenders
+> across a producer/consumer trust boundary is worth keeping even once the far side
+> is hardened. Their parser hostile-input sweep (our §40.3 question) is filed `[P2]`
+> and still ahead of them.
+
 ### 10.2 CD-Text write: pass-through, and the acceptance corpus
 
 `write --cdtext FILE` consumes byte-identically what `read --cdtext FILE` emits — no
@@ -681,7 +733,21 @@ transcoding, structurally guaranteed (no code path reads the payload). Accepted 
 `len >= 22 && (len-4) % 18 == 0` plus a header cross-check. **The multiple-of-4 pack
 refusal was killed before shipping** — three counterexamples: 33 packs (CDEmu), 35
 (real PX-716A, redumper), 42 (libmirage encoder). AccuDisc ring-fills across the wrap
-rather than padding short blocks, a deliberate divergence from cdrdao.
+rather than padding short blocks.
+
+> **CORRECTION 2026-07-24 (AccuDisc §m, B3 landed `a97f9f9`):** this ring-fill is **not a
+> divergence from cdrdao** — an earlier shared premise (our §35.3) that cdrdao "cycles
+> pre-built *blocks* and cannot emit a non-multiple-of-4 stream" is **false**. cdrdao's
+> `CdTextEncoder::buildSubChannels` ring-fills *packs* (`prun = prun->next_; if NULL prun
+> = packs_`), setting the block count to `lcm(npacks,4)/4` (33→33, 35→35, 42→21) and
+> cycling that minimal set over the lead-in — so cdrdao already burns non-mult-of-4
+> CD-Text on real discs. AccuDisc's B3 is byte-identical in method (verified against
+> `setRawRWdata`/`getRawRWdata`). Consequence: the 33/35-pack path is a **proven
+> mechanism, not a weak oracle** — a mismatch there is a diff, not a puzzle; no
+> "4-aligned-only" caveat applies to the acceptance fixture. Decode-side note (does not
+> affect us — `cdtext.py` shares no CD+G path): CD-Text lead-in R-W uses **no
+> Reed-Solomon and no interleave**, only the 6-bit packing + per-pack 16-bit CRC, unlike
+> CD+G program-area R-W.
 
 Zero-CRC (approved by Keith): valid → write; **all zeroes → recompute from payload,
 payload untouched, noted on stderr**; non-zero-and-wrong → refuse (escape flag). This
@@ -704,6 +770,30 @@ channel by which a caller *could* learn the encode failed. Validate at intake, b
 any media is touched. Every diagnostic must name the offending item (cdrdao's cannot:
 `log_message(-2, "…\"%s\"…")` has no vararg).
 
+**`accudisc write` exit-code contract (reconciled AccuDisc `b547a60`, their §s;
+`disc_writer.py` updated 2026-07-24, §50).** The tool-wide convention now applies to write
+too — and the disc-not-blank case **moved from exit 3 to exit 2**:
+
+| exit | meaning | disc written? | `disc_writer.py` |
+|---|---|---|---|
+| 0 | clean burn | yes | return |
+| 2 | could-not-complete: **disc not blank**, or transport/device failure | **no** | raise; not-blank message when stderr contains `not blank`, else generic |
+| 3 | **completed with caveats** (e.g. CD-Text SIZE_INFO ≠ `.toc`) | **yes** | **surface the caveat, return success — do NOT raise** |
+
+This is the burn invariant made operational: exit 3 is precisely "written, but a metadata
+mismatch you must be told about", so we print it loudly and succeed. Note the caveat cannot
+fire on our burns *today* — v0 passes no `--cdtext` (the §10.6 gap) — but the not-blank move
+affects every burn. (C API equivalent: `accudisc_write()` returns a **positive**
+`ACCUDISC_WROTE_WITH_CAVEATS`; test `rc > 0`, not `rc != ACCUDISC_OK`.)
+
+**Not-blank keying (interim → final, §t/§51).** Exit 2 alone can't tell not-blank from a
+transport fault, so the interim keys on `"not blank"` in stderr. That depends on stderr
+*wording*, which AccuDisc's contract reserves the right to change — so AccuDisc agreed to
+emit a machine token (`summary … result=not_blank` / `result=error`) on `--progress-fd` for
+burn-didn't-start cases. When it ships we switch to keying on `result=not_blank` and drop
+the stderr scrape (tracked in `TODO.md`). Until then the interim degrades to the generic
+exit-2 message if the wording changes, so no burn misbehaves.
+
 ### 10.4 Step D CD-Text acceptance needs a physical disc
 
 **No stored image of ours can serve** — every RBI carries a *synthesised* TOC whose
@@ -711,6 +801,30 @@ any media is touched. Every diagnostic must name the offending item (cdrdao's ca
 `accudisc cdtext` on the real disc returns `absent`. ABBA remains the article for
 audio, MCN, ISRC and pre-gaps, which it does carry. Requirement: **any physical CD
 that genuinely carries CD-Text**, read once, no burn. Pending Keith.
+
+> **UPDATE 2026-07-24 (AccuDisc §n retraction, `8bda198`):** the **Stanley Road CD-R may
+> now qualify** — it was set aside on two grounds, "very limited CD-Text" *and* "a
+> degraded lead-in", and **the second ground is void**: its `degrade=leadin_unreadable`
+> was an AccuDisc transfer-length bug, not media damage. A full TOC is `37 + 11*ntracks`
+> bytes — **odd whenever the track count is even** — and ATAPI moves 16 bits at a time, so
+> the odd length was rejected by the host adapter (`DID_ERROR`) before the drive answered.
+> Stanley Road has **12 tracks** → `169` bytes → odd → exactly this class. It *does* carry
+> real CD-Text (cdrdao: `Found CD-TEXT data`, disc `TITLE "Stanley Road"` / `PERFORMER
+> "Paul Weller"` + `SIZE_INFO`), sparse and with empty-string fields — arguably a *better*
+> edge-case article than a rich one.
+>
+> **CONFIRMED 2026-07-24 on the real disc, PX-716A, with `8bda198`:**
+> ```
+> source=fulltoc degrade=none pregaps=none sessions=1..1 disc_type=0x00 session_count=1
+> ```
+> `source=fulltoc degrade=none` where it previously read `source=toc
+> degrade=leadin_unreadable` — the full TOC now reads cleanly. **Stanley Road's lead-in is
+> not degraded and never was.** It is therefore a **live Step-D CD-Text article**: real
+> on-disc CD-Text, clean lead-in, and sparse/empty-string fields that exercise edge cases a
+> rich disc would not. (Note the earlier cdrdao run was never a clean control — it also
+> fell back off its raw-TOC path, but with a different signature, *bogus data returned*
+> rather than a transport error, via its plextor-driver raw read. The `accudisc` re-test is
+> what settles it.)
 
 ### 10.5 The review question (adopted verbatim by both projects)
 
@@ -721,3 +835,53 @@ because the usual producer happens to be well-behaved*: cdrdao assumed encodable
 AccuDisc assumed escaped input; we assume a benign foreign `.toc` on import. AccuDisc
 is running it across their drive-response parsers too, on the grounds that a drive is a
 producer as well.
+
+### 10.6 OPEN DECISION — v0 pass-through cannot author CD-Text from strings (2026-07-24j)
+
+AccuDisc corrected a conflation in our §41: their `a619854` intake refuses the
+**injection** shape (newline-in-quoted-string), **not** an un-encodable character inside
+a legitimate single-line `TITLE`. In v0 **pass-through** there is nothing to refuse,
+because `accudisc write --cdtext FILE` burns the raw **format-05 blob** verbatim and
+never sees the `.toc` strings (`tocparse.c` ignores `CD_TEXT` blocks). So the reason
+cdrdao's lead-in-drop cannot recur through AccuDisc is *"pass-through never encodes"*,
+not a check — `fold_cdtext()` at TOC-generation is doing the real work.
+
+The consequence for **our burn cutover**: a pass-through burn needs a *source* format-05
+blob. **Re-burning a captured disc has one** (`read --cdtext`). **Authoring a fresh disc
+from MusicBrainz metadata does not** — there is no strings→packs step in v0, and
+**`cdtext.py` is decode-only** (no encoder in our tree today; cdrdao is currently what
+encodes `CD_TEXT` strings→packs at burn). So once cdrdao is removed, our folded CD-Text
+strings have **no path onto a freshly-authored disc** until one of:
+
+- **(a)** we only ever *re-burn captured discs* (zero new code; but no metadata-authored
+  CD-Text ever);
+- **(b)** we carry **our own strings→packs encoder** to feed `--cdtext` (real port —
+  libmirage `cdtext-coder.c` or cdrdao's `CdTextItem`; this also unblocks §10.4, since it
+  would let us author a genuine CD-Text disc for AccuDisc's Step D);
+- **(c)** we wait on **AccuDisc's authored v1** (their deferred strings→packs mode, which
+  fails an un-encodable codepoint *before* the burn per their RECORDING_PLAN §11.9 rule 4).
+
+**DECIDED 2026-07-24 (Keith): (c).** AccuDisc builds authored CD-Text mode
+(strings/`CD_TEXT` → 18-byte packs → format-05 blob), **promoted off deferred v1 onto
+the critical path** — pack encoding is bit-formatting, which is libaccudisc's scope and
+mirrors the decoder they already ship; option **(b) is off the table** (don't port an
+encoder). **Our interim is (a): re-burn captured discs only** — the burn cutover is safe
+to make now for re-burns; a *fresh* metadata-authored disc burns without CD-Text until
+their authored mode lands. **`fold_cdtext()` stays** — it is exactly the charset-folded
+input their encoder consumes, and their encoder fails-before-burn on any residual
+un-encodable codepoint (their RECORDING_PLAN §11.9 rule 4), never silent-drops.
+Sequencing: their pass-through v0 ships first (enables re-burns), authored mode
+immediately after.
+
+Authored-mode first-cut scope, **LOCKED** (§43–§44, AccuDisc §l → RECORDING_PLAN §11.1),
+grounded in `generate_toc`: **block 0, single language, single-byte charset, pack types
+0x80 TITLE (disc+track) + 0x81 PERFORMER (disc+track) + 0x86 DISC_ID (disc-level,
+conditional on `cdtext_catalog_ref`) + mandatory 0x8f SIZE_INFO.** 0x86 is required or a
+set field silently drops on the round-trip. **0x82 SONGWRITER out** (we never author it).
+**0x8e UPC/ISRC out** — our `CATALOG`/`ISRC` are top-level Q-subcode directives that reach
+the disc via the subchannel, not CD-Text packs; encoding them as packs would duplicate
+metadata that already arrives by another path. Correction from AccuDisc §l: 0x86 is *new*
+to their encoder, not a mirror of their decoder (which decodes 0x80/0x81 only) — but the
+18-byte pack machinery is type-agnostic, so it is a constant not a subsystem, and
+authored-mode acceptance is a **byte-for-byte blob compare** (write→read-back→compare)
+that never decodes, so a decoder blind to 0x86 still proves a 0x86 round-trip.

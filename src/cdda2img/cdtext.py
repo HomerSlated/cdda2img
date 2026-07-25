@@ -239,21 +239,49 @@ def _decode_text(chunk: bytes) -> str:
 
 
 def _decode_strings(group: list[bytes]) -> dict[int, str]:
-    """Reassemble one (block, PTI) group into per-track strings."""
-    group = sorted(group, key=lambda p: p[2])  # sequence order
-    first_track = group[0][1] & 0x7F
-    data = b"".join(p[_PAYLOAD] for p in group)
+    """Reassemble one (block, PTI) group into per-track strings.
 
+    Each pack's byte [1] states which track's string is **in progress at that
+    pack's first payload byte**. That header is authoritative and is honoured on
+    every pack, including mid-string — it is the only way to see a track that
+    carries no string at all.
+
+    Counting NUL separators from the first pack's track number instead is wrong
+    on any disc with a gap: ABBA *Gold* encodes 18 TITLE strings for 19 tracks
+    with **no empty-string placeholder** for track 13, so a counting decoder
+    shifts every title from 13 on and duplicates the last one.
+
+    Resyncing only at string *boundaries* is also wrong, and fails less visibly:
+    on that disc the correction lands mid-string (the pack whose payload opens
+    inside "Gimme!…" is the one whose header reads 14), so a boundary-only
+    resync never consults it and reports the gap at the wrong track entirely.
+    Hence the accumulate-and-commit structure below: a mid-string resync has to
+    be able to change *where* the string in progress lands, so characters cannot
+    be filed under a track as they arrive.
+    """
     out: dict[int, str] = {}
-    track = first_track
-    for chunk in data.split(b"\x00"):
-        if track > 99:
-            break
-        text = _decode_text(chunk)
+    buf = bytearray()
+    track = -1
+
+    def commit(n: int) -> None:
+        text = _decode_text(bytes(buf))
         if text == "\t":
             # TAB shorthand: same as the previous track's string.
-            text = out.get(track - 1, "")
+            text = out.get(n - 1, "")
         if text:
-            out[track] = text
-        track += 1
+            out[n] = text
+
+    for p in sorted(group, key=lambda q: q[2]):  # sequence order
+        track = p[1] & 0x7F  # authoritative, even mid-string
+        for byte in p[_PAYLOAD]:
+            if track > 99:
+                break
+            if byte == 0:
+                commit(track)
+                buf.clear()
+                track += 1
+            else:
+                buf.append(byte)
+    if buf and 0 <= track <= 99:
+        commit(track)  # unterminated trailing string
     return out

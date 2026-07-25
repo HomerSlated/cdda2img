@@ -216,8 +216,22 @@ Codeword length for position arithmetic: `n = stridecount + npar`.
 ## 8. C port shape
 
 - Input: `--pcm` (raw s16le), `--parity` (the syndrome file), `--npar`, `--stride`
-  (wire value; ×2 internally), `--toc` (INDEX-01 LBAs + leadout, for affected-track
-  reporting), `--impl`, `--threads`.
+  (wire value; ×2 internally), `--toc` (INDEX-01 LBAs + leadout), `--impl`,
+  `--threads`.
+- **`--toc` selects the analysed image**: CTDB's parity covers
+  `[toc[0], toc[last])` — first-track INDEX 01 to lead-out — not the whole
+  `[LBA 0, lead-out)` audio area a rip produces. The two coincide only when track 1's
+  INDEX 01 is at LBA 0. Without `--toc` the whole `--pcm` file is analysed, which on a
+  disc with a program-area pre-gap shifts the RS grid by whole strides; that shift is
+  invisible to FindOffset (capped at `stride/2`), so it decodes to *plausible garbage*
+  rather than failing. `--toc` was accepted-and-ignored until 2026-07-25 — see
+  `private/research/incoming/ctdb-failure-abba-gold-20260725.md`.
+- Emitted `byte` offsets, `affected_sectors`, and the `--erasures` bitmap are all
+  absolute in the `--pcm` file, so the caller never has to translate domains.
+- The JSON reports the window actually analysed as `image_first_frame` /
+  `image_frames`. The binary is git-ignored while its source is tracked, so a stale
+  local build is easy to end up with — and it fails silently. Callers must check
+  `image_first_frame == toc[0]` and refuse otherwise (`ctdb_repair.run_ctanalyse`).
 - Pass 1 (the only expensive step): stream the PCM once, accumulate
   `S[stride][npar]` data syndromes with the §2 split tables; columns are independent →
   partition columns across threads. ~3.1 G table-lookup MACs for our disc.

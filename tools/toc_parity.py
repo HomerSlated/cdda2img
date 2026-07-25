@@ -1,6 +1,6 @@
-"""toc_parity.py — field-by-field parity: cdrdao read-toc vs c2read subq assembly.
+"""toc_parity.py — field-by-field parity: cdrdao read-toc vs AccuDisc subq assembly.
 
-The acceptance gate for the c2read single-pass metadata path (upgrade plan F7):
+The acceptance gate for the AccuDisc single-pass metadata path (upgrade plan F7):
 both engines read the same disc, both results are reduced to the same track
 model, and every field is diffed. Green across the disc shelf = permission to
 prefer the single-pass path.
@@ -13,7 +13,7 @@ Offline mode (re-diff existing captures):
         --fulltoc x.fulltoc --sub x.sub [--cdtext x.cdtext]
 
 Exit code: 0 = all fields match (or the only diffs are cdrdao CD-Text mojibake,
-where c2read is provably correct), 1 = real differences, 2 = capture failure.
+where AccuDisc is provably correct), 1 = real differences, 2 = capture failure.
 """
 
 from __future__ import annotations
@@ -26,6 +26,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
+from cdda2img.accudisc_reader import read_disc_c2
 from cdda2img.subq_toc import build_rip_info
 from cdda2img.toc_parser import ParsedDisc, parse_toc
 
@@ -37,11 +38,16 @@ def _capture_live(device: str, workdir: Path) -> tuple[Path, Path, Path, Path]:
     cdtext = workdir / "parity.cdtext"
     toc = workdir / "parity.toc"
 
-    print(f"[1/2] c2read subchannel capture ({device}) …", flush=True)
-    cmd = ["c2read", "--device", device, "--full", "-q"]  # LINT-013
-    cmd += ["--sub", "raw", "--subf", str(sub)]
-    cmd += ["--fulltoc", str(fulltoc), "--cdtext", str(cdtext)]
-    subprocess.run(cmd, check=False, stdout=subprocess.DEVNULL)  # noqa: S603
+    print(f"[1/2] AccuDisc subchannel capture ({device}) …", flush=True)
+    # Metadata-only whole-disc pass: sub + lead-in dumps, no PCM/C2 written (the
+    # parity gate only needs the subchannel and the lead-in, not the ~600 MB audio).
+    try:
+        read_disc_c2(
+            device, output_sub=sub, output_fulltoc=fulltoc, output_cdtext=cdtext
+        )
+    except RuntimeError as exc:  # exit 1/2 — usage or fatal device/transport
+        print(exc, file=sys.stderr)
+        sys.exit(2)
     if not fulltoc.exists() or not sub.exists():
         sys.exit(2)
 
@@ -61,9 +67,9 @@ def _is_cdrdao_mojibake(cdrdao: object, subq: object) -> bool:
     When a disc actually carries UTF-8 (every cdrdao/CDEmu-authored disc does --
     the authoring copies the TOC file's raw bytes), each non-ASCII character comes
     back double-encoded (a U+2019 apostrophe, E2 80 99, becomes three Latin-1 junk
-    chars). c2read + cdtext.py decode UTF-8-first and are correct, so detecting the
+    chars). AccuDisc + cdtext.py decode UTF-8-first and are correct, so detecting the
     exact byte relationship lets
-    the soak score these as "c2read superior", not as parity failures against a
+    the soak score these as "AccuDisc superior", not as parity failures against a
     reference that is itself wrong on this axis.
     """
     if not isinstance(cdrdao, str) or not isinstance(subq, str):
@@ -120,9 +126,11 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--device", default=None, help="live capture from this drive")
     ap.add_argument("--cdrdao-toc", type=Path, help="existing cdrdao read-toc file")
-    ap.add_argument("--fulltoc", type=Path, help="existing c2read --fulltoc dump")
-    ap.add_argument("--sub", type=Path, help="existing c2read --subf capture")
-    ap.add_argument("--cdtext", type=Path, help="existing c2read --cdtext dump")
+    ap.add_argument(
+        "--fulltoc", type=Path, help="existing AccuDisc read --fulltoc dump"
+    )
+    ap.add_argument("--sub", type=Path, help="existing AccuDisc read --subf capture")
+    ap.add_argument("--cdtext", type=Path, help="existing AccuDisc read --cdtext dump")
     args = ap.parse_args()
 
     with tempfile.TemporaryDirectory(prefix="toc_parity_") as tmp:
@@ -145,14 +153,14 @@ def main() -> int:
         differences, mojibake = _diff(ref, info)
 
     moji_note = (
-        f" ({mojibake} cdrdao CD-Text mojibake, c2read correct)" if mojibake else ""
+        f" ({mojibake} cdrdao CD-Text mojibake, AccuDisc correct)" if mojibake else ""
     )
     if differences:
         print(f"PARITY: {differences} difference(s){moji_note}")
         return 1
     if mojibake:
-        # cdrdao mis-decoded UTF-8 CD-Text; c2read got it right. Not a failure —
-        # c2read is strictly superior here, so the gate stays green.
+        # cdrdao mis-decoded UTF-8 CD-Text; AccuDisc got it right. Not a failure —
+        # AccuDisc is strictly superior here, so the gate stays green.
         print(f"PARITY: ALL MATCH{moji_note}")
         return 0
     print("PARITY: ALL MATCH")

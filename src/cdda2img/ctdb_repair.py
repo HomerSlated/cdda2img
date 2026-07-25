@@ -124,9 +124,18 @@ def track_crc_at(
     """CTDB per-track CRC32 of *track*'s window shifted by *offset* stereo samples.
 
     Edge-aware (AccurateRip.cs:CTDBCRC): track 1 excludes the first stride/2 stereo
-    samples, the last track the final laststride/2. None if out of range."""
+    samples, the last track the final laststride/2. None if out of range.
+
+    ``laststride`` is a property of CTDB's *image* — ``[bounds[0], bounds[-1])``,
+    i.e. first-track INDEX 01 to lead-out — and must NOT be derived from ``len(pcm)``,
+    which spans ``[0, lead-out)``. The two coincide only when track 1's INDEX 01 is at
+    LBA 0. On a disc with a program-area pre-gap (ABBA *Gold*: 33 frames) they differ
+    by more than the ±700 sweep, so the last track's CRC can never match and the CTDB
+    gate becomes unpassable — see
+    private/research/incoming/ctdb-failure-abba-gold-20260725.md."""
     stride = stride_wire * 2
-    laststride = stride + (len(pcm) // 2) % stride
+    image_words = (bounds[-1] - bounds[0]) * _SPP * 2
+    laststride = stride + image_words % stride
     s = bounds[track - 1] * _SPP + offset
     e = bounds[track] * _SPP + offset
     if track == 1:
@@ -271,7 +280,19 @@ def run_ctanalyse(
         raise RuntimeError(msg)
     import json
 
-    return json.loads(proc.stdout)
+    result = json.loads(proc.stdout)
+    # The binary is built from tracked source but is itself git-ignored, so a stale
+    # local build is easy to end up with. One from before 2026-07-25 accepts --toc and
+    # ignores it, analysing [0, lead-out) instead of CTDB's image — which does not
+    # fail, it returns confident nonsense. Refuse rather than trust it.
+    if result.get("image_first_frame") != bounds[0]:
+        msg = (
+            "ctanalyse ignored --toc (analysed frame "
+            f"{result.get('image_first_frame')!r}, expected {bounds[0]}) — the binary "
+            "predates the CTDB image-domain fix; rebuild it (make -C tools/ctanalyse)"
+        )
+        raise RuntimeError(msg)
+    return result
 
 
 def apply_corrections(pcm: bytearray, corrections: list[dict]) -> int | None:
@@ -288,15 +309,49 @@ def apply_corrections(pcm: bytearray, corrections: list[dict]) -> int | None:
     return None
 
 
-def verify_ctdb(pcm: bytes, sel: Selection, bounds: list[int], n_tracks: int) -> bool:
-    ok = True
+@dataclass
+class CtdbVerdict:
+    """Per-track outcome of the CTDB CRC gate, split by the role each track played
+    in the selection. ``ok`` iff nothing is unfixed and nothing regressed."""
+
+    unfixed: list[int] = field(default_factory=list)  # called damaged, still wrong
+    regressed: list[int] = field(default_factory=list)  # was clean, now wrong
+    abstained: list[int] = field(default_factory=list)  # window outside the PCM
+
+    @property
+    def ok(self) -> bool:
+        return not self.unfixed and not self.regressed
+
+    def describe(self) -> str:
+        parts = []
+        if self.unfixed:
+            parts.append("unfixed " + ",".join(str(t) for t in self.unfixed))
+        if self.regressed:
+            parts.append("regressed " + ",".join(str(t) for t in self.regressed))
+        if self.abstained:
+            parts.append("abstained " + ",".join(str(t) for t in self.abstained))
+        return "; ".join(parts) or "all tracks match"
+
+
+def verify_ctdb(
+    pcm: bytes, sel: Selection, bounds: list[int], n_tracks: int
+) -> CtdbVerdict:
+    """Role-split CTDB CRC gate.
+
+    Every track the selection called *damaged* must now match, and every track it
+    called clean must *still* match; a track whose window falls outside the PCM
+    abstains. Splitting by role (rather than one all-or-nothing boolean) is what
+    makes the failure diagnosable — a rejected repair can say which tracks it
+    failed to fix versus which ones it broke."""
+    damaged = set(sel.damaged)
+    verdict = CtdbVerdict()
     for t in range(1, n_tracks + 1):
         crc = track_crc_at(pcm, t, sel.offset, sel.entry.stride, bounds, n_tracks)
         if crc is None:
-            continue
-        if crc != sel.entry.trackcrcs[t - 1]:
-            ok = False
-    return ok
+            verdict.abstained.append(t)
+        elif crc != sel.entry.trackcrcs[t - 1]:
+            (verdict.unfixed if t in damaged else verdict.regressed).append(t)
+    return verdict
 
 
 def verify_ar(
@@ -350,7 +405,12 @@ def _ctanalyse_and_verify(
     except (OSError, RuntimeError, ValueError) as exc:
         log.warning("ctanalyse failed: %s", exc)
         return CtdbRepairResult(
-            False, "ctanalyse failed", entry_id=sel.entry.id, used_c2=used_c2
+            False,
+            "ctanalyse failed",
+            entry_id=sel.entry.id,
+            ctdb_offset=sel.offset,
+            damaged_tracks=sel.damaged,
+            used_c2=used_c2,
         )
 
     if not result.get("can_recover"):
@@ -358,6 +418,7 @@ def _ctanalyse_and_verify(
             False,
             "damage exceeds RS capacity",
             entry_id=sel.entry.id,
+            ctdb_offset=sel.offset,
             damaged_tracks=sel.damaged,
             used_c2=used_c2,
         )
@@ -368,18 +429,31 @@ def _ctanalyse_and_verify(
             False,
             "old-byte mismatch (splice aborted)",
             entry_id=sel.entry.id,
+            ctdb_offset=sel.offset,
+            damaged_tracks=sel.damaged,
             used_c2=used_c2,
         )
 
-    if not verify_ctdb(bytes(pcm), sel, bounds, n_tracks):
+    verdict = verify_ctdb(bytes(pcm), sel, bounds, n_tracks)
+    if not verdict.ok:
         return CtdbRepairResult(
-            False, "CTDB CRC gate failed", entry_id=sel.entry.id, used_c2=used_c2
+            False,
+            f"CTDB CRC gate failed ({verdict.describe()})",
+            entry_id=sel.entry.id,
+            ctdb_offset=sel.offset,
+            damaged_tracks=sel.damaged,
+            used_c2=used_c2,
         )
     if verify_ar_gate and not verify_ar(
         bytes(pcm), sel.damaged, track_lsns, disc_last_lsn, cddb_id, read_offset
     ):
         return CtdbRepairResult(
-            False, "AccurateRip gate failed", entry_id=sel.entry.id, used_c2=used_c2
+            False,
+            "AccurateRip gate failed",
+            entry_id=sel.entry.id,
+            ctdb_offset=sel.offset,
+            damaged_tracks=sel.damaged,
+            used_c2=used_c2,
         )
 
     pcm_path.write_bytes(pcm)
@@ -446,26 +520,40 @@ def repair_whole_disc(
             False, "CTDB parity fetch failed", entry_id=sel.entry.id
         )
 
-    eras_path = None
-    used_c2 = False
+    # Erasure-assisted first (roughly double the reconstruction capacity), then
+    # error-only as a fallback. They are genuine alternatives, not one path: an
+    # over-flagging C2 bitmap can spend erasure budget on clean words and turn a
+    # decodable stride undecodable, so a failed erasure run says nothing about
+    # whether error-only would have worked.
+    attempts: list[tuple[Path | None, bool]] = [(None, False)]
     if c2_path and c2_path.exists():
         eras_path = cache / "ctdb_erasures.bin"
         eras_path.write_bytes(build_erasure_bitmap(c2_path, len(pcm) // 2, c2_align))
-        used_c2 = True
+        attempts.insert(0, (eras_path, True))
 
-    return _ctanalyse_and_verify(
-        pcm,
-        pcm_path,
-        sel,
-        parity,
-        bounds,
-        n_tracks,
-        track_lsns,
-        disc_last_lsn,
-        cddb_id,
-        read_offset,
-        eras_path,
-        used_c2,
-        ctanalyse_bin,
-        verify_ar_gate,
-    )
+    result = CtdbRepairResult(False, "no repair attempted")
+    for eras, used_c2 in attempts:
+        result = _ctanalyse_and_verify(
+            bytearray(pcm),  # fresh copy: a failed attempt must not poison the next
+            pcm_path,
+            sel,
+            parity,
+            bounds,
+            n_tracks,
+            track_lsns,
+            disc_last_lsn,
+            cddb_id,
+            read_offset,
+            eras_path=eras,
+            used_c2=used_c2,
+            ctanalyse_bin=ctanalyse_bin,
+            verify_ar_gate=verify_ar_gate,
+        )
+        if result.repaired:
+            return result
+        if used_c2:
+            log.info(
+                "CTDB erasure-assisted repair failed (%s); retrying error-only",
+                result.reason,
+            )
+    return result

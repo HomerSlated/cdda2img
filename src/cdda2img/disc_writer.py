@@ -106,17 +106,21 @@ def _run_accudisc_write(
     cmd: list[str],
     ui: TerminalUI | None,
     n_tracks: int,
-) -> tuple[int, str]:
+) -> tuple[int, str, str | None]:
     """Run ``accudisc write`` with the ``--progress-fd 1`` machine channel.
 
-    AccuDisc emits newline-delimited ``progress <done> <total>`` tokens (plus a
-    final ``summary …`` / ``write done …`` line) on the progress fd; we forward
-    the sector counts to the UI as a fraction and log the rest. stderr goes to a
-    temp file (never a pipe) so a chatty burn can't deadlock the single-threaded
-    stdout reader; it is read back for error detail. Returns
-    ``(returncode, stderr_text)``.
+    AccuDisc emits newline-delimited ``progress <done> <total>`` tokens and a
+    final ``summary … result=<token>`` line on the progress fd; we forward the
+    sector counts to the UI and keep the ``result=`` token. stderr goes to a temp
+    file (never a pipe) so a chatty burn can't deadlock the single-threaded
+    stdout reader; it is read back for error detail.
+
+    Returns ``(returncode, stderr_text, result_token)``. The token is the
+    *machine* outcome — stderr wording is explicitly not a stable interface, so
+    it must never be the thing a decision keys on.
     """
     status = f"Burning {n_tracks} track(s)…"
+    result_token: str | None = None
     with tempfile.TemporaryFile() as err_fp:
         proc = subprocess.Popen(  # noqa: S603
             [*cmd, "--progress-fd", "1"],
@@ -133,10 +137,14 @@ def _run_accudisc_write(
                 except ValueError:
                     continue
                 ui.set_status(status, done / total if total > 0 else 0.0)
+            elif parts and parts[0] == "summary":
+                for tok in parts[1:]:
+                    if tok.startswith("result="):
+                        result_token = tok.partition("=")[2]
         proc.wait()
         err_fp.seek(0)
         stderr_text = err_fp.read().decode(errors="replace")
-    return proc.returncode, stderr_text
+    return proc.returncode, stderr_text, result_token
 
 
 def _print_burn_error(ui: TerminalUI | None, stderr_text: str) -> None:
@@ -160,11 +168,19 @@ def _write_disc(
     ui: TerminalUI | None,
     track_count: int,
 ) -> None:
-    """Invoke ``accudisc write`` and map its exit code to a clear error.
+    """Invoke ``accudisc write`` and map its exit code to a clear outcome.
 
-    AccuDisc exit convention: 0 ok / 1 usage / 2 transport / 3 disc not blank.
-    Raises RuntimeError on any non-zero code, with a targeted message for the
-    common "disc not blank" case.
+    AccuDisc's tool-wide exit convention (reconciled in AccuDisc ``b547a60``,
+    2026-07-24): ``0`` clean burn; ``1`` usage; ``2`` could-not-complete — **disc
+    not written** (disc-not-blank, or any transport/device failure); ``3``
+    completed **with caveats** — the disc **was** written but some metadata is
+    imperfect (e.g. CD-Text SIZE_INFO disagrees with the ``.toc``).
+
+    Exit 3 is therefore a *success with a warning*, not a failure: we surface the
+    caveat loudly — the burn invariant is that a written disc must never *silently*
+    carry mismatched or dropped metadata — and return. Only ``1``/``2`` raise, with
+    a targeted message for the disc-not-blank case (which moved from 3 to 2 in the
+    reconciliation, hence keyed on the stderr text, not the bare code).
     """
     from cdda2img.accudisc_reader import _ACCUDISC
 
@@ -183,11 +199,26 @@ def _write_disc(
     ]
     if simulate:
         cmd.append("--simulate")
-    rc, stderr_text = _run_accudisc_write(cmd, ui, track_count)
+    rc, stderr_text, result = _run_accudisc_write(cmd, ui, track_count)
     if rc == 0:
         return
-    _print_burn_error(ui, stderr_text)
     if rc == 3:
+        # Completed WITH caveats: the disc WAS written. Surface the detail (never
+        # swallow it) and return success — do NOT raise, or the caller would treat
+        # a written disc as a failed burn.
+        for line in (ln for ln in stderr_text.splitlines() if ln.strip()):
+            _ui_print(ui, f"  {line}")
+        _ui_print(
+            ui,
+            "  WARNING: burn completed with a caveat — the disc's CD-Text may not "
+            "match its audio (see above). The audio itself was written correctly.",
+        )
+        return
+    _print_burn_error(ui, stderr_text)
+    # Keyed on AccuDisc's machine token, not on stderr wording — their contract
+    # explicitly reserves the right to reword stderr, and exit 2 also covers
+    # transport/device failure, so the exit code alone cannot disambiguate.
+    if result == "not_blank":
         msg = "disc is not blank — insert a blank CD-R/RW and retry"
         raise RuntimeError(msg)
     detail = stderr_text.strip().splitlines()[-1] if stderr_text.strip() else ""

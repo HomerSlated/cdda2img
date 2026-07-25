@@ -4,7 +4,7 @@
 Owns network, policy and writes; delegates pure math to a ctanalyse subprocess:
 
   1. derive the disc (TOC → track LSNs, lead-out, CDDB id) live from --device
-     (c2read --toc) or from an explicit --toc; no disc constants are hard-coded
+     (accudisc toc) or from an explicit --toc; no disc constants are hard-coded
   2. CTDB lookup (cached XML or live GET, keyed on the derived TOC)
   3. entry selection — highest npar among entries our clean tracks reconcile to,
      located via a CRC offset-sweep on one clean track, confirmed on the rest
@@ -20,7 +20,7 @@ detected by select_entry / ctanalyse) and the drive *read* offset (our PCM ↔
 AccurateRip-absolute, --read-offset, for the AR gate).
 
 Usage:
-    # From files (raw whole-disc PCM + its C2 capture, e.g. a c2read --full pass):
+    # From files (raw whole-disc PCM + its C2 capture, e.g. an AccuDisc read pass):
     uv run python tools/ctdb_repair.py --pcm pass.pcm --c2 pass.c2 --toc L0:L1:…:LEADOUT
     # From the live disc (reads with C2, parks the spindle after):
     env TMPDIR=/var/tmp uv run python tools/ctdb_repair.py --device /dev/sr0 --read-offset 30
@@ -49,7 +49,6 @@ import numpy as np
 _FRAME = 2352  # bytes per CD sector
 _SPP = 588  # stereo sample-pairs per sector
 _SWEEP_WINDOW = 700  # offset sweep range in stereo samples, ±
-_C2READ = "c2read"  # resolved on $PATH (symlinked into ~/.local/bin)
 
 EXIT_OK = 0
 EXIT_ERR = 1
@@ -101,70 +100,47 @@ def disc_from_toc(toc: str) -> Disc:
 
 
 def disc_from_device(device: str) -> Disc:
-    """READ TOC via c2read --toc (no drive throttle)."""
-    out = subprocess.run(  # noqa: S603 — fixed local tool
-        [_C2READ, "--device", device, "--toc"],
-        capture_output=True,
-        text=True,
-        check=True,
-    )
-    lsns: list[int] = []
-    leadout: int | None = None
-    for line in out.stdout.splitlines():
-        p = line.split()
-        if p[:1] == ["track"]:
-            lsns.append(int(p[3]))
-        elif p[:1] == ["leadout"]:
-            leadout = int(p[2])
-    if not lsns or leadout is None:
-        msg = "could not derive TOC from device"
-        raise SystemExit(msg)
-    return Disc(lsns, leadout)
+    """Track geometry via ``accudisc toc`` (no drive throttle).
+
+    Tolerates an unreadable lead-in: on the format-0x02 → 0x00 degrade the track
+    LBAs and lead-out are identical (AccuDisc cross-checks both decodes
+    byte-for-byte), so the CTDB geometry is unaffected."""
+    from cdda2img.accudisc_reader import read_toc
+
+    geom = read_toc(device)
+    # TocGeometry reports the last audio sector (lead-out - 1); Disc wants the
+    # lead-out LBA itself.
+    return Disc(geom.track_lsns, geom.disc_last_lsn + 1)
 
 
 def c2_features_ok(device: str) -> bool:
-    """True iff c2read --features reports the drive both advertises AND functionally
-    supports C2 (exit 0). The `auto` gate for whether to use C2 erasures at all."""
-    r = subprocess.run(  # noqa: S603 — fixed local tool
-        [_C2READ, "--device", device, "--features"], capture_output=True, check=False
-    )
-    return r.returncode == 0
+    """True iff AccuDisc reports the drive both advertises AND functionally supports
+    C2. The `auto` gate for whether to use C2 erasures at all."""
+    from cdda2img.accudisc_reader import drive_supports_c2
+
+    return drive_supports_c2(device)
 
 
 def read_disc(device: str, pcm_path: Path, c2_path: Path, speed: int) -> None:
-    """Full-disc read WITH C2 via c2read; park the spindle afterwards."""
+    """Full-disc read WITH C2 via AccuDisc; park the spindle afterwards."""
+    from cdda2img.accudisc_reader import park_spindle, read_disc_c2
+
     print(f"reading disc {device} (full, +C2) @ {speed}x…")
-    subprocess.run(  # noqa: S603 — fixed local tool
-        [
-            _C2READ,
-            "--device",
-            device,
-            "--full",
-            "--speed",
-            str(speed),
-            "-q",
-            "--pcm",
-            str(pcm_path),
-            "--c2",
-            str(c2_path),
-        ],
-        check=True,
-    )
-    subprocess.run(  # noqa: S603 — park spindle, done reading
-        [_C2READ, "--device", device, "--stop", "-q"], capture_output=True, check=False
-    )
+    read_disc_c2(device, pcm_path, c2_path, read_speed=speed)
+    park_spindle(device)
 
 
 # ---- C2 -> per-word erasure bitmap ------------------------------------------
 
 
 def build_erasure_bitmap(c2_path: Path, nwords: int, align_pairs: int) -> bytes:
-    """Turn a c2read C2 capture (294 B/sector, MSB-first per byte) into a per-word
+    """Turn an AccuDisc C2 capture (294 B/sector, MSB-first per byte) into a per-word
     LSB-first erasure bitmap in ctanalyse's PCM word domain.
 
     Collapse per-byte → per-sample-pair (any of 4 bytes flagged), shift by the drive's
-    C2/audio offset (align_pairs, -2 on the PX-716A per c2bench: the flag sits
-    align_pairs ahead of the error it marks), expand each pair to its 2 words, and
+    C2/audio offset (align_pairs, -2 on the PX-716A; the canonical probe is now
+    ``accudisc c2lag`` — the flag sits align_pairs ahead of the error it marks),
+    expand each pair to its 2 words, and
     packbits. packbits (not |=) is mandatory: C2 flags cluster, so many words share a
     byte and fancy-index OR silently drops duplicates."""
     raw = np.fromfile(c2_path, dtype=np.uint8)
@@ -247,9 +223,15 @@ def track_crc_at(
     """CTDB per-track CRC32 of *track*'s window shifted by *offset* stereo samples.
 
     Edge-aware (AccurateRip.cs:CTDBCRC): track 1 excludes the first stride/2 stereo
-    samples, the last track the final laststride/2. Returns None if out of range."""
+    samples, the last track the final laststride/2. Returns None if out of range.
+
+    ``laststride`` belongs to CTDB's *image* — ``[bounds[0], bounds[-1])``, first-track
+    INDEX 01 to lead-out — not to ``len(pcm)``, which spans ``[0, lead-out)``. They
+    coincide only when track 1's INDEX 01 is at LBA 0; see
+    private/research/incoming/ctdb-failure-abba-gold-20260725.md."""
     stride = stride_wire * 2
-    laststride = stride + (len(pcm) // 2) % stride
+    image_words = (disc.bounds[-1] - disc.bounds[0]) * _SPP * 2
+    laststride = stride + image_words % stride
     s = disc.bounds[track - 1] * _SPP + offset
     e = disc.bounds[track] * _SPP + offset
     if track == 1:
@@ -470,7 +452,7 @@ def main() -> int:
     ap.add_argument("--device", help="read the disc live (with C2) instead of files")
     ap.add_argument("--pcm", type=Path, help="whole-disc s16le PCM (raw or corrected)")
     ap.add_argument(
-        "--c2", type=Path, help="matching c2read C2 capture (enables erasures)"
+        "--c2", type=Path, help="matching AccuDisc C2 capture (enables erasures)"
     )
     ap.add_argument("--toc", help="colon TOC L0:L1:…:LEADOUT (required with --pcm)")
     ap.add_argument(

@@ -132,6 +132,33 @@ def test_read_disc_c2_inline_leadin(monkeypatch: pytest.MonkeyPatch) -> None:
     assert cmd[cmd.index("--cdtext") + 1] == "a.cdtext"
 
 
+def test_read_disc_c2_metadata_only_omits_pcm_and_c2(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The parity gate wants sub + lead-in only: a whole-disc read with no audio
+    # write. Omitting output_pcm/output_c2 must drop --pcm/--c2f entirely (no
+    # ~600 MB PCM), while --sub/--fulltoc/--cdtext still appear.
+    calls = _patch_run(monkeypatch)
+    ar.read_disc_c2(
+        "/dev/sr0",
+        output_sub=Path("a.sub"),
+        output_fulltoc=Path("a.fulltoc"),
+        output_cdtext=Path("a.cdtext"),
+    )
+    (cmd,) = calls
+    assert cmd[:4] == [_ACC, "--device", "/dev/sr0", "read"]
+    assert "--pcm" not in cmd
+    assert "--c2f" not in cmd
+    assert cmd[cmd.index("--sub") : cmd.index("--sub") + 4] == [
+        "--sub",
+        "raw",
+        "--subf",
+        "a.sub",
+    ]
+    assert cmd[cmd.index("--fulltoc") + 1] == "a.fulltoc"
+    assert cmd[cmd.index("--cdtext") + 1] == "a.cdtext"
+
+
 def test_read_disc_c2_exit_3_is_completed(monkeypatch: pytest.MonkeyPatch) -> None:
     # Exit 3 = completed with caveats (hard/suspect/residual C2) — not a failure.
     monkeypatch.setattr(ar.subprocess, "run", lambda *a, **k: _Result(returncode=3))

@@ -986,9 +986,32 @@ gates (AR v1/v2, CTDB CRC + parity) and the disc geometry.
 | Tracy Chapman | 40,32,24,8,4 | R0–R4 | **off** | — | `spans=0` at every speed — C2 off = no localization surface |
 | Tracy Chapman | 40,32,24,8,4 | R0–R4 + ctdb + ctdb-noc2 | on | localized, **intermittent** | the full matrix — §12.3 |
 
-**Gap:** ZZ Top and ABBA predate the ctdb rungs (no CTDB parity data for either);
-Tracy is the only disc with full coverage. A fair cross-disc CTDB comparison needs
-a backfill pass on both (deferred).
+**Gap:** ZZ Top and ABBA predate the ctdb rungs; Tracy is the only disc with full
+coverage. A fair cross-disc CTDB comparison needs a backfill pass on both (deferred).
+
+> **Corrected 2026-07-25:** the parenthetical "no CTDB parity data for either" was
+> wrong for ABBA *Gold* — it is in CTDB with parity (entry 829896, confidence 1430,
+> npar 8). What actually happened is that CTDB repair was *structurally impossible*
+> on that disc until the domain fix below, so it looked like absent data.
+>
+> **The ABBA *Gold* CTDB domain defect.** CTDB's parity and per-track CRCs are
+> computed over `[first-track INDEX 01, lead-out)`; our PCM spans `[LBA 0, lead-out)`.
+> On the ~all discs whose track 1 starts at LBA 0 these coincide. ABBA *Gold* has a
+> 33-frame program-area pre-gap, so they differed, with two consequences:
+> `ctdb_repair.track_crc_at` derived `laststride` from the PCM buffer, over-trimming
+> the *last* track's CRC window by 1,764 sample-pairs — outside the ±700 sweep, so
+> the CTDB gate could never pass; and `ctanalyse` silently ignored `--toc`, shifting
+> its RS grid by 3 whole strides and emitting 7,375 confident-but-wrong corrections
+> on a provably perfect rip. The CTDB CRC gate rejected them, so no data was harmed,
+> and the speed ladder recovered the disc instead.
+>
+> Fixed 2026-07-25: `laststride` now comes from `(bounds[-1] - bounds[0])`,
+> `ctanalyse` honours `--toc`, `verify_ctdb` reports per-track roles
+> (unfixed / regressed / abstained), the decline reason reaches PROV
+> (`ctdb_declined`), and a failed erasure-assisted run now falls back to error-only.
+> Verified end-to-end on this disc: 5 deliberately damaged words in track 5 repaired
+> bit-exactly through both gates. Full analysis:
+> `private/research/incoming/ctdb-failure-abba-gold-20260725.md`.
 
 ### 12.3 The Tracy full matrix (run2)
 

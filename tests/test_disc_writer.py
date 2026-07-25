@@ -110,18 +110,47 @@ def test_burn_simulate_appends_flag(tmp_path, monkeypatch):
     assert "--simulate" in cap["cmd"]
 
 
-def test_burn_exit_3_reports_disc_not_blank(tmp_path, monkeypatch):
+def test_burn_exit_2_not_blank_reports_disc_not_blank(tmp_path, monkeypatch):
+    # AccuDisc b547a60 moved disc-not-blank from exit 3 to exit 2 (a
+    # could-not-complete precondition), and a76ede2 added the machine token that
+    # disambiguates it from a transport failure. The stderr text here deliberately
+    # does NOT say "not blank": the decision must rest on result=not_blank alone,
+    # because stderr wording is explicitly not a stable interface.
     rbi = _tiny_rbi(tmp_path)
-    _patch_popen(monkeypatch, "", returncode=3)
+    monkeypatch.setattr(
+        disc_writer,
+        "_run_accudisc_write",
+        lambda *a, **k: (2, "accudisc: could not start the burn", "not_blank"),
+    )
     with pytest.raises(RuntimeError, match="not blank"):
         disc_writer.burn_disc(rbi, device="/dev/sr0", yes=True)
 
 
 def test_burn_transport_error_raises(tmp_path, monkeypatch):
+    # Exit 2 with result=error = a real transport/device failure → generic message.
     rbi = _tiny_rbi(tmp_path)
-    _patch_popen(monkeypatch, "", returncode=2)
+    monkeypatch.setattr(
+        disc_writer,
+        "_run_accudisc_write",
+        lambda *a, **k: (2, "scsi: I/O error", "error"),
+    )
     with pytest.raises(RuntimeError, match="exit 2"):
         disc_writer.burn_disc(rbi, device="/dev/sr0", yes=True)
+
+
+def test_burn_exit_3_is_caveat_success_not_failure(tmp_path, monkeypatch, capsys):
+    # Exit 3 = completed WITH caveats: the disc WAS written (e.g. CD-Text SIZE_INFO
+    # disagrees with the .toc). Must NOT raise, and must surface the caveat loudly.
+    rbi = _tiny_rbi(tmp_path)
+    monkeypatch.setattr(
+        disc_writer,
+        "_run_accudisc_write",
+        lambda *a, **k: (3, "accudisc: CD-Text SIZE_INFO 1-12 != .toc 1-2", "ok"),
+    )
+    disc_writer.burn_disc(rbi, device="/dev/sr0", yes=True)  # no raise
+    out = capsys.readouterr().out
+    assert "caveat" in out.lower()
+    assert "SIZE_INFO" in out
 
 
 # ── CATALOG sanitization ──────────────────────────────────────────────────────

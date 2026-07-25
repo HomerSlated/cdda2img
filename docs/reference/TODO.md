@@ -2,6 +2,208 @@
 
 ## Open
 
+### ✅ DONE 2026-07-25 — CD-Text titles shift by one when a track has no title (2026-07-24)
+
+**Fixed.** `cdtext.py:_decode_strings` was rewritten to re-sync to each pack's declared
+track number while walking the stream (accumulate-then-commit), so a pack header is
+honoured even mid-string. Resyncing only at string *boundaries* is a trap that yields a
+different wrong answer (gap reported at track 16) — AccuDisc's warning caught that before
+it shipped. Regression tests added in `tests/test_cdtext.py`
+(`test_track_with_no_string_does_not_shift_the_rest`,
+`test_continuation_pack_header_overrides_the_running_count`); the test helpers were also
+fixed, since they had been writing track `0` into continuation packs, which no real disc
+does. The encoder half (cdrdao dropping U+2010) is closed separately by `fold_cdtext` plus
+the AccuDisc transition removing cdrdao from the burn path.
+
+Original analysis follows.
+
+
+Found by the Step-D burn verification (report:
+`private/research/incoming/burn-verify-abba-gold-20260724.md`). The CD-R under test carries
+**no CD-Text TITLE for track 13**; `cd-info` and libmirage both read track 13 as
+PERFORMER-only. Our decoder **compacts the gap**: every title from 13 onward shifts up one
+and track 19 becomes a duplicate — 6 of 19 titles wrong, silently, on a disc that reads
+clean. "Voulez-Vous" appears nowhere in the output, so this is a positional shift, not a bad
+metadata match.
+
+**Two separate defects, don't conflate them.** *Why* the gap exists: the source RBI's track
+13 title is `"Voulez‐Vous (edit)"` with **U+2010 HYPHEN**, unrepresentable in CD-Text block 0.
+The encoder that discarded it is **cdrdao's** — the original §10 bug, observed end-to-end on
+physical media (AccuDisc has no string→pack encoder; libmirage measurably round-trips U+2010
+intact; the blob's 504 payload bytes contain zero non-ASCII). Our `fold_cdtext` fix stops us
+handing cdrdao unencodable characters, and the AccuDisc transition removes cdrdao from the
+burn path entirely, eliminating the class. *This* item is the decoder half — a gap must never
+shift the other titles, whatever caused it — and is worth fixing independently.
+
+**Root cause confirmed** against the disc's raw packs (`accudisc cdtext`, 760 B): the TITLE
+(0x80) stream holds **18 strings for 19 tracks with no empty string and no NUL placeholder**
+for track 13 (`…Fernando\x00Gimme! Gimme!…`). Sequential NUL-counting therefore *cannot*
+land correctly. The absent track is visible only in the **per-pack track number** (pack
+byte 1), which names the track whose string starts in that pack; on this disc those run
+`… 9 9 11 12 14 14 14 14 15 15 17 17 17 18 18 19` — the pack beginning the final string
+declares 19, so a header-driven decoder ends on Waterloo=19 while ours ends on Waterloo=18
+plus a duplicate. `cd-info` and libmirage both re-sync per pack and both get it right.
+
+`subq_toc.py:136` maps by track *number* and is not the culprit. The defect is
+`cdtext.py:_decode_strings` (241-259), which takes `first_track` from the first pack and
+then counts sequentially. **Fix:** re-sync to each pack's declared starting track while
+walking the stream. Regression fixture: capture this disc's packs into `tests/fixtures/`
+(no sparse-title capture exists today) — note it is a commercial pressing's CD-Text, so
+keep the fixture minimal (the TITLE packs around the gap suffice).
+
+### ✅ DONE 2026-07-25 — CTDB repair was structurally impossible on a disc whose track 1 starts at LBA > 0
+
+Found by investigating why CTDB declined on the 2026-07-25 ABBA *Gold* rip (it was the
+first CTDB failure ever seen). Two defects, one trigger: CTDB's parity and per-track CRCs
+cover `[first-track INDEX 01, lead-out)` while our PCM spans `[0, lead-out)`, and the two
+coincide only when track 1's INDEX 01 is at LBA 0 — true of every test disc we had.
+
+`ctdb_repair.track_crc_at` derived `laststride` from the PCM buffer, over-trimming the last
+track's CRC window by 1,764 sample-pairs (outside the ±700 sweep, so the gate could never
+pass); and `ctanalyse` accepted `--toc` and silently ignored it, shifting its RS grid by 3
+whole strides and emitting 7,375 confident-but-wrong corrections against a provably perfect
+rip. The CTDB CRC gate rejected them, so no audio was harmed.
+
+Fixed: domain-correct `laststride` (both copies), `ctanalyse` honours `--toc` and reports
+`image_first_frame`/`image_frames` so a stale binary is refused rather than trusted,
+`verify_ctdb` returns per-track roles (unfixed/regressed/abstained), `ctdb_declined` reaches
+PROV, and a failed erasure-assisted run falls back to error-only. New
+`tests/test_ctdb_repair.py` (13 tests, every geometry fixture uses `bounds[0] != 0`) — there
+was no test file for this module at all. Analysis:
+`private/research/incoming/ctdb-failure-abba-gold-20260725.md`.
+
+**Still open from it:** the C2 erasure-bitmap origin shift is correct by arithmetic but has
+not been exercised on real damaged media with `bounds[0] != 0`.
+
+### Whole-disc AR miss disables per-track recovery (2026-07-24)
+
+Same report, §2b. The Step-D CD-R readback contained **15 stereo samples of a transient read
+error** at LBA 327495 that two re-reads did not reproduce. Whether C2 flagged it is *not
+known and cannot now be established* — the `.c2` sidecar lived in the per-invocation
+`TempFiles` mkdtemp and a fresh capture would measure a different read; do not assume C2
+missed it (that would contradict the ~99 % precision banked from c2bench).
+`_recover_failed_tracks` fires only on a *partial* AR mismatch; here the wrong
+read offset (`+30` applied to a disc burned uncorrected on the same drive) made **every**
+track miss, so the partial condition never held and no recovery ran. Consider: treat a
+whole-disc AR miss as a trigger for an offset probe (AR `detect_offset`) before concluding
+"not in DB", and/or let C2-flagged sectors trigger re-reads independently of AR. Worth
+folding into the §9 recovery-profile work rather than patching separately.
+
+### DONE 2026-07-25 — disc-not-blank now keys on AccuDisc's machine token
+
+AccuDisc shipped it in `a76ede2` (`summary … result=not_blank`). `_run_accudisc_write` now
+returns `(rc, stderr, result_token)` and `_write_disc` keys not-blank on the token, not on
+stderr wording. The regression test deliberately supplies stderr that does *not* contain
+"not blank", so the decision can only come from the token.
+
+<details><summary>original item</summary>
+
+### Switch disc-not-blank detection from stderr scrape to AccuDisc's machine token (2026-07-24)
+
+`disc_writer._write_disc` currently distinguishes exit-2 disc-not-blank from exit-2
+transport failure by `"not blank" in stderr_text.lower()`. That works but keys on stderr
+*wording*, which AccuDisc's machine-interface contract explicitly reserves the right to
+change (stderr is not a stable interface). AccuDisc agreed (their §t) to emit a machine
+token on `--progress-fd` for the burn-didn't-start cases — `summary ... result=not_blank` /
+`result=error`. **When that ships:** parse the `summary` line's `result=` in
+`_run_accudisc_write` (it already reads the `--progress-fd` stream and ignores `summary`),
+return it alongside `(rc, stderr)`, and key not-blank on `result=not_blank` — dropping the
+stderr scrape. Interim stderr match stays until then (degrades to the generic exit-2 message
+if the wording changes, so no burn misbehaves). Confirm the token's exact final spelling
+(field order, whether `mode=burn` is always present) against AccuDisc before writing the parse.
+
+</details>
+
+### RESOLVED BY RETIREMENT — c2read deleted 2026-07-24; hazard recorded for reuse
+
+**c2read is retired.** Archived to `private/deprecated/c2read-20260724.tar.gz` (13 entries)
+and deleted from the tree: `tools/c2read/` (C tool), `src/cdda2img/c2_reader.py`,
+`tests/test_c2_reader.py`, `tools/c2read_recovery_test.py`, `tools/c2bench.py`,
+`tools/c2timing.py`, `tools/cx_census.py`, `tools/modepage_experiment.py`,
+`docs/reference/c2read-upgrade-plan.md`. AccuDisc superseded all of it. 1273 tests pass
+(−14 = the deleted wrapper's tests); `make check` green.
+
+**Two tools kept that shelled out to `c2read` — retargeted to AccuDisc 2026-07-24** (they
+were never c2read material, they merely used it as a capture engine). Both now route through
+`cdda2img.accudisc_reader`:
+- `tools/ctdb_repair.py` — `c2read --toc/--features/--full/--stop` → `read_toc` /
+  `drive_supports_c2` / `read_disc_c2` + `park_spindle`.
+- `tools/toc_parity.py` — `c2read --full` (sub + lead-in, no PCM) → `read_disc_c2` with
+  `output_pcm`/`output_c2` omitted. That required widening `read_disc_c2` to make those two
+  outputs optional (backward-compatible; test `test_read_disc_c2_metadata_only_omits_pcm_and_c2`).
+  The cdrdao read-toc *reference* side stays — it is the parity gate's baseline until cdrdao
+  itself is removed in a later migration phase.
+Nothing in the tree references `c2read` any more.
+
+The transfer-length hazard below is **no longer live for us** (no raw-SCSI code remains in
+this repo) but is recorded because it is subtle, it cost AccuDisc three months, and it will
+apply again to anything that issues SCSI here or reviews AccuDisc's.
+
+#### The hazard (for reuse, not for action)
+
+Found by AccuDisc (their §n retraction, fixed their side in `8bda198`) and **confirmed by
+reading ours**. A two-step SCSI allocation that sizes the second transfer straight from the
+returned data-length header can produce an **odd** length; ATAPI moves data 16 bits at a
+time, so the host adapter rejects it **before the drive answers** — Linux `host_status =
+DID_ERROR (0x07)`, driver `0x00`, **no sense**. It then surfaces as a bare I/O error and is
+easily misread as a *disc-health* verdict rather than a *transfer* fault (that misreading
+cost AccuDisc three months and produced a false `degrade=leadin_unreadable` on Stanley
+Road).
+
+A full TOC is `4 + 11*ndesc` with `ndesc = 3 (A0/A1/A2) + ntracks`, i.e. **`37 +
+11*ntracks`** — **odd on every disc with an EVEN track count**. Stanley Road (12 tracks →
+169) failed every run; an 11-track disc (158) never did.
+
+Both sites in `tools/c2read/c2read.c`:
+- `dump_toc_format()` — `len = ((hdr[0]<<8)|hdr[1]) + 2` (L221) → `scsi_in(..., buf, len,
+  ...)` (L232). Exposes **format 0x02** (full TOC) on every even-track disc.
+- `mode_sense10()` — `len = ((buf[0]<<8)|buf[1]) + 2` (L329) → `scsi_in(..., buf, len,
+  ...)` (L333); `mode_select10()` inherits that `len` into `io.dxfer_len` (L363).
+
+Parity by format (corrected by AccuDisc §o — our first pass said "only 0x02", which was
+narrowly incomplete):
+- **0x02 full TOC — exposed.** 11-byte descriptors → `37 + 11*ntracks`, odd on even track
+  counts.
+- **0x03 PMA — also exposed.** Same 11-byte descriptors, same `4 + 11*n` parity. Neither
+  project issues 0x03 today, so it is theoretical — but it is the same trap if PMA is ever
+  reached for during recovery.
+- **0x05 CD-Text — structurally immune.** A blob is `4 + 18*npacks`; `18*npacks` is always
+  even, so the length is always even regardless of pack count (including the 33/35
+  ring-fill cases).
+- **0x00 / 0x01 — immune.** 8-byte descriptors.
+
+Fix is one helper (round any header-derived transfer length up to even) — AccuDisc's is
+`adsc_alloc_even`. **Put it in the shared two-step reader, not per-format**, so every
+format is covered regardless of which is used.
+
+**Second-order trap, found in AccuDisc's fix by our review and fixed there in `f6494c1`:**
+rounding then clamping re-introduces the bug — `len = even(len); if (len > cap) len = cap;`
+hands an **odd `cap`** straight back out. Clamp to `cap & ~1u`. c2read's `mode_sense10()`
+had exactly this clamp shape, and its `len` fed `mode_select10()`, so an odd cap would have
+gone out on a **write** as well as a read.
+
+**Observed consequence, measured on Stanley Road (PX-716A, AccuDisc `8bda198`):** the
+even-rounded read returned **one byte more than the header declares** — file 170 B, header
+`datalen=167` → declared total 169, one trailing pad byte (`0x2b`), `ndesc=15` = 3 pointers
++ 12 tracks. The pad is drive buffer residue, not data. Does not affect 0x05:
+`4 + 18*npacks` is always even, so CD-Text needs no rounding and gets no pad — confirmed
+empirically (a post-fix CD-Text re-capture of the same disc is **byte-identical** to the
+pre-fix 148 B capture) and structurally on AccuDisc's side (`test_alloc_even` asserts no
+CD-Text length pads for npacks 1..64).
+
+> **Reporting this upstream fixed it at source, and found a second bug (AccuDisc `e9df8c7`,
+> their §q).** (1) The pad was escaping as *data* — rounding is a **transfer** concern, but
+> the padded figure was being reported as the **response length**. Now requests
+> `alloc_even(len)` and reports `len`; the same disc dumps **169 bytes, pad 0**. (2) Found
+> while re-reading that code: the clamp was `0xffff` (**odd**) *then* round → `0x10000`,
+> which truncates to **0** in the 16-bit allocation-length field — a *zero-length* request,
+> not a short read. Now clamps to `0xfffe`.
+>
+> So: "compare by header-declared length, not file size" remains the right defensive habit
+> for any dump taken **before `e9df8c7`** (including our delivered
+> `stanley_road__fulltoc_12tracks.bin`, 170 B — kept deliberately as a marker of the bug).
+> From `e9df8c7` the artefact is clean at source and file size is a safe comparison again.
+
 ### SECURITY AUDIT — `toc_parser.py` accepts untrusted foreign TOCs (2026-07-24)
 
 Found while cross-checking AccuDisc's parser injection report. `toc_parser.py` is
@@ -22,39 +224,11 @@ Fix shape (same as AccuDisc's): quote-aware scan; an unterminated quote at end-o
 is a hard parse error. Start from AccuDisc's injected-TOC fixture. Their equivalent bug
 produced a phantom track, shifted lead-out and attacker-chosen ISRC returned as OK.
 
-**Do NOT weaken `escape_toc_string`** — until AccuDisc's quote-aware parse ships it is
-the only thing protecting *their* burn layout from MusicBrainz free text. Cross-project
-contract, recorded in `accudisc-migration-plan.md`.
-
-### CD-Text transliteration — one character silently drops the whole lead-in (2026-07-24)
-
-A real burn proved it: `TITLE "Voulez‐Vous (edit)"` carries **U+2010 HYPHEN** (from
-MusicBrainz). cdrdao cannot encode it into the CD-Text charset, so it **dropped all 20
-CD_TEXT blocks, exited 0, and logged "Writing CD-TEXT lead-in..."**. The disc has
-perfect audio and no CD-Text.
-
-Root cause is a layering collision, not a short list:
-- `TITLE` → `escape_toc_string` only, **Unicode deliberately preserved** (GRD-2026-0531-01,
-  for FLAC-extraction fidelity).
-- `PERFORMER` → `sanitize_title`, ASCII-only.
-A `CD_TEXT` block is not free text — it is input to a charset-limited encoder.
-
-`sanitize_title` is separately wrong: `re.sub(r"[^\x00-\x7F]+", "", text)` **deletes**
-unmapped characters, so `Voulez‐Vous` → `VoulezVous`. Silent, lossy, and indistinguishable
-from success to every layer above.
-
-Agreed fix (with AccuDisc, 2026-07-24): **transliterate, do not refuse** — this is
-*authored* metadata synthesised from MusicBrainz, not preserved data (ABBA's pressing
-carries no CD-Text at all), so "prefer no data over wrong data" does not reach it.
-1. Decide at **TOC-generation** time, never at burn time (by then the cost is media).
-2. **Report every substitution**, per string. Silence is the actual defect.
-3. Refuse only an **unmappable field**, loudly — never the whole lead-in.
-
-Mechanism: do **not** extend the 6-entry table (same bug, longer table). Use published
-Latin-ASCII folding (ICU/CLDR, or `unidecode` — not currently a dependency), then attempt
-the target-charset encode, and treat whatever still fails as the reportable set. Note
-**normalisation will not help**: U+2010 has an empty decomposition and NFD/NFC/NFKD/NFKC
-all leave it unchanged (verified).
+**Keep `escape_toc_string` regardless of the audit outcome.** AccuDisc's quote-aware
+parse has now shipped (`a619854`, their §2026-07-24i), so on the *burn* side it is
+defence-in-depth rather than load-bearing — but on **this** (import/read) side it is
+still the primary guard: `accudisc_write()` never runs on an imported foreign `.toc`.
+Cross-project contract, recorded in `accudisc-migration-plan.md` §10.1.
 
 ### NEXT SESSION — USER-AUTHORIZED (2026-07-05): default flip + pre-emphasis virtual disc
 

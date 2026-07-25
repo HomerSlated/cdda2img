@@ -37,8 +37,7 @@ import logging
 from typing import TYPE_CHECKING
 
 from cdda2img.cdtext import PTI_TITLE, parse_cdtext
-from cdda2img.disc_reader import RipInfo
-from cdda2img.rbi_format import RBIDisc, RBITocEntry
+from cdda2img.rbi_format import RBIDisc, RBITocEntry, RipInfo
 from cdda2img.subchannel import (
     SubcodeScan,
     TrackLayout,

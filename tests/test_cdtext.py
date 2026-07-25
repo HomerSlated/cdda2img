@@ -37,20 +37,33 @@ def _pack(
     return p + bytes([crc >> 8, crc & 0xFF])
 
 
+def _pack_owners(first_track: int, strings: list[bytes]) -> list[int]:
+    """Per-payload-byte track number, matching how real discs fill pack byte [1].
+
+    A pack's byte [1] names the track whose string is in progress at that pack's
+    *first payload byte* — so continuation packs restate the current track, they
+    do not carry 0. Verified against a real PX-716A capture, whose TITLE headers
+    run ``0 0 1 2 2 3 3 4 5 5 …``. A string's terminating NUL belongs to the
+    string it terminates.
+    """
+    owners: list[int] = []
+    track = first_track
+    for s in strings:
+        owners.extend([track] * (len(s) + 1))  # bytes + terminating NUL
+        track += 1
+    return owners
+
+
 def _text_packs(
     pti: int, first_track: int, strings: list[str], *, block: int = 0, seq0: int = 0
 ) -> list[bytes]:
-    payload = b"\x00".join(s.encode("latin-1") for s in strings) + b"\x00"
-    return [
-        _pack(
-            pti,
-            first_track if i == 0 else 0,
-            seq0 + i // 12,
-            block,
-            payload[i : i + 12],
-        )
-        for i in range(0, len(payload), 12)
-    ]
+    return _text_packs_bytes(
+        pti,
+        first_track,
+        [s.encode("latin-1") for s in strings],
+        block=block,
+        seq0=seq0,
+    )
 
 
 def test_album_and_track_titles_span_packs():
@@ -143,11 +156,17 @@ def test_latin1_payload_still_decodes():
 
 
 def _text_packs_bytes(
-    pti: int, first_track: int, strings: list[bytes], *, block: int = 0
+    pti: int,
+    first_track: int,
+    strings: list[bytes],
+    *,
+    block: int = 0,
+    seq0: int = 0,
 ) -> list[bytes]:
     payload = b"\x00".join(strings) + b"\x00"
+    owners = _pack_owners(first_track, strings)
     return [
-        _pack(pti, first_track if i == 0 else 0, i // 12, block, payload[i : i + 12])
+        _pack(pti, owners[i], seq0 + i // 12, block, payload[i : i + 12])
         for i in range(0, len(payload), 12)
     ]
 
@@ -171,3 +190,42 @@ def test_real_cdemu_capture_utf8_titles():
 def test_malformed_length_raises():
     with pytest.raises(ValueError, match="neither"):
         parse_cdtext(_HDR + b"\x00" * 17)
+
+
+# ── a track carrying no string at all (2026-07-24) ───────────────────────────
+#
+# ABBA *Gold* encodes 18 TITLE strings for 19 tracks: track 13 has no title AND
+# no empty-string placeholder. The gap is visible only in the per-pack track
+# number, and on that disc the correction lands MID-STRING — so a decoder that
+# counts NULs, or that resyncs only at string boundaries, mis-titles the disc
+# (differently in each case). Shape reproduced synthetically below; the real
+# 760-byte capture stays out of the repo (commercial pressing).
+
+
+def test_track_with_no_string_does_not_shift_the_rest():
+    payload = b"One\x00Two\x00Three\x00"
+    packs = [
+        # "One\x00Two\x00Thr" — opens on track 1's string.
+        _pack(PTI_TITLE, 1, 0, 0, payload[0:12]),
+        # "ee\x00" — opens MID-"Three", and its header says that string is
+        # track 4's. Track 3 carries nothing at all.
+        _pack(PTI_TITLE, 4, 1, 0, payload[12:]),
+    ]
+    (b,) = parse_cdtext(_HDR + b"".join(packs))
+    assert b.track_title(1) == "One"
+    assert b.track_title(2) == "Two"
+    assert b.track_title(3) is None, "the gap must be preserved, not closed up"
+    assert b.track_title(4) == "Three", "a mid-string header must be honoured"
+    assert b.track_title(5) is None, "the tail must not be duplicated"
+
+
+def test_continuation_pack_header_overrides_the_running_count():
+    """Even with no gap, byte [1] — not the NUL count — decides placement."""
+    payload = b"Alpha\x00Beta\x00"
+    packs = [
+        _pack(PTI_TITLE, 7, 0, 0, payload[0:12]),
+        _pack(PTI_TITLE, 8, 1, 0, payload[12:]),
+    ]
+    (b,) = parse_cdtext(_HDR + b"".join(packs))
+    assert b.track_title(7) == "Alpha"
+    assert b.track_title(8) == "Beta"

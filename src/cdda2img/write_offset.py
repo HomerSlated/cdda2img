@@ -38,6 +38,7 @@ _SAMPLE_RATE = 44100
 _CHANNELS = 2
 _SAMPLE_WIDTH = 2  # bytes per channel per sample (s16)
 _FRAME_BYTES = _CHANNELS * _SAMPLE_WIDTH  # 4 bytes per stereo sample pair
+_SAMPLES_PER_FRAME = 588  # stereo sample pairs per CD frame (2352 / 4)
 
 _DURATION_S = 75
 _DURATION = _DURATION_S * _SAMPLE_RATE  # 3_307_500 stereo sample pairs
@@ -74,8 +75,24 @@ def results_path(slug: str) -> Path:
 # ── test signal generation ────────────────────────────────────────────────────
 
 
+def _msf(frames: int) -> str:
+    m, rem = divmod(frames, 75 * 60)
+    s, f = divmod(rem, 75)
+    return f"{m:02d}:{s:02d}:{f:02d}"
+
+
 def generate_test_signal(wav_path: Path, toc_path: Path) -> None:
-    """Write a 75-second WAV with noise bursts at two known sample positions."""
+    """Write a 75-second test signal with noise bursts at two known positions.
+
+    Emits three files: the WAV (kept for inspection), a raw s16le ``.pcm`` beside
+    it (what ``accudisc write --bin`` consumes), and the TOC.
+
+    The ``FILE`` line carries **both** fields in MSF. AccuDisc's ``.toc`` parser
+    requires that and refuses the bare-integer form outright — deliberately, since
+    cdrdao's grammar reads a bare start as *samples* and a bare length as *bytes*,
+    which is a silent-misread waiting to happen. The old ``FILE "x.wav" 0`` here
+    would have been rejected with an unhelpful "invalid argument".
+    """
     rng = np.random.default_rng(_PULSE_SEED)
     pulse = rng.integers(-32767, 32767, (_PULSE_LEN, _CHANNELS), dtype=np.int16)
 
@@ -89,79 +106,94 @@ def generate_test_signal(wav_path: Path, toc_path: Path) -> None:
         wf.setsampwidth(_SAMPLE_WIDTH)
         wf.setframerate(_SAMPLE_RATE)
         wf.writeframes(audio.tobytes())
+    pcm_path(wav_path).write_bytes(audio.tobytes())
 
-    # cdrdao FILE path is relative to the TOC file's directory
+    length = _msf(_DURATION // _SAMPLES_PER_FRAME)
     toc_path.write_text(
         "CD_DA\n\n"
         "TRACK AUDIO\n"
         "  NO COPY\n"
         "  NO PRE_EMPHASIS\n"
         "  TWO_CHANNEL_AUDIO\n"
-        f'  FILE "{wav_path.name}" 0\n'
+        f'  FILE "{pcm_path(wav_path).name}" 00:00:00 {length}\n'
     )
 
 
-# ── cdrdao wrappers ───────────────────────────────────────────────────────────
+def pcm_path(wav_path: Path) -> Path:
+    """Raw s16le companion of the generated test WAV (the burner's ``--bin``)."""
+    return wav_path.with_suffix(".pcm")
+
+
+# ── AccuDisc wrappers (M7) ────────────────────────────────────────────────────
+
+
+def _accudisc() -> str:
+    from cdda2img.accudisc_reader import _ACCUDISC
+
+    return _ACCUDISC
 
 
 def burn_disc(toc_path: Path, device: str, speed: int) -> None:
-    """Burn the TOC+WAV at *toc_path* to the disc in *device*.
+    """Burn the TOC + raw PCM at *toc_path* to the disc in *device*.
 
-    cwd is set to the TOC directory so cdrdao resolves the relative FILE path.
-    Raises RuntimeError on non-zero exit.
+    Exit 3 is *completed with caveats* — the disc was written — so only 0 and 3
+    are success. Raises RuntimeError otherwise.
     """
+    wav = toc_path.with_name(toc_path.stem + ".wav")
     result = subprocess.run(  # noqa: S603  # LINT-013
-        [  # noqa: S607  # LINT-013
-            "cdrdao",
-            "write",
+        [
+            _accudisc(),
             "--device",
             device,
+            "write",
+            "--toc",
+            str(toc_path.resolve()),
+            "--bin",
+            str(pcm_path(wav).resolve()),
             "--speed",
             str(speed),
-            "--eject",
-            toc_path.name,
         ],
-        cwd=str(toc_path.parent.resolve()),
     )
-    if result.returncode != 0:
-        msg = f"cdrdao write failed (exit {result.returncode})"
+    if result.returncode not in (0, 3):
+        msg = f"accudisc write failed (exit {result.returncode})"
         raise RuntimeError(msg)
+    eject(device)
 
 
 def rip_disc(device: str, bin_path: Path, toc_path: Path) -> None:
-    """Rip *device* to *bin_path* / *toc_path* via cdrdao read-cd.
+    """Read *device* back to *bin_path* as raw s16le PCM via ``accudisc read``.
 
-    Raises RuntimeError on non-zero exit.
+    *toc_path* is accepted for call-site compatibility and is no longer written:
+    the measurement only needs the audio, and the geometry is already known (we
+    burned it). Exit 3 = completed with caveats, which for a freshly burned test
+    disc means flagged sectors — the pulse search tolerates those, so it counts
+    as success.
     """
     bin_path.unlink(missing_ok=True)
     toc_path.unlink(missing_ok=True)
     result = subprocess.run(  # noqa: S603  # LINT-013
-        [  # noqa: S607  # LINT-013
-            "cdrdao",
-            "read-cd",
+        [
+            _accudisc(),
             "--device",
             device,
-            "--datafile",
+            "read",
+            "--pcm",
             str(bin_path.resolve()),
-            str(toc_path.resolve()),
         ],
     )
-    if result.returncode != 0:
-        msg = f"cdrdao read-cd failed (exit {result.returncode})"
+    if result.returncode not in (0, 3):
+        msg = f"accudisc read failed (exit {result.returncode})"
         raise RuntimeError(msg)
 
 
 def eject(device: str) -> None:
     """Eject the disc from *device* (best-effort; never raises)."""
-    subprocess.run(["eject", device], check=False)  # noqa: S603, S607
+    subprocess.run(  # noqa: S603
+        [_accudisc(), "--device", device, "eject"], check=False
+    )
 
 
 # ── PCM analysis ──────────────────────────────────────────────────────────────
-
-
-def _swap_be_to_le(data: bytes) -> bytes:
-    """Byte-swap s16be → s16le. cdrdao BIN output is big-endian."""
-    return np.frombuffer(data, dtype=np.int16).byteswap().tobytes()
 
 
 def _apply_read_offset(pcm: bytes, read_offset: int) -> bytes:
@@ -194,7 +226,9 @@ def analyse_cycle(bin_path: Path, read_offset: int) -> dict | None:
 
     Returns a cycle result dict, or None if pulse detection fails.
     """
-    pcm = _apply_read_offset(_swap_be_to_le(bin_path.read_bytes()), read_offset)
+    # No byte-swap: AccuDisc reads return s16le. (cdrdao's read-cd BIN was s16be
+    # and needed one — removing the engine removed the swap with it.)
+    pcm = _apply_read_offset(bin_path.read_bytes(), read_offset)
 
     pos_a = _find_pulse(pcm, _PULSE_A)
     pos_b = _find_pulse(pcm, _PULSE_B)
