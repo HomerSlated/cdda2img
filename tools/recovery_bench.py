@@ -319,6 +319,12 @@ class BenchRow:
     pass_n: int = 0
     pass_role: str = ""  # "median" (drove the rungs) | "repeat" | "" (single pass)
     wall_s: float = 0.0
+    # AccuDisc's exit code for this cell's read, and why the gates were skipped.
+    # 0 = clean, 3 = completed with caveats; anything else is fatal and the capture
+    # must NOT be gated. `abandoned` is the human reason, empty when the cell ran.
+    read_exit: int = 0
+    captured_sectors: int = 0
+    abandoned: str = ""
 
     @property
     def q_health(self) -> float | None:
@@ -789,6 +795,33 @@ def fetch_ar_once(
     return responses  # give up: still empty
 
 
+def _capture_verdict(
+    rc: int, pcm: Path, geom: tuple[list[int], int, int] | None
+) -> str:
+    """Empty when the capture is safe to gate; otherwise why it is not.
+
+    Two independent checks, because they catch different failures:
+
+    * **Exit code.** AccuDisc's contract is ``0`` clean / ``3`` completed with
+      caveats / anything else fatal. A fatal exit means stop and surface their
+      result — not gate the partial file and mention the code afterwards.
+    * **Length.** Exit ``3`` is still "completed", so a caveat exit alone does not
+      tell us the capture is whole. A short file gates as an AR failure for a
+      reason that has nothing to do with the rung under test, which is worse than
+      no row at all: it looks like data.
+    """
+    if rc not in (0, 3):
+        return f"accudisc read exited {rc} (fatal per the machine interface)"
+    if not pcm.is_file():
+        return "no PCM file was produced"
+    got = pcm.stat().st_size // 2352
+    want = (geom[1] + 1) if geom is not None else 0
+    if want and got < want:
+        pct = 100.0 * got / want
+        return f"capture truncated: {got}/{want} sectors ({pct:.1f}%), exit {rc}"
+    return ""
+
+
 def _track_ar_conf(
     pcm: Path,
     i: int,
@@ -811,16 +844,23 @@ def _track_ar_conf(
         track_lsns[i + 1] if i < n - 1 else disc_last_lsn + 1
     ) * 2352 + offset_bytes
     read_start = max(0, byte_start)
-    read_end = min(pcm_size, byte_end)
+    # Defence in depth: `_capture_verdict` should already have abandoned a short
+    # capture, but a track window starting past EOF must degrade to "no bytes, so
+    # no match", never to a negative read length that kills the whole matrix.
+    read_end = max(read_start, min(pcm_size, byte_end))
     with open(pcm, "rb") as f:
         f.seek(read_start)
         raw = f.read(read_end - read_start)
     # Zero-pad the offset window outside the file — the pad falls inside AR's
     # ±2940-frame exclusion zone, so it is checksum-neutral (as in verify_rip).
+    # Pad to the exact window width rather than to (byte_end - pcm_size): on a
+    # truncated capture the latter over-pads, because the missing head has already
+    # been skipped by the clamped read_start.
     if byte_start < 0:
         raw = bytes(-byte_start) + raw
-    if byte_end > pcm_size:
-        raw = raw + bytes(byte_end - pcm_size)
+    want = byte_end - max(0, byte_start)
+    if len(raw) < want:
+        raw = raw + bytes(want - len(raw))
     _v1, _v2, conf_v1, conf_v2 = match_track_pcm(raw, i + 1, n, responses)
     return conf_v1, conf_v2
 
@@ -1322,15 +1362,28 @@ def _baseline_passes(
             on_progress=bp.progress_cb(),
         )
         row = _mk_row(disc_id, args.device, "baseline", speed, governor, summary)
-        _gate_row(
-            row,
-            p_pcm,
-            (out_dir / f"{tag}.c2") if args.c2 else None,
-            geom,
-            args.read_offset,
-            ar_responses,
-            on_stage=lambda label: bp.stage(2 if label == "AR gate" else 3, 3, label),
-        )
+        row.abandoned = _capture_verdict(rc, p_pcm, geom)
+        row.read_exit = rc
+        row.captured_sectors = p_pcm.stat().st_size // 2352 if p_pcm.is_file() else 0
+        if row.abandoned:
+            # Gating a bad capture manufactures a measurement out of nothing: a
+            # truncated read fails AR for a reason that has nothing to do with the
+            # rung under test. Record the cell as abandoned and move on. (This is
+            # also the §4 contract with AccuDisc — a non-zero exit means stop and
+            # surface their result, not continue and mention it afterwards.)
+            print(f"  !! baseline @ {speed}x ABANDONED: {row.abandoned}", flush=True)
+        else:
+            _gate_row(
+                row,
+                p_pcm,
+                (out_dir / f"{tag}.c2") if args.c2 else None,
+                geom,
+                args.read_offset,
+                ar_responses,
+                on_stage=lambda label: bp.stage(
+                    2 if label == "AR gate" else 3, 3, label
+                ),
+            )
         row.wall_s = round(time.monotonic() - t0, 1)  # capture + gate
         if n_passes > 1:
             row.pass_n = p
