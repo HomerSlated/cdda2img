@@ -965,6 +965,42 @@ offset +30, Accurate Stream = yes). Data: `private/bench/runs/run1/` (per-disc,
 progress, 40 rows, 2026-07-19). **Provisional** — the harness is still maturing;
 read §12.5 before drawing method conclusions.*
 
+### 12.0 Drive interlock — a confound that cannot be detected after the fact
+
+**Drive interlock (2026-07-25).** Two projects share this machine's optical drive.
+A contended read and an intrinsically poor disc produce the same signature —
+collapsed Q yield, clean audio, passing checksums — so concurrent access is a
+confound that cannot be detected after the fact. Measured once: 99.17 % → 13.43 %
+Q yield, +59 % wall, C2 unchanged at 0, AR v2 passing throughout. All `/dev/sr0`
+access is now serialised with `flock /var/tmp/sr0.lock`. Figures recorded before
+this date were not taken under the lock; a cross-run audit of all 41 baseline Q
+measurements found every repeated (disc, speed) cell reproducing to within
+0.04 pp except the one known contended run, so the historical figures are
+retained as sound.
+
+That audit bounds *large* contention only: an 86-point collapse cannot hide in
+replicates agreeing to 0.04 pp. It does not exclude sub-percent effects, which no
+measurement here could detect.
+
+The audit is also positive evidence in the other direction. Tracy Chapman yields
+98.0 % at 8×, 24×, 32× and 40× in two independent invocations four hours apart,
+agreeing to ±0.04 pp. A contention artefact does not reproduce to four significant
+figures across separate runs — so that reproducibility is a *static* property of
+the disc, which is what the irreducible-vs-transient split in the recovery model
+rests on.
+
+> **Note on this file.** `docs/reference/RECOVERY.md` is one document hardlinked
+> into both the cdda2img and AccuDisc repos — one inode, two paths, and git
+> enforces nothing about the relationship. Most editors save atomically (write
+> temp, rename over target), which replaces the directory entry with a **new
+> inode** and silently severs the link; `sed -i` does the same. The two repos then
+> hold look-alike files that diverge from the next edit onward. Edit in place
+> (`cat new > RECOVERY.md`) and verify immediately with
+> `stat -c '%i %h' docs/reference/RECOVERY.md` — the link count must be **2**.
+> If it reads 1 the link is severed: reconcile, `ln -f` from one side, and
+> re-verify before either side commits. (It was severed once, found 2026-07-25;
+> the copies had diverged by 45 lines.)
+
 ### 12.1 What the bench does
 
 Per swept speed it takes **one whole-disc baseline capture**, clusters the
