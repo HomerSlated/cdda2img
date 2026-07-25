@@ -1096,14 +1096,14 @@ gates (AR v1/v2, CTDB CRC + parity) and the disc geometry.
 | Disc | Speeds | Rungs | C2 | Damage profile | Result |
 |------|--------|-------|----|----|--------|
 | ZZ Top | 40,32,24,16,8,4 | R0–R4 | on | clean | 36 rows, Q 0.998–0.999, 0 C2, AR/CTDB pass all speeds, no cliff |
+| ZZ Top | 40,32,24,8,4 | ctdb + ctdb-noc2, `--passes 3` | on | clean — **gate passes, no repair attempted** | the backfill — §12.2.2 |
 | ABBA *Gold* | 32,24,8,4 | R0–R4 | on | clean-ish | R1 cut C2 58→2 at +0 s (damage-proportional rescue) |
 | ABBA *Gold* | 32,24,8,4 | ctdb + ctdb-noc2, `--passes 3` | on | **needs parity repair** | the backfill — §12.2.1 |
 | Tracy Chapman | 40,32,24,8,4 | R0–R4 | **off** | — | `spans=0` at every speed — C2 off = no localization surface |
 | Tracy Chapman | 40,32,24,8,4 | R0–R4 + ctdb + ctdb-noc2 | on | localized, **intermittent** | the full matrix — §12.3 |
 
-**Remaining gap:** ZZ Top still predates the ctdb rungs (needs a disc swap; not urgent —
-it is the clean control and the least likely to exercise parity). ABBA's backfill landed
-2026-07-25 as run6 and is below.
+**The §12.2 CTDB gap is closed.** Both backfills landed 2026-07-25 (run6, run7) and are
+below. Every disc in the suite now has ctdb/ctdb-noc2 coverage.
 
 #### 12.2.1 ABBA *Gold* CTDB backfill (run6, 2026-07-25)
 
@@ -1164,6 +1164,41 @@ Three further results from the same run:
 > Verified end-to-end on this disc: 5 deliberately damaged words in track 5 repaired
 > bit-exactly through both gates. Full analysis:
 > `private/research/incoming/ctdb-failure-abba-gold-20260725.md`.
+
+#### 12.2.2 ZZ Top CTDB backfill (run7, 2026-07-25) — the null that makes §12.2.1 mean something
+
+25 cells, same shape as run6: `ctdb` + `ctdb-noc2` across `[40, 32, 24, 8, 4]`,
+`--passes 3`, `--read-offset 30`, under `flock`. 11 tracks, lead-out 204142, CDDB
+`8f0aa10b`. ~1 h 50 m.
+
+| speed | Q yield ×3 | spread | vs σ_diff | `ar_v2` | `ctdb` / `ctdb-noc2` |
+|---|---|---|---|---|---|
+| 40× | 0.99798 / 0.99799 / 0.99809 | 0.011 pp | 0.81σ | T T T | pass=**T** repaired=— |
+| 32× | 0.99813 / 0.99806 / 0.99796 | 0.017 pp | 1.24σ | T T T | pass=**T** repaired=— |
+| 24× | 0.99919 / 0.99918 / 0.99914 | 0.005 pp | 0.54σ | T T T | pass=**T** repaired=— |
+| 8× | 0.99889 / 0.99894 / 0.99886 | 0.007 pp | 0.71σ | T T T | pass=**T** repaired=— |
+| 4× | 0.99913 / 0.99919 / 0.99914 | 0.006 pp | 0.65σ | T T T | pass=**T** repaired=— |
+
+C2 = 0 at every speed. `pass=True` means the **CTDB checksum gate passed, so no parity
+repair was attempted** — the exact complement of ABBA's `pass=False, repaired=True`.
+
+**This row is the control, and it is what licenses §12.2.1.** Without it, "ABBA needed
+parity repair and got it" is compatible with the ctdb rungs reporting success on
+anything handed to them. A clean disc that declines to repair, at all five speeds, on
+both the C2-assisted and error-only rungs, rules that out.
+
+Two further results:
+
+1. **15/15 passes tight-mode**, every speed between 0.54σ and 1.24σ of binomial. No
+   disturbed pass anywhere, which excludes *q* ≥ 0.18 at the 5 % level — a tighter bound
+   than anything in §12.0's audit, and the first earned at three passes per cell rather
+   than two. Contrast ABBA's 8× at *q* ≈ 0.33 on the same drive hours earlier: the
+   disturbed mode is a **disc** property, not a drive one.
+2. **The admitted ladder was `[40, 32, 24, 8, 4]` with a 40× governor ceiling**, where
+   ABBA gave `[32, 24, 8, 4]` in the same session with no tray cycle between the two
+   probes. That isolates the disc effect from the session effect in §12.2's ladder
+   caveat — consistent with AccuDisc's init-governor mechanism (governor picks per disc
+   at init, so a disc swap re-picks), still one drive.
 
 ### 12.3 The Tracy full matrix (run2)
 
