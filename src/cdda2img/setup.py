@@ -8,6 +8,7 @@ prompts use questionary.  Non-TTY callers receive a ``RuntimeError``.
 from __future__ import annotations
 
 import logging
+import os
 import random
 import sqlite3
 from pathlib import Path
@@ -18,6 +19,7 @@ _SECTION_CHOICES = [
     ("create-config", "Config: Create from template"),
     ("update-config", "Config: Update from template"),
     ("validate-config", "Config: Validate / repair"),
+    ("edit-config", "Config: Edit ($EDITOR)"),
     ("read-offset", "Drive: Detect read offset"),
     ("write-offset", "Drive: Measure write offset"),
     ("create-catalogue", "Catalogue: Create database"),
@@ -49,6 +51,7 @@ def run_setup_wizard(
         "create-config": _section_create_config,
         "update-config": _section_update_config,
         "validate-config": _section_validate_config,
+        "edit-config": _section_edit_config,
         "read-offset": lambda: _section_read_offset(device),
         "write-offset": lambda: _section_write_offset(device, speed),
         "create-catalogue": _section_create_catalogue,
@@ -170,7 +173,14 @@ def _section_update_config() -> bool:
 
 
 def _section_validate_config() -> bool:
-    from cdda2img.config import Config, config_path
+    """Run the real two-stage validator over the config (§9.6).
+
+    This used to check only that the TOML parsed and that no key was unknown to
+    the ``Config`` dataclass — neither of the two stages. An out-of-range value
+    passed silently, which is exactly the class the split exists to catch.
+    """
+    from cdda2img.config import config_path
+    from cdda2img.validation import CONFIG_SCHEMA, validate
 
     path = config_path()
     if not path.is_file():
@@ -189,26 +199,74 @@ def _section_validate_config() -> bool:
         print(f"  TOML parse error: {exc}")
         return False
 
-    known = set(Config.__dataclass_fields__)
-    unknown = [k for k in raw if k not in known]
     print(f"  Config: {path}")
-    if unknown:
-        print(f"  Unknown keys: {', '.join(unknown)}")
-        if _confirm("  Remove unknown keys?"):
-            for k in unknown:
-                del raw[k]
-            _write_config_dict(path, raw)
-            print("  Done.")
-    else:
-        print("  No unknown keys.")
+    errors = validate(raw, CONFIG_SCHEMA)
+    if not errors:
+        drives = raw.get("drives", [])
+        print(
+            f"  Drives configured: {len(drives)}"
+            if drives
+            else "  No drives configured."
+        )
+        print("  Config OK.")
+        return True
 
-    drives = raw.get("drives", [])
-    if drives:
-        print(f"  Drives configured: {len(drives)}")
-    else:
-        print("  No drives configured.")
-    print("  Config OK.")
-    return True
+    spec = [e for e in errors if e.stage == "spec"]
+    sanity = [e for e in errors if e.stage == "sanity"]
+    for label, group in (("structure", spec), ("values", sanity)):
+        for e in group:
+            print(f"  [{label}] {e}")
+
+    # Only unknown top-level keys can be repaired mechanically. A wrong type or an
+    # illegal value needs a decision about what the user meant, and guessing is how
+    # the old lenient loader hid mistakes.
+    unknown = [
+        e.where for e in spec if "unknown key" in e.message and "." not in e.where
+    ]
+    if unknown and _confirm(f"  Remove {len(unknown)} unknown key(s)?"):
+        for k in unknown:
+            raw.pop(k, None)
+        _write_config_dict(path, raw)
+        print("  Removed. Re-run validation to check what remains.")
+    elif not unknown:
+        print(f"  Edit {path} to fix these, then re-run.")
+    return False
+
+
+def _section_edit_config() -> bool:
+    """Open the config in $EDITOR and re-validate on save (§9.6).
+
+    Re-validating afterwards is the point: with `load_config` now strict, saving a
+    broken config would make every subcommand except `setup` refuse to start, and
+    the user would find out at the start of their next rip rather than here.
+    """
+    import shlex
+    import subprocess
+
+    from cdda2img.config import config_path
+
+    path = config_path()
+    if not path.is_file():
+        print(f"  Config not found: {path}")
+        print("  Run 'Config: Create from template' first.")
+        return False
+
+    editor = os.environ.get("VISUAL") or os.environ.get("EDITOR")
+    if not editor:
+        print("  Neither $VISUAL nor $EDITOR is set; cannot open an editor.")
+        print(f"  Edit {path} by hand, then run 'Config: Validate / repair'.")
+        return False
+
+    try:
+        # shlex.split so EDITOR="code -w" and friends work. Deliberately inherits
+        # the terminal: this is an interactive editor, not a captured subprocess.
+        subprocess.run([*shlex.split(editor), str(path)], check=False)  # noqa: S603
+    except OSError as exc:
+        print(f"  Could not run {editor!r}: {exc}")
+        return False
+
+    print()
+    return _section_validate_config()
 
 
 def _write_config_dict(path: Path, raw: dict) -> None:
@@ -241,7 +299,7 @@ def _section_read_offset(device: str | None) -> bool:
         probe_drive_name,
     )
 
-    cfg = load_config()
+    cfg = load_config(strict=False)
     if device is None:
         device = cfg.default_device
     drive_name = probe_drive_name(device)
@@ -281,7 +339,7 @@ def _section_write_offset(device: str | None, speed: int) -> bool:  # noqa: C901
     from cdda2img.config import load_config, save_drive_write_offset
 
     if device is None:
-        device = load_config().default_device
+        device = load_config(strict=False).default_device
 
     drive_name, read_offset = wo.probe_drive(device, None)
     slug = wo.drive_slug(drive_name, device)
@@ -407,7 +465,7 @@ def _section_create_catalogue() -> bool:
     from cdda2img.config import load_config
 
     try:
-        cfg = load_config()
+        cfg = load_config(strict=False)
         db_path = cfg.catalogue_path or catalogue_db_path()
     except Exception:
         db_path = catalogue_db_path()
@@ -434,7 +492,7 @@ def _section_validate_catalogue() -> bool:
     from cdda2img.config import load_config
 
     try:
-        cfg = load_config()
+        cfg = load_config(strict=False)
         db_path = cfg.catalogue_path or catalogue_db_path()
     except Exception:
         db_path = catalogue_db_path()
@@ -495,7 +553,7 @@ def _section_verify_catalogue(verify_test: bool = False) -> bool:  # noqa: C901
     from cdda2img.config import load_config
 
     try:
-        cfg = load_config()
+        cfg = load_config(strict=False)
         db_path = cfg.catalogue_path or catalogue_db_path()
     except Exception:
         db_path = catalogue_db_path()

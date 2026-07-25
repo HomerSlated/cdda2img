@@ -5,6 +5,14 @@ Reads $XDG_CONFIG_HOME/cdda2img/cdda2img.toml
 (default: ~/.config/cdda2img/cdda2img.toml).
 When the file is absent and stdin is a TTY, the user is offered the option to
 create it from the bundled example (conf/cdda2img.toml.example).
+
+Validation is **strict by default** (accudisc-migration-plan.md §9.6): the file is
+checked against ``validation.CONFIG_SCHEMA`` and any failure raises
+:class:`ConfigError` listing every problem at once. The old behaviour — warn about
+a bad value and silently substitute a default — is gone, because it means a user
+who mistypes ``recovery_passes`` gets a rip that quietly did something else. Only
+``setup`` loads leniently (``strict=False``), since it exists to repair a broken
+config and cannot refuse to start on one.
 """
 
 from __future__ import annotations
@@ -16,7 +24,12 @@ import shutil
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import cast
+from typing import TYPE_CHECKING, cast
+
+from cdda2img.validation import CONFIG_SCHEMA, apply_defaults, validate
+
+if TYPE_CHECKING:
+    from cdda2img.validation import Error
 
 try:
     import tomllib
@@ -24,6 +37,20 @@ except ImportError:
     import tomli as tomllib  # type: ignore[import-not-found,no-redef]  # LINT-011
 
 log = logging.getLogger(__name__)
+
+
+class ConfigError(Exception):
+    """The config file is invalid. Carries every failure, not just the first."""
+
+    def __init__(self, errors: list[Error], path: Path) -> None:
+        self.errors = errors
+        self.path = path
+        super().__init__(self.describe())
+
+    def describe(self) -> str:
+        lines = [f"{self.path} has {len(self.errors)} problem(s):"]
+        lines += [f"  - {e}" for e in self.errors]
+        return "\n".join(lines)
 
 
 def config_path() -> Path:
@@ -280,82 +307,20 @@ def _parse_drives(raw_drives: object) -> list[DriveConfig]:
     return result
 
 
-_DUP_POLICY_VALID = {"ask", "skip", "replace", "add"}
+def load_config(strict: bool = True) -> Config:
+    """Load, validate and return the user configuration.
 
+    *strict* (the default) raises :class:`ConfigError` listing every schema failure.
+    ``strict=False`` warns, discards the offending keys and continues on defaults —
+    that mode exists for ``setup``, which has to be able to open a broken config in
+    order to fix it, and for nothing else.
 
-def _parse_dup_policy(raw: object) -> str:
-    value = str(raw).lower()
-    if value not in _DUP_POLICY_VALID:
-        log.warning(
-            "Invalid duplicate_catalogue_entry %r in config; defaulting to 'ask'", raw
-        )
-        return "ask"
-    return value
-
-
-_C2_RECOVERY_VALID = {"auto", "on", "off"}
-
-
-def _parse_c2_recovery(raw: object) -> str:
-    value = str(raw).lower()
-    if value not in _C2_RECOVERY_VALID:
-        log.warning("Invalid c2_recovery %r in config; defaulting to 'auto'", raw)
-        return "auto"
-    return value
-
-
-def _bounded_int(raw: object, default: int, lo: int, hi: int, name: str) -> int:
-    """Parse *raw* as an int in [lo, hi]; warn and return *default* on bad/out-of-range."""
-    try:
-        val = int(raw)  # type: ignore[arg-type]
-    except (ValueError, TypeError):
-        val = None  # type: ignore[assignment]
-    if val is None or not lo <= val <= hi:
-        log.warning("Invalid %s %r in config; defaulting to %d", name, raw, default)
-        return default
-    return val
-
-
-def load_config() -> Config:
-    """Load and return the user configuration from the TOML file."""
+    Validation is entirely table-driven (``validation.CONFIG_SCHEMA``); the former
+    per-field "parse, warn, substitute a default" ladder is gone. It was worse than
+    no validation: a mistyped ``recovery_passes`` produced a rip that silently did
+    something other than what was asked, and the warning scrolled past.
+    """
     data = _load_raw()
-
-    cddb_server = str(data.get("cddb_server", "gnudb.gnudb.org:8880"))
-    contact_email = str(data.get("contact_email", ""))
-
-    raw_backups = data.get("database_backups", 3)
-    try:
-        database_backups = max(0, int(raw_backups))
-    except (ValueError, TypeError):
-        log.warning(
-            "Invalid database_backups %r in config; defaulting to 3", raw_backups
-        )
-        database_backups = 3
-
-    database_backup_frequency = str(data.get("database_backup_frequency", "4w"))
-
-    raw_cat_backups = data.get("catalogue_backups", 3)
-    try:
-        catalogue_backups = max(0, int(raw_cat_backups))
-    except (ValueError, TypeError):
-        log.warning(
-            "Invalid catalogue_backups %r in config; defaulting to 3", raw_cat_backups
-        )
-        catalogue_backups = 3
-
-    catalogue_backup_frequency = str(data.get("catalogue_backup_frequency", "1d"))
-    drives = _parse_drives(data.get("drives", []))
-
-    raw_catalogue_path = data.get("catalogue_path")
-    catalogue_path = (
-        Path(str(raw_catalogue_path)) if raw_catalogue_path is not None else None
-    )
-
-    enable_catalogue = bool(data.get("enable_catalogue", True))
-    duplicate_catalogue_entry = _parse_dup_policy(
-        data.get("duplicate_catalogue_entry", "ask")
-    )
-    default_device = str(data.get("default_device", "/dev/sr0"))
 
     if "silence" in data and "silence_threshold" not in data:
         log.warning(
@@ -363,76 +328,54 @@ def load_config() -> Config:
             "the old key is ignored. Update %s to silence the warning.",
             config_path(),
         )
-    raw_silence_threshold = data.get("silence_threshold", 55)
-    try:
-        silence_threshold = int(raw_silence_threshold)
-    except (ValueError, TypeError):
-        silence_threshold = 0
-    if not 1 <= silence_threshold <= 90:
-        log.warning(
-            "Invalid silence_threshold %r in config; defaulting to 55",
-            raw_silence_threshold,
-        )
-        silence_threshold = 55
 
-    raw_capacity = data.get("capacity", 80)
-    try:
-        capacity = int(raw_capacity)
-    except (ValueError, TypeError):
-        capacity = 0
-    if not 1 <= capacity <= 99:
-        log.warning("Invalid capacity %r in config; defaulting to 80", raw_capacity)
-        capacity = 80
+    errors = validate(data, CONFIG_SCHEMA)
+    if errors:
+        if strict:
+            raise ConfigError(errors, config_path())
+        # Lenient: drop each failing top-level key so the rest of the file still
+        # applies. Dropping is deliberate — keeping a value we have just declared
+        # invalid is how the old "warn and carry on" behaviour hid mistakes.
+        for e in errors:
+            log.warning("config: %s (ignored)", e)
+        bad = {e.where.split("[")[0].split(".")[0] for e in errors}
+        data = {k: v for k, v in data.items() if k not in bad}
 
-    preview = bool(data.get("preview", True))
-    tui = bool(data.get("tui", True))
-    auto = bool(data.get("auto", False))
-    embedart = bool(data.get("embedart", False))
+    return _build(apply_defaults(data, CONFIG_SCHEMA))
 
-    recovery_passes = _bounded_int(
-        data.get("recovery_passes", 3), 3, 0, 20, "recovery_passes"
-    )
-    c2_recovery = _parse_c2_recovery(data.get("c2_recovery", "off"))
 
-    preferred_country = _parse_preferred_country(data.get("preferred_country", []))
+def _build(d: dict) -> Config:
+    """Construct a :class:`Config` from schema-valid, default-filled data.
 
-    raw_low_dr = data.get("low_dr_threshold", 5.0)
-    try:
-        low_dr_threshold = float(raw_low_dr)
-    except (ValueError, TypeError):
-        low_dr_threshold = 0.0
-    if not 0.5 <= low_dr_threshold <= 20.0:
-        log.warning(
-            "Invalid low_dr_threshold %r in config; defaulting to 5.0", raw_low_dr
-        )
-        low_dr_threshold = 5.0
-
-    raw_profile = data.get("default_profile")
-    default_profile = str(raw_profile).strip() or None if raw_profile else None
-
+    Only *normalisation* happens here — turning strings into ``Path`` objects,
+    grouping drive tables, upper-casing country codes. Anything that could reject a
+    value belongs in the schema, so that every rejection is reported together
+    rather than one per run.
+    """
+    catalogue_path = d["catalogue_path"]
     return Config(
-        cddb_server=cddb_server,
-        contact_email=contact_email,
-        database_backups=database_backups,
-        database_backup_frequency=database_backup_frequency,
-        catalogue_backups=catalogue_backups,
-        catalogue_backup_frequency=catalogue_backup_frequency,
-        drives=drives,
-        catalogue_path=catalogue_path,
-        enable_catalogue=enable_catalogue,
-        duplicate_catalogue_entry=duplicate_catalogue_entry,
-        default_device=default_device,
-        silence_threshold=silence_threshold,
-        capacity=capacity,
-        preview=preview,
-        tui=tui,
-        low_dr_threshold=low_dr_threshold,
-        auto=auto,
-        embedart=embedart,
-        recovery_passes=recovery_passes,
-        c2_recovery=c2_recovery,
-        preferred_country=preferred_country,
-        default_profile=default_profile,
+        cddb_server=d["cddb_server"],
+        contact_email=d["contact_email"],
+        database_backups=d["database_backups"],
+        database_backup_frequency=d["database_backup_frequency"],
+        catalogue_backups=d["catalogue_backups"],
+        catalogue_backup_frequency=d["catalogue_backup_frequency"],
+        drives=_parse_drives(d["drives"]),
+        catalogue_path=Path(catalogue_path) if catalogue_path else None,
+        enable_catalogue=d["enable_catalogue"],
+        duplicate_catalogue_entry=d["duplicate_catalogue_entry"],
+        default_device=d["default_device"],
+        silence_threshold=d["silence_threshold"],
+        capacity=d["capacity"],
+        preview=d["preview"],
+        tui=d["tui"],
+        low_dr_threshold=float(d["low_dr_threshold"]),
+        auto=d["auto"],
+        embedart=d["embedart"],
+        recovery_passes=d["recovery_passes"],
+        c2_recovery=d["c2_recovery"],
+        preferred_country=_parse_preferred_country(d["preferred_country"]),
+        default_profile=d["default_profile"],
     )
 
 

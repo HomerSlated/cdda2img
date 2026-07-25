@@ -488,6 +488,12 @@ def parse_args() -> argparse.Namespace:
         help="Update config from template (preserves user values)",
     )
     s_cmd.add_argument(
+        "--edit-config",
+        action="store_true",
+        dest="edit_config",
+        help="Open the config in $EDITOR, then re-validate on save",
+    )
+    s_cmd.add_argument(
         "--validate-config",
         action="store_true",
         dest="validate_config",
@@ -3297,6 +3303,7 @@ def _dispatch_utility(args: argparse.Namespace) -> None:
             "create_config",
             "update_config",
             "validate_config",
+            "edit_config",
             "read_offset",
             "write_offset",
             "create_catalogue",
@@ -3359,7 +3366,20 @@ def main() -> None:
             format="%(asctime)s %(levelname)-5s %(name)s: %(message)s",
             datefmt="%H:%M:%S",
         )
+    # Validate the config once, before anything touches a drive or the network
+    # (accudisc-migration-plan.md §9.6). `setup` is exempt: it is the tool for
+    # repairing a broken config, so refusing to start on one would be a trap with
+    # no exit. Every other subcommand stops here rather than running with a
+    # configuration we have already found to be wrong.
     if getattr(args, "cmd", None) != "setup":
+        from cdda2img.config import ConfigError, load_config
+
+        try:
+            load_config()
+        except ConfigError as e:
+            print(f"Error: {e.describe()}")
+            print("\nRun `cdda2img setup` to fix it.")
+            raise SystemExit(1) from None
         _run_startup_checks(args)
     try:
         _dispatch(args)

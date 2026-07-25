@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 
 from cdda2img.config import (
+    ConfigError,
     DriveConfig,
     _overlay,
     _parse_drives,
@@ -404,13 +405,16 @@ def test_recovery_passes_read_and_zero_allowed(
     assert load_config().recovery_passes == 0
 
 
-def test_recovery_passes_out_of_range_falls_back(
+def test_recovery_passes_out_of_range_now_raises(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Was: fall back to 3 with a warning. Now: refuse (§9.6). Substituting a
+    default meant the rip silently did something other than what was asked."""
     cfg = tmp_path / "cfg.toml"
     cfg.write_text("recovery_passes = 999\n")
     monkeypatch.setattr("cdda2img.config.config_path", lambda: cfg)
-    assert load_config().recovery_passes == 3
+    with pytest.raises(ConfigError, match="recovery_passes"):
+        load_config()
 
 
 def test_c2_recovery_defaults_to_off(
@@ -431,13 +435,16 @@ def test_c2_recovery_valid_values(
     assert load_config().c2_recovery == "off"
 
 
-def test_c2_recovery_invalid_falls_back(
+def test_c2_recovery_invalid_now_raises(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Was: silently become "auto" — which is not even the documented default,
+    so a typo turned C2 recovery ON. Now: refuse."""
     cfg = tmp_path / "cfg.toml"
     cfg.write_text('c2_recovery = "bogus"\n')
     monkeypatch.setattr("cdda2img.config.config_path", lambda: cfg)
-    assert load_config().c2_recovery == "auto"
+    with pytest.raises(ConfigError, match="c2_recovery"):
+        load_config()
 
 
 # ---------------------------------------------------------------------------
@@ -604,71 +611,56 @@ def test_silence_capacity_preview_tui_overrides(
     assert c.low_dr_threshold == 6.5
 
 
-def test_silence_out_of_range_falls_back_to_default(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    caplog: pytest.LogCaptureFixture,
+def test_silence_out_of_range_now_raises(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Was: warn and substitute the default. Now: refuse (§9.6)."""
     cfg = tmp_path / "cfg.toml"
     cfg.write_text("silence_threshold = 200\n")
     monkeypatch.setattr("cdda2img.config.config_path", lambda: cfg)
-    with caplog.at_level(logging.WARNING):
-        c = load_config()
-    assert c.silence_threshold == 55
-    assert "Invalid silence_threshold" in caplog.text
+    with pytest.raises(ConfigError, match="silence_threshold"):
+        load_config()
 
 
-def test_capacity_out_of_range_falls_back_to_default(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    caplog: pytest.LogCaptureFixture,
+def test_capacity_out_of_range_now_raises(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Was: warn and substitute the default. Now: refuse (§9.6)."""
     cfg = tmp_path / "cfg.toml"
     cfg.write_text("capacity = 0\n")
     monkeypatch.setattr("cdda2img.config.config_path", lambda: cfg)
-    with caplog.at_level(logging.WARNING):
-        c = load_config()
-    assert c.capacity == 80
-    assert "Invalid capacity" in caplog.text
+    with pytest.raises(ConfigError, match="capacity"):
+        load_config()
 
 
-def test_silence_non_integer_falls_back_to_default(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    caplog: pytest.LogCaptureFixture,
+def test_silence_non_integer_now_raises(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Was: warn and substitute the default. Now: refuse (§9.6)."""
     cfg = tmp_path / "cfg.toml"
     cfg.write_text('silence_threshold = "loud"\n')
     monkeypatch.setattr("cdda2img.config.config_path", lambda: cfg)
-    with caplog.at_level(logging.WARNING):
-        c = load_config()
-    assert c.silence_threshold == 55
-    assert "Invalid silence_threshold" in caplog.text
+    with pytest.raises(ConfigError, match="silence_threshold"):
+        load_config()
 
 
-def test_low_dr_threshold_out_of_range_falls_back_to_default(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    caplog: pytest.LogCaptureFixture,
+def test_low_dr_threshold_out_of_range_now_raises(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Was: warn and substitute the default. Now: refuse (§9.6)."""
     cfg = tmp_path / "cfg.toml"
     cfg.write_text("low_dr_threshold = 99\n")
     monkeypatch.setattr("cdda2img.config.config_path", lambda: cfg)
-    with caplog.at_level(logging.WARNING):
-        c = load_config()
-    assert c.low_dr_threshold == 5.0
-    assert "Invalid low_dr_threshold" in caplog.text
+    with pytest.raises(ConfigError, match="low_dr_threshold"):
+        load_config()
 
 
-def test_low_dr_threshold_non_numeric_falls_back_to_default(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    caplog: pytest.LogCaptureFixture,
+def test_low_dr_threshold_non_numeric_now_raises(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Was: warn and substitute the default. Now: refuse (§9.6)."""
     cfg = tmp_path / "cfg.toml"
     cfg.write_text('low_dr_threshold = "loud"\n')
     monkeypatch.setattr("cdda2img.config.config_path", lambda: cfg)
-    with caplog.at_level(logging.WARNING):
-        c = load_config()
-    assert c.low_dr_threshold == 5.0
-    assert "Invalid low_dr_threshold" in caplog.text
+    with pytest.raises(ConfigError, match="low_dr_threshold"):
+        load_config()

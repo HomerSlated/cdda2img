@@ -695,8 +695,24 @@ Insert before §5 Phase E (dead-module removal), after the read/write migration:
   > notes: the probe leaves the drive at its last rung, so the binder restores it;
   > and legacy `probe_speed_ladder` returned `[8, 4]` on the same disc, so P5's
   > swap is behaviour-neutral there.
-- **Phase P3** — config → strict: `load_config(strict)`, `main()` bootstrap, `setup`
-  Config:Edit, migrate in-body loads, retire the §8.7 legacy-key shim into this path.
+- **Phase P3** — ✅ **DONE 2026-07-25**. `load_config(strict=True)` + `ConfigError`,
+  `main()` bootstrap (non-`setup` subcommands exit non-zero on a bad config),
+  `setup --edit-config` ($EDITOR + re-validate on save), `setup --validate-config`
+  rebuilt on the real two-stage validator, `setup` moved to `strict=False`, and the
+  lenient per-field ladder (`_bounded_int`, `_parse_dup_policy`,
+  `_parse_c2_recovery`) deleted. 15 new tests; 8 existing tests that asserted
+  "warn and substitute a default" were rewritten to assert refusal.
+
+  > **Pre-flight, as required before flipping the default:** the user's real
+  > `~/.config/cdda2img/cdda2img.toml` was validated against `CONFIG_SCHEMA` first
+  > and passes clean, so no migration step was needed. Do this check again before
+  > any future tightening — strict-by-default turns config drift into a failed rip.
+  >
+  > **One deliberate carry-over:** enum values remain **case-insensitive**
+  > (`c2_recovery = "OFF"` still works). Folding a closed lowercase set cannot
+  > cause a collision, so it is normalisation rather than repair — unlike profile
+  > names (§9.7), where silent lowercasing is forbidden precisely because two
+  > distinct names could then map to one file.
 - **Phase P4** — `setup` Profiles:Create (§9.7).
 - **Phase P5** — `rip --profile` + `--ad-*` passthrough; wire `ResolvedStrategy` into
   `_recover_failed_tracks` (which already implements `track-ladder` — the whole-track

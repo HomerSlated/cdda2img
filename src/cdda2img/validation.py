@@ -111,6 +111,21 @@ def _type_ok(value: object, types: tuple[type, ...]) -> bool:
     return isinstance(value, types)
 
 
+def _in_enum(value: object, enum: frozenset[str]) -> bool:
+    """Enum membership, case-insensitively.
+
+    Case folding is *normalisation*, not repair: a closed set of lowercase members
+    cannot collide, so ``"OFF"`` unambiguously means ``off`` and accepting it costs
+    nothing. This is deliberately unlike profile names (§9.7), where silent
+    lowercasing is forbidden precisely because two distinct names could then map to
+    one file. :func:`apply_defaults` folds the value to its canonical member, so
+    nothing downstream ever sees the user's casing.
+    """
+    if isinstance(value, str):
+        return value.lower() in enum
+    return value in enum
+
+
 def _check_value(where: str, value: object, spec: FieldSpec) -> list[Error]:
     if not _type_ok(value, spec.types):
         return [
@@ -123,7 +138,7 @@ def _check_value(where: str, value: object, spec: FieldSpec) -> list[Error]:
         ]
 
     errors: list[Error] = []
-    if spec.enum is not None and value not in spec.enum:
+    if spec.enum is not None and not _in_enum(value, spec.enum):
         allowed = ", ".join(sorted(spec.enum))
         errors.append(Error(where, f"{value!r} is not one of: {allowed}", "spec"))
     if spec.pattern is not None and isinstance(value, str) and not spec.pattern(value):
@@ -185,7 +200,14 @@ def apply_defaults(data: Mapping[str, Any], schema: Schema) -> dict[str, Any]:
     """
     out = dict(data)
     for key, spec in schema.fields.items():
-        if key in out or spec.required:
+        if key in out:
+            # Fold an enum value to its canonical member so callers never have to
+            # think about the user's casing (see :func:`_in_enum`).
+            v = out[key]
+            if spec.enum is not None and isinstance(v, str):
+                out[key] = v.lower()
+            continue
+        if spec.required:
             continue
         # Sequence defaults are declared as tuples so the schema itself cannot be
         # mutated, and are handed out as a fresh list per call. Returning the schema's
