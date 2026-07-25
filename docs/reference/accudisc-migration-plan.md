@@ -677,9 +677,24 @@ so a profile cannot be born invalid.
 
 Insert before §5 Phase E (dead-module removal), after the read/write migration:
 
-- **Phase P1** — `validation.py` engine + both schemas + unit tests (pure, no HW).
-- **Phase P2** — `conf/profiles/` (7 files) + loader + `resolve_recovery` + ladder binder
-  (§9.3) + tests.
+- **Phase P1** — ✅ **DONE 2026-07-25** (`f91b9ec`). `validation.py` engine + both schemas
+  + 50 tests. `CONFIG_SCHEMA` is not yet the loader's authority — that is P3.
+- **Phase P2** — ✅ **DONE 2026-07-25**. `conf/profiles/` (7 files),
+  `recovery_profile.py` (`Profile`, `load_profile`, `list_profiles`,
+  `resolve_recovery`, `rungs_for`, `bind_ladder`), `drive_speed.admitted_ladder`
+  (§9.3), `Config.default_profile`, 37 tests.
+
+  > **§9.3 confirmed against hardware, with a correction to the worked example.**
+  > `accudisc speeds` exists and emits `speed req=N page2a=M measured=X.XX`, as the
+  > rule assumes. But the example ladder `[32, 24, 8, 4]` is **not** a property of the
+  > PX-716A: re-probing the same drive with the same disc on 2026-07-25 gave
+  > `[8, 4]`, because the drive's governor had throttled ABBA *Gold* as it degraded
+  > (every request ≥8× reported `page2a=8`). The ladder is **drive × disc**, and the
+  > strict `req == page2a` rule is what keeps that honest — it drops the rungs the
+  > drive refused, whatever the reason. Never cache a ladder per drive. Two further
+  > notes: the probe leaves the drive at its last rung, so the binder restores it;
+  > and legacy `probe_speed_ladder` returned `[8, 4]` on the same disc, so P5's
+  > swap is behaviour-neutral there.
 - **Phase P3** — config → strict: `load_config(strict)`, `main()` bootstrap, `setup`
   Config:Edit, migrate in-body loads, retire the §8.7 legacy-key shim into this path.
 - **Phase P4** — `setup` Profiles:Create (§9.7).

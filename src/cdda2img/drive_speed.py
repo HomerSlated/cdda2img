@@ -129,6 +129,98 @@ def restore_drive_speed(device: str) -> None:
         log.info("drive %s read speed: %sX -> %dX (restored)", device, cur_x, nx)
 
 
+_SPEED_ROW_RE = re.compile(
+    r"^speed\s+req=(\d+)\s+page2a=(\d+)\s+measured=([\d.]+)", re.MULTILINE
+)
+
+
+def read_speed_rows(device: str) -> list[tuple[int, int, float]]:
+    """``accudisc speeds`` rows as ``(req, page2a, measured)``.
+
+    Each row is a timed streaming read at a requested rung: *req* is what we asked
+    for, *page2a* what mode page 2A reported the drive settled on (0 = the page did
+    not report), *measured* the achieved throughput in X.
+
+    The probe performs real reads, so it both warms the disc — letting a
+    self-throttling governor settle to its true ceiling — and leaves the drive at
+    the last rung it tried. :func:`admitted_ladder` restores it afterwards.
+    """
+    from cdda2img.accudisc_reader import _ACCUDISC
+
+    try:
+        result = subprocess.run(  # noqa: S603  # LINT-012
+            [_ACCUDISC, "--device", device, "speeds"],  # LINT-012
+            capture_output=True,
+            text=True,
+        )
+    except (FileNotFoundError, OSError) as exc:
+        log.debug("accudisc speeds failed for %s: %s", device, exc)
+        return []
+    if result.returncode != 0:
+        log.debug("accudisc speeds exited %d for %s", result.returncode, device)
+        return []
+
+    rows: list[tuple[int, int, float]] = []
+    for m in _SPEED_ROW_RE.finditer(result.stdout + "\n" + result.stderr):
+        rows.append((int(m.group(1)), int(m.group(2)), float(m.group(3))))
+    return rows
+
+
+def admitted_ladder(device: str) -> list[int]:
+    """The rungs this drive honoured *exactly*, fastest first (migration plan §9.3).
+
+    **Strict rule** — whenever any row reports a non-zero ``page2a``, admit only rows
+    where ``req == page2a``. A row where they differ means the drive quantised the
+    request: reading at 8x while the row is labelled 32x is worse than not having the
+    rung, because it silently mislabels every measurement taken there.
+
+    **Fallback** — when *every* row reports ``page2a == 0``, the page did not report
+    at all (which is not the same as "quantised to zero"), so the equality test would
+    admit nothing. Admit on ``measured`` instead, collapsing rungs that achieved the
+    same rate. AccuDisc caught this case: on a drive with no usable page 2A the
+    strict rule alone yields a silently empty ladder.
+
+    **Outcome guard** — if the ladder still resolves empty by any path, degrade to a
+    single rung at the drive's reported maximum and warn. The guard is on the
+    *outcome*, not on the causes, because the causes are open-ended: a drive
+    reporting a real ``page2a`` that never equals ``req`` (it supports 10x/20x while
+    we probe {40,32,24,16,8,4}) is non-zero, so the fallback does not fire, and the
+    ladder is empty again for a completely different reason.
+
+    The ladder is a property of **drive x disc**, not of the drive: a self-throttling
+    governor caps a degraded disc regardless of what the drive can do. The PX-716A
+    admitted [32, 24, 8, 4] on ABBA *Gold* in July and [8, 4] on the same disc once
+    it had degraded further. Never cache this per drive.
+    """
+    rows = read_speed_rows(device)
+    ladder: list[int] = []
+
+    if any(page2a for _, page2a, _ in rows):
+        ladder = sorted({p for req, p, _ in rows if req == p and p}, reverse=True)
+    elif rows:
+        # No page 2A anywhere: rank by achieved throughput, one rung per distinct rate.
+        by_rate: dict[int, int] = {}
+        for req, _, measured in rows:
+            key = round(measured)
+            by_rate.setdefault(key, req)
+        ladder = [by_rate[k] for k in sorted(by_rate, reverse=True)]
+
+    restore_drive_speed(device)  # the probe left the drive at its last rung
+
+    if not ladder:
+        _, maximum = read_drive_speed(device)
+        top = max(1, (maximum or _KBPS_PER_X) // _KBPS_PER_X)
+        log.warning(
+            "drive %s admitted no speed rungs (%d probe rows); "
+            "degrading to a single rung at %dX",
+            device,
+            len(rows),
+            top,
+        )
+        return [top]
+    return ladder
+
+
 def probe_speed_ladder(device: str) -> list[int]:
     """Return the drive's actual discrete read speeds (X), ascending and de-duplicated.
 

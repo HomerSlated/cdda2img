@@ -1,0 +1,21 @@
+# track-constant — re-read the whole failed track, always at the drive's top
+# admitted speed.
+#
+# Bench: 14/19 (0.74). Beats track-ladder on time when the first attempt succeeds
+# (18 s vs 20 s on Tracy t8) and loses badly when it does not — 1/3 against the
+# ladder's 3/3 at ABBA t19. Choose it when you already know the damage is light.
+name         = "track-constant"
+experimental = false
+
+sub          = true
+c2           = true
+
+granularity  = "track"
+ladder       = "single"
+speed        = "max"
+passes       = 3
+variation    = "none"
+
+ctdb         = "auto"
+verify       = false
+budget_s     = 300

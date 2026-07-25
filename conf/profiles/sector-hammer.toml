@@ -1,0 +1,24 @@
+# sector-hammer — re-read the single flagged sector, same speed, over and over.
+#
+# EXPERIMENTAL, and the measured floor: minimum variation of every arm. 2/20 (0.10),
+# 0/25 on the disc that motivated the whole bench, while plain whole-disc passes on
+# the same disc came back clean ~27% of the time.
+#
+# This is the shape the pre-bench `_recover_rung` used. It is kept as the control
+# that anchors the low end of the variation axis — deleting it would leave the
+# ranking with no zero point.
+name         = "sector-hammer"
+experimental = true
+
+sub          = true
+c2           = true
+
+granularity  = "sector"
+ladder       = "single"
+speed        = "max"
+passes       = 3
+variation    = "none"
+
+ctdb         = "auto"
+verify       = false
+budget_s     = 120

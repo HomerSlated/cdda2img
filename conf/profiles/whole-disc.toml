@@ -1,0 +1,21 @@
+# whole-disc — re-read the entire disc at one speed and re-gate.
+#
+# Bench: 11/20 (0.55). Expensive per attempt, but it carries the most positional
+# variation of any single-speed arm — a fresh whole-disc pass came back clean ~27%
+# of the time on the disc where sector-hammer scored 0/25. That contrast is the
+# original evidence that variation, not targeting, drives recovery.
+name         = "whole-disc"
+experimental = false
+
+sub          = true
+c2           = true
+
+granularity  = "whole-disc"
+ladder       = "single"
+speed        = "max"
+passes       = 3
+variation    = "none"
+
+ctdb         = "auto"
+verify       = false
+budget_s     = 600

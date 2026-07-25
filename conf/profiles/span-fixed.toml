@@ -1,0 +1,26 @@
+# span-fixed — re-read a large FIXED span ending at the flagged sector, at one speed.
+#
+# EXPERIMENTAL, and a control rather than a candidate. It exists to separate two
+# confounded explanations of max-variation's wins: it reads 145-664 sectors AND it
+# randomises speed and run-up, while sector-runup reads 35 and randomises nothing.
+# span-fixed holds the span large and the randomness at zero.
+#
+# Result: 1/16 (0.06) against max-variation's 2/3 on the same target with the same
+# splice rule. Span size is therefore NOT the story — the variation is. Keeping the
+# arm keeps that conclusion falsifiable on the next disc.
+name         = "span-fixed"
+experimental = true
+
+sub          = true
+c2           = true
+
+granularity  = "sector"
+ladder       = "single"
+speed        = "max"
+passes       = 3
+span         = 512
+variation    = "none"
+
+ctdb         = "auto"
+verify       = false
+budget_s     = 180

@@ -102,22 +102,28 @@
 # via 'cdda2img extract --embedart'. Default: false
 # embedart = false
 
-# AccurateRip recovery effort for a rip. When cdrdao produces a track that fails
-# AccurateRip, the track is re-ripped with cd-paranoia across the drive's own speed
-# ladder (fastest to slowest), AR-verifying each attempt and stopping at the first
-# match. recovery_passes is how many full sweeps of the ladder to try per failed
-# track before giving up (total attempts = passes x ladder steps). 0 disables the
-# laddered recovery. Default: 3
+# AccurateRip recovery effort for a rip. When a track fails AccurateRip it is
+# re-read across the drive's own admitted speed ladder (fastest to slowest),
+# AR-verifying each attempt and stopping at the first match. recovery_passes is how
+# many full sweeps of the ladder to try per failed track before giving up (total
+# attempts = passes x ladder steps). 0 disables the laddered recovery. Default: 3
 # recovery_passes = 3
 
-# C2-erasure-assisted CTDB recovery (item 8). The drive's C2 error pointers can be
-# fed to the ctanalyse Reed-Solomon repair as erasures, which roughly doubles how
-# much damage it can reconstruct. C2 is only a *modifier* to ctanalyse, so "off"
-# never disables recovery -- it just skips the erasure boost (error-only ctanalyse,
-# then the cd-paranoia ladder). "auto" uses C2 only when the drive both advertises
-# and functionally supports it; "on" forces it; "off" never uses it. Default: off
-# (enabling C2 today adds a second cdrdao read-toc metadata pass, since c2read cannot
-# read the subchannel yet; error-only ctanalyse still repairs above cd-paranoia).
+# Recovery profile used when neither --profile nor any --ad-* flag is given. A
+# profile is a complete recovery specification, named after the strategy the bench
+# measured. `cdda2img rip --list-profiles` shows what is installed; the shipped set
+# is track-ladder, track-constant, max-variation, whole-disc, and the experimental
+# sector-runup / sector-hammer / span-fixed. Unset falls through to the built-in
+# "track-ladder" -- 19/20 across 8 bench targets, and the only arm that managed 3/3
+# at the hardest one. Default: unset
+# default_profile = "track-ladder"
+
+# C2-erasure-assisted CTDB recovery. The drive's C2 error pointers can be fed to the
+# ctanalyse Reed-Solomon repair as erasures, which roughly doubles how much damage it
+# can reconstruct. C2 is only a *modifier* to ctanalyse, so "off" never disables
+# recovery -- it just skips the erasure boost (error-only ctanalyse, then the speed
+# ladder). "auto" uses C2 only when the drive both advertises and functionally
+# supports it; "on" forces it; "off" never uses it. Default: off
 # c2_recovery = "off"
 
 # Per-drive read and write offsets.

@@ -214,6 +214,10 @@ class Config:
     # rung (rbi_spec.md §6.3.2; trust_model_design.md §10.2). NOT a filter: listed
     # codes rank in order, unlisted codes share the lowest rank, empty = key skipped.
     preferred_country: list[str] = field(default_factory=list)
+    # Recovery profile used when neither --profile nor any --ad-* flag is given
+    # (accudisc-migration-plan.md §9.4, resolution rung 3). None falls through to
+    # the built-in "track-ladder", the bench winner.
+    default_profile: str | None = None
 
 
 def _parse_preferred_country(raw: object) -> list[str]:
@@ -403,6 +407,9 @@ def load_config() -> Config:
         )
         low_dr_threshold = 5.0
 
+    raw_profile = data.get("default_profile")
+    default_profile = str(raw_profile).strip() or None if raw_profile else None
+
     return Config(
         cddb_server=cddb_server,
         contact_email=contact_email,
@@ -425,6 +432,7 @@ def load_config() -> Config:
         recovery_passes=recovery_passes,
         c2_recovery=c2_recovery,
         preferred_country=preferred_country,
+        default_profile=default_profile,
     )
 
 

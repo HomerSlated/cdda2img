@@ -1,0 +1,25 @@
+# max-variation — random rung x random run-up x random order, around the flagged
+# sectors.
+#
+# Bench: 13/20 (0.65) overall, but that average hides the shape: fastest arm at low
+# n (5x quicker than track-ladder on Tracy) and 0/9 at high n. Use it when the
+# damage is a handful of sectors; it collapses when the defect is broad.
+#
+# The `span-fixed` control exists because of this arm — max-variation reads 145-664
+# sectors while sector-runup reads 35, so span size and randomness were confounded.
+# span-fixed isolates span at 0/16, which is what promotes variation itself from
+# "incidental" to the active ingredient.
+name         = "max-variation"
+experimental = false
+
+sub          = true
+c2           = true
+
+granularity  = "sector"
+ladder       = "full"
+passes       = 3
+variation    = "full"
+
+ctdb         = "auto"
+verify       = false
+budget_s     = 300

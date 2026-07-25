@@ -1,0 +1,22 @@
+# sector-runup — re-read each flagged sector with a fixed run-up ahead of it.
+#
+# EXPERIMENTAL. Bench: 2/20 (0.10), and both wins were on one degenerate n=1 target.
+# 0/3 on every hard target. Kept because it is the cheapest arm that still gives the
+# drive a streaming approach to the defect, and because a negative result is only
+# useful if the arm that produced it stays runnable.
+name         = "sector-runup"
+experimental = true
+
+sub          = true
+c2           = true
+
+granularity  = "sector"
+ladder       = "single"
+speed        = "max"
+passes       = 3
+run_up       = 32
+variation    = "none"
+
+ctdb         = "auto"
+verify       = false
+budget_s     = 120
