@@ -271,3 +271,55 @@ def test_binding_against_an_empty_admitted_list_yields_no_rungs() -> None:
     """admitted_ladder guarantees this cannot happen in practice; rungs_for still
     must not raise if it ever does."""
     assert R.rungs_for(R.load_profile("track-ladder"), []) == []
+
+
+# ---- §9.7 profile creation guards -------------------------------------------
+
+
+def test_setup_refuses_a_name_that_collides_with_a_shipped_profile(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys
+) -> None:
+    """Shipped names are reserved. Shadowing `track-ladder` with a local file makes
+    every later measurement labelled `track-ladder` incomparable with the bench that
+    named it — and there is deliberately no --force."""
+    from cdda2img import setup as S
+
+    monkeypatch.setattr(S, "_text", lambda *a, **k: "track-ladder")
+    monkeypatch.setattr(R, "user_profiles_dir", lambda: tmp_path)
+    assert S._section_create_profile() is False
+    assert "already exists" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("name", ["Track Ladder", "my profile", "up!", "MyProfile"])
+def test_setup_refuses_an_illegal_name_rather_than_mangling_it(
+    name: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys
+) -> None:
+    """Silent lowercasing would let two distinct names map to one file, and the
+    loser would vanish without a message."""
+    from cdda2img import setup as S
+
+    monkeypatch.setattr(S, "_text", lambda *a, **k: name)
+    monkeypatch.setattr(R, "user_profiles_dir", lambda: tmp_path)
+    assert S._section_create_profile() is False
+    assert "Invalid name" in capsys.readouterr().out
+    assert not list(tmp_path.glob("*.toml"))
+
+
+def test_setup_writes_a_profile_that_loads_back(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Creation goes through the same validator as loading, so a profile cannot be
+    born invalid."""
+    from cdda2img import setup as S
+
+    monkeypatch.setattr(S, "_text", lambda *a, **k: "my-profile")
+    monkeypatch.setattr(S, "_select", lambda *a, **k: "track-constant")
+    monkeypatch.setattr(R, "user_profiles_dir", lambda: tmp_path)
+    assert S._section_create_profile() is True
+
+    written = tmp_path / "my-profile.toml"
+    assert written.is_file()
+    loaded = R.load_profile("my-profile", profiles={"my-profile": written})
+    assert loaded.name == "my-profile"
+    assert loaded.ladder == "single"  # inherited from track-constant
+    assert loaded.experimental is False  # a derived profile is not a bench control

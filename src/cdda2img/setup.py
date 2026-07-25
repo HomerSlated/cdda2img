@@ -20,6 +20,7 @@ _SECTION_CHOICES = [
     ("update-config", "Config: Update from template"),
     ("validate-config", "Config: Validate / repair"),
     ("edit-config", "Config: Edit ($EDITOR)"),
+    ("create-profile", "Profiles: Create"),
     ("read-offset", "Drive: Detect read offset"),
     ("write-offset", "Drive: Measure write offset"),
     ("create-catalogue", "Catalogue: Create database"),
@@ -52,6 +53,7 @@ def run_setup_wizard(
         "update-config": _section_update_config,
         "validate-config": _section_validate_config,
         "edit-config": _section_edit_config,
+        "create-profile": _section_create_profile,
         "read-offset": lambda: _section_read_offset(device),
         "write-offset": lambda: _section_write_offset(device, speed),
         "create-catalogue": _section_create_catalogue,
@@ -267,6 +269,100 @@ def _section_edit_config() -> bool:
 
     print()
     return _section_validate_config()
+
+
+def _text(prompt: str, default: str = "") -> str | None:
+    return _q().text(prompt, default=default).ask()  # type: ignore[return-value]
+
+
+def _section_create_profile() -> bool:
+    """Create a recovery profile in the user profiles dir (§9.7).
+
+    Two guards, both deliberately without a --force escape:
+
+    1. **Name sanitiser** — anything outside ``[a-z0-9_-]`` is an error, never
+       silently mangled. Two names that differ only in case or punctuation would map
+       to one filename, and the loser would vanish without a message.
+    2. **Overwrite guard** — a name matching any shipped or existing user profile is
+       refused. Shipped names are reserved; shadowing `track-ladder` with a local
+       file would make every future measurement labelled `track-ladder`
+       incomparable with the bench that named it.
+
+    The file is written atomically through the same validator the loader uses, so a
+    profile cannot be born invalid.
+    """
+    from cdda2img.recovery_profile import (
+        ProfileError,
+        list_profiles,
+        load_profile,
+        user_profiles_dir,
+    )
+    from cdda2img.validation import PROFILE_SCHEMA, validate
+
+    existing = list_profiles()
+    print("  Existing profiles: " + ", ".join(sorted(existing)))
+
+    name = _text("  New profile name ([a-z0-9_-]):")
+    if not name:
+        print("  Cancelled.")
+        return False
+    name = name.strip()
+    if not _is_profile_name(name):
+        print(f"  Invalid name {name!r}: use only lowercase letters, digits, - and _.")
+        return False
+    if name in existing:
+        print("  Profile already exists, please choose a different name.")
+        return False
+
+    base = _select("  Start from which profile?", sorted(existing))
+    if base is None:
+        print("  Cancelled.")
+        return False
+    try:
+        template = load_profile(base)
+    except ProfileError as exc:
+        print(f"  {exc}")
+        return False
+
+    data: dict[str, object] = {
+        k: v for k, v in template.__dict__.items() if k not in ("name", "experimental")
+    }
+    data["name"] = name
+    data["experimental"] = False
+
+    errors = validate(data, PROFILE_SCHEMA)
+    if errors:
+        print("  Refusing to write an invalid profile:")
+        for e in errors:
+            print(f"    - {e}")
+        return False
+
+    dest = user_profiles_dir() / f"{name}.toml"
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    lines = [f"# {name} — created by `cdda2img setup`, based on {base}.", ""]
+    lines += [_render_scalar_value(k, data[k]) for k in sorted(data)]
+    tmp = dest.with_suffix(".toml.tmp")
+    tmp.write_text("\n".join(lines) + "\n")
+    tmp.replace(dest)
+
+    print(f"  Wrote {dest}")
+    print(f"  Edit it to taste, then use it with: cdda2img rip --profile {name}")
+    return True
+
+
+def _render_scalar_value(key: str, value: object) -> str:
+    """One TOML scalar. Profiles are flat by design, so this is the whole writer."""
+    if isinstance(value, bool):
+        return f"{key} = {str(value).lower()}"
+    if isinstance(value, (int, float)):
+        return f"{key} = {value}"
+    return f'{key} = "{value}"'
+
+
+def _is_profile_name(name: str) -> bool:
+    from cdda2img.validation import _is_profile_name as check
+
+    return check(name)
 
 
 def _write_config_dict(path: Path, raw: dict) -> None:

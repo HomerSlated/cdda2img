@@ -19,6 +19,7 @@ if TYPE_CHECKING:
     from cdda2img.lookup_result import DiscMeta
     from cdda2img.mb_lookup import MBPrepopResult
     from cdda2img.rbi_format import RipInfo
+    from cdda2img.recovery_profile import ResolvedStrategy
     from cdda2img.rip_log import RipLogBuilder
     from cdda2img.terminal_ui import TerminalUI
     from cdda2img.track_preview import TrackPreview
@@ -308,6 +309,30 @@ def parse_args() -> argparse.Namespace:
 
     r_cmd = sub.add_parser("rip", help="Rip a physical CD-DA disc to an RBI container")
     r_cmd.add_argument(
+        "--profile",
+        metavar="NAME",
+        help="Recovery profile (see --list-profiles). Overrides config default_profile.",
+    )
+    r_cmd.add_argument(
+        "--list-profiles",
+        action="store_true",
+        help="List installed recovery profiles and exit",
+    )
+    # AccuDisc passthrough. Supplying ANY of these bypasses profiles entirely (§9.4
+    # rung 1) — it is an escape hatch for driving the engine directly, and merging it
+    # with a profile would produce a configuration nobody asked for.
+    _ad = r_cmd.add_argument_group(
+        "AccuDisc passthrough",
+        "Drive AccuDisc's recovery knobs directly. Any of these disables profiles.",
+    )
+    _ad.add_argument("--ad-speed", type=int, metavar="X")
+    _ad.add_argument("--ad-retries", type=int, metavar="K")
+    _ad.add_argument("--ad-c2-retries", type=int, metavar="N", dest="ad_c2")
+    _ad.add_argument("--ad-verify", type=int, metavar="P")
+    _ad.add_argument("--ad-overlap", type=int, metavar="K")
+    _ad.add_argument("--ad-ladder", metavar="LIST")
+    _ad.add_argument("--ad-recovery", metavar="FLAGS")
+    r_cmd.add_argument(
         "--device",
         default=None,
         metavar="DEVICE",
@@ -486,6 +511,12 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         dest="update_config",
         help="Update config from template (preserves user values)",
+    )
+    s_cmd.add_argument(
+        "--create-profile",
+        action="store_true",
+        dest="create_profile",
+        help="Create a recovery profile in the user profiles directory",
     )
     s_cmd.add_argument(
         "--edit-config",
@@ -2654,6 +2685,7 @@ def rip_image(  # noqa: C901
     auto: bool = False,
     extract: bool = False,
     keep_rbi: bool = True,
+    strategy: ResolvedStrategy | None = None,
 ) -> None:
     import sys
 
@@ -2876,16 +2908,31 @@ def rip_image(  # noqa: C901
             # each attempt and splicing the first match; a track that never matches
             # keeps its original audio. The sweep across passes x speeds is the recovery
             # mechanism (validated 6/6 on the damaged reference disc).
-            from cdda2img import drive_speed
+            from cdda2img import drive_speed, recovery_profile
             from cdda2img.accuraterip import fetch_ar_responses
 
             ar_responses, _ar_transport, _ar_b3 = fetch_ar_responses(
                 final_track_lsns, final_disc_last_lsn, cddb_id
             )
+            # The ladder comes from the resolved profile bound to THIS drive and
+            # THIS disc (§9.3) — a self-throttling governor caps a degraded disc
+            # regardless of drive capability, so it must be probed per rip.
+            # `cfg.recovery_passes = 0` remains the global kill switch; otherwise
+            # the profile owns the sweep count.
+            bound = (
+                recovery_profile.bind_ladder(strategy, device)
+                if strategy is not None and strategy.profile is not None
+                else None
+            )
             recovery_ladder = (
-                drive_speed.probe_speed_ladder(device)
-                if ar_responses and cfg.recovery_passes > 0
+                list(bound.ladder)
+                if bound is not None and ar_responses and cfg.recovery_passes > 0
                 else []
+            )
+            recovery_passes = (
+                bound.profile.passes
+                if bound is not None and bound.profile is not None
+                else cfg.recovery_passes
             )
             if recovery_ladder:
                 outcomes = _recover_failed_tracks(
@@ -2897,7 +2944,7 @@ def rip_image(  # noqa: C901
                     ar_responses,
                     len(final_track_lsns),
                     recovery_ladder,
-                    cfg.recovery_passes,
+                    recovery_passes,
                     read_offset,
                     ui,
                 )
@@ -2978,8 +3025,16 @@ def rip_image(  # noqa: C901
                 provenance["ctdb_declined"] = ctdb_result.reason
         # Speed-laddered recovery provenance: what was tried and the per-track outcome.
         if recovery_ladder:
-            provenance["recovery_passes"] = str(cfg.recovery_passes)
+            provenance["recovery_passes"] = str(recovery_passes)
             provenance["recovery_ladder"] = ",".join(f"{x}X" for x in recovery_ladder)
+            if strategy is not None:
+                provenance["recovery_source"] = strategy.source
+                if strategy.profile is not None:
+                    provenance["recovery_profile"] = strategy.profile.name
+                if strategy.ad_flags:
+                    provenance["recovery_ad_flags"] = ",".join(
+                        f"{k}={v}" for k, v in sorted(strategy.ad_flags.items())
+                    )
         for _t, _outcome in sorted(recovery_outcomes.items()):
             provenance[f"recovery_track_{_t}"] = _outcome
         # Frame-450 partial verification: a track that still fails full AR but
@@ -3212,8 +3267,33 @@ def _dispatch(args: argparse.Namespace) -> None:
         )
     elif args.cmd == "rip":
         from cdda2img.config import load_config
+        from cdda2img.recovery_profile import (
+            AD_FLAGS,
+            list_profiles,
+            load_profile,
+            resolve_recovery,
+        )
+
+        if getattr(args, "list_profiles", False):
+            for pname, path in sorted(list_profiles().items()):
+                prof = load_profile(pname)
+                mark = " (experimental)" if prof.experimental else ""
+                print(
+                    f"{pname:16s} {prof.granularity:10s} ladder={prof.ladder:6s}{mark}"
+                )
+                print(f"{'':16s} {path}")
+            return
 
         cfg = load_config()
+        # Only flags the user actually supplied may appear: argparse hands over
+        # every --ad-* key with None when unset, and treating those as present
+        # would fire §9.4 rung 1 on every single invocation.
+        ad = {f: getattr(args, f"ad_{f}", None) for f in AD_FLAGS}
+        strategy = resolve_recovery(
+            ad_flags={k: v for k, v in ad.items() if v is not None},
+            profile_name=args.profile,
+            config_default=cfg.default_profile,
+        )
         rip_image(
             args.device,
             loudness=args.loudness,
@@ -3225,6 +3305,7 @@ def _dispatch(args: argparse.Namespace) -> None:
             auto=args.auto if args.auto is not None else cfg.auto,
             extract=args.extract,
             keep_rbi=not args.no_keep_rbi,
+            strategy=strategy,
         )
     elif args.cmd == "import":
         if args.info:
@@ -3304,6 +3385,7 @@ def _dispatch_utility(args: argparse.Namespace) -> None:
             "update_config",
             "validate_config",
             "edit_config",
+            "create_profile",
             "read_offset",
             "write_offset",
             "create_catalogue",
@@ -3355,6 +3437,8 @@ def _run_startup_checks(args: argparse.Namespace) -> None:
 
 
 def main() -> None:
+    from cdda2img.recovery_profile import ProfileError
+
     args = parse_args()
     if args.verbose:
         # CLI entry only — keeps the library boundary clean per the
@@ -3390,6 +3474,11 @@ def main() -> None:
         print(f"Error: {e}")
         raise SystemExit(1) from None
     except RuntimeError as e:
+        print(f"Error: {e}")
+        raise SystemExit(1) from None
+    except ProfileError as e:
+        # A named profile that cannot be loaded is fatal on purpose (§9.4): silently
+        # substituting a default would mislabel every measurement taken afterwards.
         print(f"Error: {e}")
         raise SystemExit(1) from None
     except EOFError:

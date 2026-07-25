@@ -713,10 +713,23 @@ Insert before §5 Phase E (dead-module removal), after the read/write migration:
   > cause a collision, so it is normalisation rather than repair — unlike profile
   > names (§9.7), where silent lowercasing is forbidden precisely because two
   > distinct names could then map to one file.
-- **Phase P4** — `setup` Profiles:Create (§9.7).
-- **Phase P5** — `rip --profile` + `--ad-*` passthrough; wire `ResolvedStrategy` into
-  `_recover_failed_tracks` (which already implements `track-ladder` — the whole-track
-  ladder sweep — so the default path is largely a no-op rename + explicit binding).
+- **Phase P4** — ✅ **DONE 2026-07-25**. `setup --create-profile` / "Profiles: Create":
+  name sanitiser (illegal characters are an error, never mangled), overwrite guard
+  against shipped **and** user names, atomic `.tmp`+rename through the §9.5 validator
+  so a profile cannot be born invalid. No `--force`.
+- **Phase P5** — ✅ **DONE 2026-07-25**. `rip --profile NAME`, `--list-profiles`, and
+  the `--ad-*` passthrough group; `resolve_recovery` runs once at dispatch and
+  `bind_ladder` per rip; `ResolvedStrategy` reaches `_recover_failed_tracks`. PROV
+  gains `recovery_source`, `recovery_profile`, `recovery_ad_flags`.
+
+  > **Two things the "no-op rename" framing missed.** (1) `cfg.recovery_passes` and
+  > `Profile.passes` now overlap. Resolved: the profile owns the sweep count, and
+  > `recovery_passes = 0` stays the global kill switch — the documented way to
+  > disable recovery entirely must keep working. (2) Only supplied `--ad-*` flags may
+  > reach `resolve_recovery`: argparse hands over every key with `None` when unset, so
+  > passing the raw namespace would fire rung 1 on every invocation and silently
+  > disable profiles for everyone. `ProfileError` is now caught in `main()` — an
+  > unknown `--profile` exits 1 with the available names, not a traceback.
 
 Verification additions: `--profile nope`→exit; same profile on two drives → each binds its
 own admitted ladder; invalid config → every non-setup subcommand exits, `setup` repairs;
