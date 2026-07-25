@@ -1102,6 +1102,22 @@ concrete reasons:
 1. **One damaged disc, intermittently damaged.** ZZ Top and ABBA are clean; Tracy
    manifests damage on only 2 of 5 passes. R0–R4 were therefore exercised on
    exactly two dirty baselines, **n=1 each**.
+
+   > **Corrected 2026-07-25: ABBA *Gold* is not clean.** Four independent lines of
+   > evidence, none of which were available when this was written: §12.2's own run1
+   > row records R1 cutting C2 spans 58→2 (a clean disc has no 58); run3 makes ABBA
+   > t19 the *hardest* target in the whole bench (n=47 flagged sectors, the sole cell
+   > where only `track-ladder` scored 3/3); the 2026-07-25 rip failed AR on tracks 1
+   > and 19 and needed the speed ladder to recover both; and the PX-716A's read
+   > governor now throttles every request ≥8× down to 8× **on this disc** — the drive
+   > itself classifies the media as degraded before we read a sector.
+   >
+   > This *strengthens* the section's conclusion rather than weakening it. The claim
+   > was "one damaged disc"; the truth is two, but ABBA's damage was never put through
+   > R0–R4 (it predates the ctdb rungs — §12.2's gap), so the count of dirty baselines
+   > the audio ladder was actually measured on is unchanged at two. What changes is
+   > the backfill's value: it is not a tidiness exercise, it is the second damaged
+   > disc the dataset needs.
 2. **n=1 against a stochastic process.** §3.5's own discipline: only the randomized
    `--characterize` mode (Wilson CIs) can attribute an effect to a method. "R0–R4
    recovered nothing" is within noise, not a conclusion.

@@ -68,12 +68,23 @@ Fixed: domain-correct `laststride` (both copies), `ctanalyse` honours `--toc` an
 `image_first_frame`/`image_frames` so a stale binary is refused rather than trusted,
 `verify_ctdb` returns per-track roles (unfixed/regressed/abstained), `ctdb_declined` reaches
 PROV, and a failed erasure-assisted run falls back to error-only. New
-`tests/test_ctdb_repair.py` (13 tests, every geometry fixture uses `bounds[0] != 0`) — there
+`tests/test_ctdb_repair.py` (15 tests, every geometry fixture uses `bounds[0] != 0`) — there
 was no test file for this module at all. Analysis:
 `private/research/incoming/ctdb-failure-abba-gold-20260725.md`.
 
-**Still open from it:** the C2 erasure-bitmap origin shift is correct by arithmetic but has
-not been exercised on real damaged media with `bounds[0] != 0`.
+**Closed 2026-07-25 — the C2 erasure-bitmap origin shift is now measured, not merely
+derived.** It had never been *executed* with a non-zero origin, because every fixture and
+every repaired disc had `bounds[0] == 0`, where the shift is a no-op.
+`tools/ctdb_erasure_origin_test.py` runs it on ABBA *Gold* (`bounds[0] = 33`, CTDB entry
+829896, npar 8): 6 words damaged in a single RS column — above the error-only capacity of
+`npar/2 = 4`, below the erasure capacity of `npar = 8` — so the two paths must disagree.
+Correct bitmap → repaired **bit-exactly**; no bitmap → refused ("damage exceeds RS
+capacity"), proving the erasures did the work; bitmap displaced by `word_base` (the exact
+error a broken origin would make) → refused, proving the harness can see the fault it is
+looking for. Two unit tests now pin the domain contract from both sides
+(`build_erasure_bitmap` emits over `[0, lead-out)`; `repair_whole_disc` sizes it from the
+PCM buffer), because the hazard is a future "fix" that narrows the Python side and applies
+the shift twice.
 
 ### Whole-disc AR miss disables per-track recovery (2026-07-24)
 

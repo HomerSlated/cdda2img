@@ -224,7 +224,19 @@ def build_erasure_bitmap(c2_path: Path, nwords: int, align_pairs: int = -2) -> b
     Sign convention: align_pairs=-2 makes audio pair i read bitmap index i+2 — the C2
     bitmap LAGS the audio by 2 pairs. tools/modepage_experiment.py measures the same
     physical lag as k=+2 in its slice convention (TP-argmax vs an AR-verified oracle,
-    precision 0.993 / recall 0.990, 2026-07-05). Do not "fix" either sign."""
+    precision 0.993 / recall 0.990, 2026-07-05). Do not "fix" either sign.
+
+    **Domain: this bitmap spans our PCM, ``[0, lead-out)`` — deliberately, not by
+    oversight.** ctanalyse works in CTDB's image domain and does the conversion on its
+    side, skipping ``word_base / 8`` bytes (``word_base = bounds[0] * 1176``) before
+    bucketing bits into grid cells (tools/ctanalyse/main.c, ``bits + skip``). Narrowing
+    this function to the image domain would apply the shift twice and silently displace
+    every erasure by the length of the track-1 pre-gap. Given that domain confusion is
+    exactly what caused the 2026-07-25 ABBA *Gold* failure, treat the asymmetry as
+    load-bearing. Verified on real media with ``bounds[0]=33`` by
+    tools/ctdb_erasure_origin_test.py: 6 errors in one column (over the error-only
+    capacity of npar/2, under the erasure capacity of npar) repair bit-exactly with the
+    correct bitmap, and fail both with no bitmap and with one shifted by ``word_base``."""
     raw = np.fromfile(c2_path, dtype=np.uint8)
     nsec = raw.size // 294
     bits = np.unpackbits(raw[: nsec * 294].reshape(nsec, 294), axis=1)

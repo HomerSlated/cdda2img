@@ -96,6 +96,51 @@ def test_window_outside_the_pcm_returns_none() -> None:
     assert C.track_crc_at(pcm, 2, 0, 10, [33, 50, 200], 2) is None
 
 
+# ---- A2: erasure-bitmap domain ----------------------------------------------
+
+
+def _c2_flagging(nsec: int, sector: int) -> bytes:
+    """A 294 B/sector C2 capture with every word of *sector* flagged."""
+    raw = bytearray(nsec * 294)
+    raw[sector * 294 : (sector + 1) * 294] = b"\xff" * 294
+    return bytes(raw)
+
+
+def test_the_erasure_bitmap_is_built_over_the_whole_pcm_not_the_ctdb_image(
+    tmp_path: Path,
+) -> None:
+    """ctanalyse converts to CTDB's image domain itself, skipping word_base/8 bytes.
+    If this function were "fixed" to emit image-relative bits the shift would be
+    applied twice and every erasure would land a pre-gap away from its damage."""
+    nsec, sector = 100, 40
+    c2 = tmp_path / "d.c2"
+    c2.write_bytes(_c2_flagging(nsec, sector))
+
+    bitmap = C.build_erasure_bitmap(c2, nsec * 1176, align_pairs=0)
+    bits = [
+        (bitmap[w // 8] >> (w % 8)) & 1
+        for w in (sector * 1176, sector * 1176 + 1175, (sector - 1) * 1176)
+    ]
+    # absolute sector position flagged, its neighbour untouched
+    assert bits == [1, 1, 0]
+
+
+def test_repair_whole_disc_sizes_the_bitmap_from_the_pcm_buffer(
+    _repair_harness: dict,
+) -> None:
+    """The caller-side half of the same contract: nwords must span [0, lead-out)."""
+    h = _repair_harness
+    seen: list[int] = []
+    h["monkeypatch"].setattr(
+        C,
+        "build_erasure_bitmap",
+        lambda p, nwords, align: seen.append(nwords) or b"\x00",
+    )
+    h["monkeypatch"].setattr(C, "_ctanalyse_and_verify", h["record"]([True]))
+    _run(h, c2=True)
+    assert seen == [h["pcm_path"].stat().st_size // 2]
+
+
 # ---- B2: stale-binary guard -------------------------------------------------
 
 
