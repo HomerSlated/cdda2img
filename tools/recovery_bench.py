@@ -725,6 +725,13 @@ def run_read(
     if start is not None:
         cmd += ["--start", str(start), "--count", str(count)]
     cmd += capture_flags(sub, c2)
+    if sub:
+        # `--sub raw` alone captures the stream and reports subq_ok/subq_total, but
+        # writes nothing: the aggregate counters survive and the frames do not.
+        # Without the sidecar there is no way to ask *which* frames failed, only how
+        # many — the exact granularity limit that made a stable count look like a
+        # stable defect (AccuDisc correspondence §ah).
+        cmd += ["--subf", str(out_dir / f"{tag}.sub")]
     if rung is not None:
         cmd += rung_recovery_flags(rung, c2, overlap_needed=overlap_needed)
     cmd += ["-q", "--progress-fd", "1"]
@@ -1412,7 +1419,13 @@ def _baseline_passes(
         for i, (t, pcm_f, map_f) in enumerate(pass_files):
             if i == pick:
                 continue
-            for f in (pcm_f, map_f, out_dir / f"{t}.c2", out_dir / f"{t}.sub"):
+            # The .sub sidecar is deliberately spared. Only the median pass feeds the
+            # rungs, so its PCM/C2/map are the only ones worth GBs — but the *set* of
+            # CRC-bad frames per pass is a different measurement, and it only exists
+            # across repeated passes. Discarding the non-median sidecars throws away
+            # the static-vs-transient discriminator to save 33 MB against the 226 MB
+            # of PCM already being deleted on the same line.
+            for f in (pcm_f, map_f, out_dir / f"{t}.c2"):
                 f.unlink(missing_ok=True)
 
     return pass_rows, pass_files, pick

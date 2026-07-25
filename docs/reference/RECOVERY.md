@@ -193,9 +193,10 @@ read-engine side; "caller" means cdda2img (or any application driving AccuDisc).
 - **Dependencies**: a settable read speed (best-effort `CDROM_SELECT_SPEED` /
   `--speed`); requires an external gate (AR) to know when to stop.
 - **Optional**: `recovery_passes` config (default 3; 0 disables).
-- **Auto-detected**: the ladder is probed live per drive (`drive_speed.
-  probe_speed_ladder` / `accudisc speeds`: set each candidate, read back the
-  achieved speed).
+- **Auto-detected**: the ladder is probed live (`drive_speed.probe_speed_ladder` /
+  `drive_speed.admitted_ladder` over `accudisc speeds`: set each candidate, read back
+  the achieved speed). **Probe it every time; never cache it.** The ladder is a
+  property of drive × disc × *session*, not of the drive — see the caveat below.
 - **Conflicts**: alternative exit to parity repair (2.3). Not self-sufficient —
   without a gate there is nothing to verify a candidate against.
 - **Combinations**: sequential after parity-repair failure; each attempt
@@ -989,17 +990,77 @@ figures across separate runs — so that reproducibility is a *static* property 
 the disc, which is what the irreducible-vs-transient split in the recovery model
 rests on.
 
+> **Weakened 2026-07-25 by §12.8, and by how much is calculable.** Every cell in
+> the 41-row audit was a *two*-pass comparison, and §12.8 shows Q yield is bimodal:
+> most passes land in a tight mode, an occasional one sits ~36 σ out. Two passes
+> cannot distinguish "this cell is reproducible" from "both draws landed in the
+> tight mode", so the audit's tightness is partly selection and "reproduces to four
+> significant figures" is weaker evidence than it read as when written.
+>
+> How much survives depends on the unit, and the first version of this note got the
+> unit wrong. If a disturbed pass occurs independently with probability *q*, then
+> *n* consecutive tight passes has probability (1−*q*)ⁿ, and the bound is:
+>
+> | *n* | excluded at 5 % | at 10 % |
+> |---|---|---|
+> | 8 (Tracy, pooled over 4 speeds × 2 invocations) | *q* ≥ 0.31 | *q* ≥ 0.25 |
+> | 3 (`--passes 3`) | *q* ≥ 0.63 | *q* ≥ 0.54 |
+> | **2 (one audit cell)** | ***q* ≥ 0.78** | *q* ≥ 0.68 |
+>
+> The pooled *n* = 8 figure is **not** the applicable one. Pooling assumes a single
+> *q* across all four speeds, and §12.8 measures the opposite on the same afternoon:
+> ABBA ran 0/3 disturbed at 32×, 0/3 at 24×, and 1/3 at 8×. *q* is a (disc, speed)
+> cell property, near zero at the high rungs and ≈ 0.33 at 8× — so pooling averages
+> over precisely the variation being estimated.
+>
+> The audit's claim is per-cell ("every repeated (disc, speed) cell reproduces to
+> within 0.04 pp"), so the per-cell *n* = 2 row is the one that applies:
+> **no individual cell in the 41-row audit is constrained below *q* ≈ 0.78.** A cell
+> with ABBA's measured 8× rate of *q* ≈ 0.33 shows two tight passes 44 % of the time.
+> What the pooled figure does support is narrower and worth keeping: Tracy's *average*
+> disturbed rate across its four speeds is ≲ 0.31.
+>
+> This does **not** reopen the contention hypothesis. Bimodality is not contention:
+> the disturbed pass recurs within a single session with nothing else changed, and
+> contention was an 86-point excursion, not one point. The irreducible-Q model
+> stands. What changes is the strength of the replicate argument supporting it —
+> and the design rule that follows: **three passes are the floor for any Q claim;
+> two cannot distinguish the modes, regardless of how the output is analysed.**
+
 > **Note on this file.** `docs/reference/RECOVERY.md` is one document hardlinked
 > into both the cdda2img and AccuDisc repos — one inode, two paths, and git
 > enforces nothing about the relationship. Most editors save atomically (write
 > temp, rename over target), which replaces the directory entry with a **new
 > inode** and silently severs the link; `sed -i` does the same. The two repos then
 > hold look-alike files that diverge from the next edit onward. Edit in place
-> (`cat new > RECOVERY.md`) and verify immediately with
-> `stat -c '%i %h' docs/reference/RECOVERY.md` — the link count must be **2**.
-> If it reads 1 the link is severed: reconcile, `ln -f` from one side, and
-> re-verify before either side commits. (It was severed once, found 2026-07-25;
-> the copies had diverged by 45 lines.)
+> (`cat new > RECOVERY.md`) and verify immediately.
+>
+> **Verify inode *identity*, not link count.** Compare the two paths:
+>
+> ```sh
+> [ "$(stat -c %i A)" = "$(stat -c %i B)" ] && cmp -s A B
+> ```
+>
+> The earlier version of this note said "the link count must be **2**", which is
+> the wrong property — it answers *how many names does this inode have*, when the
+> question is *are these two names the same file*. A backup made with `ln`, or a
+> third repo taking the document, gives `links=3` and a perfectly correct link
+> then reports as severed. Corrected 2026-07-25 after the same defect was found
+> in the repair script written to enforce it (§12.8's class, instance #7);
+> AccuDisc's `CLAUDE.md` carried the identical wording and has been flagged.
+> Treat the link count as information worth printing, not as the assertion.
+>
+> If the inodes differ the link is severed. **Do not simply `ln -f`** — that
+> destroys whatever is at the target path, which may be the other project's work.
+> Diff the peer copy first and merge anything unique before relinking.
+> `tools/relink_recovery_md.sh` does all of this: no-ops when already linked,
+> refuses and prints the offending lines when the peer has unique content,
+> requires `--force` to discard them, and verifies inode identity plus `cmp`
+> afterwards.
+>
+> (Severed and repaired four times on 2026-07-25 alone; the first time it went
+> unnoticed and the copies had diverged by 45 lines. The severing is caused by the
+> editing tool, so no amount of author care prevents it — only the check does.)
 
 ### 12.1 What the bench does
 
@@ -1013,17 +1074,72 @@ faithful stand-in for a drive with no C2). The AccuDisc side supplies the
 relative signals (C2, Q-health, the status map); cdda2img supplies the absolute
 gates (AR v1/v2, CTDB CRC + parity) and the disc geometry.
 
+> **Every ladder in this Part is session-scoped (2026-07-25).** The admitted-speed
+> ladders recorded in §12.2–§12.7 are written as though they were properties of a
+> (drive, disc) pair. They are not: the PX-716A gave `[32, 24, 8, 4]` on ABBA *Gold*
+> in July, `[8, 4]` on the same disc on 2026-07-25, and `[32, 24, 8, 4]` again the
+> next day with a tray open/close in between. Three ladders, one drive, one disc.
+>
+> AccuDisc's mechanism for this — a hypothesis from one drive, not a finding — is that
+> the PX-716A pins a per-disc quality ceiling **at drive init**, so a tray cycle
+> re-inits and can pick a different ceiling. It predicts the observation and predicts
+> the ladder should be stable *within* a session. run6's 20 cells were one session with
+> no tray cycle and held a flat 32× governor ceiling throughout, which is consistent —
+> one session on one drive, not a confirmation.
+>
+> The data are not relabelled, because a one-drive hypothesis is not grounds for
+> rewriting a table. But no ladder here should be read as reproducible on a later
+> session, and none may be cached, shipped in a table, or asserted in a test.
+
 ### 12.2 Disc coverage
 
 | Disc | Speeds | Rungs | C2 | Damage profile | Result |
 |------|--------|-------|----|----|--------|
 | ZZ Top | 40,32,24,16,8,4 | R0–R4 | on | clean | 36 rows, Q 0.998–0.999, 0 C2, AR/CTDB pass all speeds, no cliff |
 | ABBA *Gold* | 32,24,8,4 | R0–R4 | on | clean-ish | R1 cut C2 58→2 at +0 s (damage-proportional rescue) |
+| ABBA *Gold* | 32,24,8,4 | ctdb + ctdb-noc2, `--passes 3` | on | **needs parity repair** | the backfill — §12.2.1 |
 | Tracy Chapman | 40,32,24,8,4 | R0–R4 | **off** | — | `spans=0` at every speed — C2 off = no localization surface |
 | Tracy Chapman | 40,32,24,8,4 | R0–R4 + ctdb + ctdb-noc2 | on | localized, **intermittent** | the full matrix — §12.3 |
 
-**Gap:** ZZ Top and ABBA predate the ctdb rungs; Tracy is the only disc with full
-coverage. A fair cross-disc CTDB comparison needs a backfill pass on both (deferred).
+**Remaining gap:** ZZ Top still predates the ctdb rungs (needs a disc swap; not urgent —
+it is the clean control and the least likely to exercise parity). ABBA's backfill landed
+2026-07-25 as run6 and is below.
+
+#### 12.2.1 ABBA *Gold* CTDB backfill (run6, 2026-07-25)
+
+20 cells: `ctdb` + `ctdb-noc2` across the disc-bound ladder `[32, 24, 8, 4]`, three
+whole-disc baseline passes per speed, `--read-offset 30`, drive held under
+`flock /var/tmp/sr0.lock` throughout. ~2 h 40 m.
+
+| speed | Q yield ×3 | `ar_v2` ×3 | `ctdb` | `ctdb-noc2` |
+|---|---|---|---|---|
+| 32× | 0.478 / 0.478 / 0.478 | F F F | pass=F repaired=**F** | pass=F repaired=**F** |
+| 24× | 0.992 / 0.992 / 0.992 | F F F | pass=F repaired=**F** | pass=F repaired=**F** |
+| 8× | 0.992 / 0.982 / 0.992 | F **T** **T** | pass=F repaired=**T** | pass=F repaired=**T** |
+| 4× | 0.965 / 0.965 / 0.965 | F F F | pass=F repaired=**T** | pass=F repaired=**T** |
+
+`repaired=True` means the CTDB **checksum gate failed and the parity repair then
+succeeded** — verified through the AR double-gate, so it is a real recovery, not an
+unchecked splice.
+
+**This disc is not "clean-ish".** The old row's damage profile was inferred from a rung
+set that could not attempt parity. Corrected: ABBA *Gold* **requires** parity repair,
+**gets** it at 8× and 4×, and is **unrecoverable at 24× and 32×** — those captures are
+past RS capacity, not merely slower. That is a materially different status, and it is
+the answer to a question the pre-backfill table was shaped not to ask.
+
+Three further results from the same run:
+
+1. **C2-assisted and error-only parity agree at every speed.** `ctdb` and `ctdb-noc2`
+   returned identical verdicts in all four cells. On this disc the C2 bitmap neither
+   helps nor hurts the repair — consistent with §12.3's Tracy finding that error-only
+   was sufficient at that damage level, now reproduced on a second disc.
+2. **The high-rung AR failures are a speed characteristic, not degradation.** run1,
+   weeks earlier, recorded the same per-speed pattern — `ar_v2` False at 32× and 24×,
+   True at 8×, False at 4×, including the non-monotonicity. A cross-week repeat over
+   four speeds rules out damage accumulated in between.
+3. **Q health did not predict capture quality** — at 8× the median-Q pass failed AR
+   while the lowest-Q pass passed. See §12.8; that finding came out of this run.
 
 > **Corrected 2026-07-25:** the parenthetical "no CTDB parity data for either" was
 > wrong for ABBA *Gold* — it is in CTDB with parity (entry 829896, confidence 1430,
@@ -1261,6 +1377,64 @@ SPEED-OPTIMISED VARIANT (only when Q is NOT required):
 Because targeted Q recovery is (strongly indicated to be) ineffective, "do we need
 Q recovery" reduces to "do we need Q *at all*" — an archival-policy decision, not a
 recovery-engine capability.
+
+### 12.8 Q health is not a proxy for capture quality — measured, 2026-07-25
+
+This document's central invariant is that **relative checks (C2, consensus, overlap)
+never outrank absolute gates (AccurateRip / CTDB)**. It has been a design principle
+throughout. This is the first measured instance of it biting, and the measurement is
+stronger than the principle: a relative check did not merely fail to help, it
+*anti-correlated* with the absolute gate.
+
+**The measurement.** ABBA *Gold* (CDDB 09121513), PX-716A, one session, three
+whole-disc baseline captures per speed at `--passes 3`:
+
+| speed | pass 1 | pass 2 | pass 3 | spread | vs binomial σ_diff |
+|---|---|---|---|---|---|
+| 32× | 0.47794 | 0.47791 | 0.47795 | 0.004 pp | 0.0σ |
+| 24× | 0.99181 | 0.99183 | 0.99182 | 0.002 pp | 0.1σ |
+| 8× | 0.99198 | **0.98228** | 0.99226 | **0.998 pp** | **~36σ** |
+
+At 8×, `ar_v2` was **False, True, True** — in that order. **The median-Q pass (p1,
+0.99198) failed AccurateRip; the lowest-Q pass (p2, 0.98228) passed it.**
+
+`recovery_bench` selects the pass that feeds the recovery rungs by median Q yield, on
+the unstated assumption that subchannel health proxies for capture quality. These
+three passes refute it on this disc: the two quantities pointed opposite ways. Any
+`ctdb`/`ctdb-noc2` row at 8× is therefore a statement about the *selected* pass, not
+about the disc — and a row reading "clean, nothing to repair" would be the most
+misleading possible form of that error.
+
+**Consequence for the tables.** §12.2-style rows must carry every pass's AR outcome
+beside the ctdb verdict rather than collapsing to the median. A column headed as
+though it means "the representative pass" whose selector means "the median-Q pass" is
+a silently narrowed domain — well-formed, plausible, and about something other than
+the question asked.
+
+**Two further facts from the same twelve captures.**
+
+*Q yield is bimodal, not stochastic and not deterministic.* At 8× the p1↔p3 pair sits
+at 1.3σ — textbook binomial — while p2 is ~36σ from either. Ordinary sampling plus an
+occasional disturbed pass. The high rungs looked deterministic only because all three
+of their passes landed in the tight mode. **Two passes cannot distinguish the modes**,
+so `--passes 3` is the floor for any Q claim, not a refinement. It also means
+`q_transient`'s 0.90 floor is aimed two orders of magnitude too coarse to catch a
+disturbed pass: the one here is 1 pp below its neighbours, not 60 pp.
+
+*The high-rung AR failures are a speed characteristic, not degradation.* run1, weeks
+earlier, recorded the same pattern on this disc — `ar_v2` False at 32× and 24×, True
+at 8×, False at 4× — including the non-monotonicity. A cross-week repeat rules out
+accumulated damage as the explanation.
+
+**Where the invariant now stands.** Recorded as a constraint rather than a preference:
+no pass, sector, rung or strategy may be selected on Q health, C2 counts, or any other
+relative signal, when an absolute gate is available to select on instead. AccuDisc
+verified their read engine is not exposed — its `subq_ok`/`subq_total` counters are
+write-only, incremented for the summary and never read back, and rescue/consensus
+operate on C2 flags and audio agreement rather than on subchannel health. That is
+partly luck: the idea was never rejected, it simply never got wired in. It is written
+down here so that a future "select the pass with the healthiest subchannel" proposal
+meets this measurement instead of sounding reasonable.
 
 ---
 
