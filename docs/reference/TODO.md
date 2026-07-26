@@ -2,6 +2,146 @@
 
 ## Open
 
+### AccuDisc migration §5 Phase E — dead-module removal + docs (2026-07-26)
+
+The last unfinished phase of `accudisc-migration-plan.md`. §9 (validator, profiles,
+strict config) is complete and the snapshot pin is retired, so the soak condition is met.
+Delete the §3 modules, update CLAUDE.md, close the plan.
+
+`scripts/sync.py` already prints `Skipping missing: cdrdao_ripper.py` and
+`Skipping missing: disc_reader.py` on every run — its manifest still lists modules that
+were deleted, which is the tidy-up this phase is for.
+
+### §9.3 speed ladder — the rule is settled; implementation pending (2026-07-26)
+
+Documented in `accudisc-migration-plan.md` §9.3 and the `drive_speed.admitted_ladder`
+docstring. **No fix shipped yet, but the design question is closed** — Keith ruled it
+with whole-disc measurements, which is the evidence every earlier round lacked.
+
+**The original defect.** With the SpeedRead uncap (0xE9) on, page 2A advertises the
+drive's **data** ceiling of 48× and `accudisc speeds` returns `req=48 page2a=48` next to
+`req=40 page2a=40`. Both pass the strict rule, so both are admitted as separate rungs —
+but CD-DA is governed to 40× on this drive, so they are one speed wearing two labels.
+`req == page2a` cannot detect it: both operands derive from the same advertised ceiling,
+so the equality cross-checks the drive's *quantiser*, never its ceiling.
+
+**Whole-disc reads settle it** (Keith, uncap on, `--start 0 --count 162892`). A full-disc
+read covers every radius identically at both settings, so the CAV confound that wrecked
+the `speeds` comparison cancels exactly:
+
+| req | seconds | sectors/s | whole-disc avg | C2 sectors | C2 bits |
+|---:|---:|---:|---:|---:|---:|
+| 48 | 91.5 | 1780.3 | **23.74×** | 63 | 1160 |
+| 40 | 89.8 | 1814.1 | **24.19×** | 54 | 1133 |
+| 32 | 113.1 | 1439.8 | 19.20× | 1 | 12 |
+| 24 | 150.2 | 1084.8 | 14.46× | 2 | 24 |
+
+48 and 40 differ by **1.9%**, with 40 marginally *faster* — noise. 40 and 32 differ by
+**20.6%**. The C2 counts corroborate independently: 48 and 40 flag 63 and 54 sectors over
+the same span (~112,320–115,694), while 32 flags **one**. So 48 and 40 are the same
+physical read and 32 is a genuinely distinct rung. The residual we spent §97–§99 chasing
+was 0.45× ≈ 2%, not a real anomaly.
+
+**Keith's ruling, which is the specification.**
+
+1. CD-DA is never read at 48× on this drive. Ever.
+2. Page 2A correctly reports the requested speed *ceiling* — it is not lying, it needs
+   reading in context.
+3. That ceiling is 48 because `speed-uncap` is on.
+4. Actual CD-DA speed is still governed to 40×.
+5. `speeds` transfer rates are **mid-disc only**; CAV rates differ at both ends. He has
+   asked AccuDisc to report min/avg/max instead.
+6. `speed-uncap off` changes only the *data*-disc maximum and the displayed `speeds`
+   output. Max CD-DA stays 40×.
+7. **`speeds` output varies with disc degradation** — the governor has been observed
+   capping at 32× and as low as 8× on damaged media, with the uncap having zero
+   influence. Throttled speeds are real and measurable, not a page-2A artefact.
+
+**The algorithm to implement in `drive_speed.admitted_ladder`:**
+
+> Read the page-2A settings on the ladder → measure actual throughput at **all three
+> disc regions** (beginning, middle, end) → decide which page-2A readings represent
+> speeds actually achievable under the governor → discard obvious duplicates and
+> unachievable rungs → the remainder is the real ladder.
+
+This supersedes both earlier candidates. It is not "trust `measured`" (a single mid-disc
+figure carries a radius term) and not a media-class floor (a policy that bakes one
+drive's manual into the rule). It is: measure across the disc, then dedupe on
+achievability. Because the governor is disc-dependent, **the ladder must stay per-disc
+and must never be cached per drive** — already the rule, now with a mechanism.
+
+**Fidelity is not at stake.** No speed setting can sabotage audio extraction; nothing can
+force this drive to read CD-DA at 48×. But a 40× read of a *damaged* disc produces many
+more Q and C2 errors (63 flagged sectors at 40–48× vs 1 at 32×), so **slower is optimal
+for damaged media** — which is the recovery-ladder result arrived at from the hardware
+side.
+
+**Blocked on:** AccuDisc's min/avg/max `speeds` output (Keith has requested it). Until it
+lands, cross-rung `measured_cx` carries an uncorrected radius term — each rung is probed
+at its own window, `stride = count/ncand`, windows marching outward with a descending
+candidate list, so the fastest rungs are always measured innermost. A second confound
+applies to any rule spanning the full ladder: timed window length is `min(req*75, 2250)`,
+so 48/40/32× are length-comparable at 2250 sectors but 24× times 1800, 16× 1200, 8× 600,
+4× 300. Scope any collapse rule to length-comparable rungs.
+
+### Two ladder implementations with different admission rules (2026-07-26)
+
+`drive_speed.admitted_ladder` admits `page2a` only where `req == page2a`;
+`tools/recovery_bench.py:probe_ladder` admits **every** non-zero `page2a` regardless of
+`req`. They agree on every row set observed so far and diverge as soon as a quantised
+row yields a ceiling no other row reaches (`req=16 → page2a=10` with no `req=10` row:
+dropped by the library, admitted as 10 by the bench).
+
+The bench is arguably the more defensible — it labels the rung by the ceiling the drive
+*accepted*, so nothing is mislabelled — but they were never reconciled deliberately.
+**Reconciling them retroactively changes what past bench runs mean**, since every result
+is indexed by the bench's ladder. Decide the rule first, then decide whether old runs
+are re-indexed or fenced off.
+
+### Watch for AccuDisc's uncap-probe interface change (2026-07-26)
+
+Proposed to Keith on their side, not committed, and it lands on us automatically now the
+snapshot pin is retired (`tools/accudisc/accudisc` symlinks into their live build):
+
+1. `-q` no longer suppressing data-integrity warnings — currently `if (!quiet)` gates the
+   driver-independent uncap warning, and we pass `-q` at `accudisc_reader.py:335`, `:439`
+   and `recovery_bench.py:777`. The flag that makes us a machine consumer is the one that
+   suppresses the hazard notice written for us.
+2. A **machine-readable token** for it, since stderr prose is not an interface we key
+   decisions on (LINT/§80.2 rule).
+3. `speed-uncap` query falling back to the page-2A probe when no driver is attached,
+   reporting `on` / `off` / `likely-on` / `unknown` — needs neither a driver nor
+   `cap_sys_rawio`.
+
+**No guard is being built on our side** (2026-07-26 decision, manual-backed: CD-DA is
+throttled to 40× regardless of the uncap, so audio is unaffected). If (3) lands, a
+three-way pre-flight becomes cheap and honest — refuse on `on`, proceed on `off`, record
+the caveat on `unknown` — but it is not needed today.
+
+### Open question: is page-2A `max_x` media-class invariant? (2026-07-26)
+
+AccuDisc's `stock_ceilings` classifier is keyed on **(model)**; the PX-716A manual (p.15)
+publishes three ceilings for that model by **media class** — 48× data, 40× CD-DA/CD-R
+audio, 32× CD-RW audio. If page 2A's `max_x` tracks the loaded media class, a
+single per-model stock number is coarser than the drive's real behaviour and the CD-RW
+audio case is untested by either project.
+
+Not a claim that it misclassifies — a question, answerable in two minutes with a CD-RW
+audio disc in the tray. Offered to AccuDisc in outbound §88.2; we have the discs.
+
+### Never established: one-sided (pre-boundary) static-Q clustering (2026-07-26)
+
+RECOVERY.md §12.9.2. Symmetric ±150 boundary clustering is **refuted with power** on
+Tracy Chapman. The *pre-side* variant is neither confirmed nor refuted: Tracy's pre-20
+window expects 1.61 frames (no power), and ABBA's original z = +3.50 was a normal
+approximation at λ ≈ 1.6 — exact Poisson gives p = 5.8e-3, which survives no
+multiplicity correction on a post-hoc window.
+
+Testing it needs a disc with a **denser** static population than Tracy's 1314, and a
+pre-window width pre-registered before the captures are taken. Low priority: the decile
+result (§12.9.3) already says more about the population being physical than a boundary
+test can.
+
 ### ✅ DONE 2026-07-25 — CD-Text titles shift by one when a track has no title (2026-07-24)
 
 **Fixed.** `cdtext.py:_decode_strings` was rewritten to re-sync to each pack's declared

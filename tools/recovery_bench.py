@@ -90,8 +90,11 @@ CTDB_RUNGS: tuple[str, ...] = ("ctdb-noc2", "ctdb")
 # rather than that speed's real yield (AccuDisc 2026-07-18, §15.6).
 _Q_TRANSIENT_FLOOR = 0.90
 
-# --map-file low-nibble states (AccuDisc §15.4 / accudisc.h). "Needs recovery"
-# is the exact predicate AccuDisc's span-finder uses.
+# --map-file low-nibble states (AccuDisc §15.4 / accudisc.h).
+#
+# The high nibble is NOT comparable across states (AccuDisc §bh.3, 2026-07-26):
+# C2 is log2(fired bits), SUSPECT is log2(differing bytes), RECOVERED is a raw
+# reread count. Never build a severity ramp spanning states.
 MAP_STATE_NAME = {
     0x0: "PENDING",
     0x1: "OK",
@@ -100,6 +103,20 @@ MAP_STATE_NAME = {
     0x4: "RECOVERED",
     0x5: "SUSPECT",
 }
+# Our predicate, ours alone. It used to claim to be "the exact predicate AccuDisc's
+# span-finder uses" — there is no such predicate on their side (§bh.4, 2026-07-26);
+# their only map consumer is the CLI glyph renderer, which ranks RECOVERED above OK.
+#
+# RECOVERED (0x4) is deliberately excluded here because the bench asks "what still
+# needs a recovery pass", and a recovered sector has had one. That is NOT a claim
+# that it is correct: on the 2026-07-26 five-speed Tracy set, 9 of 9 sectors that
+# came back wrong sat one index below a RECOVERED flag (§89.5).
+#
+# And OK (0x1) is the weaker state, not the stronger one: all 9 of those corrupt
+# sectors were themselves marked OK (§94). A silent misread at a fixed speed is
+# re-read at the same speed by the verify pass, returns identical bad bytes, and
+# is "confirmed" — AccuDisc §bl.1. **No map state means "these bytes are right."**
+# Only an absolute gate (AccurateRip / CTDB) answers that question.
 MAP_NEEDS_RECOVERY = frozenset({0x2, 0x3, 0x5})
 
 # Default speed sweep — AccuDisc's bare `speeds` default set. Probe per DISC (the

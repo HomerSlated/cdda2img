@@ -608,6 +608,25 @@ admit a rung that measures ~21×. A mislabelled rung is a measurement defect on 
 the uncap on. The claim being corrected is the *sufficiency* wording above, which
 overstated what the rule buys.
 
+> **Correction, 2026-07-26 (supersedes the evidence requirement above).** The three-pass
+> `speeds` table is no longer the blocker, because page 2A cannot answer the question at
+> any *n*. Per Keith (hardware owner): the CD-DA ceiling is enforced by the **drive
+> governor** — 40× on a healthy disc, less on a degraded one — and *"nothing anyone does
+> in software alone can ever force a CDDA to read at 48×… That is a function of the drive
+> which is not exposed via MMC/SG."* So with the uncap on, `speeds` reports
+> `req=48 page2a=48` — both operands derived from the same advertised ceiling, agreeing
+> with each other and both wrong about what the drive will do — with no MMC field
+> exposing the discrepancy. **`req == page2a` cross-checks the quantiser, never the
+> ceiling.** Asking page 2A more carefully cannot work, so the ladder has exactly two
+> sound bases: (1) the **`measured`** column, the only quantity in `speeds` reflecting
+> what the drive actually did; or (2) a **media-class floor** — never admit a CD-DA rung
+> above this drive family's audio ceiling whatever page 2A advertises. Both live in
+> `drive_speed.py`; neither needs anything from AccuDisc. Sent as §96.
+>
+> Reachability is no longer hypothetical either: the drive was left with SpeedRead **on**
+> (page 2A now advertises 48×, curve 20.0×..48.0×), so any `speeds` table taken from now
+> on is an uncapped one.
+
 Two live corollaries, neither of them about the uncap:
 
 - **Don't hardcode 40.** "Compare against the audio ceiling, not page-2A max" is right as a
