@@ -1507,10 +1507,35 @@ caveat with a measurement.
 
 Two things follow. **Static frames are nearly deterministic** — 97–98.5 % of captures
 see them fail — so the population is real and not a depth artefact. And **the strata
-agree within each disc** while the discs differ from each other (0.971 vs 0.985), so
-the pooled `q` is a mean that means what it says, and `q` is a disc property rather
-than a property of the measurement. That was the §ax.3 question and it is answered:
-on neither disc is "static" two populations wearing one number.
+agree within each disc**, which was the §ax.3 question: on neither disc is "static"
+two populations wearing one number.
+
+**The between-disc comparison needed a correction, and AccuDisc caught it (§az.2).**
+The first version of this section read the 0.014 gap as evidence that `q` is a disc
+property. It could not carry that, because the two capture sets are drawn from
+*different ladders*: Tracy's admits 40× and ABBA's does not, so the pooled figures
+average over different speed mixtures. §12.8's bimodal 8× mode establishes that
+per-capture failure rate varies with speed, which is exactly what makes a mixture a
+confound rather than a technicality.
+
+Re-estimated on the **common ladder** (32/24/8/4, n=12, depth 12 vs 9 for both discs —
+no extra reads, the same captures with Tracy's three 40× members dropped):
+
+| disc | ladder | deep | shallow | q |
+|---|---|---|---|---|
+| ABBA *Gold* | 32,24,8,4 | 1 115 @ 12 | 1 219.2 @ 9 | 0.9707 |
+| Tracy Chapman | 32,24,8,4 | 1 376 @ 12 | 1 464.3 @ 9 | **0.9795** |
+
+The gap narrows from 0.0142 to **0.0088** and survives. So both readings were partly
+right and neither was right alone: **`q` is partly speed-dependent and partly a disc
+property.** About a third of the apparent disc difference was ladder composition, and
+dropping the 40× rung *lowers* Tracy's `q` — those captures were pulling the population
+toward looking more deterministic than the common rungs support.
+
+No p-value is attached to the surviving 0.0088. The subset spread (sd 29.9 and 30.9
+over 40 draws) is which-*k* sampling noise from correlated subsets, so it understates
+the true uncertainty by an unknown factor; the gap is several times that understated
+spread, which is worth stating and not worth testing.
 
 The subset spread is *not* a confidence interval — subsets of one capture set share
 captures and are correlated — so no p-value is attached to the ABBA edge/interior gap
@@ -1543,12 +1568,23 @@ the window was pre-specified:
 
 The symmetric test has power and returns a null slightly *below* chance. It does more
 than fail to confirm: under ABBA's measured 1.62×, the expectation would be 39.2 and
-P(observe ≤19) = **0.00063**. Tracy excludes ABBA's symmetric effect size.
+**exact Poisson** P(X ≤ 19 | λ = 39.2) = **2.72e-4**. Tracy excludes ABBA's symmetric
+effect size. (The first version of this line quoted 6.3e-4 from an uncorrected normal
+approximation — in the same paragraph that flags an approximation elsewhere. AccuDisc
+re-derived it and the exclusion is 2.3× *stronger* than claimed; §az.1.)
 
 The one-sided windows have **no power** — expectations of 1.61 and 0.81 frames — and
-exact Poisson (the normal approximation is unreliable at λ≈1.6) gives P(X≥3) = 0.22
-and P(X=0) = 0.44. So ABBA's *pre-side* result is neither confirmed nor refuted here,
-and saying otherwise would repeat the §75 mistake of reading a sparse null as absence.
+exact Poisson gives P(X≥3) = 0.22 and P(X=0) = 0.44. So this disc says nothing about a
+pre-side effect, and treating the symmetric refutation as covering it would repeat the
+§75 mistake of reading a sparse null as absence.
+
+**But the pre-side claim was never as strong as its statistic said.** ABBA's z = +3.50
+came from a normal approximation at an expectation near 1.6, where it is not reliable.
+At the implied λ = 1.589 with 6 observed, exact Poisson gives P(X≥6) = **5.8e-3** —
+the approximation overstated significance by ~25×. In a window chosen post hoc, 5.8e-3
+survives no multiplicity correction. So the honest state of the hypothesis is
+**symmetric clustering refuted with power; pre-side clustering never established by
+either disc** — not "refuted here, open there".
 
 **Every window is reported against its own coverage, never as a bare share.** "19 of
 1 314 within ±150" is 1.4 % and reads as absence; ±150 around 10 boundaries covers
@@ -1573,6 +1609,14 @@ the medium would have to produce the same shape twice. Clustering is real; its
 location is disc-specific, which is what a physical defect should look like and what a
 measurement artefact should not.
 
+**Do not merge this with the SpeedRead dead zone.** AccuDisc's
+`drivers/plextor/FEATURES.md` records a *radius-structured* Q collapse — 0 % across the
+10–60 % band with the uncap on, ~99 % off — and in a decile plot the two findings would
+look alike. They are opposite in kind: this one is a disc defect whose location differs
+per disc, theirs is a **drive-mode** artefact whose cause travels with the drive and
+would therefore reproduce its shape across discs. Neither is evidence about the other
+(AccuDisc §az.3).
+
 #### 12.9.4 Two controls on the run itself
 
 **The disturbed pass is not load-bearing.** `base_8x_p2` captured at q = 0.387 against
@@ -1587,10 +1631,14 @@ z −1.09). The disturbed capture removed 7 frames from a population of 1 321 �
 during `base_24x_p1`'s capture (recorded in `run8/INTERVENTIONS.md` before any result
 was examined, with the exclusion rule pre-registered). Its bad-frame rate came out
 0.01945 against siblings at 0.01972 and 0.01960 — the *lowest* of the three, spread
-2.7e-4 — so the rule did not fire and the capture stands. Contention is a known
-confound for exactly this measurement (AccuDisc §au.3: Q collapses, audio stays clean),
-so this is one negative observation at one rung against one kind of load, and not a
-licence to analyse during captures.
+2.7e-4 — so the rule did not fire and the capture stands.
+
+**This null does not generalise, and AccuDisc's §az.4 is why.** The contention that
+collapsed Q 99 % → 13 % in their measurement was *two processes issuing SCSI commands
+to the same device* — the drive's command queue and seek pattern being disturbed. Ours
+was a saturated core in userspace, which never touches the SG_IO path. The two share
+the word "contention" and not the coupling, so this bounds the CPU-load path only. The
+`flock` rule stays exactly as strict as it is.
 
 ---
 
