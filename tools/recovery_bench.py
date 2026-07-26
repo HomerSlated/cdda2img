@@ -36,6 +36,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import dataclasses
+import hashlib
 import mmap
 import os
 import shutil
@@ -579,6 +580,39 @@ def set_speed_to_max(device: str) -> int:
         return 0
     _, cur = _parse_speed_line(r.stdout)
     return cur
+
+
+def engine_identity() -> str:
+    """Which AccuDisc binary produced this run — resolved path, size, sha256, version.
+
+    ``--version`` alone cannot answer this. Measured 2026-07-26: our pinned snapshot
+    (built 07-25 11:18, 60 160 B) and AccuDisc's current `main` (built 07-26 01:45,
+    56 048 B, across an ABI change that moved every field of two structs) **both report
+    `accudisc 0.2.0`**. A semver names a release; a bench row needs to name a *build*,
+    and between two builds of one release version they are different questions.
+
+    So the digest is the identity and the version string is a label beside it. Cheap
+    (one hash of a ~60 KB binary), and it makes a run's numbers re-attachable to the
+    engine that produced them after the tree has moved on — which is exactly the
+    situation every cross-run comparison in RECOVERY.md is in.
+    """
+    real = Path(_ACCUDISC).resolve()  # follow the tools/accudisc symlink to the inode
+    try:
+        digest = hashlib.sha256(real.read_bytes()).hexdigest()[:16]
+        size = real.stat().st_size
+    except OSError as exc:
+        return f"{real} (unreadable: {exc})"
+    version = "?"
+    with contextlib.suppress(OSError, subprocess.SubprocessError):
+        r = subprocess.run(  # noqa: S603 — snapshot/PATH binary, fixed argv
+            [_ACCUDISC, "--version"], capture_output=True, text=True, check=False
+        )
+        version = (
+            (r.stdout or r.stderr).strip().splitlines()[0]
+            if r.stdout or r.stderr
+            else "?"
+        )
+    return f"{version}  sha256:{digest}  {size}B  {real}"
 
 
 def probe_ladder(device: str) -> list[int]:
@@ -1911,6 +1945,7 @@ def main(argv: list[str] | None = None) -> int:
         f"# bench: {args.label} on {args.device} "
         f"(governor {governor}x, speeds {speeds}, rungs {rungs})"
     )
+    print(f"# engine: {engine_identity()}")
 
     # Disc geometry (track_lsns / lead-out / cddb_id) is disc-invariant — acquire
     # once, from a cheap lead-in fulltoc, and feed every row's AR/CTDB gate.
