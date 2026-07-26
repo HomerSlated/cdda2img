@@ -187,6 +187,19 @@ def admitted_ladder(device: str) -> list[int]:
     we probe {40,32,24,16,8,4}) is non-zero, so the fallback does not fire, and the
     ladder is empty again for a completely different reason.
 
+    **Known gap (2026-07-25)** — the strict rule does not guarantee *distinct* rungs,
+    which is what the ladder actually needs. Both of its operands come from the same
+    advertised ceiling, so it cross-checks the drive's quantiser and not the ceiling
+    itself. With the Plextor SpeedRead uncap set, page 2A advertises the 48x **data**
+    ceiling while CD-DA tops out at 40x by specification, and `req=48 page2a=48
+    measured=20.99` sits alongside `req=40 page2a=40 measured=22.83` (AccuDisc's
+    measurement): both admitted, one speed, and the top rung labelled a rate the drive
+    never reaches on audio. Only `measured` can see this, and this branch never reads
+    it -- while the `page2a == 0` branch below dedupes on `round(measured)`, so the two
+    disagree about what ground truth is. Not guarded here: the uncap needs
+    CAP_SYS_RAWIO, we never set it, and one n=1 table is not enough to design a
+    monotonicity rule against. Migration plan 9.3 carries the full correction.
+
     The ladder is a property of **drive x disc**, not of the drive: a self-throttling
     governor caps a degraded disc regardless of what the drive can do. The PX-716A
     admitted [32, 24, 8, 4] on ABBA *Gold* in July and [8, 4] on the same disc once

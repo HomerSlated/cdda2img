@@ -570,6 +570,46 @@ drive reporting a real `page2a` that never *equals* `req` (supports only 10×/20
 probe {40,32,24,16,8,4}) — non-zero, so the fallback won't fire, empty again. Hence the
 guard is on the **outcome**, not the cause: an empty ladder is not a reachable state.
 
+**Correction 2026-07-25 (AccuDisc §au.2): the strict rule does not guarantee distinct
+rungs, and `measured` is the only thing that can.** The rule above is stated as if
+`req == page2a` were sufficient to keep the ladder honest. It is not. With the Plextor
+SpeedRead uncap (0xE9) set, page 2A advertises the drive's **data** ceiling — 48× — and
+`accudisc speeds` on ZZ Top returned (AccuDisc's numbers, not ours):
+
+```
+req=48  page2a=48  measured=20.99
+req=40  page2a=40  measured=22.83
+```
+
+Both rows pass `req == page2a`, so both are admitted as separate rungs — yet CD-DA tops
+out at 40× by the PX-716A's own specification (manual p.7: 48× data, 40× CD-DA, 32× CD-RW
+audio), and the two rungs deliver the **same speed within noise**. The ladder's premise is
+*distinct* speeds descending; here it carries a phantom top rung labelled 48, and anything
+run there is recorded against a rate the drive never reached. The equality test cannot see
+this, because both of its operands derive from the same advertised ceiling — so it is not
+an independent cross-check of the ceiling, only of the quantiser. `measured` is the sole
+independent witness, and the strict branch never consults it (the `page2a == 0` fallback
+does, on `round(measured)` — the two branches disagree about what ground truth is).
+
+Reachability: the uncap needs `CAP_SYS_RAWIO`, is not something cdda2img sets, and is now
+cleared. **No fix is shipped** — a monotonicity guard designed off one n=1 table is how the
+next §12.x entry gets earned. The claim being corrected is the *sufficiency* wording above,
+which overstated what the rule buys.
+
+Two live corollaries, neither of them about the uncap:
+
+- **Don't hardcode 40.** "Compare against the audio ceiling, not page-2A max" is right as a
+  principle and drive-specific as a number — 40× is this Plextor's spec, not CD-DA's. A
+  literal `40` in a triage rule is the same failure class one layer down.
+- **We have two ladders with different admission rules.** `drive_speed.admitted_ladder`
+  admits `page2a` only where `req == page2a`; `tools/recovery_bench.py:probe_ladder` admits
+  **every** non-zero `page2a` regardless of `req`. They coincide on the rows seen so far,
+  and diverge the moment a quantised row yields a ceiling no other row reaches (`req=16 →
+  page2a=10` with no `req=10` row: dropped by one, admitted-as-10 by the other). The bench
+  is arguably the more defensible of the two — it labels the rung by the ceiling the drive
+  *accepted*, so nothing is mislabelled — but they were not reconciled deliberately and
+  the bench's results are indexed by its own ladder, not the library's.
+
 Policy resolution: `full` → the whole admitted list fastest→slowest; `single`+`speed` →
 the admitted rung nearest max / mid / min / `fraction×max`; `variation="full"` → random
 admitted rung per attempt.

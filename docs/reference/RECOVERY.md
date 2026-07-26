@@ -1101,6 +1101,7 @@ gates (AR v1/v2, CTDB CRC + parity) and the disc geometry.
 | ABBA *Gold* | 32,24,8,4 | ctdb + ctdb-noc2, `--passes 3` | on | **needs parity repair** | the backfill — §12.2.1 |
 | Tracy Chapman | 40,32,24,8,4 | R0–R4 | **off** | — | `spans=0` at every speed — C2 off = no localization surface |
 | Tracy Chapman | 40,32,24,8,4 | R0–R4 + ctdb + ctdb-noc2 | on | localized, **intermittent** | the full matrix — §12.3 |
+| Tracy Chapman | 40,32,24,8,4 | ctdb + ctdb-noc2, `--passes 3` | on | **needs parity repair** (repaired at 4×) | the frame-level run — §12.9 |
 
 **The §12.2 CTDB gap is closed.** Both backfills landed 2026-07-25 (run6, run7) and are
 below. Every disc in the suite now has ctdb/ctdb-noc2 coverage.
@@ -1470,6 +1471,126 @@ operate on C2 flags and audio agreement rather than on subchannel health. That i
 partly luck: the idea was never rejected, it simply never got wired in. It is written
 down here so that a future "select the pass with the healthiest subchannel" proposal
 meets this measurement instead of sounding reasonable.
+
+### 12.9 Static Q frames: how static they are, and where they are not — 2026-07-26
+
+Three discs have now been captured at `--passes 3` across their full admitted ladder
+and intersected frame-by-frame (`tools/q_frame_stability.py`): a frame is **static**
+if its Q sub-frame fails CRC in *every* capture. Counts alone cannot say this — an
+aggregate `subq_ok/subq_total` that holds steady across runs is equally consistent
+with a fixed defect and with a stable transient rate, which is why AccuDisc withdrew a
+static-population claim on the same ground (correspondence §ah).
+
+| disc | captures | static | disc sectors | density | q |
+|---|---|---|---|---|---|
+| ZZ Top (run7) | 15 | 63 | 204 143 | 0.031 % | not computed |
+| ABBA *Gold* (run6) | 12 | 1 115 | 347 208 | 0.321 % | **0.9707** |
+| Tracy Chapman (run8) | 15 | 1 314 | 162 892 | **0.807 %** | **0.9849** |
+
+#### 12.9.1 `q` — a static frame is not quite deterministic, and now we know by how much
+
+Static-ness is a threshold on intersection depth, not a property, until the depth is
+varied. Intersecting **subsets** of the same captures varies it for free: if a frame
+in the retained population fails independently with per-capture probability `q`, an
+intersection over *n* captures keeps it with probability `q**n`, so for two depths
+
+    count(n) / count(k) = q ** (n - k)
+
+`tools/q_static_q.py` draws random *k*-subsets (40 draws, sampled without replacement)
+and reports the matched count and `q`. AccuDisc proposed this in §aw.1; it replaced a
+caveat with a measurement.
+
+| disc | deep | shallow (matched) | q | edge d0/d1/d9 | interior d2–8 |
+|---|---|---|---|---|---|
+| ABBA *Gold* | 1 115 @ 12 | 1 219.2 @ 9 (sd 29.9) | 0.9707 | 0.9699 | 0.9748 |
+| Tracy Chapman | 1 314 @ 15 | 1 375.6 @ 12 (sd 17.8) | 0.9849 | 0.9843 | 0.9846 |
+
+Two things follow. **Static frames are nearly deterministic** — 97–98.5 % of captures
+see them fail — so the population is real and not a depth artefact. And **the strata
+agree within each disc** while the discs differ from each other (0.971 vs 0.985), so
+the pooled `q` is a mean that means what it says, and `q` is a disc property rather
+than a property of the measurement. That was the §ax.3 question and it is answered:
+on neither disc is "static" two populations wearing one number.
+
+The subset spread is *not* a confidence interval — subsets of one capture set share
+captures and are correlated — so no p-value is attached to the ABBA edge/interior gap
+of 0.005, which is small against the between-disc gap of 0.014 and is reported as
+descriptive only.
+
+**The depth bias this was raised to address turns out to be minor.** At q = 0.985 the
+n=15-vs-n=12 difference is 4.5 %, nowhere near enough to move a threshold. The worry
+was legitimate and the answer is that it was small — which is only knowable by
+measuring it.
+
+#### 12.9.2 The boundary hypothesis fails on the one disc with power to test it
+
+AccuDisc's §as.5 proposed that the static population clusters at track boundaries.
+ABBA showed a symmetric ±150 enrichment of 1.62× (z +2.68) and, on a post-hoc pre/post
+split, a one-sided pre-20 effect at z +3.50. ZZ Top could not test it: 63 static frames
+disc-wide gave a pre-150 expectation of 0.51, and P(≥1 | true 2.15×) = 0.67 — the
+observed 1 was uninformative either way. Tracy was run to settle it, with the
+threshold pre-registered before the disc was read (~250 static frames disc-wide for
+adequate power; under ~100 to be reported as "no power, different design").
+
+1 314 static frames, so the disc qualifies. `tools/q_boundary.py`, k=1 Šidák because
+the window was pre-specified:
+
+| window | coverage | expected | observed | enrichment | z |
+|---|---|---|---|---|---|
+| symmetric ±150 | 1.842 % | 24.20 | **19** | **0.79×** | **−1.07** |
+| pre 20 | 0.123 % | 1.61 | 3 | 1.86× | +1.09 |
+| post 10 | 0.061 % | 0.81 | 0 | — | −0.90 |
+
+The symmetric test has power and returns a null slightly *below* chance. It does more
+than fail to confirm: under ABBA's measured 1.62×, the expectation would be 39.2 and
+P(observe ≤19) = **0.00063**. Tracy excludes ABBA's symmetric effect size.
+
+The one-sided windows have **no power** — expectations of 1.61 and 0.81 frames — and
+exact Poisson (the normal approximation is unreliable at λ≈1.6) gives P(X≥3) = 0.22
+and P(X=0) = 0.44. So ABBA's *pre-side* result is neither confirmed nor refuted here,
+and saying otherwise would repeat the §75 mistake of reading a sparse null as absence.
+
+**Every window is reported against its own coverage, never as a bare share.** "19 of
+1 314 within ±150" is 1.4 % and reads as absence; ±150 around 10 boundaries covers
+1.842 % of this disc, so the honest figure is 0.79× *depletion*. On the earlier ABBA
+analysis (outbound §71.3) the raw share and the corrected conclusion pointed in
+opposite directions. Coverage is computed as a **union** of the windows, not a sum:
+overlapping windows double-counted would inflate the expectation and bias toward "no
+enrichment" — conservative, and silently wrong.
+
+#### 12.9.3 Where the static frames actually are — and it is not the same place twice
+
+| disc | decile counts (0→9) | χ² vs uniform (9 df) |
+|---|---|---|
+| ZZ Top | uniform | 16.84 |
+| ABBA *Gold* | 90 % in d0/d1/d9 | (see §75.2) |
+| Tracy Chapman | `[177,122,30,38,93,98,197,312,123,124]` | **462.77** |
+
+Both damaged discs are violently non-uniform (critical value 16.92) and they peak in
+**different places** — ABBA at the edges, Tracy at decile 7 with a trough at 2–3. A
+mechanism indexed to radius, to lead-in/lead-out proximity, or to any fixed feature of
+the medium would have to produce the same shape twice. Clustering is real; its
+location is disc-specific, which is what a physical defect should look like and what a
+measurement artefact should not.
+
+#### 12.9.4 Two controls on the run itself
+
+**The disturbed pass is not load-bearing.** `base_8x_p2` captured at q = 0.387 against
+siblings at 0.980 — the §12.8 bimodal mode, on a third disc and again at 8×. A capture
+with 61 % bad frames is a *permissive* member of an intersection, not a strict one, so
+it could only inflate the count. Excluding it and re-intersecting the other 14 gives
+**1 321** static frames against 1 314, and the boundary result is unchanged (0.78×,
+z −1.09). The disturbed capture removed 7 frames from a population of 1 321 — meaning
+99.5 % of static frames were bad in it too, which is what a genuine defect predicts.
+
+**Host contention was injected and measured.** A single-core Python job ran for ~2 min
+during `base_24x_p1`'s capture (recorded in `run8/INTERVENTIONS.md` before any result
+was examined, with the exclusion rule pre-registered). Its bad-frame rate came out
+0.01945 against siblings at 0.01972 and 0.01960 — the *lowest* of the three, spread
+2.7e-4 — so the rule did not fire and the capture stands. Contention is a known
+confound for exactly this measurement (AccuDisc §au.3: Q collapses, audio stays clean),
+so this is one negative observation at one rung against one kind of load, and not a
+licence to analyse during captures.
 
 ---
 
