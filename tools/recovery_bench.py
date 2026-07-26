@@ -585,16 +585,22 @@ def set_speed_to_max(device: str) -> int:
 def engine_identity() -> str:
     """Which AccuDisc binary produced this run — resolved path, size, sha256, version.
 
-    ``--version`` alone cannot answer this. Measured 2026-07-26: our pinned snapshot
-    (built 07-25 11:18, 60 160 B) and AccuDisc's current `main` (built 07-26 01:45,
+    ``--version`` alone cannot answer this. Measured 2026-07-26: the old pinned
+    snapshot (built 07-25 11:18, 60 160 B) and AccuDisc's `main` (built 07-26 01:45,
     56 048 B, across an ABI change that moved every field of two structs) **both report
     `accudisc 0.2.0`**. A semver names a release; a bench row needs to name a *build*,
-    and between two builds of one release version they are different questions.
+    and between two builds of one release version they are different questions. A
+    commit suffix was proposed and declined (their §bc), so this stays true.
 
     So the digest is the identity and the version string is a label beside it. Cheap
-    (one hash of a ~60 KB binary), and it makes a run's numbers re-attachable to the
+    (one hash of a ~56 KB binary), and it makes a run's numbers re-attachable to the
     engine that produced them after the tree has moved on — which is exactly the
     situation every cross-run comparison in RECOVERY.md is in.
+
+    Since 2026-07-26 the snapshot pin is retired and ``tools/accudisc/accudisc`` is a
+    symlink into AccuDisc's **live** build tree, so this is no longer a stable value
+    within a run: see the end-of-run re-hash in :func:`main`. Resolving the symlink
+    first is load-bearing for both — the identity wanted is the inode's, not the link's.
     """
     real = Path(_ACCUDISC).resolve()  # follow the tools/accudisc symlink to the inode
     try:
@@ -1945,7 +1951,8 @@ def main(argv: list[str] | None = None) -> int:
         f"# bench: {args.label} on {args.device} "
         f"(governor {governor}x, speeds {speeds}, rungs {rungs})"
     )
-    print(f"# engine: {engine_identity()}")
+    engine_at_start = engine_identity()
+    print(f"# engine: {engine_at_start}")
 
     # Disc geometry (track_lsns / lead-out / cddb_id) is disc-invariant — acquire
     # once, from a cheap lead-in fulltoc, and feed every row's AR/CTDB gate.
@@ -1975,6 +1982,23 @@ def main(argv: list[str] | None = None) -> int:
     set_speed_to_max(args.device)
     print(f"# wrote {len(rows)} rows → {args.out}")
     print(f"# classify: {classify(rows)}")
+
+    # The engine is a live symlink into AccuDisc's build tree (their §bd), not a
+    # snapshot, so a `cmake --build` on their side swaps the binary *between* our
+    # per-command invocations. The header line records what we started with and
+    # cannot see that. Re-hashing at the end turns "they promised not to rebuild
+    # mid-run" into an observation — the same reason we hash the binary rather than
+    # trust its version string. It is one stat+hash of a ~56 KB file.
+    engine_at_end = engine_identity()
+    if engine_at_end != engine_at_start:
+        print(
+            "# ENGINE CHANGED MID-RUN — rows are not attributable to one build.\n"
+            f"#   start: {engine_at_start}\n"
+            f"#   end:   {engine_at_end}\n"
+            "#   Treat this run as void for cross-run comparison and re-run it.",
+            flush=True,
+        )
+        return 1
     return 0
 
 
