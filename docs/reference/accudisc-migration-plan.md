@@ -591,10 +591,22 @@ an independent cross-check of the ceiling, only of the quantiser. `measured` is 
 independent witness, and the strict branch never consults it (the `page2a == 0` fallback
 does, on `round(measured)` — the two branches disagree about what ground truth is).
 
-Reachability: the uncap needs `CAP_SYS_RAWIO`, is not something cdda2img sets, and is now
-cleared. **No fix is shipped** — a monotonicity guard designed off one n=1 table is how the
-next §12.x entry gets earned. The claim being corrected is the *sufficiency* wording above,
-which overstated what the rule buys.
+**Reachability update 2026-07-26: this is live, not hypothetical.** The first version of
+this correction filed it as unreachable because the uncap needs `CAP_SYS_RAWIO` and
+cdda2img does not set it. That premise is dead — the snapshot pin was retired, the binary
+we execute is now AccuDisc's live build, and it carries `cap_sys_rawio=ep`. The uncap has
+since been set and cleared from this shell.
+
+Note that the defect **does not depend on the disputed Q question**. CD-DA is throttled to
+40× by the drive regardless of the uncap (`private/drives/Plextor-716.pdf` p.15: 48× data,
+40× CD-DA, 32× CD-RW audio), so audio fidelity is not at issue — but page 2A still
+advertises 48, `accudisc speeds` still returns `req=48 page2a=48`, and both ladders still
+admit a rung that measures ~21×. A mislabelled rung is a measurement defect on its own.
+
+**No fix is shipped** — a monotonicity guard designed off one n=1 table is how the next
+§12.x entry gets earned; the evidence it wants is a `speeds` table at three passes with
+the uncap on. The claim being corrected is the *sufficiency* wording above, which
+overstated what the rule buys.
 
 Two live corollaries, neither of them about the uncap:
 
