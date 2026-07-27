@@ -836,7 +836,25 @@ def _read_span_binding(
             copy=False,
             speed_x=read_speed or 0,
         )
-    return bytes(buf[:pos])
+
+    # Length is a guarantee on the subprocess path — AccuDisc zero-fills
+    # hard-unreadable sectors, so the output file is always exactly `count`
+    # sectors and `read_bytes()` inherits that. Here the length is whatever the
+    # sink happened to accumulate, so the guarantee has to be re-established or
+    # it is quietly lost in the swap.
+    #
+    # A short return would not look like an error anywhere downstream: the AR
+    # recovery ladder splices this at `track_start*2352 + read_offset*4`, a
+    # sample-exact offset, so a short buffer is silent audio corruption rather
+    # than a failure. The sector_len guard above covers the wrong *width*; this
+    # covers the wrong *count*, which is the same defect one axis over.
+    if pos != len(buf):
+        msg = (
+            f"span read delivered {pos // _SECTOR_BYTES} of {count} sectors from "
+            f"lba {start_lba} — refusing a short span, it would splice silently"
+        )
+        raise RuntimeError(msg)
+    return bytes(buf)
 
 
 def read_span_bytes(

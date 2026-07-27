@@ -899,7 +899,14 @@ def _install(
 
 @pytest.fixture(autouse=True)
 def _reset_transport_warnings(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The warn-once flags are module globals; leaking them hides later warnings."""
+    """The warn-once flags are module globals; leaking them hides later warnings.
+
+    Depends on conftest's ``_pin_accudisc_transport`` having already set the
+    policy to ``subprocess`` — autouse fixtures run outer-scope first, then in
+    definition order, so the session-level conftest pin precedes this. A future
+    autouse fixture that touches the transport should be added to conftest, not
+    to a test module, or the ordering stops being obvious.
+    """
     monkeypatch.setattr(ar, "_binding_warned", False)
     monkeypatch.setattr(ar, "_abi_warned", False)
     ar._import_binding.cache_clear()
@@ -1256,3 +1263,17 @@ def test_read_span_bytes_falls_back_to_the_subprocess_on_abi_skew(
     monkeypatch.setattr(ar.subprocess, "run", _run)
     monkeypatch.setattr("cdda2img.container.resolve_temp_dir", lambda need=0: tmp_path)
     assert ar.read_span_bytes("/dev/sr0", 0, 1) == b"\x01" * 2352
+
+
+def test_read_span_binding_refuses_a_short_span() -> None:
+    """The length guarantee has to be re-established, not inherited.
+
+    On the subprocess path AccuDisc zero-fills hard-unreadable sectors, so the
+    file is always exactly `count` sectors. Here the length is whatever the sink
+    accumulated. A short return is invisible downstream: the AR recovery ladder
+    splices it at a sample-exact byte offset, so it corrupts audio rather than
+    failing.
+    """
+    device = _FakeDevice(chunks=[_FakeChunk(2, b"\x00" * 4704)])  # asked for 3
+    with pytest.raises(RuntimeError, match="delivered 2 of 3 sectors"):
+        ar._read_span_binding(_binding_with(device), "/dev/sr0", 500, 3, None, None)
