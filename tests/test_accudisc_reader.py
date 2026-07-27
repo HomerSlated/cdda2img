@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import io
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -634,7 +635,8 @@ def test_engine_version_takes_the_first_non_blank_line(
         "run",
         lambda *a, **k: _TextResult(stdout="\naccudisc 0.2.0\nbuilt with foo\n"),
     )
-    assert ar.engine_version() == "accudisc 0.2.0"
+    monkeypatch.setenv(ar.TRANSPORT_ENV, "subprocess")
+    assert ar.engine_version() == "accudisc 0.2.0 [transport: subprocess]"
 
 
 def test_engine_version_is_device_free(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -658,7 +660,8 @@ def test_engine_version_never_raises(monkeypatch: pytest.MonkeyPatch) -> None:
         raise OSError
 
     monkeypatch.setattr(ar.subprocess, "run", boom)
-    assert ar.engine_version() == "accudisc (version unknown)"
+    monkeypatch.setenv(ar.TRANSPORT_ENV, "subprocess")
+    assert ar.engine_version() == "accudisc (version unknown) [transport: subprocess]"
 
 
 # ── write_disc / eject ───────────────────────────────────────────────────────
@@ -853,3 +856,403 @@ def test_read_span_bytes_propagates_a_fatal_exit(
     with pytest.raises(RuntimeError, match="span read"):
         ar.read_span_bytes("/dev/sr0", 0, 10)
     assert list(tmp_path.iterdir()) == []  # cleaned up even on failure
+
+
+# ── transport selection (binding ⇄ subprocess) ───────────────────────────────
+#
+# Every test here clears the _import_binding cache: it is a functools.cache on a
+# module global, so one test's fake binding would otherwise be the next test's
+# environment.
+
+
+class _FakeBindingError(Exception):
+    pass
+
+
+class _FakeAbiMismatch(_FakeBindingError):
+    pass
+
+
+class _FakeBinding:
+    """The minimum surface accudisc_reader calls, so _BINDING_SURFACE is satisfied."""
+
+    AccuDiscError = _FakeBindingError
+    AbiMismatch = _FakeAbiMismatch
+
+    def __init__(self) -> None:
+        self.opened: list[str] = []
+
+    @staticmethod
+    def anomaly_token(bit: object) -> str:
+        return str(bit)
+
+    def Device(self, path: str) -> object:
+        raise NotImplementedError
+
+
+def _install(
+    monkeypatch: pytest.MonkeyPatch, module: object | None, why: str = "x"
+) -> None:
+    ar._import_binding.cache_clear()
+    monkeypatch.setattr(ar, "_import_binding", lambda: (module, "" if module else why))
+
+
+@pytest.fixture(autouse=True)
+def _reset_transport_warnings(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The warn-once flags are module globals; leaking them hides later warnings."""
+    monkeypatch.setattr(ar, "_binding_warned", False)
+    monkeypatch.setattr(ar, "_abi_warned", False)
+    ar._import_binding.cache_clear()
+
+
+def test_a_namespace_package_is_not_the_binding(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The trap this project actually fell into, kept as a regression.
+
+    With tools/ on sys.path, ``import accudisc`` SUCCEEDS and binds
+    tools/accudisc/ — the git-ignored *binary snapshot* directory — as an empty
+    PEP 420 namespace package. No ImportError is raised, because nothing failed:
+    a module was found. It just has no ``Device``, and the failure surfaces far
+    from the import.
+
+    The condition is built here rather than relied on: whether the real tools/
+    directory is on sys.path depends on which test files ran first, so a test
+    that waited for it would pass vacuously in isolation — which is how it
+    escaped notice in ``tools/binding_ab.py`` in the first place.
+    """
+    import importlib
+    import sys
+
+    (tmp_path / "accudisc").mkdir()  # a directory, no __init__.py — the snapshot shape
+    monkeypatch.syspath_prepend(str(tmp_path))
+    monkeypatch.delitem(sys.modules, "accudisc", raising=False)
+    importlib.invalidate_caches()
+
+    # The trap itself: the import succeeds and yields an attribute-less module.
+    # Both accesses go through getattr, matching what _import_binding does — a
+    # plain `phantom.__file__` makes ty resolve the name to tools/accudisc/ and
+    # reject the attribute, which is ty being right about the thing under test.
+    phantom = importlib.import_module("accudisc")
+
+    assert getattr(phantom, "__file__", None) is None
+    assert not hasattr(phantom, "Device")
+
+    ar._import_binding.cache_clear()
+    module, why = ar._import_binding()
+    assert module is None, (
+        "an attribute-less namespace package was accepted as the binding"
+    )
+    assert "namespace directory" in why
+
+
+def test_import_rejects_a_module_missing_part_of_the_surface() -> None:
+    class Partial:
+        Device = object  # has Device, lacks the error types
+
+    ar._import_binding.cache_clear()
+    assert [n for n in ar._BINDING_SURFACE if not hasattr(Partial, n)]
+
+
+def test_subprocess_mode_never_imports_the_binding(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _boom() -> tuple[object | None, str]:
+        msg = "the binding was imported under transport=subprocess"
+        raise AssertionError(msg)
+
+    monkeypatch.setattr(ar, "_import_binding", _boom)
+    monkeypatch.setenv(ar.TRANSPORT_ENV, "subprocess")
+    assert ar._binding("toc") is None
+    assert ar.active_transport() == "subprocess"
+
+
+def test_auto_falls_back_and_warns_exactly_once(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    _install(monkeypatch, None, why="no module named accudisc")
+    monkeypatch.setenv(ar.TRANSPORT_ENV, "auto")
+    with caplog.at_level("WARNING"):
+        assert ar._binding("toc") is None
+        assert ar._binding("span read") is None
+    warnings = [r for r in caplog.records if "binding unavailable" in r.message]
+    assert len(warnings) == 1, (
+        "the fallback must announce itself once, not never and not always"
+    )
+
+
+def test_binding_mode_refuses_to_fall_back(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pinning the transport is how you know which one ran; falling back would
+    answer a question nobody asked."""
+    _install(monkeypatch, None, why="not built")
+    monkeypatch.setenv(ar.TRANSPORT_ENV, "binding")
+    with pytest.raises(RuntimeError, match="not importable"):
+        ar._binding("toc")
+
+
+def test_an_unknown_mode_degrades_to_auto(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    monkeypatch.setenv(ar.TRANSPORT_ENV, "libary")  # typo, deliberately
+    with caplog.at_level("WARNING"):
+        assert ar._transport_mode() == "auto"
+    assert any("not one of" in r.message for r in caplog.records)
+
+
+def test_active_transport_reports_binding_when_available(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install(monkeypatch, _FakeBinding())
+    monkeypatch.setenv(ar.TRANSPORT_ENV, "auto")
+    assert ar.active_transport() == "binding"
+
+
+def test_active_transport_does_not_warn(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """It is the reporting path: a report that changes the log it describes is
+    its own bug."""
+    _install(monkeypatch, None)
+    monkeypatch.setenv(ar.TRANSPORT_ENV, "auto")
+    with caplog.at_level("WARNING"):
+        assert ar.active_transport() == "subprocess"
+    assert not caplog.records
+
+
+def test_abi_mismatch_degrades_to_the_subprocess(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A skewed build breaks the binding but leaves the CLI binary good — exactly
+    the case the fallback exists for."""
+    fake = _FakeBinding()
+
+    def _skew() -> None:
+        msg = "compiled against 0.2 but loaded 0.3"
+        raise _FakeAbiMismatch(msg)
+
+    with caplog.at_level("WARNING"):
+        assert ar._try_binding(fake, "toc", _skew) is None
+    assert any("ABI mismatch" in r.message for r in caplog.records)
+
+
+def test_a_device_error_is_raised_not_retried(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Retrying a real device failure through the other transport would re-run the
+    same failing operation and report the second failure as if it were the first."""
+    fake = _FakeBinding()
+
+    def _sense() -> None:
+        msg = "sense 3/11/00 unrecovered read error"
+        raise _FakeBindingError(msg)
+
+    with pytest.raises(RuntimeError, match="binding transport"):
+        ar._try_binding(fake, "span read", _sense)
+
+
+# ── the flipped paths, exercised device-free ─────────────────────────────────
+#
+# tools/binding_ab.py is the acceptance test and needs a drive. These are the
+# cheap half: that the struct→dataclass assembly and the sink reassembly are
+# wired correctly at all, so a typo fails here rather than on the shelf.
+
+
+class _FakeTrack:
+    def __init__(self, number: int, lba: int, *, audio: bool = True) -> None:
+        self.number = number
+        self.lba = lba
+        self.is_audio = audio
+        self.is_data = not audio
+
+
+class _FakeSession:
+    def __init__(self, number: int) -> None:
+        self.number = number
+
+
+class _FakeToken:
+    def __init__(self, token: str) -> None:
+        self.token = token
+
+
+class _FakeToc:
+    def __init__(self, tracks, sessions, leadout, anomalies=(), trusted=True) -> None:
+        self.tracks = tracks
+        self.sessions = sessions
+        self.leadout_lba = leadout
+        self.anomalies = anomalies
+        self.trusted = trusted
+
+    @property
+    def audio_tracks(self):
+        return tuple(t for t in self.tracks if t.is_audio)
+
+    @property
+    def data_tracks(self):
+        return tuple(t for t in self.tracks if t.is_data)
+
+
+class _FakeInfo:
+    def __init__(self, source: str, degrade: str, session_count: int) -> None:
+        self.source = _FakeToken(source)
+        self.degrade = _FakeToken(degrade)
+        self.session_count = session_count
+
+
+class _FakeDevice:
+    """Context-manager device returning canned structs; records the reads it served."""
+
+    def __init__(self, toc_src=None, chunks=()) -> None:
+        self._toc_src = toc_src
+        self._chunks = chunks
+        self.read_kwargs: dict[str, object] = {}
+
+    def __enter__(self) -> _FakeDevice:
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        return None
+
+    def read_toc_src(self):
+        return self._toc_src
+
+    def read(self, lba: int, count: int, **kwargs: Any):
+        self.read_kwargs = {"lba": lba, "count": count, **kwargs}
+        sink = kwargs["sink"]
+        for chunk in self._chunks:
+            sink(chunk)
+
+
+class _FakeChunk:
+    def __init__(self, nsec: int, data: bytes, sector_len: int = 2352) -> None:
+        self.nsec = nsec
+        self.data = data
+        self.sector_len = sector_len
+
+
+def _binding_with(device: _FakeDevice) -> _FakeBinding:
+    module = _FakeBinding()
+    module.Device = lambda _path: device  # type: ignore[assignment]
+    return module
+
+
+def test_toc_geometry_from_binding_maps_every_field() -> None:
+    device = _FakeDevice(
+        toc_src=(
+            _FakeToc(
+                tracks=[
+                    _FakeTrack(1, 0),
+                    _FakeTrack(2, 15000),
+                    _FakeTrack(3, 30000, audio=False),
+                ],
+                sessions=[_FakeSession(1)],
+                leadout=162892,
+                anomalies=("b", "a"),
+            ),
+            _FakeInfo("fulltoc", "none", 1),
+        )
+    )
+    geom = ar._toc_geometry_from_binding(_binding_with(device), "/dev/sr0")
+
+    assert geom.track_lsns == [0, 15000]  # audio only
+    assert geom.disc_last_lsn == 162891  # leadout - 1
+    assert geom.data_tracks == [3]
+    assert geom.source == "fulltoc"
+    assert geom.session_count == 1
+    assert geom.sessions == "1..1"
+    assert geom.anomalies == ["a", "b"]  # sorted: the shape the A/B found agreeing
+    assert geom.toc_trusted is True
+
+
+def test_toc_geometry_sessions_is_none_on_the_format_0_degrade() -> None:
+    """No session structure means no range to report — not "1..1" invented from a
+    count. The CLI omits the token here too."""
+    device = _FakeDevice(
+        toc_src=(
+            _FakeToc(tracks=[_FakeTrack(1, 0)], sessions=[], leadout=1000),
+            _FakeInfo("toc", "leadin_unreadable", 0),
+        )
+    )
+    geom = ar._toc_geometry_from_binding(_binding_with(device), "/dev/sr0")
+    assert geom.sessions is None
+    assert geom.degraded is True
+
+
+def test_read_span_binding_reassembles_chunks_in_order() -> None:
+    chunks = [_FakeChunk(2, b"\xaa" * 4704), _FakeChunk(1, b"\xbb" * 2352)]
+    device = _FakeDevice(chunks=chunks)
+    seen: list[tuple[int, int]] = []
+
+    data = ar._read_span_binding(
+        _binding_with(device),
+        "/dev/sr0",
+        100,
+        3,
+        8,
+        lambda done, total: seen.append((done, total)),
+    )
+
+    assert data == b"\xaa" * 4704 + b"\xbb" * 2352
+    assert device.read_kwargs["lba"] == 100
+    assert device.read_kwargs["count"] == 3
+    assert device.read_kwargs["speed_x"] == 8
+    assert seen == [(2, 3), (3, 3)]  # progress is cumulative sectors, not per chunk
+
+
+def test_read_span_binding_leaves_speed_unset_when_not_asked() -> None:
+    device = _FakeDevice(chunks=[_FakeChunk(1, b"\x00" * 2352)])
+    ar._read_span_binding(_binding_with(device), "/dev/sr0", 0, 1, None, None)
+    assert device.read_kwargs["speed_x"] == 0  # 0 = leave the drive alone
+
+
+def test_read_span_binding_refuses_an_unexpected_sector_length() -> None:
+    """2352 is our PREDICTION of a number the library REPORTS. Slice assignment
+    into a bytearray silently resizes it, so an unchecked wrong prediction yields
+    a plausible buffer of the wrong length instead of an error."""
+    device = _FakeDevice(chunks=[_FakeChunk(1, b"\x00" * 2646, sector_len=2646)])
+    with pytest.raises(RuntimeError, match="2646-byte sectors"):
+        ar._read_span_binding(_binding_with(device), "/dev/sr0", 0, 1, None, None)
+
+
+def test_read_toc_prefers_the_binding_and_never_shells_out(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    device = _FakeDevice(
+        toc_src=(
+            _FakeToc(
+                tracks=[_FakeTrack(1, 0)], sessions=[_FakeSession(1)], leadout=500
+            ),
+            _FakeInfo("fulltoc", "none", 1),
+        )
+    )
+    _install(monkeypatch, _binding_with(device))
+    monkeypatch.setenv(ar.TRANSPORT_ENV, "auto")
+
+    def _boom(*a: object, **k: object) -> None:
+        msg = "read_toc shelled out while the binding was available"
+        raise AssertionError(msg)
+
+    monkeypatch.setattr(ar.subprocess, "run", _boom)
+    assert ar.read_toc("/dev/sr0").track_lsns == [0]
+
+
+def test_read_span_bytes_falls_back_to_the_subprocess_on_abi_skew(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The end-to-end degrade: a skewed binding must not fail the read when a
+    perfectly good CLI binary is sitting right there."""
+    module = _FakeBinding()
+
+    def _skewed(_path: str) -> None:
+        msg = "compiled against 0.2 but loaded 0.3"
+        raise _FakeAbiMismatch(msg)
+
+    module.Device = _skewed  # type: ignore[assignment]
+    _install(monkeypatch, module)
+    monkeypatch.setenv(ar.TRANSPORT_ENV, "auto")
+
+    def _run(cmd: list[str], **k: object) -> _Result:
+        Path(cmd[cmd.index("--pcm") + 1]).write_bytes(b"\x01" * 2352)
+        return _Result(returncode=0)
+
+    monkeypatch.setattr(ar.subprocess, "run", _run)
+    monkeypatch.setattr("cdda2img.container.resolve_temp_dir", lambda need=0: tmp_path)
+    assert ar.read_span_bytes("/dev/sr0", 0, 1) == b"\x01" * 2352

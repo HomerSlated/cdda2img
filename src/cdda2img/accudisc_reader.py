@@ -44,25 +44,38 @@ API_PLAN phase 4 is a Python binding over ``libaccudisc``, and this module is
 what it replaces. Stdout parsing (six regexes, below) is the part the binding
 deletes; keep it here so there is exactly one place to delete it from.
 
-The subprocess path stays after the binding lands — it is the acceptance
-instrument, not a hedge. Parity is "same disc, both transports, compare bytes"
-(AccuDisc API_PLAN §7.3 names us as the only consumer who can run that test), and
-it is also the fallback on a machine with the binary but no library.
+**Two transports, one seam.** The AccuDisc Python binding (``import accudisc``, a
+cffi API-mode extension over ``libaccudisc``) is preferred where it is bound, and
+the subprocess path is the fallback. Both call the same ``accudisc_read()`` in the
+same C library, so this is a change of *carrier*, not of behaviour — the CLI is a
+thin argv layer over the calls the binding makes directly. See the transport
+section below for what is flipped and what deliberately is not.
+
+The subprocess path is not a hedge that will be retired. It is the acceptance
+instrument: parity is "same disc, both transports, compare bytes"
+(AccuDisc API_PLAN §7.3 names us as the only consumer who can run that test —
+``tools/binding_ab.py`` is it), and it is also what serves a machine that has the
+binary but no importable library, which is currently *every* machine running this
+project's 3.10 venv.
 """
 
 from __future__ import annotations
 
 import contextlib
+import functools
 import logging
+import os
 import re
 import subprocess
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, TypeVar
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+
+_T = TypeVar("_T")
 
 log = logging.getLogger(__name__)
 
@@ -80,6 +93,177 @@ def _resolve_accudisc() -> str:
 
 
 _ACCUDISC = _resolve_accudisc()
+
+#: Red Book audio frame. Plain PCM only — a span read requests no C2 and no
+#: subchannel, so this is the whole sector on both transports.
+_SECTOR_BYTES = 2352
+
+
+# ── transport selection (library binding, falling back to the subprocess) ─────
+
+#: ``auto`` (default) prefers the binding and falls back silently-once to the
+#: subprocess; ``binding`` refuses to fall back; ``subprocess`` never imports it.
+TRANSPORT_ENV = "CDDA2IMG_ACCUDISC_TRANSPORT"
+_TRANSPORT_MODES = ("auto", "binding", "subprocess")
+
+# What is flipped, and what is not. Each unflipped call is unflipped for a reason,
+# not for lack of time:
+#   flipped   read_toc          — Device.read_toc_src(), structs instead of regexes
+#   flipped   read_span_bytes   — the call a subprocess cannot express (no temp file)
+#   NOT       read_disc_c2      — whole-disc output is a file either way; the
+#                                 binding would add a Python-level copy of ~800 MB
+#   NOT       write_disc        — the write path is not bound at all
+#   NOT       speed_ladder_rows — `speeds` is not bound (it is a timed measurement,
+#                                 not a device call we can reassemble)
+#   NOT       read_lead_in / engine_version / eject / park_spindle — bound or
+#                                 trivial, but flipping them adds paths that no
+#                                 environment here can currently execute.
+
+# The names this module actually calls on the binding. Used as an identity proof,
+# not a version check — see _import_binding for the namespace-package trap it
+# closes. Keep in step with the call sites, or a real binding gets rejected.
+_BINDING_SURFACE = ("Device", "AccuDiscError", "AbiMismatch", "anomaly_token")
+
+_binding_warned = False
+_abi_warned = False
+
+
+@functools.cache
+def _import_binding() -> tuple[Any | None, str]:
+    """Import the binding once, returning ``(module, why_not)``.
+
+    Typed ``Any`` deliberately. ``tools/`` is on ty's ``extra-paths``, so a static
+    check resolves ``accudisc`` to ``tools/accudisc/`` — the git-ignored *binary*
+    snapshot directory — as a PEP 420 namespace portion, and reports every real
+    attribute as missing. At runtime the scan records a directory without
+    ``__init__.py`` as a namespace portion and keeps searching, so the real
+    package further along ``sys.path`` wins. The alternative was seven
+    suppressions on lines that are correct.
+
+    Cached because the answer cannot change within a process and the import is
+    the expensive half; the *policy* below is re-read on every call.
+
+    **A successful import is not evidence the right thing was imported.** With
+    ``tools/`` on ``sys.path`` — which is how every tool and its tests import
+    each other — ``import accudisc`` *succeeds* and binds ``tools/accudisc/``,
+    the git-ignored **binary snapshot directory**, as an empty PEP 420 namespace
+    package. No ``ImportError`` is raised, because nothing failed: a module was
+    found. It simply has no ``Device``, and the first attribute access dies
+    somewhere far from here. So the module has to prove it is the binding by
+    carrying the names we actually call, and a namespace portion (``__file__``
+    is None) is named as such in the reason rather than reported as a vague
+    missing attribute.
+    """
+    try:
+        import accudisc
+    except ImportError as exc:
+        return None, str(exc)
+
+    missing = [name for name in _BINDING_SURFACE if not hasattr(accudisc, name)]
+    if missing:
+        if getattr(accudisc, "__file__", None) is None:
+            where = getattr(accudisc, "__path__", ["?"])
+            return None, (
+                f"'accudisc' resolved to the namespace directory {list(where)}, "
+                f"not the Python binding — that is the binary snapshot, and it "
+                f"shadows nothing because no real package is installed"
+            )
+        return None, f"'accudisc' is missing {', '.join(missing)} — not the binding"
+    return accudisc, ""
+
+
+def _transport_mode() -> str:
+    """Read the transport policy fresh from the environment.
+
+    Not frozen at import: a test that pins the transport must be able to pin it
+    per case, or it asserts against whichever path the machine happened to take —
+    and passing would then tell you nothing about the path you meant to exercise.
+    """
+    mode = os.environ.get(TRANSPORT_ENV, "auto").strip().lower() or "auto"
+    if mode not in _TRANSPORT_MODES:
+        log.warning(
+            "%s=%r is not one of %s — using auto",
+            TRANSPORT_ENV,
+            mode,
+            ", ".join(_TRANSPORT_MODES),
+        )
+        return "auto"
+    return mode
+
+
+def active_transport() -> str:
+    """Which transport a flipped call would use right now: ``binding``/``subprocess``.
+
+    Recorded in the rip log. A silent fallback would make the whole flip
+    untestable — a later A/B would pass and nobody could say which transport
+    passed it. Deliberately does not warn: this is the reporting path, and a
+    report that changes the log it describes is its own bug.
+    """
+    if _transport_mode() == "subprocess":
+        return "subprocess"
+    return "binding" if _import_binding()[0] is not None else "subprocess"
+
+
+def _binding(what: str) -> Any | None:
+    """The binding module if it should serve *what*, else None (use subprocess)."""
+    global _binding_warned
+
+    mode = _transport_mode()
+    if mode == "subprocess":
+        return None
+    module, why = _import_binding()
+    if module is not None:
+        return module
+    if mode == "binding":
+        # Explicitly demanded, so falling back would answer a question nobody
+        # asked. The whole point of pinning it is to be sure which one ran.
+        msg = f"{TRANSPORT_ENV}=binding requested but it is not importable: {why}"
+        raise RuntimeError(msg)
+    if not _binding_warned:
+        _binding_warned = True
+        log.warning(
+            "AccuDisc Python binding unavailable (%s) — using the subprocess "
+            "transport for %s and everything after it. Set %s=subprocess to "
+            "silence this.",
+            why,
+            what,
+            TRANSPORT_ENV,
+        )
+    return None
+
+
+def _try_binding(module: Any, what: str, fn: Callable[[], _T]) -> _T | None:
+    """Run *fn* on the binding path. ``None`` means "fall back to the subprocess".
+
+    Only an **ABI mismatch** degrades: it means the extension and
+    ``libaccudisc`` were built from different headers, which breaks the binding
+    while leaving the CLI binary perfectly good — precisely the "binary but no
+    working library" case the fallback exists for. It surfaces on ``Device()``
+    rather than on import (the binding runs its skew check in ``__init__``), so
+    it cannot be probed for in advance.
+
+    Every other ``AccuDiscError`` is a real device or media failure. Retrying it
+    through the subprocess would re-run the same failing operation against the
+    same drive and report the second failure as if it were the first, so it is
+    raised — as ``RuntimeError``, the exception the subprocess path already
+    documents, so no caller needs to learn a new type.
+    """
+    global _abi_warned
+
+    try:
+        return fn()
+    except module.AbiMismatch as exc:
+        if not _abi_warned:
+            _abi_warned = True
+            log.warning(
+                "AccuDisc binding/library ABI mismatch (%s) — falling back to the "
+                "subprocess transport. Rebuild the binding to use it.",
+                exc,
+            )
+        return None
+    except module.AccuDiscError as exc:
+        msg = f"accudisc {what} failed (binding transport): {exc}"
+        raise RuntimeError(msg) from exc
 
 
 # ── TOC geometry (READ TOC, with the 0x02 → 0x00 degrade) ─────────────────────
@@ -248,13 +432,84 @@ def read_lead_in(
             log.debug("accudisc %s failed for %s: %s", sub, device, exc)
 
 
+def _toc_geometry_from_binding(module: Any, device: str) -> TocGeometry:
+    """Build a :class:`TocGeometry` from the binding's ``Toc``/``TocInfo`` structs.
+
+    The same eight fields ``tools/binding_ab.py`` compared live against the CLI
+    text on 2026-07-27 (all agreed), assembled here instead of asserted. Two
+    fields need a word:
+
+    ``anomalies`` is sorted, because the flag set has no inherent order to
+    preserve — the CLI emits them in its own; the A/B compared both sorted, so
+    that is the shape known to agree. Nothing downstream is order-sensitive
+    (they are joined into a warning string).
+
+    ``sessions`` is the one field the A/B never compared, because the CLI's
+    ``"1..1"`` has no direct counterpart. It is derived from the real
+    ``Session.number`` values rather than synthesised from a count — writing
+    ``f"1..{sessions_total}"`` would assume contiguous 1-based numbering and
+    produce a well-formed string that answers a different question. On the
+    format-0 degrade ``toc.sessions`` is empty and this is ``None``, which is
+    exactly when the CLI omits the token too.
+    """
+    with module.Device(device) as dev:
+        toc, info = dev.read_toc_src()
+
+    audio = toc.audio_tracks
+    if not audio:
+        msg = f"accudisc toc (binding) found no audio tracks on {device}"
+        raise RuntimeError(msg)
+
+    numbers = [s.number for s in toc.sessions]
+    return TocGeometry(
+        track_lsns=[t.lba for t in audio],
+        disc_last_lsn=toc.leadout_lba - 1,
+        source=info.source.token,
+        degrade=info.degrade.token,
+        sessions=f"{min(numbers)}..{max(numbers)}" if numbers else None,
+        data_tracks=[t.number for t in toc.data_tracks],
+        session_count=info.session_count,
+        anomalies=sorted(module.anomaly_token(bit) for bit in toc.anomalies),
+        toc_trusted=toc.trusted,
+    )
+
+
+def _warn_about_geometry(geom: TocGeometry) -> None:
+    """Surface an untrusted or degraded TOC. Shared, so both transports say it."""
+    if not geom.toc_trusted:
+        log.warning(
+            "TOC geometry is untrusted (anomalies: %s) — the track map contradicts "
+            "itself; this usually means copy protection, not damage",
+            ", ".join(geom.anomalies) or "unspecified",
+        )
+    elif geom.degraded:
+        log.warning(
+            "TOC lead-in unavailable (%s) — geometry from the cooked track list; "
+            "session count is %s",
+            geom.degrade,
+            geom.session_count if geom.session_count else "unknown",
+        )
+
+
 def read_toc(device: str) -> TocGeometry:
-    """Track geometry via ``accudisc toc``, tolerating an unreadable lead-in.
+    """Track geometry via AccuDisc, tolerating an unreadable lead-in.
 
     Raises RuntimeError when the command itself fails; a *degrade* is a success
     (exit 0) and is reported in the result, not raised — failing it would break
     exactly the discs the fallback exists to serve.
+
+    Served by the binding where available (structs, no regexes), else by
+    ``accudisc toc`` and :func:`parse_toc_output`.
     """
+    module = _binding("toc")
+    if module is not None:
+        geom = _try_binding(
+            module, "toc", lambda: _toc_geometry_from_binding(module, device)
+        )
+        if geom is not None:
+            _warn_about_geometry(geom)
+            return geom
+
     try:
         proc = subprocess.run(  # noqa: S603 — snapshot/PATH binary, fixed argv
             [_ACCUDISC, "--device", device, "toc"],
@@ -269,19 +524,7 @@ def read_toc(device: str) -> TocGeometry:
         msg = f"accudisc toc exited {proc.returncode}: {proc.stderr.strip()}"
         raise RuntimeError(msg)
     geom = parse_toc_output(proc.stdout)
-    if not geom.toc_trusted:
-        log.warning(
-            "TOC geometry is untrusted (anomalies: %s) — the track map contradicts "
-            "itself; this usually means copy protection, not damage",
-            ", ".join(geom.anomalies) or "unspecified",
-        )
-    elif geom.degraded:
-        log.warning(
-            "TOC lead-in unavailable (%s) — geometry from the cooked track list; "
-            "session count is %s",
-            geom.degrade,
-            geom.session_count if geom.session_count else "unknown",
-        )
+    _warn_about_geometry(geom)
     return geom
 
 
@@ -414,13 +657,20 @@ def engine_version() -> str:
     Recorded verbatim so a rip can be traced to the build that produced it. Falls
     back to a placeholder rather than raising — a missing version must not fail a
     rip that has already succeeded.
+
+    The transport is appended because the fallback is silent after its one
+    warning, and a rip log that does not say which carrier read the disc cannot
+    settle a later question about a discrepancy between them. The version still
+    comes from the binary either way: it is the same library underneath, and this
+    call is device-free on the subprocess path where the binding is not.
     """
     probe = _run_probe(["--version"], "--version", timeout=5)
     if probe is None:
-        return "accudisc (version unknown)"
+        return f"accudisc (version unknown) [transport: {active_transport()}]"
     lines = (probe[1] + probe[2]).splitlines()
     first = next((ln for ln in lines if ln.strip()), None)
-    return first.strip() if first else "accudisc (version unknown)"
+    banner = first.strip() if first else "accudisc (version unknown)"
+    return f"{banner} [transport: {active_transport()}]"
 
 
 def _run_read(
@@ -530,6 +780,65 @@ def read_span(
     _run_read(cmd, progress_cb, "span read")
 
 
+def _read_span_binding(
+    module: Any,
+    device: str,
+    start_lba: int,
+    count: int,
+    read_speed: int | None,
+    progress_cb: Callable[[int, int], None] | None,
+) -> bytes:
+    """Span read straight into memory — no temp file, no filesystem round-trip.
+
+    Uses ``Device.read()`` with our own sink rather than the binding's
+    ``read_span()`` helper, for one reason: ``read_span()`` supplies its own sink
+    and so has nowhere to hang progress, and this call carries a ``progress_cb``
+    that drives the TUI through every recovery re-read. Streaming silently for
+    minutes reads as a hang.
+
+    The ``sector_len`` check is kept from that helper because it is the right
+    check: 2352 is our *prediction* of a number the library *reports*, and slice
+    assignment into a ``bytearray`` silently resizes it — so a wrong prediction
+    would yield a plausible buffer of the wrong length rather than an error.
+
+    ``speed_x`` is set and **not** restored, matching the subprocess contract:
+    ``ladder_restore`` in AccuDisc's ``src/read/engine.c`` returns to
+    ``req->speed_x``, not to the drive's prior speed, and no exit path restores.
+    The recovery ladder depends on that — it steps rungs without re-spinning and
+    the caller restores once after the loop. Both transports enter the same
+    ``accudisc_read()``, so this is structural, not a coincidence to re-verify.
+    """
+    buf = bytearray(count * _SECTOR_BYTES)
+    pos = 0
+
+    def collect(chunk: Any) -> None:
+        nonlocal pos
+        if chunk.sector_len != _SECTOR_BYTES:
+            msg = (
+                f"span read returned {chunk.sector_len}-byte sectors, expected "
+                f"{_SECTOR_BYTES} — the C2/sub layout assumption is wrong, "
+                f"refusing to reassemble"
+            )
+            raise RuntimeError(msg)
+        size = chunk.nsec * chunk.sector_len
+        buf[pos : pos + size] = chunk.data
+        pos += size
+        if progress_cb is not None:
+            progress_cb(pos // _SECTOR_BYTES, count)
+
+    with module.Device(device) as dev:
+        # copy=False is safe: `collect` consumes the view synchronously into
+        # `buf` and never retains it past the call.
+        dev.read(
+            start_lba,
+            count,
+            sink=collect,
+            copy=False,
+            speed_x=read_speed or 0,
+        )
+    return bytes(buf[:pos])
+
+
 def read_span_bytes(
     device: str,
     start_lba: int,
@@ -545,8 +854,10 @@ def read_span_bytes(
     The temp file here is an implementation detail of the *subprocess* transport
     and is exactly what AccuDisc's library binding removes (their API_PLAN §7.3:
     the sink is the binding's reason to exist, and a bounded span is the case where
-    that pays off). Expressing the call as "give me the bytes" means the binding
-    swaps in underneath without touching a call site.
+    that pays off). Expressing the call as "give me the bytes" is what let the
+    binding swap in underneath without touching a call site — which it now has:
+    :func:`_read_span_binding` serves this where the binding is importable, and
+    the temp-file body below is the fallback.
 
     Bounded reads only — one track is ~50 MB at worst. Use :func:`read_span` when
     the destination genuinely is a file, and :func:`read_disc_c2` for a whole disc.
@@ -556,11 +867,23 @@ def read_span_bytes(
     the "prefer disk-backed ``/var/tmp``, and check free space first" decision
     already lives. Bypassing it would silently put disc-recovery scratch in RAM.
     """
+    module = _binding("span read")
+    if module is not None:
+        data = _try_binding(
+            module,
+            "span read",
+            lambda: _read_span_binding(
+                module, device, start_lba, count, read_speed, progress_cb
+            ),
+        )
+        if data is not None:
+            return data
+
     # Local import: this module is the drive seam and everything else in the tree
     # imports *it*, so it stays free of package-level dependencies.
     from cdda2img.container import resolve_temp_dir
 
-    need = count * 2352
+    need = count * _SECTOR_BYTES
     with tempfile.TemporaryDirectory(
         prefix="accudisc-span-", dir=resolve_temp_dir(need)
     ) as td:

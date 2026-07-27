@@ -46,12 +46,28 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import os
 import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
+
+# THE A SIDE MUST BE PINNED, or this harness stops being a harness.
+#
+# `read_span_bytes` and `read_toc` now PREFER the binding (the 2026-07-27 default
+# flip). Under the very interpreter this tool requires — one that can import the
+# binding — the "subprocess" reads below would therefore be binding reads, and the
+# comparison would be the binding against itself: a guaranteed PASS that measures
+# nothing. Pinning the whole process to the subprocess transport makes A genuinely
+# A. The B side is unaffected because it calls `ad.Device` directly and never goes
+# through the seam.
+#
+# Set, not setdefault: an inherited `CDDA2IMG_ACCUDISC_TRANSPORT=auto` would
+# reintroduce exactly the self-comparison, and "the environment silently changed
+# what was measured" is the failure this whole tool exists to catch.
+os.environ["CDDA2IMG_ACCUDISC_TRANSPORT"] = "subprocess"
 
 _FRAME = 2352
 
@@ -273,6 +289,7 @@ def main() -> int:
     print(f"# device        {args.device}")
     print(f"# binding       accudisc {ad.version_string()}")
     print(f"# interpreter   {sys.version.split()[0]}")
+    print("# A side        subprocess (pinned)   B side  binding (direct)")
 
     from cdda2img.accudisc_reader import read_toc
 
