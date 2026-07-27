@@ -82,10 +82,20 @@ def _binding() -> Any:
     *binary* snapshot directory — as a PEP 420 namespace package, and reports
     every attribute of the real package as missing.
 
-    At runtime the real package wins regardless: the import scan records a
-    directory without ``__init__.py`` as a namespace *portion* and keeps
+    At runtime a real package beats an earlier namespace portion: the import
+    scan records a directory without ``__init__.py`` as a *portion* and keeps
     searching, so a regular package further along ``sys.path`` takes precedence.
-    Confirmed by the A/B actually running.
+    Measured on both sides (AccuDisc §bw.1), so the blast radius is bounded — a
+    phantom cannot displace a working install.
+
+    But that only holds **when a real package exists**. Where none does, the
+    portion wins uncontested and ``import accudisc`` succeeds with a module that
+    has no ``Device`` and raises no ``ImportError``. This docstring originally
+    said the real package wins "regardless", which is silent in exactly that
+    case; ``accudisc_reader._import_binding`` therefore proves identity by
+    attribute rather than trusting the import. Nothing here is affected — this
+    tool only runs under an interpreter that has the binding — but the reasoning
+    was true by environment, not by construction.
     """
     import accudisc
 

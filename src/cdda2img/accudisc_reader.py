@@ -801,12 +801,17 @@ def _read_span_binding(
     assignment into a ``bytearray`` silently resizes it — so a wrong prediction
     would yield a plausible buffer of the wrong length rather than an error.
 
-    ``speed_x`` is set and **not** restored, matching the subprocess contract:
-    ``ladder_restore`` in AccuDisc's ``src/read/engine.c`` returns to
-    ``req->speed_x``, not to the drive's prior speed, and no exit path restores.
-    The recovery ladder depends on that — it steps rungs without re-spinning and
-    the caller restores once after the loop. Both transports enter the same
-    ``accudisc_read()``, so this is structural, not a coincidence to re-verify.
+    ``speed_x`` is set and **not** restored, matching the subprocess contract —
+    now stated outright at ``include/accudisc/accudisc.h:1153`` (AccuDisc §bw.4),
+    which is the durable citation; it used to be inferable only from the silence
+    next to ``pregap_scan_opts.speed_x``, which *does* document a restore. The
+    mechanism is stronger than "nothing restores": ``ladder_restore`` fires only
+    when a ladder rung moved the speed, and returns to ``req->speed_x``. The
+    caller's prior speed is never sampled, so there is nothing that *could* be
+    restored. The recovery ladder depends on exactly that — it steps rungs
+    without re-spinning and the caller restores once after the loop. Both
+    transports enter the same ``accudisc_read()``, so this is structural rather
+    than a coincidence to re-verify per release.
     """
     buf = bytearray(count * _SECTOR_BYTES)
     pos = 0
