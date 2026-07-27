@@ -179,7 +179,9 @@ def compare_toc(device: str) -> list[str]:
     # field is compared the same way rather than each getting its own `if`.
     #
     # `session_count` is the READ DISC INFORMATION count on BOTH sides: verified
-    # against cli/format.c:47, which prints `info->session_count`. It is NOT
+    # by reading AccuDisc's TOC formatter, which prints `info->session_count`.
+    # Cited by field name rather than file:line — the name is what cannot drift
+    # without the meaning drifting too (AccuDisc §bx.1). It is NOT
     # `toc.mapped_session_count`, and conflating them is the §bs.2 hazard.
     fields: list[tuple[str, object, object]] = [
         ("track_lsns", geom.track_lsns, b_lsns),

@@ -802,9 +802,11 @@ def _read_span_binding(
     would yield a plausible buffer of the wrong length rather than an error.
 
     ``speed_x`` is set and **not** restored, matching the subprocess contract —
-    now stated outright at ``include/accudisc/accudisc.h:1153`` (AccuDisc §bw.4),
-    which is the durable citation; it used to be inferable only from the silence
-    next to ``pregap_scan_opts.speed_x``, which *does* document a restore. The
+    now stated outright on ``accudisc_read_req.speed_x`` in their public header
+    (AccuDisc §bw.4); it used to be inferable only from the silence next to
+    ``pregap_scan_opts.speed_x``, which *does* document a restore. Cited by field
+    name, not by line: the header is the contract, the line number is not part of
+    it, and their §bw.4 edit moved everything below that field already. The
     mechanism is stronger than "nothing restores": ``ladder_restore`` fires only
     when a ladder rung moved the speed, and returns to ``req->speed_x``. The
     caller's prior speed is never sampled, so there is nothing that *could* be
