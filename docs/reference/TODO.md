@@ -2,21 +2,29 @@
 
 ## Open
 
-### Full API migration — the CLI is going away, so the fallback goes with it (2026-07-27)
+### Full API migration — our *use* of the CLI is deprecated (2026-07-27)
 
-**Draft. Work starts next session.** Keith's call: AccuDisc will retire the CLI, so
-the subprocess is not merely deprecated — it stops existing, including as a fallback.
-The three calls left on it in the 2026-07-27 default flip (`read_disc_c2`,
-`write_disc`, `speed_ladder_rows`) must move. AccuDisc's agent has committed full
-cooperation, and changes on both sides are in scope.
+**Draft. Work starts next session.** The three calls left on the subprocess in the
+2026-07-27 default flip (`read_disc_c2`, `write_disc`, `speed_ladder_rows`) must move
+to the API. AccuDisc's agent has committed full cooperation, and changes on both sides
+are in scope.
 
-> **PREMISE UNCONFIRMED (AccuDisc §by.0).** The retirement reached them *through us*,
-> not from Keith, and it contradicts a standing statement in their own `CLAUDE.md` /
-> API_PLAN §3 that the CLI's exit codes, `--progress-fd` and stderr conventions "stay
-> here by design". They are not disputing it; they cannot confirm it from their side,
-> and have put the question to Keith directly. **Confirm with Keith before sequencing
-> anything on it.** Nothing below depends on the answer — all three questions are
-> answered under either premise — but "required rather than optional" does.
+> **PREMISE CORRECTED (AccuDisc §bz.1) — the CLI is NOT being retired.** This item was
+> first written as "the CLI is going away, so the fallback goes with it". That was an
+> over-read of a one-line decision, and AccuDisc declined to sequence on it, checked
+> with Keith, and came back with the verbatim answer:
+>
+> > "I'm deprecating use of the CLI for cdda2img. The whole purpose of the API is that
+> > *all* consumers use it exclusively. The CLI is *our* consumer of the API. Everyone
+> > else creates their own."
+>
+> So the CLI stays — it is AccuDisc's **reference consumer**, their standing proof that
+> the public header is sufficient to build a real tool against. What is deprecated is
+> *our* use of it as a transport. The migration below is unchanged; one consequence
+> drawn from the stronger premise was wrong, and is corrected under "The reprieve".
+>
+> It also does **not** overturn their `CLAUDE.md` — the contradiction that made them
+> check was a real signal, not a stale doc. The decision sharpens that line.
 
 **The good news, established by reading their header rather than assuming:** all three
 already exist in C. This is binding-layer work on their side, not new engine features.
@@ -101,13 +109,25 @@ So: (a) measure `read_to_file` on a whole disc while they work, (b) ~~send the t
 questions~~ — done, all answered in §by, (c) take `speed_ladder_rows` when the binding
 lands, (d) `write_disc` last — it is the destructive path, the only one where a wrong
 answer damages media, and it deserves the `--simulate` gate exercised on both
-transports while both still exist.
+transports before the binding one carries a real burn.
 
-**Do not delete the subprocess path until all three are migrated and A/B'd.** It is
-still the acceptance instrument (`tools/binding_ab.py`), and when it goes, byte-level
-cross-transport comparison goes with it — every claim afterwards rests on absolute
-gates (AccurateRip/CTDB) alone. That is a real loss of measuring power and should be
-spent deliberately, not discovered.
+#### The reprieve — we do not lose the instrument after all
+
+The first draft of this item spent a paragraph on the cost of losing byte-level
+cross-transport comparison once the subprocess path went: every claim afterwards
+resting on absolute gates (AccurateRip/CTDB) alone, a real reduction in what we can
+measure about their library, to be "spent deliberately rather than discovered".
+
+**That cost is not incurred** (AccuDisc §bz.3). Deprecating a transport for production
+is not deleting the binary it drove, and the CLI is staying. So `tools/binding_ab.py`
+keeps its A side indefinitely: one A/B harness that shells out, invoked deliberately,
+against a production path that never does. Keep it, and keep its hard transport pin —
+the pin is what makes it an instrument rather than a self-comparison, and that was
+already true before any of this.
+
+Still true: **do not remove the subprocess code paths until all three are migrated and
+A/B'd on media.** The reason is now "the acceptance instrument needs them", not "we are
+about to lose them".
 
 ### AccuDisc migration §5 Phase E — dead-module removal + docs (2026-07-26)
 
