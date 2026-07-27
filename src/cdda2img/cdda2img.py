@@ -2530,7 +2530,6 @@ def _read_track_window(
     idx: int,
     read_offset: int,
     speed: int,
-    window_tmp: Path,
     prog_cb: Callable[[int, int], None] | None,
 ) -> bytes:
     """One targeted c2read re-read of track ``idx`` (0-based); returns the track's
@@ -2543,7 +2542,7 @@ def _read_track_window(
     """
     from math import ceil
 
-    from cdda2img.accudisc_reader import read_span
+    from cdda2img.accudisc_reader import read_span_bytes
 
     leadout = disc_last_lsn + 1
     s = track_lsns[idx]
@@ -2553,13 +2552,7 @@ def _read_track_window(
     tail = ceil(read_offset / 588) if read_offset > 0 else 0
     lo = max(0, s - lead)
     hi = min(leadout, e + tail)
-    try:
-        read_span(
-            device, lo, hi - lo, window_tmp, read_speed=speed, progress_cb=prog_cb
-        )
-        window = window_tmp.read_bytes()
-    finally:
-        window_tmp.unlink(missing_ok=True)
+    window = read_span_bytes(device, lo, hi - lo, read_speed=speed, progress_cb=prog_cb)
     pad_front = (lo - (s - lead)) * _R6_BYTES_PER_FRAME
     pad_back = ((e + tail) - hi) * _R6_BYTES_PER_FRAME
     if pad_front or pad_back:
@@ -2629,7 +2622,6 @@ def _recover_failed_tracks(
                 print(f"  Recovering track {t}…")
 
             matched = False
-            window_tmp = pcm_file.with_stem(f"{pcm_file.stem}.t{t}")
             for attempt, speed in enumerate(speeds, 1):
                 status_line[0] = f"Recover track {t} ({attempt}/{total_attempts})"
                 if ui is not None:
@@ -2642,7 +2634,6 @@ def _recover_failed_tracks(
                         idx,
                         read_offset,
                         speed,
-                        window_tmp,
                         prog_cb,
                     )
                 except (RuntimeError, OSError) as exc:

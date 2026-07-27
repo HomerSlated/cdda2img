@@ -781,3 +781,75 @@ def test_no_module_outside_the_seam_invokes_accudisc() -> None:
     assert offenders == [], "AccuDisc invoked outside the seam:\n" + "\n".join(
         offenders
     )
+
+
+# ── read_span_bytes ──────────────────────────────────────────────────────────
+
+
+def test_read_span_bytes_returns_the_pcm_and_leaves_no_file(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The temp file is an implementation detail of the subprocess transport."""
+    seen: list[Path] = []
+
+    def _run(cmd, **k):
+        out = Path(cmd[cmd.index("--pcm") + 1])
+        out.write_bytes(b"\x01\x02" * 8)
+        seen.append(out)
+        return _Result(returncode=0)
+
+    monkeypatch.setattr(ar.subprocess, "run", _run)
+    monkeypatch.setattr("cdda2img.container.resolve_temp_dir", lambda need=0: tmp_path)
+    data = ar.read_span_bytes("/dev/sr0", 100, 4)
+    assert data == b"\x01\x02" * 8
+    assert seen and not seen[0].exists()  # scratch dir torn down
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_read_span_bytes_passes_start_count_and_speed(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    calls: list[list[str]] = []
+
+    def _run(cmd, **k):
+        calls.append(cmd)
+        Path(cmd[cmd.index("--pcm") + 1]).write_bytes(b"")
+        return _Result(returncode=0)
+
+    monkeypatch.setattr(ar.subprocess, "run", _run)
+    monkeypatch.setattr("cdda2img.container.resolve_temp_dir", lambda need=0: tmp_path)
+    ar.read_span_bytes("/dev/sr0", 4500, 300, read_speed=8)
+    cmd = calls[0]
+    assert cmd[cmd.index("--start") + 1] == "4500"
+    assert cmd[cmd.index("--count") + 1] == "300"
+    assert cmd[cmd.index("--speed") + 1] == "8"
+
+
+def test_read_span_bytes_asks_for_room_for_the_span(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The free-space check must be sized to the read, not left at the default —
+    /tmp here is RAM-backed and the resolver is what steers scratch off it."""
+    asked: list[int] = []
+
+    def _run(cmd, **k):
+        Path(cmd[cmd.index("--pcm") + 1]).write_bytes(b"")
+        return _Result(returncode=0)
+
+    monkeypatch.setattr(ar.subprocess, "run", _run)
+    monkeypatch.setattr(
+        "cdda2img.container.resolve_temp_dir",
+        lambda need=0: (asked.append(need), tmp_path)[1],
+    )
+    ar.read_span_bytes("/dev/sr0", 0, 1000)
+    assert asked == [1000 * 2352]
+
+
+def test_read_span_bytes_propagates_a_fatal_exit(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(ar.subprocess, "run", lambda *a, **k: _Result(returncode=2))
+    monkeypatch.setattr("cdda2img.container.resolve_temp_dir", lambda need=0: tmp_path)
+    with pytest.raises(RuntimeError, match="span read"):
+        ar.read_span_bytes("/dev/sr0", 0, 10)
+    assert list(tmp_path.iterdir()) == []  # cleaned up even on failure

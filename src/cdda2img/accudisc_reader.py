@@ -530,6 +530,45 @@ def read_span(
     _run_read(cmd, progress_cb, "span read")
 
 
+def read_span_bytes(
+    device: str,
+    start_lba: int,
+    count: int,
+    read_speed: int | None = None,
+    progress_cb: Callable[[int, int], None] | None = None,
+) -> bytes:
+    """:func:`read_span` returning the PCM, for callers that never wanted a file.
+
+    Every caller of ``read_span`` bar one immediately did ``read_bytes()`` and
+    unlinked — a full filesystem round-trip for bytes that only ever wanted to be
+    in memory, repeated ``recovery_passes * ladder_rungs`` times per failed track.
+    The temp file here is an implementation detail of the *subprocess* transport
+    and is exactly what AccuDisc's library binding removes (their API_PLAN §7.3:
+    the sink is the binding's reason to exist, and a bounded span is the case where
+    that pays off). Expressing the call as "give me the bytes" means the binding
+    swaps in underneath without touching a call site.
+
+    Bounded reads only — one track is ~50 MB at worst. Use :func:`read_span` when
+    the destination genuinely is a file, and :func:`read_disc_c2` for a whole disc.
+
+    The scratch file goes through ``container.resolve_temp_dir`` rather than bare
+    ``tempfile``: this project's ``/tmp`` is RAM-backed, and that resolver is where
+    the "prefer disk-backed ``/var/tmp``, and check free space first" decision
+    already lives. Bypassing it would silently put disc-recovery scratch in RAM.
+    """
+    # Local import: this module is the drive seam and everything else in the tree
+    # imports *it*, so it stays free of package-level dependencies.
+    from cdda2img.container import resolve_temp_dir
+
+    need = count * 2352
+    with tempfile.TemporaryDirectory(
+        prefix="accudisc-span-", dir=resolve_temp_dir(need)
+    ) as td:
+        out = Path(td) / "span.pcm"
+        read_span(device, start_lba, count, out, read_speed, progress_cb)
+        return out.read_bytes()
+
+
 def _run_with_progress(
     cmd: list[str], progress_cb: Callable[[int, int], None]
 ) -> tuple[int, str]:
