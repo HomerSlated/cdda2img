@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import datetime
 import logging
-import subprocess
 from typing import TYPE_CHECKING
 
 from cdda2img.rbi_format import (
@@ -30,21 +29,9 @@ def _get_engine_version(rip_type: str) -> str:
     names the *path* taken (``accudisc`` / ``accudisc+toc``, plus ``+c2rec``
     when the recovery ladder ran) and callers pass it positionally.
     """
-    from cdda2img.accudisc_reader import _ACCUDISC
+    from cdda2img.accudisc_reader import engine_version
 
-    try:
-        result = subprocess.run(  # noqa: S603
-            [_ACCUDISC, "--version"],  # LINT-012
-            capture_output=True,
-            text=True,
-            timeout=5,
-            check=False,
-        )
-        out = (result.stdout + result.stderr).splitlines()
-        first = next((ln for ln in out if ln.strip()), None)
-        return first.strip() if first else "accudisc (version unknown)"
-    except (OSError, subprocess.TimeoutExpired):
-        return "accudisc (version unknown)"
+    return engine_version()
 
 
 class RipLogBuilder:

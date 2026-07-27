@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from cdda2img import disc_writer
+from cdda2img import accudisc_reader, disc_writer
 from cdda2img.container import build_container
 from cdda2img.disc_writer import _sanitize_toc_for_burn
 from cdda2img.rbi_format import RBIDisc, RBITocEntry
@@ -49,6 +49,10 @@ def _toc(
 
 
 # ── AccuDisc write invocation (mocked subprocess) ─────────────────────────────
+#
+# The transport moved to accudisc_reader.write_disc, so the mocks patch there:
+# argv-shape tests patch its Popen, outcome tests replace write_disc wholesale.
+# disc_writer imports it inside the function, so the name resolves at call time.
 
 
 def _tiny_rbi(tmp_path: Path) -> Path:
@@ -83,7 +87,7 @@ def _patch_popen(monkeypatch, stdout: str = "", returncode: int = 0) -> dict:
         captured["cmd"] = cmd
         return _FakeProc(stdout, returncode)
 
-    monkeypatch.setattr(disc_writer.subprocess, "Popen", _popen)
+    monkeypatch.setattr(accudisc_reader.subprocess, "Popen", _popen)
     return captured
 
 
@@ -118,8 +122,8 @@ def test_burn_exit_2_not_blank_reports_disc_not_blank(tmp_path, monkeypatch):
     # because stderr wording is explicitly not a stable interface.
     rbi = _tiny_rbi(tmp_path)
     monkeypatch.setattr(
-        disc_writer,
-        "_run_accudisc_write",
+        accudisc_reader,
+        "write_disc",
         lambda *a, **k: (2, "accudisc: could not start the burn", "not_blank"),
     )
     with pytest.raises(RuntimeError, match="not blank"):
@@ -130,8 +134,8 @@ def test_burn_transport_error_raises(tmp_path, monkeypatch):
     # Exit 2 with result=error = a real transport/device failure → generic message.
     rbi = _tiny_rbi(tmp_path)
     monkeypatch.setattr(
-        disc_writer,
-        "_run_accudisc_write",
+        accudisc_reader,
+        "write_disc",
         lambda *a, **k: (2, "scsi: I/O error", "error"),
     )
     with pytest.raises(RuntimeError, match="exit 2"):
@@ -143,8 +147,8 @@ def test_burn_exit_3_is_caveat_success_not_failure(tmp_path, monkeypatch, capsys
     # disagrees with the .toc). Must NOT raise, and must surface the caveat loudly.
     rbi = _tiny_rbi(tmp_path)
     monkeypatch.setattr(
-        disc_writer,
-        "_run_accudisc_write",
+        accudisc_reader,
+        "write_disc",
         lambda *a, **k: (3, "accudisc: CD-Text SIZE_INFO 1-12 != .toc 1-2", "ok"),
     )
     disc_writer.burn_disc(rbi, device="/dev/sr0", yes=True)  # no raise

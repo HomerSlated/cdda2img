@@ -6,91 +6,37 @@ import pytest
 
 import cdda2img.drive_speed as ds
 
-# Real `accudisc --device /dev/sr0 speed` output (PLEXTOR PX-716A), throttled to 8x.
-_SPEED_OUT = """\
-page2A     max 40x (7056 kB/s)  current 8x (1411 kB/s)
-rotation   CAV (constant angular velocity)
-  curve[0] lba 0..359999  17.0x..40.0x (nominal)
-"""
-
-
-class _Result:
-    def __init__(self, stdout: str = "", stderr: str = "", returncode: int = 0) -> None:
-        self.stdout = stdout
-        self.stderr = stderr
-        self.returncode = returncode
-
-
 # ── read_drive_speed ─────────────────────────────────────────────────────────
+#
+# The page-2A parsing moved to accudisc_reader.read_speed (the AccuDisc seam), so
+# it is tested there. What remains here is that this module still *asks* — a
+# delegation that silently stopped delegating would look identical to a drive
+# that reports nothing.
 
 
-def test_read_drive_speed_parses_current_and_max(
+def test_read_drive_speed_delegates_to_the_seam(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(
-        ds.subprocess, "run", lambda *a, **k: _Result(stdout=_SPEED_OUT)
-    )
+    import cdda2img.accudisc_reader as ar
+
+    seen: list[str] = []
+
+    def _read_speed(device: str) -> tuple[int | None, int | None]:
+        seen.append(device)
+        return 1411, 7056
+
+    monkeypatch.setattr(ar, "read_speed", _read_speed)
     assert ds.read_drive_speed("/dev/sr0") == (1411, 7056)
+    assert seen == ["/dev/sr0"]
 
 
-def test_read_drive_speed_calls_accudisc_speed_only(
+def test_read_drive_speed_passes_through_unknown(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """One command, and it is the `speed` subcommand.
+    """(None, None) must survive the hop — restore_drive_speed keys on it."""
+    import cdda2img.accudisc_reader as ar
 
-    The name matters: this used to call `speed-report`, which AccuDisc removed —
-    so it failed on every invocation and silently fell through to cdrdao. There
-    is no fallback now, which is exactly why the subcommand name is asserted.
-    """
-    calls: list[list[str]] = []
-
-    def _run(cmd: list[str], **k: object) -> _Result:
-        calls.append(cmd)
-        return _Result(stdout=_SPEED_OUT)
-
-    monkeypatch.setattr(ds.subprocess, "run", _run)
-    assert ds.read_drive_speed("/dev/sr0") == (1411, 7056)
-    assert len(calls) == 1
-    assert calls[0][0].endswith("accudisc")
-    assert calls[0][-1] == "speed"
-
-
-def test_read_drive_speed_scans_stderr_too(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(
-        ds.subprocess, "run", lambda *a, **k: _Result(stderr=_SPEED_OUT)
-    )
-    assert ds.read_drive_speed("/dev/sr0") == (1411, 7056)
-
-
-def test_read_drive_speed_max_without_current(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A max with no current line still yields the max — callers need only that."""
-    monkeypatch.setattr(
-        ds.subprocess,
-        "run",
-        lambda *a, **k: _Result(stdout="page2A     max 40x (7056 kB/s)\n"),
-    )
-    assert ds.read_drive_speed("/dev/sr0") == (None, 7056)
-
-
-def test_read_drive_speed_missing_lines(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(ds.subprocess, "run", lambda *a, **k: _Result(stdout="garbage"))
-    assert ds.read_drive_speed("/dev/sr0") == (None, None)
-
-
-def test_read_drive_speed_nonzero_exit(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(
-        ds.subprocess, "run", lambda *a, **k: _Result(stdout=_SPEED_OUT, returncode=1)
-    )
-    assert ds.read_drive_speed("/dev/sr0") == (None, None)
-
-
-def test_read_drive_speed_binary_absent(monkeypatch: pytest.MonkeyPatch) -> None:
-    def boom(*a, **k):
-        raise FileNotFoundError
-
-    monkeypatch.setattr(ds.subprocess, "run", boom)
+    monkeypatch.setattr(ar, "read_speed", lambda d: (None, None))
     assert ds.read_drive_speed("/dev/sr0") == (None, None)
 
 

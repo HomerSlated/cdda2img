@@ -8,9 +8,14 @@ It expects little-endian PCM and handles the drive's own byte order internally
 and the BIN is that PCM verbatim — no WAV wrapper, no byte-swap (``--byteswap``
 is AccuDisc's manual override for legacy s16be inputs only). AccuDisc is a
 separate external project (https://github.com/HomerSlated/accudisc); a
-git-ignored local snapshot in ``tools/accudisc/`` is used, resolved via
-:data:`cdda2img.accudisc_reader._ACCUDISC`. cdrdao no longer plays any role in
-burning.
+git-ignored local snapshot in ``tools/accudisc/`` is used. cdrdao no longer plays
+any role in burning.
+
+The invocation itself lives in :func:`cdda2img.accudisc_reader.write_disc` — this
+module owns the *policy* (what the exit codes mean for a burn, what the user is
+told) and none of the transport. Note that it returns an exit code rather than
+raising, precisely so exit 3 ("written, with caveats") can be reported as the
+success it is.
 
 Public interface:
     burn_disc(rbi_file, device, write_offset, speed, *, simulate, yes, ui) -> None
@@ -19,7 +24,6 @@ Public interface:
 from __future__ import annotations
 
 import re
-import subprocess
 import tempfile
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -28,6 +32,8 @@ from cdda2img.container import read_header
 from cdda2img.offset_correct import apply_offset
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from cdda2img.terminal_ui import TerminalUI
 
 _FILE_NAME_RE = re.compile(r'(FILE\s+)"[^"]*"')
@@ -102,49 +108,20 @@ def _ui_print(ui: TerminalUI | None, text: str) -> None:
         print(text)
 
 
-def _run_accudisc_write(
-    cmd: list[str],
-    ui: TerminalUI | None,
-    n_tracks: int,
-) -> tuple[int, str, str | None]:
-    """Run ``accudisc write`` with the ``--progress-fd 1`` machine channel.
+def _burn_progress(ui: TerminalUI | None, n_tracks: int) -> Callable[[int, int], None]:
+    """Progress sink that drives the TUI status bar. None when there is no TUI.
 
-    AccuDisc emits newline-delimited ``progress <done> <total>`` tokens and a
-    final ``summary … result=<token>`` line on the progress fd; we forward the
-    sector counts to the UI and keep the ``result=`` token. stderr goes to a temp
-    file (never a pipe) so a chatty burn can't deadlock the single-threaded
-    stdout reader; it is read back for error detail.
-
-    Returns ``(returncode, stderr_text, result_token)``. The token is the
-    *machine* outcome — stderr wording is explicitly not a stable interface, so
-    it must never be the thing a decision keys on.
+    The transport parses ``progress <done> <total>`` (``accudisc_reader.write_disc``);
+    all this contributes is the presentation — which is why it stays here and the
+    parsing does not.
     """
     status = f"Burning {n_tracks} track(s)…"
-    result_token: str | None = None
-    with tempfile.TemporaryFile() as err_fp:
-        proc = subprocess.Popen(  # noqa: S603
-            [*cmd, "--progress-fd", "1"],
-            stdout=subprocess.PIPE,
-            stderr=err_fp,
-            text=True,
-        )
-        assert proc.stdout is not None  # noqa: S101
-        for line in proc.stdout:
-            parts = line.split()
-            if len(parts) == 3 and parts[0] == "progress" and ui is not None:
-                try:
-                    done, total = int(parts[1]), int(parts[2])
-                except ValueError:
-                    continue
-                ui.set_status(status, done / total if total > 0 else 0.0)
-            elif parts and parts[0] == "summary":
-                for tok in parts[1:]:
-                    if tok.startswith("result="):
-                        result_token = tok.partition("=")[2]
-        proc.wait()
-        err_fp.seek(0)
-        stderr_text = err_fp.read().decode(errors="replace")
-    return proc.returncode, stderr_text, result_token
+
+    def _cb(done: int, total: int) -> None:
+        if ui is not None:
+            ui.set_status(status, done / total if total > 0 else 0.0)
+
+    return _cb
 
 
 def _print_burn_error(ui: TerminalUI | None, stderr_text: str) -> None:
@@ -182,24 +159,17 @@ def _write_disc(
     a targeted message for the disc-not-blank case (which moved from 3 to 2 in the
     reconciliation, hence keyed on the stderr text, not the bare code).
     """
-    from cdda2img.accudisc_reader import _ACCUDISC
+    from cdda2img.accudisc_reader import write_disc
 
     _ui_status(ui, f"Burning {track_count} track(s)…")
-    cmd = [
-        _ACCUDISC,
-        "--device",
+    rc, stderr_text, result = write_disc(
         device,
-        "write",
-        "--toc",
-        str(toc_path),
-        "--bin",
-        str(pcm_path),
-        "--speed",
-        str(speed),
-    ]
-    if simulate:
-        cmd.append("--simulate")
-    rc, stderr_text, result = _run_accudisc_write(cmd, ui, track_count)
+        toc_path,
+        pcm_path,
+        speed,
+        simulate=simulate,
+        progress_cb=_burn_progress(ui, track_count),
+    )
     if rc == 0:
         return
     if rc == 3:

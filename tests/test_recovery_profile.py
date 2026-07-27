@@ -109,10 +109,14 @@ def test_the_probe_leaves_the_drive_throttled_so_the_binder_restores_it(
 
 
 def test_speed_rows_are_parsed_from_the_accudisc_format() -> None:
+    """The row format the ladder policy depends on. Parsing lives in the AccuDisc
+    seam (``accudisc_reader``); this asserts the shape the policy here consumes."""
+    from cdda2img.accudisc_reader import _SPEED_ROW_RE
+
     text = "speed req=40 page2a=8 measured=8.01\nspeed req=4 page2a=4 measured=4.01\n"
     rows = [
         (int(m.group(1)), int(m.group(2)), float(m.group(3)))
-        for m in drive_speed._SPEED_ROW_RE.finditer(text)
+        for m in _SPEED_ROW_RE.finditer(text)
     ]
     assert rows == [(40, 8, 8.01), (4, 4, 4.01)]
 

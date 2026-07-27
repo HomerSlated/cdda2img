@@ -35,6 +35,19 @@ Differences from c2read, and how they are absorbed:
 READ CD returns s16le, so — unlike cdrdao's s16be BIN — the PCM needs no
 byte-swap. Hard-unreadable sectors are zero-filled by AccuDisc (C2 bitmap
 all-ones), so the PCM/C2/sub streams always stay length-consistent.
+
+**Seam invariant: every AccuDisc invocation in the tree lives here.** No other
+module builds an argv or imports ``_ACCUDISC`` — five once did (``drive_speed``,
+``rip_log``, ``write_offset``, ``disc_writer``), which meant "swap the transport"
+was five scattered edits instead of one. That matters now because AccuDisc's
+API_PLAN phase 4 is a Python binding over ``libaccudisc``, and this module is
+what it replaces. Stdout parsing (six regexes, below) is the part the binding
+deletes; keep it here so there is exactly one place to delete it from.
+
+The subprocess path stays after the binding lands — it is the acceptance
+instrument, not a hedge. Parity is "same disc, both transports, compare bytes"
+(AccuDisc API_PLAN §7.3 names us as the only consumer who can run that test), and
+it is also the fallback on a machine with the binary but no library.
 """
 
 from __future__ import annotations
@@ -272,19 +285,34 @@ def read_toc(device: str) -> TocGeometry:
     return geom
 
 
-def _run_features(device: str) -> tuple[int, str] | None:
-    """Run ``accudisc features``; return (returncode, stdout) or None if unavailable."""
+def _run_probe(
+    args: list[str], what: str, timeout: float | None = None
+) -> tuple[int, str, str] | None:
+    """Run a read-only ``accudisc`` probe; return ``(rc, stdout, stderr)`` or None.
+
+    Every probe on this module's surface is best-effort — ``features``, ``speed``,
+    ``speeds``, ``--version`` — so a missing binary or a transport error yields
+    None and the caller degrades. None means *"could not ask"*; a non-zero ``rc``
+    means *"asked and was refused"*, which is a different thing and stays visible.
+    """
     try:
         result = subprocess.run(  # noqa: S603 — snapshot/PATH binary, fixed argv
-            [_ACCUDISC, "--device", device, "features"],
+            [_ACCUDISC, *args],
             capture_output=True,
             text=True,
             check=False,
+            timeout=timeout,
         )
-    except (FileNotFoundError, OSError) as exc:
-        log.debug("accudisc features unavailable for %s: %s", device, exc)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        log.debug("accudisc %s unavailable: %s", what, exc)
         return None
-    return result.returncode, result.stdout
+    return result.returncode, result.stdout, result.stderr
+
+
+def _run_features(device: str) -> tuple[int, str] | None:
+    """Run ``accudisc features``; return (returncode, stdout) or None if unavailable."""
+    probe = _run_probe(["--device", device, "features"], "features")
+    return None if probe is None else (probe[0], probe[1])
 
 
 def drive_supports_c2(device: str) -> bool:
@@ -313,6 +341,86 @@ def probe_combos(device: str) -> dict[str, bool]:
         if len(parts) == 3 and parts[0] == "combo":
             combos[parts[1]] = parts[2] == "ok"
     return combos
+
+
+# ── speed probes (page 2A, and the timed ladder) ──────────────────────────────
+
+# `accudisc speed` page-2A line, e.g.
+#   page2A     max 40x (7056 kB/s)  current 8x (1411 kB/s)
+# The Nx figure is the drive's own rounding; we take the kB/s, which is what every
+# caller compares against.
+_AD_MAX_RE = re.compile(r"\bmax\s+\d+x\s+\((\d+)\s*kB/s\)")
+_AD_CUR_RE = re.compile(r"\bcurrent\s+\d+x\s+\((\d+)\s*kB/s\)")
+
+# `accudisc speeds` row, e.g. `speed req=32 page2a=32 measured=19.20`.
+_SPEED_ROW_RE = re.compile(
+    r"^speed\s+req=(\d+)\s+page2a=(\d+)\s+measured=([\d.]+)", re.MULTILINE
+)
+
+
+def read_speed(device: str) -> tuple[int | None, int | None]:
+    """``(current_kbps, max_kbps)`` from ``accudisc speed``, or ``(None, None)``.
+
+    MODE SENSE page 2A read at the correct offsets (max = page[8:10], current =
+    page[14:16] — the fields ``cdrdao drive-info`` reports; the "page 2A lies"
+    folklore is naive readers using the wrong ones). Instant: no disc spin-up.
+
+    Never raises — every failure is ``(None, None)``, which callers read as
+    "unknown". Note that ``max`` is the *advertised* ceiling; the drive's governor
+    enforces a lower one on CD-DA and does not expose it (§9.3).
+    """
+    probe = _run_probe(["--device", device, "speed"], "speed")
+    if probe is None:
+        return None, None
+    rc, stdout, stderr = probe
+    if rc != 0:
+        log.debug("accudisc speed exited %d for %s", rc, device)
+        return None, None
+    text = stdout + "\n" + stderr
+    max_m = _AD_MAX_RE.search(text)
+    if max_m is None:
+        log.debug("accudisc speed output unparseable for %s", device)
+        return None, None
+    cur_m = _AD_CUR_RE.search(text)
+    return (int(cur_m.group(1)) if cur_m else None), int(max_m.group(1))
+
+
+def speed_ladder_rows(device: str) -> list[tuple[int, int, float]]:
+    """Timed streaming reads per rung from ``accudisc speeds``: ``(req, page2a, measured)``.
+
+    *req* is what was asked for, *page2a* what the drive settled on (0 = the page
+    did not report), *measured* the achieved throughput in X. The probe performs
+    real reads, so it warms the disc and **leaves the drive at its last rung** —
+    restoring it is the caller's job (``drive_speed.admitted_ladder``).
+
+    Empty list on any failure.
+    """
+    probe = _run_probe(["--device", device, "speeds"], "speeds")
+    if probe is None:
+        return []
+    rc, stdout, stderr = probe
+    if rc != 0:
+        log.debug("accudisc speeds exited %d for %s", rc, device)
+        return []
+    return [
+        (int(m.group(1)), int(m.group(2)), float(m.group(3)))
+        for m in _SPEED_ROW_RE.finditer(stdout + "\n" + stderr)
+    ]
+
+
+def engine_version() -> str:
+    """AccuDisc's version banner, for the RLOG block. Device-free; never raises.
+
+    Recorded verbatim so a rip can be traced to the build that produced it. Falls
+    back to a placeholder rather than raising — a missing version must not fail a
+    rip that has already succeeded.
+    """
+    probe = _run_probe(["--version"], "--version", timeout=5)
+    if probe is None:
+        return "accudisc (version unknown)"
+    lines = (probe[1] + probe[2]).splitlines()
+    first = next((ln for ln in lines if ln.strip()), None)
+    return first.strip() if first else "accudisc (version unknown)"
 
 
 def _run_read(
@@ -455,6 +563,85 @@ def _run_with_progress(
         err_fp.seek(0)
         stderr_text = err_fp.read().decode(errors="replace")
     return proc.returncode, stderr_text
+
+
+# ── write path (the one destructive subcommand) ───────────────────────────────
+
+
+def write_disc(
+    device: str,
+    toc_path: Path,
+    bin_path: Path,
+    speed: int,
+    simulate: bool = False,
+    progress_cb: Callable[[int, int], None] | None = None,
+) -> tuple[int, str, str | None]:
+    """Burn *toc_path* + *bin_path* via ``accudisc write``. Returns (rc, stderr, result).
+
+    Deliberately returns the exit code rather than raising: exit **3** means
+    *completed with caveats* — the disc **was** written — and a caller that treats
+    that as a failure has told the user their disc is blank when it is not. Only
+    the caller knows how to say that, so the decision stays there.
+
+    *result* is the ``summary … result=<token>`` machine token. Decisions key on
+    it, never on stderr wording — AccuDisc reserve the right to reword stderr and
+    exit 2 covers both "not blank" and transport failure, so the code alone cannot
+    disambiguate. None when no summary line arrived.
+
+    stderr goes to a temp file, never a pipe, so a chatty burn cannot deadlock the
+    single-threaded stdout reader.
+    """
+    cmd = [
+        _ACCUDISC,
+        "--device",
+        device,
+        "write",
+        "--toc",
+        str(toc_path),
+        "--bin",
+        str(bin_path),
+        "--speed",
+        str(speed),
+    ]
+    if simulate:
+        cmd.append("--simulate")
+
+    result_token: str | None = None
+    with tempfile.TemporaryFile() as err_fp:
+        proc = subprocess.Popen(  # noqa: S603 — snapshot/PATH binary, fixed argv
+            [*cmd, "--progress-fd", "1"],
+            stdout=subprocess.PIPE,
+            stderr=err_fp,
+            text=True,
+        )
+        assert proc.stdout is not None  # noqa: S101 — guaranteed by stdout=PIPE
+        for line in proc.stdout:
+            parts = line.split()
+            if len(parts) == 3 and parts[0] == "progress" and progress_cb is not None:
+                try:
+                    progress_cb(int(parts[1]), int(parts[2]))
+                except ValueError:  # pragma: no cover — malformed token
+                    log.debug("accudisc write: unparseable progress line %r", line)
+            elif parts and parts[0] == "summary":
+                for tok in parts[1:]:
+                    if tok.startswith("result="):
+                        result_token = tok.partition("=")[2]
+        proc.wait()
+        err_fp.seek(0)
+        stderr_text = err_fp.read().decode(errors="replace")
+    return proc.returncode, stderr_text, result_token
+
+
+def eject(device: str) -> None:
+    """Best-effort tray eject (``accudisc eject``). Never raises."""
+    try:
+        subprocess.run(  # noqa: S603 — snapshot/PATH binary, fixed argv
+            [_ACCUDISC, "--device", device, "eject"],
+            capture_output=True,
+            check=False,
+        )
+    except (FileNotFoundError, OSError) as exc:
+        log.debug("accudisc eject failed for %s: %s", device, exc)
 
 
 def park_spindle(device: str) -> None:

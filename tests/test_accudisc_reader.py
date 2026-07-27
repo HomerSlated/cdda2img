@@ -517,3 +517,267 @@ def test_report_only_anomalies_do_not_make_the_toc_untrusted() -> None:
     assert geom.toc_trusted  # no toc_trusted=0 token → still trusted
     safe, _why = geom.session_safe
     assert safe
+
+
+# ── speed probes (moved here with the parsing, from test_drive_speed.py) ──────
+
+# Real `accudisc --device /dev/sr0 speed` output (PLEXTOR PX-716A), throttled to 8x.
+_SPEED_OUT = """\
+page2A     max 40x (7056 kB/s)  current 8x (1411 kB/s)
+rotation   CAV (constant angular velocity)
+  curve[0] lba 0..359999  17.0x..40.0x (nominal)
+"""
+
+
+class _TextResult:
+    """subprocess.run(text=True) result — str stderr, unlike the bytes _Result."""
+
+    def __init__(self, stdout: str = "", stderr: str = "", returncode: int = 0) -> None:
+        self.stdout = stdout
+        self.stderr = stderr
+        self.returncode = returncode
+
+
+def test_read_speed_parses_current_and_max(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        ar.subprocess, "run", lambda *a, **k: _TextResult(stdout=_SPEED_OUT)
+    )
+    assert ar.read_speed("/dev/sr0") == (1411, 7056)
+
+
+def test_read_speed_calls_the_speed_subcommand_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One command, and it is `speed`.
+
+    The name matters: this used to call `speed-report`, which AccuDisc removed —
+    so it failed on every invocation and silently fell through to cdrdao. There
+    is no fallback now, which is exactly why the subcommand name is asserted.
+    """
+    calls: list[list[str]] = []
+
+    def _run(cmd: list[str], **k: object) -> _TextResult:
+        calls.append(cmd)
+        return _TextResult(stdout=_SPEED_OUT)
+
+    monkeypatch.setattr(ar.subprocess, "run", _run)
+    assert ar.read_speed("/dev/sr0") == (1411, 7056)
+    assert len(calls) == 1
+    assert calls[0][0].endswith("accudisc")
+    assert calls[0][-1] == "speed"
+
+
+def test_read_speed_scans_stderr_too(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        ar.subprocess, "run", lambda *a, **k: _TextResult(stderr=_SPEED_OUT)
+    )
+    assert ar.read_speed("/dev/sr0") == (1411, 7056)
+
+
+def test_read_speed_max_without_current(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A max with no current line still yields the max — callers need only that."""
+    monkeypatch.setattr(
+        ar.subprocess,
+        "run",
+        lambda *a, **k: _TextResult(stdout="page2A     max 40x (7056 kB/s)\n"),
+    )
+    assert ar.read_speed("/dev/sr0") == (None, 7056)
+
+
+def test_read_speed_missing_lines(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        ar.subprocess, "run", lambda *a, **k: _TextResult(stdout="garbage")
+    )
+    assert ar.read_speed("/dev/sr0") == (None, None)
+
+
+def test_read_speed_nonzero_exit(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        ar.subprocess,
+        "run",
+        lambda *a, **k: _TextResult(stdout=_SPEED_OUT, returncode=1),
+    )
+    assert ar.read_speed("/dev/sr0") == (None, None)
+
+
+def test_read_speed_binary_absent(monkeypatch: pytest.MonkeyPatch) -> None:
+    def boom(*a, **k):
+        raise FileNotFoundError
+
+    monkeypatch.setattr(ar.subprocess, "run", boom)
+    assert ar.read_speed("/dev/sr0") == (None, None)
+
+
+def test_speed_ladder_rows_parses_the_accudisc_format(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    out = "speed req=40 page2a=8 measured=8.01\nspeed req=4 page2a=4 measured=4.01\n"
+    monkeypatch.setattr(ar.subprocess, "run", lambda *a, **k: _TextResult(stdout=out))
+    assert ar.speed_ladder_rows("/dev/sr0") == [(40, 8, 8.01), (4, 4, 4.01)]
+
+
+def test_speed_ladder_rows_empty_on_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        ar.subprocess, "run", lambda *a, **k: _TextResult(returncode=2, stderr="boom")
+    )
+    assert ar.speed_ladder_rows("/dev/sr0") == []
+
+
+# ── engine_version ───────────────────────────────────────────────────────────
+
+
+def test_engine_version_takes_the_first_non_blank_line(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        ar.subprocess,
+        "run",
+        lambda *a, **k: _TextResult(stdout="\naccudisc 0.2.0\nbuilt with foo\n"),
+    )
+    assert ar.engine_version() == "accudisc 0.2.0"
+
+
+def test_engine_version_is_device_free(monkeypatch: pytest.MonkeyPatch) -> None:
+    """--version must not open a device: it is called while building the RLOG,
+    long after the drive work is done."""
+    calls: list[list[str]] = []
+
+    def _run(cmd: list[str], **k: object) -> _TextResult:
+        calls.append(cmd)
+        return _TextResult(stdout="accudisc 0.2.0\n")
+
+    monkeypatch.setattr(ar.subprocess, "run", _run)
+    ar.engine_version()
+    assert calls[0][1:] == ["--version"]
+
+
+def test_engine_version_never_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A missing version must not fail a rip that has already succeeded."""
+
+    def boom(*a, **k):
+        raise OSError
+
+    monkeypatch.setattr(ar.subprocess, "run", boom)
+    assert ar.engine_version() == "accudisc (version unknown)"
+
+
+# ── write_disc / eject ───────────────────────────────────────────────────────
+
+
+class _FakeProc:
+    def __init__(self, stdout: str, returncode: int) -> None:
+        self.stdout = io.StringIO(stdout)
+        self.returncode = returncode
+
+    def wait(self) -> int:
+        return self.returncode
+
+
+def _patch_write_popen(monkeypatch, stdout: str = "", returncode: int = 0) -> dict:
+    captured: dict = {}
+
+    def _popen(cmd, **k):
+        captured["cmd"] = cmd
+        return _FakeProc(stdout, returncode)
+
+    monkeypatch.setattr(ar.subprocess, "Popen", _popen)
+    return captured
+
+
+def test_write_disc_builds_the_write_argv(monkeypatch: pytest.MonkeyPatch) -> None:
+    cap = _patch_write_popen(monkeypatch, "summary result=ok\n", 0)
+    rc, _err, outcome = ar.write_disc(
+        "/dev/sr0", Path("/burn/a.toc"), Path("/burn/a.pcm"), 8
+    )
+    cmd = cap["cmd"]
+    assert cmd[1:4] == ["--device", "/dev/sr0", "write"]
+    assert cmd[cmd.index("--toc") + 1] == "/burn/a.toc"
+    assert cmd[cmd.index("--bin") + 1] == "/burn/a.pcm"
+    assert cmd[cmd.index("--speed") + 1] == "8"
+    assert cmd[cmd.index("--progress-fd") + 1] == "1"
+    assert "--simulate" not in cmd
+    assert (rc, outcome) == (0, "ok")
+
+
+def test_write_disc_simulate_appends_the_flag(monkeypatch: pytest.MonkeyPatch) -> None:
+    cap = _patch_write_popen(monkeypatch, "", 0)
+    ar.write_disc("/dev/sr0", Path("a.toc"), Path("a.pcm"), 8, simulate=True)
+    assert "--simulate" in cap["cmd"]
+
+
+def test_write_disc_returns_the_code_rather_than_raising(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Exit 3 means the disc WAS written. Raising here would let a caller report a
+    successful burn as a failure, so the decision stays with the caller."""
+    _patch_write_popen(monkeypatch, "summary result=ok\n", 3)
+    rc, _err, outcome = ar.write_disc("/dev/sr0", Path("a.toc"), Path("a.pcm"), 8)
+    assert (rc, outcome) == (3, "ok")
+
+
+def test_write_disc_extracts_the_result_token(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Decisions key on result=, never on stderr wording."""
+    _patch_write_popen(monkeypatch, "summary written=0 result=not_blank\n", 2)
+    _rc, _err, outcome = ar.write_disc("/dev/sr0", Path("a.toc"), Path("a.pcm"), 8)
+    assert outcome == "not_blank"
+
+
+def test_write_disc_token_is_none_without_a_summary(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_write_popen(monkeypatch, "progress 1 2\n", 2)
+    _rc, _err, outcome = ar.write_disc("/dev/sr0", Path("a.toc"), Path("a.pcm"), 8)
+    assert outcome is None
+
+
+def test_write_disc_forwards_progress(monkeypatch: pytest.MonkeyPatch) -> None:
+    _patch_write_popen(monkeypatch, "progress 10 300\nprogress 300 300\n", 0)
+    seen: list[tuple[int, int]] = []
+    ar.write_disc(
+        "/dev/sr0",
+        Path("a.toc"),
+        Path("a.pcm"),
+        8,
+        progress_cb=lambda d, t: seen.append((d, t)),
+    )
+    assert seen == [(10, 300), (300, 300)]
+
+
+def test_eject_never_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    def boom(*a, **k):
+        raise FileNotFoundError
+
+    monkeypatch.setattr(ar.subprocess, "run", boom)
+    ar.eject("/dev/sr0")  # no exception
+
+
+# ── the seam invariant ───────────────────────────────────────────────────────
+
+
+def test_no_module_outside_the_seam_invokes_accudisc() -> None:
+    """Every AccuDisc invocation in ``src/`` lives in this module.
+
+    Not style — this is what makes the AccuDisc Python binding (their API_PLAN
+    phase 4) a one-module swap. Five modules once imported ``_ACCUDISC`` and built
+    their own argv (``drive_speed``, ``rip_log``, ``write_offset``, ``disc_writer``),
+    which would have made "change the transport" five scattered edits, each with
+    its own chance of being missed.
+
+    Scope is ``src/`` only. ``tools/recovery_bench.py`` deliberately resolves its
+    own binary and drives flags the seam does not expose (``features --stream``,
+    ``speed <n>``, engine hashing) — a bench harness is allowed closer to the
+    metal than the library is.
+    """
+    src = Path(__file__).resolve().parent.parent / "src" / "cdda2img"
+    seam = src / "accudisc_reader.py"
+    offenders: list[str] = []
+    for path in sorted(src.glob("*.py")):
+        if path == seam:
+            continue
+        for n, line in enumerate(path.read_text().splitlines(), 1):
+            code = line.split("#", 1)[0]
+            if "_ACCUDISC" in code:
+                offenders.append(f"{path.name}:{n}: {line.strip()}")
+    assert offenders == [], "AccuDisc invoked outside the seam:\n" + "\n".join(
+        offenders
+    )

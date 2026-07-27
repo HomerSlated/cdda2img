@@ -11,9 +11,13 @@ and, if the drive is throttled, restores it to maximum.
 Reading: there is no Linux ioctl for CD speed. The trustworthy source is MODE SENSE
 page 2A read at the *correct offsets* (max = page[8:10], current = page[14:16] — the
 fields cdrdao drive-info reports; the "page 2A lies" folklore is naive readers using
-the wrong fields). ``accudisc speed-report`` reads exactly those fields (validated
-kB/s-identical to cdrdao drive-info at 4X and 40X on the PX-716A) and is the primary
-reader; ``cdrdao drive-info`` remains the fallback when the AccuDisc helper is absent.
+the wrong fields). ``accudisc speed`` reads exactly those fields (validated
+kB/s-identical to cdrdao drive-info at 4X and 40X on the PX-716A) and is the only
+reader — there is no cdrdao fallback (M6 of the AccuDisc migration).
+
+This module owns the **ioctl** side of speed control. Every AccuDisc invocation
+lives in :mod:`cdda2img.accudisc_reader`, which is the single seam the library
+binding will replace; nothing here builds an argv.
 
 Setting: the ``CDROM_SELECT_SPEED`` block-device ioctl (proven by cd-paranoia/cdspeedctl)
 needs only device access — no root, unlike a raw SG_IO ``SET CD SPEED``.
@@ -30,8 +34,6 @@ from __future__ import annotations
 import fcntl
 import logging
 import os
-import re
-import subprocess
 
 log = logging.getLogger(__name__)
 
@@ -39,14 +41,6 @@ log = logging.getLogger(__name__)
 # it by ~177 into a SET CD SPEED command); arg 0 is the "fastest possible" sentinel.
 _CDROM_SELECT_SPEED = 0x5322
 _KBPS_PER_X = 176  # 1x CD = 75 sectors/s * 2352 bytes / 1000 ≈ 176 kB/s
-
-# `accudisc speed` page-2A line, e.g.
-#   page2A     max 40x (7056 kB/s)  current 8x (1411 kB/s)
-# The Nx figure is the drive's own rounding; we take the kB/s, which is what every
-# caller compares against. `speed-report` (the name this used to call) was removed
-# upstream — calling it silently failed and fell through to cdrdao for months.
-_AD_MAX_RE = re.compile(r"\bmax\s+\d+x\s+\((\d+)\s*kB/s\)")
-_AD_CUR_RE = re.compile(r"\bcurrent\s+\d+x\s+\((\d+)\s*kB/s\)")
 
 # Candidate Nx values to probe for the drive's real speed ladder; the drive snaps each to a
 # supported speed and we read back the achieved value (so the ladder is the drive's own,
@@ -57,33 +51,13 @@ _SPEED_PROBE = (1, 2, 3, 4, 6, 8, 10, 12, 16, 20, 24, 32, 40, 48)
 def read_drive_speed(device: str) -> tuple[int | None, int | None]:
     """Return ``(current_kbps, max_kbps)``, or ``(None, None)``.
 
-    ``accudisc speed`` (page 2A, ~instant, no disc spin-up needed). There is no
-    longer a cdrdao fallback — M6 of the AccuDisc migration. Never raises: any
-    failure yields ``(None, None)`` and callers treat that as "unknown".
+    Delegates to :func:`accudisc_reader.read_speed` — this module owns the *ioctl*
+    side of speed control, not the AccuDisc transport. Never raises: any failure
+    yields ``(None, None)`` and callers treat that as "unknown".
     """
-    from cdda2img.accudisc_reader import _ACCUDISC
+    from cdda2img.accudisc_reader import read_speed
 
-    try:
-        result = subprocess.run(  # noqa: S603  # LINT-012
-            [_ACCUDISC, "--device", device, "speed"],  # LINT-012
-            capture_output=True,
-            text=True,
-        )
-    except (FileNotFoundError, OSError) as exc:
-        log.debug("accudisc speed failed for %s: %s", device, exc)
-        return None, None
-
-    if result.returncode != 0:
-        log.debug("accudisc speed exited %d for %s", result.returncode, device)
-        return None, None
-
-    text = result.stdout + "\n" + result.stderr
-    max_m = _AD_MAX_RE.search(text)
-    cur_m = _AD_CUR_RE.search(text)
-    if max_m is None:
-        log.debug("accudisc speed output unparseable for %s", device)
-        return None, None
-    return (int(cur_m.group(1)) if cur_m else None), int(max_m.group(1))
+    return read_speed(device)
 
 
 def _select_speed(device: str, nx: int) -> bool:
@@ -129,11 +103,6 @@ def restore_drive_speed(device: str) -> None:
         log.info("drive %s read speed: %sX -> %dX (restored)", device, cur_x, nx)
 
 
-_SPEED_ROW_RE = re.compile(
-    r"^speed\s+req=(\d+)\s+page2a=(\d+)\s+measured=([\d.]+)", re.MULTILINE
-)
-
-
 def read_speed_rows(device: str) -> list[tuple[int, int, float]]:
     """``accudisc speeds`` rows as ``(req, page2a, measured)``.
 
@@ -144,26 +113,13 @@ def read_speed_rows(device: str) -> list[tuple[int, int, float]]:
     The probe performs real reads, so it both warms the disc — letting a
     self-throttling governor settle to its true ceiling — and leaves the drive at
     the last rung it tried. :func:`admitted_ladder` restores it afterwards.
+
+    Delegates to :func:`accudisc_reader.speed_ladder_rows`; kept as a name here
+    because :func:`admitted_ladder` is the policy that consumes it.
     """
-    from cdda2img.accudisc_reader import _ACCUDISC
+    from cdda2img.accudisc_reader import speed_ladder_rows
 
-    try:
-        result = subprocess.run(  # noqa: S603  # LINT-012
-            [_ACCUDISC, "--device", device, "speeds"],  # LINT-012
-            capture_output=True,
-            text=True,
-        )
-    except (FileNotFoundError, OSError) as exc:
-        log.debug("accudisc speeds failed for %s: %s", device, exc)
-        return []
-    if result.returncode != 0:
-        log.debug("accudisc speeds exited %d for %s", result.returncode, device)
-        return []
-
-    rows: list[tuple[int, int, float]] = []
-    for m in _SPEED_ROW_RE.finditer(result.stdout + "\n" + result.stderr):
-        rows.append((int(m.group(1)), int(m.group(2)), float(m.group(3))))
-    return rows
+    return speed_ladder_rows(device)
 
 
 def admitted_ladder(device: str) -> list[int]:

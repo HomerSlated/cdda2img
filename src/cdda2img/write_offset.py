@@ -19,11 +19,11 @@ from __future__ import annotations
 
 import os
 import re
-import subprocess
 import wave
 from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import numpy as np
 
@@ -31,6 +31,9 @@ if __import__("sys").version_info >= (3, 11):
     import tomllib
 else:
     import tomli as tomllib  # type: ignore[import-not-found,no-redef]  # LINT-011
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 # ── test signal parameters ────────────────────────────────────────────────────
 
@@ -127,10 +130,19 @@ def pcm_path(wav_path: Path) -> Path:
 # ── AccuDisc wrappers (M7) ────────────────────────────────────────────────────
 
 
-def _accudisc() -> str:
-    from cdda2img.accudisc_reader import _ACCUDISC
+def _print_progress(what: str) -> Callable[[int, int], None]:
+    """One-line percentage ticker for the interactive measurement loop.
 
-    return _ACCUDISC
+    Both operations here take minutes, so silence would read as a hang. AccuDisc's
+    own human line is muted on the machine-channel path, so the feedback has to be
+    reconstructed from the ``progress`` tokens.
+    """
+
+    def _cb(done: int, total: int) -> None:
+        pct = 100.0 * done / total if total > 0 else 0.0
+        print(f"\r  {what}: {pct:5.1f}%", end="", flush=True)
+
+    return _cb
 
 
 def burn_disc(toc_path: Path, device: str, speed: int) -> None:
@@ -139,23 +151,20 @@ def burn_disc(toc_path: Path, device: str, speed: int) -> None:
     Exit 3 is *completed with caveats* — the disc was written — so only 0 and 3
     are success. Raises RuntimeError otherwise.
     """
+    from cdda2img.accudisc_reader import write_disc
+
     wav = toc_path.with_name(toc_path.stem + ".wav")
-    result = subprocess.run(  # noqa: S603  # LINT-013
-        [
-            _accudisc(),
-            "--device",
-            device,
-            "write",
-            "--toc",
-            str(toc_path.resolve()),
-            "--bin",
-            str(pcm_path(wav).resolve()),
-            "--speed",
-            str(speed),
-        ],
+    rc, stderr_text, _result = write_disc(
+        device,
+        toc_path.resolve(),
+        pcm_path(wav).resolve(),
+        speed,
+        progress_cb=_print_progress("burning"),
     )
-    if result.returncode not in (0, 3):
-        msg = f"accudisc write failed (exit {result.returncode})"
+    print()
+    if rc not in (0, 3):
+        detail = stderr_text.strip().splitlines()[-1] if stderr_text.strip() else ""
+        msg = f"accudisc write failed (exit {rc}): {detail}"
         raise RuntimeError(msg)
     eject(device)
 
@@ -167,30 +176,30 @@ def rip_disc(device: str, bin_path: Path, toc_path: Path) -> None:
     the measurement only needs the audio, and the geometry is already known (we
     burned it). Exit 3 = completed with caveats, which for a freshly burned test
     disc means flagged sectors — the pulse search tolerates those, so it counts
-    as success.
+    as success (``read_disc_c2`` treats 0 and 3 alike and raises on 1/2).
     """
+    from cdda2img.accudisc_reader import read_disc_c2
+
     bin_path.unlink(missing_ok=True)
     toc_path.unlink(missing_ok=True)
-    result = subprocess.run(  # noqa: S603  # LINT-013
-        [
-            _accudisc(),
-            "--device",
-            device,
-            "read",
-            "--pcm",
-            str(bin_path.resolve()),
-        ],
+    read_disc_c2(
+        device,
+        output_pcm=bin_path.resolve(),
+        progress_cb=_print_progress("reading back"),
     )
-    if result.returncode not in (0, 3):
-        msg = f"accudisc read failed (exit {result.returncode})"
-        raise RuntimeError(msg)
+    print()
 
 
 def eject(device: str) -> None:
-    """Eject the disc from *device* (best-effort; never raises)."""
-    subprocess.run(  # noqa: S603
-        [_accudisc(), "--device", device, "eject"], check=False
-    )
+    """Eject the disc from *device* (best-effort; never raises).
+
+    Re-exported from the seam because ``setup.py`` drives the whole interactive
+    burn → eject → reinsert → read-back loop through this module and should not
+    have to know which module owns the transport.
+    """
+    from cdda2img.accudisc_reader import eject as _eject
+
+    _eject(device)
 
 
 # ── PCM analysis ──────────────────────────────────────────────────────────────
