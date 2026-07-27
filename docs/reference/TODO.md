@@ -10,6 +10,14 @@ The three calls left on it in the 2026-07-27 default flip (`read_disc_c2`,
 `write_disc`, `speed_ladder_rows`) must move. AccuDisc's agent has committed full
 cooperation, and changes on both sides are in scope.
 
+> **PREMISE UNCONFIRMED (AccuDisc §by.0).** The retirement reached them *through us*,
+> not from Keith, and it contradicts a standing statement in their own `CLAUDE.md` /
+> API_PLAN §3 that the CLI's exit codes, `--progress-fd` and stderr conventions "stay
+> here by design". They are not disputing it; they cannot confirm it from their side,
+> and have put the question to Keith directly. **Confirm with Keith before sequencing
+> anything on it.** Nothing below depends on the answer — all three questions are
+> answered under either premise — but "required rather than optional" does.
+
 **The good news, established by reading their header rather than assuming:** all three
 already exist in C. This is binding-layer work on their side, not new engine features.
 
@@ -19,39 +27,57 @@ already exist in C. This is binding-layer work on their side, not new engine fea
 | `speed_ladder_rows` | `accudisc_probe_speed_ladder(dev, lba, count, cands, n, out)` | no |
 | `read_disc_c2` | `accudisc_read()` + `Device.read_to_file()` | **yes**, see below |
 
-#### The three questions that decide whether this is a swap or a change
+#### The three questions — asked as §106.3, **all answered from source** in §by
 
-These are the "type-correct, reference-wrong" candidates — each one produces
-plausible numbers on the wrong referent if we guess.
+These were the "type-correct, reference-wrong" candidates: each produces plausible
+numbers on the wrong referent if guessed. Answers below are theirs, from their tree.
 
-1. **`speeds` measures a span we do not currently choose.**
-   `accudisc_probe_speed_ladder` takes `lba` and `count`; the CLI picked them for us.
-   Radius is not incidental — the §9.3 phantom rung was a CAV radius term, and the
-   whole-disc measurements above exist because a short span at one radius could not
-   settle it. If we pick a different span than `speeds` used, every rung is still a
-   well-formed number and the ladder means something else. **Ask AccuDisc what the CLI
-   passed**, and pin it, or deliberately choose and document a new span. Do not default.
-   Mapping is otherwise clean: `requested_x`/`reported_x` → the §9.3 `req == page2a`
-   rule, `measured_cx` is **centi-x** (531 = 5.31×) where our regex parsed a float.
+1. **The `speeds` span is DERIVED, not a constant** (§by.1, `cli/main.c:659-664`):
 
-2. **`write_disc`'s not-blank answer must stay unambiguous.**
-   Today the burn decision keys on the `result=not_blank` machine token, never on
-   stderr wording. The C contract returns `ACCUDISC_ERR_UNSUPPORTED` for "the disc is
-   not blank — nothing was written", which is the *same code* a genuinely unsupported
-   operation would return. "Disc isn't blank" is a safe, expected, user-facing outcome;
-   "unsupported" is a bug or a wrong drive. Collapsing them would be a regression
-   against the typed answer we have now. **Ask for a distinct code** (or a field on
-   `write_opts`/result). The rest maps well — `ACCUDISC_WROTE_WITH_CAVEATS` is our
-   exit 3, and "negative means the burn did NOT complete" is exactly our
-   `in (0, 3)` acceptance restated.
+   ```c
+   lba   = start >= 0 ? start : toc.leadout_lba / 4;
+   count = toc.leadout_lba > lba ? toc.leadout_lba - lba : 0;
+   if (count > toc.leadout_lba / 2 && start < 0) count = toc.leadout_lba / 2;
+   ```
 
-3. **`read_disc_c2`'s single spin-up is a property we would lose by accident.**
-   Today one `read` pass captures audio + C2 + raw sub **and** dumps `--fulltoc` /
-   `--cdtext` inline — one spin-up, which is why the pre-rip banner is cheap.
-   `read_full_toc_raw()` and `read_cdtext_raw()` are already bound but are *separate
-   calls*. **Ask whether the library caches the lead-in** or whether three calls means
-   three lead-in reads; if the latter, we need an inline equivalent, because losing it
-   is a silent cost regression nothing in our tests would catch.
+   The default is the **middle half of the disc** — start at 25% of `leadout_lba`,
+   span 50% — chosen for representative CAV radius plus headroom for one fresh window
+   per rung. An explicit `--start` deliberately skips the clamp and runs to lead-out.
+   **Reproduce the expression, not a number read off one run**: it is a function of
+   `leadout_lba`, so a hardcoded span drifts from the bench archive on every disc of
+   a different length, and every rung stays a plausible number while meaning something
+   else. Default candidate rungs `{52,48,40,32,24,16,8,4}` filtered to ≤ page-2A max.
+   Otherwise the mapping is clean: `requested_x`/`reported_x` → the §9.3
+   `req == page2a` rule; `measured_cx` is **centi-x** (531 = 5.31×) where our regex
+   parsed a float.
+
+2. **Not-blank: agreed, deferred, and the real argument is better than ours** (§by.2).
+   We argued "they are different events". They checked whether the CLI's
+   `result=not_blank` is a guess and found it is not — `ACCUDISC_ERR_UNSUPPORTED` is
+   reachable from `accudisc_write` in exactly one place, the blank check. But that is
+   exact **by census, not by construction**: any future `ERR_UNSUPPORTED` under the
+   write path silently joins "not blank", and the failure is well-formed on both sides
+   — they report not-blank for a blank disc, we tell the user to insert a blank disc
+   they already inserted, and neither test suite notices. `ACCUDISC_ERR_NOT_BLANK =
+   -13` is free and touches three places; it lands when the retirement question
+   resolves. **Until then keep keying on the `result=not_blank` token** — it is what
+   they would fix first, and our current code needs no change.
+
+3. **Q3 dissolves — there is no inline mechanism to lose** (§by.3). There is no
+   cross-call lead-in cache (three calls are three reads), *but* the CLI's
+   "single-spin capture" is not a fold into `accudisc_read`: it makes two ordinary
+   public calls (`accudisc_read_full_toc`, `accudisc_read_cdtext`) before the read, on
+   the same open handle. "One spin-up instead of three" is a property of **one process
+   holding the handle open**, not of any combining in the library — the three spin-ups
+   came from three subprocess invocations each opening and closing the device. So a
+   binding consumer holding **one `Device`** across `read_full_toc_raw()` →
+   `read_cdtext_raw()` → `read()` issues an identical command sequence.
+   `Device.__init__` calls `accudisc_open` and nothing else, so there is no hidden
+   lead-in access either. **Two rules, both free**: keep the order (lead-in metadata
+   before the audio read, so the head is not sent to the program area and back), and
+   **do not open/close between them** — that, and only that, is what the subprocess
+   cost. Reintroducing it would be invisible: every byte still correct, three spin-ups.
+   They offered a test pinning the command sequence; take them up on it.
 
 #### `read_disc_c2` is the one we can start on now
 
@@ -66,11 +92,16 @@ asking them to build anything.
 #### Sequencing
 
 AccuDisc's queue is `speeds` min/avg/max, then binding `accudisc_probe_speed_ladder`
-(their §bx). So: (a) measure `read_to_file` on a whole disc while they work, (b) send
-the three questions now so answers arrive before the code does, (c) take
-`speed_ladder_rows` when the binding lands, (d) `write_disc` last — it is the
-destructive path, the only one where a wrong answer damages media, and it deserves the
-`--simulate` gate exercised on both transports before the CLI goes.
+(their §bx). **Their live blocker** (§by.4): `accudisc_speed_rung` has no `size` field
+and min/avg/max grows it, so binding the probe first would close the free ABI-break
+window and turn a routine field addition into a versioned break for us. **Keep the
+regex until they say explicitly that it can go.**
+
+So: (a) measure `read_to_file` on a whole disc while they work, (b) ~~send the three
+questions~~ — done, all answered in §by, (c) take `speed_ladder_rows` when the binding
+lands, (d) `write_disc` last — it is the destructive path, the only one where a wrong
+answer damages media, and it deserves the `--simulate` gate exercised on both
+transports while both still exist.
 
 **Do not delete the subprocess path until all three are migrated and A/B'd.** It is
 still the acceptance instrument (`tools/binding_ab.py`), and when it goes, byte-level
