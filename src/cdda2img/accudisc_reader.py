@@ -81,15 +81,26 @@ log = logging.getLogger(__name__)
 
 
 def _resolve_accudisc() -> str:
-    """Locate the AccuDisc binary: the snapshot in ``tools/accudisc/`` first, else PATH.
+    """Locate the AccuDisc binary: ``tools/accudisc/`` first, else ``$PATH``.
 
-    The snapshot (``tools/accudisc/accudisc``) is the version validated against
-    this checkout; falling back to a bare ``accudisc`` on ``$PATH`` keeps a
-    system install working. Path is dev-tree relative (mirrors the conf-example
-    resolution); replace with ``importlib.resources`` when packaging lands.
+    ``tools/accudisc/accudisc`` is a **symlink into the AccuDisc build tree**, not
+    a copy — it was a snapshot until their API was complete, and maintaining a
+    separate one stopped paying once the binding linked ``libaccudisc`` from that
+    same tree. ``is_file()`` follows the link, so a dangling one falls through.
+
+    That makes the ``$PATH`` fallback a **silent version change** rather than a
+    convenience. Previously it meant "pinned copy, or a system install if you
+    have no checkout"; now it means "their live build, or something else of
+    unknown vintage if their tree is momentarily absent" — mid-``make``, or a
+    checkout that has not relinked yet. Both are readable and neither announces
+    itself. :func:`engine_version` is what records which one actually ran, and is
+    the only reason a rip log can settle the question afterwards.
+
+    Path is dev-tree relative (mirrors the conf-example resolution); replace with
+    ``importlib.resources`` when packaging lands.
     """
-    snapshot = Path(__file__).parent.parent.parent / "tools" / "accudisc" / "accudisc"
-    return str(snapshot) if snapshot.is_file() else "accudisc"
+    local = Path(__file__).parent.parent.parent / "tools" / "accudisc" / "accudisc"
+    return str(local) if local.is_file() else "accudisc"
 
 
 _ACCUDISC = _resolve_accudisc()
@@ -697,7 +708,7 @@ def _run_read(
         else:
             returncode, stderr_text = _run_with_progress(cmd, progress_cb)
     except FileNotFoundError:
-        msg = "accudisc not found — snapshot to tools/accudisc/ or put it on $PATH"
+        msg = "accudisc not found — symlink it into tools/accudisc/ or put it on $PATH"
         raise RuntimeError(msg) from None
     if returncode not in (0, 3):
         msg = f"accudisc {what} failed (exit {returncode}): {stderr_text.strip()}"
