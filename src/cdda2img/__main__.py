@@ -1,16 +1,10 @@
-import warnings
+"""``python -m cdda2img`` — delegates to the same entry point as the console script.
 
-# discogs_client/fetchers.py:102 uses '\w' in a non-raw string; the parser emits
-# SyntaxWarning at bytecode-compile time. `module=` is matched against the
-# *filename* (stripped of `.py`) via re.match, NOT against the dotted module
-# name — so we need a path-style pattern anchored at the start, not
-# `discogs_client\..*`. See `re.match`/`warnings.filterwarnings` docs.
-warnings.filterwarnings(
-    "ignore",
-    category=SyntaxWarning,
-    module=r".*/discogs_client/.*",
-)
+Both paths must install the ``discogs_client`` SyntaxWarning filter before the
+package is imported, so the filter lives in one place (``cli.main``) rather than
+being duplicated here and drifting.
+"""
 
-from cdda2img.cdda2img import main  # noqa: E402
+from cdda2img.cli import main
 
 main()

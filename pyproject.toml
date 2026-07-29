@@ -65,6 +65,9 @@ dev = [
     "mkdocstrings[python]>=0.26.1",
 ]
 
+[project.scripts]
+cdda2img = "cdda2img.cli:main"
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
