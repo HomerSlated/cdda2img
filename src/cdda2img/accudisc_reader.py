@@ -709,8 +709,33 @@ def read_speed(device: str) -> tuple[int | None, int | None]:
     return (int(cur_m.group(1)) if cur_m else None), int(max_m.group(1))
 
 
+def _speed_ladder_binding(module: Any, device: str) -> list[tuple[int, int, float]]:
+    """``speed_ladder_rows`` over ``Device.probe_speed_ladder``.
+
+    ``points=3`` — the default, and load-bearing rather than incidental. It cuts
+    the span into three bands and measures every rung in each, and **only at
+    ``points=3`` does any rung get a verdict other than UNKNOWN**; a ladder
+    derived from point samples is a confident wrong answer.
+
+    The span is left to the library on purpose. Our migration plan had recorded
+    the CLI's span as ``lba = leadout/4, count clamped to leadout/2`` — true of
+    the *non-sweep* probe, and wrong here: at ``points=3`` the CLI opens out to
+    the whole disc, because three bands of the middle half are three samples of
+    much the same neighbourhood and nothing in the output would say so. AccuDisc
+    caught that before it cost a run (§ce.3). Passing no span gets their
+    computation instead of our copy of it — and a correction we copy is a
+    correction we can copy wrong.
+
+    ``measured_x`` is the middle band, matching the CLI's ``measured=`` token, so
+    the triple this returns is identical on both transports.
+    """
+    with module.Device(device) as dev:
+        rungs = dev.probe_speed_ladder(points=3)
+    return [(r.requested_x, r.reported_x, r.measured_x) for r in rungs]
+
+
 def speed_ladder_rows(device: str) -> list[tuple[int, int, float]]:
-    """Timed streaming reads per rung from ``accudisc speeds``: ``(req, page2a, measured)``.
+    """Timed streaming reads per rung: ``(req, page2a, measured)``.
 
     *req* is what was asked for, *page2a* what the drive settled on (0 = the page
     did not report), *measured* the achieved throughput in X. The probe performs
@@ -718,7 +743,33 @@ def speed_ladder_rows(device: str) -> list[tuple[int, int, float]]:
     restoring it is the caller's job (``drive_speed.admitted_ladder``).
 
     Empty list on any failure.
+
+    **The triple is deliberately unchanged by the binding migration**, though the
+    binding offers more: ``SpeedRung`` also carries ``min_x``/``max_x``,
+    ``spread_cx`` and a ``verdict``, and ``Device.admitted_ladder()`` applies
+    AccuDisc's own admission rule. Adopting that rule would *fix* the known gap
+    documented in ``drive_speed.admitted_ladder`` — with the Plextor uncap set,
+    ``req=48 page2a=48 measured=20.99`` sits beside ``req=40 page2a=40
+    measured=22.83``, and our ``req == page2a`` test admits both, labelling the
+    top rung a rate the drive never reaches on audio; their verdict calls it
+    ``duplicate:40``. That is a change of **policy**, not of carrier, and folding
+    it into a transport swap would mean a ladder that changed for two reasons at
+    once with no way to attribute the difference. It gets its own change and its
+    own evidence.
+
+    Note ``min_x``/``max_x`` are ``None`` — not ``0.0`` — when no gradient was
+    measured. Flattening that to zero would make "not measured" indistinguishable
+    from "this rung stalled", the same sentinel-that-looks-like-a-measurement
+    shape as exit 3 being a projection rather than a return.
     """
+    module = _binding("speed ladder")
+    if module is not None:
+        rows = _try_binding(
+            module, "speed ladder", lambda: _speed_ladder_binding(module, device)
+        )
+        if rows is not None:
+            return rows
+
     probe = _run_probe(["--device", device, "speeds"], "speeds")
     if probe is None:
         return []

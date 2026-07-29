@@ -137,6 +137,23 @@ def _stale_extension() -> str | None:
     )
 
 
+def _engine_version_only() -> str:
+    """The library version alone — with the `[transport: ...]` suffix stripped.
+
+    `engine_version()` appends the active transport, which is exactly the thing
+    this harness changes between arms. Comparing the full banner at start and end
+    therefore reports "the engine changed" on every single run: a guard that fires
+    unconditionally, which is indistinguishable from no guard at all. The first
+    run of this tool did precisely that and blamed AccuDisc's build tree for a
+    field we were mutating on purpose.
+
+    The check being made is "did libaccudisc move under us", so the string it
+    compares must contain the library version and nothing that the measurement
+    itself perturbs.
+    """
+    return ar.engine_version().split("[transport:")[0].strip()
+
+
 @dataclass
 class Arm:
     """One whole-disc read: which transport, how long it took, what it produced."""
@@ -221,6 +238,37 @@ def _run_arm(
     return Arm(name, transport, elapsed, sectors, digests, reported)
 
 
+def _classify_stream(stream: str, a1: Arm, b: Arm, a2: Arm) -> tuple[str, str]:
+    """Which of the four patterns this stream shows, and what it means.
+
+    The whole reason arm A runs twice. Three digests admit exactly four
+    arrangements, and only one of them is evidence about the transport:
+
+    ``identical``        all three agree — the strongest result available.
+    ``carrier``          A1 == A2 != B. The disc reproduced and the binding did
+                         not. This is the finding the harness exists to catch.
+    ``cold-first-pass``  A1 != B == A2. The two *adjacent* arms agree and the
+                         first one does not. A whole-disc read warms the drive
+                         and settles its servo; treating this as a carrier defect
+                         would blame the binding for being second in the queue.
+    ``nondeterministic`` all three differ. The stream is not reproducible on this
+                         disc at all, so it can neither convict nor acquit.
+                         Expected for raw subchannel, which has no CIRC
+                         protection and only a per-frame CRC.
+    """
+    d1, db, d2 = (arm.digests.get(stream) for arm in (a1, b, a2))
+    if d1 == db == d2:
+        return "identical", "all three arms agree"
+    if d1 == d2 != db:
+        return "carrier", "both subprocess arms agree, binding differs"
+    if d1 != db == d2:
+        return (
+            "cold-first-pass",
+            "binding matches the SECOND subprocess arm; the first differs",
+        )
+    return "nondeterministic", "all three differ — this stream does not reproduce"
+
+
 def _report(arms: list[Arm], versions: tuple[str, str]) -> int:
     a1, b, a2 = arms
     print()
@@ -228,7 +276,7 @@ def _report(arms: list[Arm], versions: tuple[str, str]) -> int:
     print(f"# engine at end:   {versions[1]}")
     if versions[0] != versions[1]:
         print(
-            "# WARNING: the engine banner CHANGED during the run. Both transports\n"
+            "# WARNING: the engine version CHANGED during the run. Both transports\n"
             "# resolve one libaccudisc out of AccuDisc's build tree, so this run\n"
             "# compared two library versions and the delta below is not a carrier\n"
             "# measurement. Discard it and rerun against a quiet tree."
@@ -246,28 +294,44 @@ def _report(arms: list[Arm], versions: tuple[str, str]) -> int:
     # are not two ways of doing the same thing, and comparing their speed would
     # be comparing a read with something that is not that read.
     print()
-    mismatched = [s for s in _STREAMS if len({arm.digests.get(s) for arm in arms}) > 1]
-    if mismatched:
-        print(f"STREAMS DIFFER between arms: {', '.join(mismatched)}")
-        for arm in arms:
-            for s in mismatched:
-                print(f"    {arm.name:3s} {s:4s} {arm.digests.get(s, '(absent)')}")
+    verdicts = {s: _classify_stream(s, a1, b, a2) for s in _STREAMS}
+    for stream, (kind, note) in verdicts.items():
+        print(f"  {stream:4s} {kind:18s} {note}")
+        if kind != "identical":
+            for arm in arms:
+                print(f"         {arm.name:3s} {arm.digests.get(stream, '(absent)')}")
+
+    # ONLY the A1 == A2 != B pattern indicts the carrier. The first version of
+    # this tool suppressed the timing verdict on any mismatch at all, which threw
+    # away a valid result on the first real run: the disc under test is known to
+    # read non-deterministically, so "some stream differed" was never going to be
+    # rare enough to gate on.
+    carrier = [s for s, (kind, _) in verdicts.items() if kind == "carrier"]
+    if carrier:
         print(
-            "\nThis is a correctness finding and it suppresses the timing verdict.\n"
-            "NOTE it is not automatically a binding defect: a differing arm may be\n"
-            "the disc reading differently, which is why A1 and A2 are both here. If\n"
-            "A1 != A2 the disc is the variable; if A1 == A2 != B the carrier is."
+            f"\nCARRIER FINDING on {', '.join(carrier)}: both subprocess arms agree "
+            f"with each other and disagree with the binding.\nThe disc reproduced; "
+            f"the transport did not. Timing suppressed — a transport that returns\n"
+            f"different bytes is not a faster way of doing the same thing."
         )
         return 1
-    print(f"streams identical across all three arms ({', '.join(_STREAMS)})")
 
     drift = abs(a1.seconds - a2.seconds)
     delta = b.seconds - (a1.seconds + a2.seconds) / 2
+    adjacent = b.seconds - a2.seconds
     print()
-    print(f"subprocess drift |A1-A2| : {drift:6.2f} s")
+    print(f"subprocess drift |A1-A2| : {drift:6.2f} s   <- the noise floor")
     print(
-        f"binding vs subprocess    : {delta:+6.2f} s "
+        f"binding vs mean(A1,A2)   : {delta:+6.2f} s "
         f"({delta / ((a1.seconds + a2.seconds) / 2) * 100:+.1f}%)"
+    )
+    # B and A2 are consecutive, so they share whatever warming A1 paid for. When
+    # A1 is the cold outlier this is the cleaner of the two comparisons; it is
+    # printed alongside rather than instead, because choosing the flattering one
+    # after seeing both is how a harness stops being a harness.
+    print(
+        f"binding vs A2 (adjacent) : {adjacent:+6.2f} s "
+        f"({adjacent / a2.seconds * 100:+.1f}%)"
     )
     if abs(delta) <= drift:
         print(
@@ -332,7 +396,7 @@ def main() -> int:
 
     workdir = args.workdir / f"disc_ab_{os.getpid()}"
     workdir.mkdir(parents=True)
-    version_start = ar.engine_version()
+    version_start = _engine_version_only()
     try:
         arms = [
             _run_arm("A1", "subprocess", args.device, args.speed, workdir),
@@ -341,7 +405,7 @@ def main() -> int:
         ]
     finally:
         shutil.rmtree(workdir, ignore_errors=True)
-    return _report(arms, (version_start, ar.engine_version()))
+    return _report(arms, (version_start, _engine_version_only()))
 
 
 if __name__ == "__main__":
