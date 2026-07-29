@@ -83,6 +83,60 @@ from cdda2img import accudisc_reader as ar
 _STREAMS = ("pcm", "c2", "sub")
 
 
+def _stale_extension() -> str | None:
+    """Reason the loaded extension is older than the library, or None if it is fine.
+
+    AccuDisc's build refreshes the interpreter-specific extension
+    (``_accudisc.cpython-3XX-*.so``) but not always the ``abi3`` one — and which
+    of those Python picks is decided by the interpreter, not by us. On 3.14 both
+    are loadable and the specific build wins; on **3.10**, this project's floor
+    and its default venv, only ``abi3`` is loadable. So a rebuild can leave us
+    loading a days-old extension against a current ``libaccudisc``.
+
+    Their ``_check_version_skew`` will not catch that: it compares ``[:2]`` —
+    major.minor — and a struct-layout change inside 0.2.x leaves both sides
+    saying 0.2. The ``size`` guards on ``accudisc_read_req`` / ``read_stats`` do
+    hold, so this is not "anything could happen"; the exposure is the structs
+    without one. But for an A/B specifically, *any* build skew is fatal to the
+    result: it would compare an old binding against a current subprocess and
+    report the difference as a carrier finding.
+
+    mtime is a weak signal — a copy or a ``touch`` defeats it — so this refuses
+    only on the unambiguous case (extension strictly older than the library) and
+    stays quiet otherwise. It is a guard against the accident, not against an
+    adversary.
+    """
+    root = ar._binding_search_path()
+    if root is None:
+        return None
+    # pybinding -> <accudisc-repo>/bindings/python, so the library its RUNPATH
+    # points at is <accudisc-repo>/build/src/libaccudisc.so.0. Derived rather
+    # than configured: one symlink is the single point of truth for both.
+    repo = Path(root).resolve().parent.parent
+    lib = repo / "build" / "src" / "libaccudisc.so.0"
+    exts = sorted((Path(root) / "accudisc").glob("_accudisc*.so"))
+    if not lib.exists() or not exts:
+        return None
+    # Whichever this interpreter would actually load, not whichever is newest.
+    tag = f"cpython-{sys.version_info.major}{sys.version_info.minor}"
+    loadable = [e for e in exts if tag in e.name] or [
+        e for e in exts if "abi3" in e.name
+    ]
+    if not loadable:
+        return None
+    ext = loadable[0]
+    if ext.stat().st_mtime >= lib.stat().st_mtime:
+        return None
+    return (
+        f"{ext.name} was built {time.strftime('%Y-%m-%d %H:%M', time.localtime(ext.stat().st_mtime))}, "
+        f"older than libaccudisc.so.0 ({time.strftime('%Y-%m-%d %H:%M', time.localtime(lib.stat().st_mtime))}). "
+        f"On Python {sys.version_info.major}.{sys.version_info.minor} that is the extension "
+        f"this run would load, so arm B would be an older binding against a current library — "
+        f"a build difference reported as a carrier difference. Rebuild it "
+        f"(python build_accudisc.py) or run with --allow-stale if you know better."
+    )
+
+
 @dataclass
 class Arm:
     """One whole-disc read: which transport, how long it took, what it produced."""
@@ -256,7 +310,17 @@ def main() -> int:
         help="scratch for the PCM/C2/sub streams; each arm is deleted after hashing. "
         "NOT /tmp — it is a RAM-backed tmpfs here and a whole disc floods it.",
     )
+    ap.add_argument(
+        "--allow-stale",
+        action="store_true",
+        help="run even if the binding extension is older than libaccudisc (see _stale_extension)",
+    )
     args = ap.parse_args()
+
+    stale = _stale_extension()
+    if stale and not args.allow_stale:
+        print(f"refusing to run: {stale}", file=sys.stderr)
+        return 2
 
     free = shutil.disk_usage(args.workdir).free
     if free < 1_200_000_000:
