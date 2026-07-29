@@ -221,3 +221,66 @@ def test_empty_resolution_is_identity_on_metadata():
     out = disc_from_resolution(Resolution(), _physical_disc())
     assert out.album == "OLD" and out.artist == "OLD"
     assert out.pre_emphasis is True
+
+
+# ── §11.5 traceability: skipped proposals ────────────────────────────────────
+#
+# The third question the first two cannot answer. "Why is this field X?" is
+# contenders; "what else could it be?" is alternatives; but a value that was
+# DROPPED appears in neither, exactly as if the source had never proposed it.
+# Those call for opposite fixes — mend the filter, or mend the source.
+
+
+def test_a_dropped_proposal_is_recorded_with_its_reason() -> None:
+    res = resolve([
+        _p(Field.ALBUM, "Real", Trust.DISC_ID, Source.MB_DISC_ID),
+        _p(Field.ALBUM, "", Trust.CDDB, Source.CDDB),
+        _p(Field.ALBUM, None, Trust.DISCOGS, Source.DISCOGS),
+    ])
+    assert res.winners[(Field.ALBUM, None)].value == "Real"
+    reasons = {r for _p_, r in res.skipped[(Field.ALBUM, None)]}
+    assert reasons == {"empty", "none"}
+
+
+def test_dropped_proposals_do_not_become_contenders_or_alternatives() -> None:
+    """They are excluded from ranking — that behaviour is unchanged and must be.
+    Recording them is a *trace*, not a re-admission."""
+    res = resolve([
+        _p(Field.ALBUM, "Real", Trust.DISC_ID, Source.MB_DISC_ID),
+        _p(Field.ALBUM, "", Trust.CDDB, Source.CDDB),
+    ])
+    assert [c.value for c in res.contenders[(Field.ALBUM, None)]] == ["Real"]
+    assert (Field.ALBUM, None) not in res.alternatives
+
+
+def test_a_field_whose_only_proposal_was_dropped_is_distinguishable_from_silence() -> (
+    None
+):
+    """The case the boolean filter could not express, and the reason for the change.
+
+    Before, a field proposed-then-discarded and a field never proposed at all were
+    both simply absent from the resolution. One means the filter is wrong; the
+    other means the source is. Nothing could tell them apart.
+    """
+    dropped = resolve([_p(Field.ALBUM, "", Trust.CDDB, Source.CDDB)])
+    never = resolve([_p(Field.ARTIST, "x", Trust.CDDB, Source.CDDB)])
+
+    assert (Field.ALBUM, None) not in dropped.winners  # absent either way
+    assert (Field.ALBUM, None) not in never.winners
+    # ... but only one of them says why
+    assert (Field.ALBUM, None) in dropped.skipped
+    assert (Field.ALBUM, None) not in never.skipped
+
+
+def test_skipped_is_keyed_per_track_like_every_other_map() -> None:
+    res = resolve([
+        _p(Field.TRACK_TITLE, "", Trust.CDDB, Source.CDDB, track_number=1),
+        _p(Field.TRACK_TITLE, "ok", Trust.CDDB, Source.CDDB, track_number=2),
+    ])
+    assert (Field.TRACK_TITLE, 1) in res.skipped
+    assert (Field.TRACK_TITLE, 2) not in res.skipped
+
+
+def test_a_clean_resolution_has_an_empty_skipped_map() -> None:
+    res = resolve([_p(Field.ALBUM, "Real", Trust.DISC_ID, Source.MB_DISC_ID)])
+    assert res.skipped == {}

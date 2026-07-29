@@ -175,6 +175,16 @@ class Resolution:
     trace for "why did this field resolve to X?" (§11.5 traceability). When two
     menu choices are both wrong, this is what shows whether the right value was
     never proposed, or proposed-but-outranked, and by which source/trust.
+    ``skipped`` maps a key to the proposals :func:`resolve` **discarded before
+    ranking**, each with the reason — the third case the first two cannot express.
+
+    The three answer different questions and the third is the one that was
+    missing (§11.5). "Why is this field X?" is ``contenders``. "What else could it
+    be?" is ``alternatives``. But a value that was *dropped* appears in neither:
+    it is absent from both, exactly as if the source had never proposed it. So a
+    correct value discarded as an empty string, or as an "Unknown Artist"
+    sentinel, was indistinguishable from one that was never offered — and those
+    call for opposite fixes (mend the filter vs. mend the source).
     """
 
     winners: dict[ProposalKey, FieldProposal] = dc_field(default_factory=dict)
@@ -182,6 +192,9 @@ class Resolution:
         default_factory=dict
     )
     contenders: dict[ProposalKey, tuple[FieldProposal, ...]] = dc_field(
+        default_factory=dict
+    )
+    skipped: dict[ProposalKey, tuple[tuple[FieldProposal, str], ...]] = dc_field(
         default_factory=dict
     )
 
@@ -195,17 +208,38 @@ def _is_empty(value: object) -> bool:
     return value is None or value == ""
 
 
+def _skip_reason(value: object) -> str | None:
+    """Why this proposal is discarded before ranking, or ``None`` to keep it.
+
+    Deliberately returns a *reason* rather than a boolean. The boolean form is
+    what made a dropped value invisible: `resolve` could say "this key has no
+    proposals" but never "it had one and I threw it away, for this". Those need
+    opposite fixes — mend the filter, or mend the source — and the caller cannot
+    choose between them without the reason.
+    """
+    if value is None:
+        return "none"
+    if value == "":
+        return "empty"
+    return None
+
+
 def resolve(proposals: Iterable[FieldProposal]) -> Resolution:
     """Resolve proposals to one winner per ``(field, track_number)`` by trust.
 
     Highest trust wins, independent of iteration order. Ties (equal trust, equal
     value) collapse to one winner; ties with *different* values keep first-seen as
     the winner and record the rest as alternatives. Empty/None-valued proposals are
-    ignored (see :func:`_is_empty`).
+    ignored (see :func:`_is_empty`) — but **recorded** in ``skipped`` rather than
+    dropped without trace, so a discarded value can be told apart from one that
+    was never proposed.
     """
     by_key: dict[ProposalKey, list[FieldProposal]] = defaultdict(list)
+    dropped: dict[ProposalKey, list[tuple[FieldProposal, str]]] = defaultdict(list)
     for p in proposals:
-        if _is_empty(p.value):
+        reason = _skip_reason(p.value)
+        if reason is not None:
+            dropped[(p.field, p.track_number)].append((p, reason))
             continue
         by_key[(p.field, p.track_number)].append(p)
 
@@ -237,7 +271,12 @@ def resolve(proposals: Iterable[FieldProposal]) -> Resolution:
                 sorted(best_by_value.values(), key=lambda p: p.trust, reverse=True)
             )
 
-    return Resolution(winners=winners, alternatives=alternatives, contenders=contenders)
+    return Resolution(
+        winners=winners,
+        alternatives=alternatives,
+        contenders=contenders,
+        skipped={k: tuple(v) for k, v in dropped.items()},
+    )
 
 
 def disc_from_resolution(resolution: Resolution, base: RBIDisc) -> RBIDisc:

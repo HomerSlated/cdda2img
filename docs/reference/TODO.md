@@ -779,7 +779,16 @@ log below.
       per-track direct edits, `_clear_disc`, and revert modelled as `MANUAL` proposals once
       the accumulator is carried into the menu (a persistent menu accumulator — none today;
       B-5 re-resolves `ctl.disc` on each apply). trust_model_design.md §11.4 (B-7), §9.
-- [ ] **B-7 prerequisite — §11.5 traceability** · expose per-field decision provenance the
+- [~] **B-7 prerequisite — §11.5 traceability** — *`contenders` was already shipped;
+      `Resolution.skipped[key] -> ((proposal, reason), …)` landed 2026-07-29.* A value
+      that was DROPPED used to appear in neither `contenders` nor `alternatives` —
+      indistinguishable from one never proposed, though the two call for opposite
+      fixes (mend the filter vs. mend the source). `_skip_reason` returns a reason
+      rather than a boolean for exactly that. **Remaining:** the invalid-ISRC and
+      "Unknown Artist" sentinel drops happen upstream of `resolve`, at the adapter,
+      so routing those through the same map needs the adapter to propose-then-skip
+      instead of filtering first. Original item:
+- [ ] **(original) B-7 prerequisite — §11.5 traceability** · expose per-field decision provenance the
       resolver already retains internally: `Resolution.contenders[key] -> tuple[FieldProposal, …]`
       (full contender set, trust-desc) and `Resolution.skipped[key] -> reason` (empty value /
       "Unknown Artist" sentinel / invalid-ISRC drop) so a *silently dropped correct value*
