@@ -1666,6 +1666,18 @@ class _FakeUnsupported(_FakeBindingError):
     pass
 
 
+class _FakeNotBlank(_FakeBindingError):
+    """AccuDisc 0.4.0's ``NotBlank`` — a SIBLING of ``Unsupported``, not a subclass.
+
+    The relationship is the fixture. AccuDisc declined to subclass on purpose
+    (§ck.3): subclassing would keep ``except Unsupported`` catching a not-blank
+    disc, which is the ambiguity ``ACCUDISC_ERR_NOT_BLANK`` exists to end. A fake
+    that made this a subclass — or reused one class for both — would pass whether
+    the seam caught the right type or the wrong one, and the burn path would be
+    untested in the only respect that changed.
+    """
+
+
 class _FakeWriteResult(enum.Enum):
     OK = "ok"
     CAVEATS = "caveats"
@@ -1711,6 +1723,7 @@ def _write_binding(device: _FakeWriteDevice) -> _FakeBinding:
     module = _FakeBinding()
     module.Device = device  # type: ignore[assignment]
     module.Unsupported = _FakeUnsupported  # type: ignore[attr-defined]
+    module.NotBlank = _FakeNotBlank  # type: ignore[attr-defined]
     module.WriteResult = _FakeWriteResult  # type: ignore[attr-defined]
     return module
 
@@ -1744,11 +1757,31 @@ def test_write_caveats_means_the_disc_WAS_written() -> None:
     assert "cdtext size_info odd" in err
 
 
-def test_write_not_blank_raises_unsupported_and_maps_to_not_blank() -> None:
-    dev = _FakeWriteDevice(_FakeUnsupported("disc is not blank"))
+def test_write_not_blank_raises_not_blank_and_maps_to_not_blank() -> None:
+    dev = _FakeWriteDevice(_FakeNotBlank("disc is not blank"))
     rc, err, token = _do_write(dev)
     assert (rc, token) == (2, "not_blank")
     assert "not blank" in err
+
+
+def test_write_unsupported_is_an_error_now_not_not_blank() -> None:
+    """The discriminating case for AccuDisc 0.4.0's `-13`, and the reason for it.
+
+    Before 0.4.0, "not blank" was the only place `ERR_UNSUPPORTED` was reachable
+    under the write path — exact **by census, not by construction**. Any future
+    unsupported operation would have silently joined it, and the user would be
+    told to insert a blank disc they had already inserted. Neither side's tests
+    would have noticed, because both sides' behaviour is well-formed.
+
+    So this asserts the half that has no observable consequence *today*: a
+    genuine `Unsupported` must reach the generic arm and report `error`. Pair it
+    with the test above and the two types are told apart; drop it and the seam
+    could catch `(NotBlank, Unsupported)` — the compatible-looking spelling that
+    buys compatibility by preserving the bug — and nothing would fail.
+    """
+    dev = _FakeWriteDevice(_FakeUnsupported("simulate is not supported here"))
+    rc, _err, token = _do_write(dev)
+    assert (rc, token) == (2, "error")
 
 
 def test_write_other_errors_map_to_error_and_do_not_fall_back() -> None:

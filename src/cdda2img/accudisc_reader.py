@@ -170,6 +170,15 @@ _BINDING_SURFACE = (
     "C2",
     "Sub",
     "Unsupported",
+    # AccuDisc 0.4.0+. Listed so an older binding is refused HERE, by name, rather
+    # than mismapping a not-blank disc at the burn. Under 0.3.x "not blank" raised
+    # `Unsupported`; from 0.4.0 it raises `NotBlank`, a **sibling** of it, and
+    # AccuDisc declined to subclass on purpose (§ck.3) — subclassing would keep
+    # `except Unsupported` catching a not-blank disc, which is the exact ambiguity
+    # the new code exists to end. So there is no compatible catch to write: a
+    # tuple of both would misreport a genuine `Unsupported` as "not blank" under
+    # 0.4.0, buying compatibility by preserving the bug. Break loudly instead.
+    "NotBlank",
     "WriteResult",
     "Anomaly",
 )
@@ -1372,9 +1381,20 @@ def _write_disc_binding(
     ==================  ==========================  ====  ==============
     ``ok``              ``WriteResult.OK``          0     yes
     ``caveats``         ``WriteResult.CAVEATS``     3     **yes**
-    ``not_blank``       raises ``Unsupported``      2     no
+    ``not_blank``       raises ``NotBlank``         2     no
     ``error``           raises ``AccuDiscError``    2     no
     ==================  ==========================  ====  ==============
+
+    ``NotBlank`` is AccuDisc 0.4.0's ``ACCUDISC_ERR_NOT_BLANK = -13``, and it is a
+    **sibling** of ``Unsupported``, not a subclass. Before 0.4.0 the two were one
+    exception and "not blank" was exact *by census, not by construction*: it was
+    the only place ``ERR_UNSUPPORTED`` was reachable under the write path, so any
+    future unsupported operation would have silently joined it and told the user
+    to insert a blank disc they had already inserted. The CLI's ``result=not_blank``
+    token was our insurance against that; retiring the subprocess cashed it in,
+    which is why the code was asked for and authorised. A genuine ``Unsupported``
+    now falls to the ``AccuDiscError`` arm and is reported as ``error``, which is
+    the whole point of the split.
 
     The exit codes are **ours**, synthesised to keep this function's signature
     and every caller's branch unchanged. AccuDisc deliberately do not expose them
@@ -1425,10 +1445,11 @@ def _write_disc_binding(
         # subprocess burn into a refusal, on the one operation a user cannot
         # simply retry.
         raise
-    except module.Unsupported as exc:
-        # "Not blank" — nothing was written. The subprocess reports this as
-        # exit 2 with result=not_blank, and the caller distinguishes it from a
-        # transport failure by the token, never by the code.
+    except module.NotBlank as exc:
+        # Nothing was written. The subprocess reports this as exit 2 with
+        # result=not_blank, and the caller distinguishes it from a transport
+        # failure by the token, never by the code. Caught by its own type since
+        # 0.4.0 — `Unsupported` no longer implies it and must NOT be caught here.
         return 2, str(exc), "not_blank"
     except module.AccuDiscError as exc:
         # Deliberately returned, not raised: a raise would reach _try_binding,
