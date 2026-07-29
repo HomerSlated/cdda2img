@@ -279,7 +279,7 @@ throttled to 40× regardless of the uncap, so audio is unaffected). If (3) lands
 three-way pre-flight becomes cheap and honest — refuse on `on`, proceed on `off`, record
 the caveat on `unknown` — but it is not needed today.
 
-### Open question: is page-2A `max_x` media-class invariant? (2026-07-26)
+### CLOSED 2026-07-29 (unanswerable here, and unused) — is page-2A `max_x` media-class invariant?
 
 AccuDisc's `stock_ceilings` classifier is keyed on **(model)**; the PX-716A manual (p.15)
 publishes three ceilings for that model by **media class** — 48× data, 40× CD-DA/CD-R
@@ -287,8 +287,25 @@ audio, 32× CD-RW audio. If page 2A's `max_x` tracks the loaded media class, a
 single per-model stock number is coarser than the drive's real behaviour and the CD-RW
 audio case is untested by either project.
 
-Not a claim that it misclassifies — a question, answerable in two minutes with a CD-RW
-audio disc in the tray. Offered to AccuDisc in outbound §88.2; we have the discs.
+**Closed rather than deferred, on two grounds.** (1) Keith has no blank CD-RW and is not
+planning to obtain one, so it is not answerable on this bench — and an open item nobody
+can act on is worse than a closed one with its reasoning written down. (2) More
+importantly, **the rule we ship does not consume the answer.** `drive_speed.admitted_ladder`
+rule 1 admits on AccuDisc's *verdict*, which is a measured rate comparison at three radii
+— it never reads `max_x`. Page 2A only enters at rule 2 (`req == page2a`), which fires
+solely when the engine reports no verdict at all. So on any AccuDisc build that judges
+rungs, a media-class-dependent `max_x` cannot reach our ladder.
+
+**Residual, stated rather than tracked:** should we ever fall through to rule 2 with a
+CD-RW in the tray (an older engine, or a `points=1` probe where nothing is judged), the
+ladder may admit rungs above the 32× CD-RW audio ceiling. The measured-rate rule 3 and
+the outcome guard both sit below it, and a rung the drive silently refuses shows up as a
+duplicate rate rather than as a wrong number. Not worth a guard for a case that needs an
+absent disc *and* a downgraded engine.
+
+Originally offered to AccuDisc in outbound §88.2 (which claimed "we have the discs" — that
+was wrong about CD-RW specifically). Closure relayed in §121; it also lands on their task 5
+stock-ceiling A-vs-B discriminator, which is unanswerable on this bench for the same reason.
 
 ### Never established: one-sided (pre-boundary) static-Q clustering (2026-07-26)
 
