@@ -876,18 +876,34 @@ class _FakeAbiMismatch(_FakeBindingError):
     pass
 
 
+class _FakeAnomaly(enum.IntFlag):
+    """A real IntFlag, because the REAL one is and that is where the bug lived.
+
+    The previous fake handed `anomalies` a plain tuple. Tuples iterate on every
+    Python; an ``IntFlag`` *instance* only became iterable in 3.11. So the
+    production code iterated the value directly, 1423 tests passed, and the call
+    raised "'Anomaly' object is not iterable" on the first real 3.10 read the
+    moment the binding became importable. A fake that is easier to iterate than
+    the type it stands in for is not a simplification, it is a hole.
+    """
+
+    A = 1
+    B = 2
+
+
 class _FakeBinding:
     """The minimum surface accudisc_reader calls, so _BINDING_SURFACE is satisfied."""
 
     AccuDiscError = _FakeBindingError
     AbiMismatch = _FakeAbiMismatch
+    Anomaly = _FakeAnomaly
 
     def __init__(self) -> None:
         self.opened: list[str] = []
 
     @staticmethod
     def anomaly_token(bit: object) -> str:
-        return str(bit)
+        return getattr(bit, "name", str(bit)).lower()
 
     def Device(self, path: str) -> object:
         raise NotImplementedError
@@ -1084,11 +1100,13 @@ class _FakeToken:
 
 
 class _FakeToc:
-    def __init__(self, tracks, sessions, leadout, anomalies=(), trusted=True) -> None:
+    def __init__(self, tracks, sessions, leadout, anomalies=None, trusted=True) -> None:
         self.tracks = tracks
         self.sessions = sessions
         self.leadout_lba = leadout
-        self.anomalies = anomalies
+        # Default to an empty FLAG, not a tuple: the whole point of this fake
+        # being an IntFlag is that it iterates the way the real type does.
+        self.anomalies = _FakeAnomaly(0) if anomalies is None else anomalies
         self.trusted = trusted
 
     @property
@@ -1155,7 +1173,7 @@ def test_toc_geometry_from_binding_maps_every_field() -> None:
                 ],
                 sessions=[_FakeSession(1)],
                 leadout=162892,
-                anomalies=("b", "a"),
+                anomalies=_FakeAnomaly.A | _FakeAnomaly.B,
             ),
             _FakeInfo("fulltoc", "none", 1),
         )

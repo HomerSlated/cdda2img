@@ -171,6 +171,7 @@ _BINDING_SURFACE = (
     "Sub",
     "Unsupported",
     "WriteResult",
+    "Anomaly",
 )
 
 _binding_warned = False
@@ -567,7 +568,17 @@ def _toc_geometry_from_binding(module: Any, device: str) -> TocGeometry:
         sessions=f"{min(numbers)}..{max(numbers)}" if numbers else None,
         data_tracks=[t.number for t in toc.data_tracks],
         session_count=info.session_count,
-        anomalies=sorted(module.anomaly_token(bit) for bit in toc.anomalies),
+        # Iterate the flag CLASS and mask, never the flag VALUE. `Anomaly` is an
+        # enum.IntFlag, and iterating an IntFlag *instance* only became legal in
+        # Python 3.11 — on 3.10, this project's floor, it raises "'Anomaly'
+        # object is not iterable" and takes every binding-path read_toc with it.
+        # This survived review and 1423 tests because the test fake supplied a
+        # tuple for `anomalies`, which iterates happily; the bug was unreachable
+        # until the binding actually became importable on 3.10 (2026-07-29) and
+        # then failed on the first real call.
+        anomalies=sorted(
+            module.anomaly_token(bit) for bit in module.Anomaly if bit & toc.anomalies
+        ),
         toc_trusted=toc.trusted,
     )
 
