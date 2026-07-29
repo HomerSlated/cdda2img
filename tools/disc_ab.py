@@ -69,6 +69,7 @@ import argparse
 import hashlib
 import os
 import shutil
+import subprocess
 import sys
 import time
 from dataclasses import dataclass
@@ -134,6 +135,118 @@ def _stale_extension() -> str | None:
         f"this run would load, so arm B would be an older binding against a current library — "
         f"a build difference reported as a carrier difference. Rebuild it "
         f"(python build_accudisc.py) or run with --allow-stale if you know better."
+    )
+
+
+def _resolved_libaccudisc(obj: Path) -> Path | None:
+    """The ``libaccudisc.so.0`` the dynamic loader hands *obj*, or None.
+
+    Asks ``ldd`` rather than reading ``RUNPATH``, because RUNPATH is one input to
+    the search and not the answer: ``LD_LIBRARY_PATH`` precedes it, the
+    ``ld.so`` cache follows it, and a ``DT_NEEDED`` already satisfied by another
+    object in the same process wins outright. The question here is which file
+    actually gets mapped, so the resolver is the thing to ask.
+    """
+    try:
+        out = subprocess.run(  # noqa: S603
+            ["ldd", str(obj)],  # noqa: S607
+            capture_output=True,
+            text=True,
+            timeout=20,
+            check=False,
+        ).stdout
+    except (OSError, subprocess.SubprocessError):
+        return None
+    for line in out.splitlines():
+        if "libaccudisc.so" in line and "=>" in line:
+            target = line.split("=>", 1)[1].strip().split(" (", 1)[0].strip()
+            return Path(target) if target and target != "not found" else None
+    return None
+
+
+def _build_id(lib: Path) -> str | None:
+    """GNU build-id of an ELF object, or None when it carries none."""
+    try:
+        out = subprocess.run(  # noqa: S603
+            ["readelf", "-n", str(lib)],  # noqa: S607
+            capture_output=True,
+            text=True,
+            timeout=20,
+            check=False,
+        ).stdout
+    except (OSError, subprocess.SubprocessError):
+        return None
+    for line in out.splitlines():
+        if "Build ID:" in line:
+            return line.split("Build ID:", 1)[1].strip()
+    return None
+
+
+def _carrier_library_split() -> str | None:
+    """Reason the two carriers would run against different libraries, else None.
+
+    **This guard exists because the property it checks is currently an accident.**
+    Today both carriers resolve one ``libaccudisc.so.0`` because AccuDisc's build
+    sets a RUNPATH into their build tree, so the binding extension and our
+    symlinked CLI binary land on the same file. That is what lets this harness
+    claim the library-version confound is *structurally absent* rather than
+    merely controlled for — and nothing anywhere asserts it.
+
+    AccuDisc shipped ``make install`` on 2026-07-29 (their §ci). The moment the
+    binding is pip-installed against an install prefix while our ``tools/accudisc/
+    accudisc`` symlink still points into the build tree, the two carriers resolve
+    **different files** and every byte-identical verdict this tool prints becomes a
+    statement about two libraries rather than two carriers. The failure is silent,
+    it looks exactly like a passing run, and it arrives through a change on the
+    other side of the project boundary.
+
+    So the assertion is made before the environment moves, not after. Same reason
+    as `_stale_extension` above and the same shape: refuse, name the two paths,
+    and offer an override for someone who knows better.
+
+    Path equality is the primary test; build-id is the fallback that keeps a
+    *legitimate* split from being reported as a defect — two paths carrying one
+    build (a hardlink, a copy, an install of the same artefact) are the same
+    library and the run is sound. A missing build-id on either side is not
+    treated as agreement: unknown is not equal.
+    """
+    root = ar._binding_search_path()
+    binary = shutil.which(ar._ACCUDISC) or (
+        ar._ACCUDISC if Path(ar._ACCUDISC).is_file() else None
+    )
+    if root is None or binary is None:
+        # Nothing to compare — either the shim is gone (post-install, which is
+        # its own migration) or the binary is off $PATH, and _stale_extension
+        # and the arms themselves will report that more precisely than we can.
+        return None
+    exts = sorted((Path(root) / "accudisc").glob("_accudisc*.so"))
+    tag = f"cpython-{sys.version_info.major}{sys.version_info.minor}"
+    loadable = [e for e in exts if tag in e.name] or [
+        e for e in exts if "abi3" in e.name
+    ]
+    if not loadable:
+        return None
+
+    lib_b = _resolved_libaccudisc(loadable[0])
+    lib_a = _resolved_libaccudisc(Path(binary))
+    if lib_b is None or lib_a is None:
+        return None
+    if lib_a.resolve() == lib_b.resolve():
+        return None
+
+    id_a, id_b = _build_id(lib_a), _build_id(lib_b)
+    if id_a is not None and id_b is not None and id_a == id_b:
+        return None
+
+    same = "different build-ids" if (id_a and id_b) else "build-id unavailable"
+    return (
+        f"the two carriers resolve different libraries ({same}): "
+        f"arm A (subprocess, {binary}) loads {lib_a}; "
+        f"arm B (binding) loads {lib_b}. "
+        f"A/B/A compares carriers only when both run the same libaccudisc — "
+        f"otherwise a library difference is reported as a carrier finding, and it "
+        f"looks identical to a clean run. Point them at one build, or pass "
+        f"--allow-split if you know they are the same."
     )
 
 
@@ -379,11 +492,22 @@ def main() -> int:
         action="store_true",
         help="run even if the binding extension is older than libaccudisc (see _stale_extension)",
     )
+    ap.add_argument(
+        "--allow-split",
+        action="store_true",
+        help="run even if the two carriers resolve different libaccudisc builds "
+        "(see _carrier_library_split)",
+    )
     args = ap.parse_args()
 
     stale = _stale_extension()
     if stale and not args.allow_stale:
         print(f"refusing to run: {stale}", file=sys.stderr)
+        return 2
+
+    split = _carrier_library_split()
+    if split and not args.allow_split:
+        print(f"refusing to run: {split}", file=sys.stderr)
         return 2
 
     free = shutil.disk_usage(args.workdir).free
