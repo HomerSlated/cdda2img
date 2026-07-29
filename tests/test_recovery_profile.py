@@ -13,25 +13,46 @@ import pytest
 
 from cdda2img import drive_speed
 from cdda2img import recovery_profile as R
+from cdda2img.accudisc_reader import SpeedRow
 from cdda2img.validation import PROFILE_SCHEMA, validate
 
 # Two real `accudisc speeds` captures from the same drive on the same disc, months
 # apart. They are the evidence that the ladder is a property of drive AND disc.
+#
+# Both predate AccuDisc's `verdict=` token, so they carry no verdict — deliberately
+# left that way rather than back-filled. They are what rule 2 (`req == page2a`) has
+# to keep working for, and inventing verdicts they never had would delete the only
+# regression cover the fallback has.
 _PX716A_JULY = [
-    (40, 32, 32.0),
-    (32, 32, 32.0),
-    (24, 24, 24.0),
-    (16, 8, 8.0),
-    (8, 8, 8.0),
-    (4, 4, 4.0),
+    SpeedRow(40, 32, 32.0),
+    SpeedRow(32, 32, 32.0),
+    SpeedRow(24, 24, 24.0),
+    SpeedRow(16, 8, 8.0),
+    SpeedRow(8, 8, 8.0),
+    SpeedRow(4, 4, 4.0),
 ]
 _PX716A_DEGRADED = [
-    (40, 8, 8.01),
-    (32, 8, 8.01),
-    (24, 8, 8.01),
-    (16, 8, 8.01),
-    (8, 8, 8.01),
-    (4, 4, 4.01),
+    SpeedRow(40, 8, 8.01),
+    SpeedRow(32, 8, 8.01),
+    SpeedRow(24, 8, 8.01),
+    SpeedRow(16, 8, 8.01),
+    SpeedRow(8, 8, 8.01),
+    SpeedRow(4, 4, 4.01),
+]
+
+# Tracy, 2026-07-29, uncap latched — the capture that closed the §9.3 known gap.
+# Note req=48 measured 22.96 while req=40 measured 23.68: page 2A advertises the
+# 48x DATA ceiling, CD-DA is governed to 40x, so those are one speed wearing two
+# labels and the faster-LOOKING rung is the slower one. `req == page2a` admits
+# both because both operands come from that same advertised ceiling.
+_PX716A_TRACY_VERDICTS = [
+    SpeedRow(48, 48, 22.96, "duplicate"),
+    SpeedRow(40, 40, 23.68, "admitted"),
+    SpeedRow(32, 32, 19.46, "admitted"),
+    SpeedRow(24, 24, 14.93, "admitted"),
+    SpeedRow(16, 8, 8.01, "quantized"),
+    SpeedRow(8, 8, 8.01, "admitted"),
+    SpeedRow(4, 4, 4.01, "admitted"),
 ]
 
 
@@ -41,9 +62,7 @@ def _no_restore(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(drive_speed, "restore_drive_speed", lambda device: None)
 
 
-def _ladder(
-    monkeypatch: pytest.MonkeyPatch, rows: list[tuple[int, int, float]]
-) -> list[int]:
+def _ladder(monkeypatch: pytest.MonkeyPatch, rows: list[SpeedRow]) -> list[int]:
     monkeypatch.setattr(drive_speed, "read_speed_rows", lambda device: rows)
     return drive_speed.admitted_ladder("/dev/null")
 
@@ -68,13 +87,86 @@ def test_the_same_drive_admits_less_on_a_degraded_disc(
     assert _ladder(monkeypatch, _PX716A_DEGRADED) == [8, 4]
 
 
+def test_the_verdict_rule_drops_a_rung_that_req_equals_page2a_admits(
+    monkeypatch: pytest.MonkeyPatch, _no_restore: None
+) -> None:
+    """The §9.3 known gap, closed. This is the whole reason the rule changed.
+
+    req=48 measured 22.96 and req=40 measured 23.68 on the same disc: page 2A
+    advertises the 48x DATA ceiling while CD-DA is governed to 40x, so 48 is not a
+    rung — it is 40 with a wrong label, and a SLOWER measured rate. The old rule
+    admitted it because both of its operands come from that same advertised
+    ceiling, so the equality cross-checks the drive's quantiser and never its
+    ceiling. Asserting the old answer too, so this test states what changed rather
+    than merely what is.
+    """
+    old_rule = sorted(
+        {
+            r.page2a
+            for r in _PX716A_TRACY_VERDICTS
+            if r.requested == r.page2a and r.page2a
+        },
+        reverse=True,
+    )
+    assert old_rule == [48, 40, 32, 24, 8, 4]  # what we shipped until 2026-07-29
+
+    assert _ladder(monkeypatch, _PX716A_TRACY_VERDICTS) == [40, 32, 24, 8, 4]
+
+
+def test_quantized_and_duplicate_are_both_refused(
+    monkeypatch: pytest.MonkeyPatch, _no_restore: None
+) -> None:
+    """They fail for different reasons and both must be out.
+
+    `quantized` read at 8x under a 16x label — admitting it mislabels every
+    measurement taken there. `duplicate:40` read at the right rate under a rung
+    that is not distinct (`duplicate`) — admitting it makes the ladder sweep one speed twice and
+    call the results independent.
+    """
+    ladder = _ladder(monkeypatch, _PX716A_TRACY_VERDICTS)
+    assert 16 not in ladder  # quantized
+    assert 48 not in ladder  # duplicate
+
+
+def test_an_all_unknown_verdict_set_falls_through_rather_than_degrading(
+    monkeypatch: pytest.MonkeyPatch, _no_restore: None
+) -> None:
+    """`unknown` is a verdict, and it is truthy — the trap AccuDisc named in ce.3.
+
+    At points=1 every rung comes back UNKNOWN because nothing was JUDGED, which is
+    not the same as nothing being admissible. Gating the verdict branch on "a
+    verdict is present" would send this to an empty ladder and then to the degrade
+    guard, reporting one rung at max for a drive that plainly has four.
+    """
+    rows = [
+        SpeedRow(40, 40, 23.7, "unknown"),
+        SpeedRow(32, 32, 19.5, "unknown"),
+        SpeedRow(8, 8, 8.0, "unknown"),
+        SpeedRow(4, 4, 4.0, "unknown"),
+    ]
+    assert _ladder(monkeypatch, rows) == [40, 32, 8, 4]
+
+
+def test_rows_without_any_verdict_still_use_the_old_rule(
+    monkeypatch: pytest.MonkeyPatch, _no_restore: None
+) -> None:
+    """An older engine reports no verdict at all. Rule 2 must still be reachable."""
+    assert all(r.verdict is None for r in _PX716A_JULY)
+    assert _ladder(monkeypatch, _PX716A_JULY) == [32, 24, 8, 4]
+
+
 def test_a_drive_with_no_page_2a_falls_back_to_measured_throughput(
     monkeypatch: pytest.MonkeyPatch, _no_restore: None
 ) -> None:
     """page2a == 0 means the page did not report, NOT "quantised to zero". Applying
     the equality test to it admits nothing and leaves the ladder silently empty —
     the hole AccuDisc found in the first version of this rule."""
-    rows = [(40, 0, 24.0), (24, 0, 24.0), (8, 0, 8.0), (4, 0, 4.0)]
+    rows = [
+        SpeedRow(40, 0, 24.0),
+        SpeedRow(24, 0, 24.0),
+        SpeedRow(8, 0, 8.0),
+        SpeedRow(4, 0, 4.0),
+    ]
     assert _ladder(monkeypatch, rows) == [40, 8, 4]  # the two 24.0 rows collapse
 
 
@@ -85,7 +177,7 @@ def test_an_empty_ladder_is_not_a_reachable_state(
     fallback does not fire, and the strict rule admits nothing. The guard is on the
     OUTCOME precisely because the causes are open-ended."""
     monkeypatch.setattr(drive_speed, "read_drive_speed", lambda device: (176, 7056))
-    rows = [(40, 20, 20.0), (32, 20, 20.0), (8, 10, 10.0)]
+    rows = [SpeedRow(40, 20, 20.0), SpeedRow(32, 20, 20.0), SpeedRow(8, 10, 10.0)]
     assert _ladder(monkeypatch, rows) == [40]  # 7056 // 176
 
 

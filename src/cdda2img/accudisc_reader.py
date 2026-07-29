@@ -78,7 +78,7 @@ import sys
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, TypeVar
+from typing import TYPE_CHECKING, Any, NamedTuple, TypeVar
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -706,8 +706,30 @@ _AD_CUR_RE = re.compile(r"\bcurrent\s+\d+x\s+\((\d+)\s*kB/s\)")
 
 # `accudisc speeds` row, e.g. `speed req=32 page2a=32 measured=19.20`.
 _SPEED_ROW_RE = re.compile(
-    r"^speed\s+req=(\d+)\s+page2a=(\d+)\s+measured=([\d.]+)", re.MULTILINE
+    r"^speed\s+req=(\d+)\s+page2a=(\d+)\s+measured=([\d.]+)"
+    r"(?:.*?\bverdict=(\S+))?",
+    re.MULTILINE,
 )
+
+
+class SpeedRow(NamedTuple):
+    """One rung of a ``speeds`` probe, on either transport.
+
+    ``verdict`` is AccuDisc's own judgement of the rung and is the field that
+    matters: ``admitted`` / ``duplicate:<n>`` / ``quantized:<n>`` / ``unknown``.
+    It is ``None`` only when the engine did not supply one — an older build, or a
+    ``points=1`` probe where nothing was judged.
+
+    Kept a NamedTuple rather than a dataclass so existing positional reads still
+    work, but every new call site should use the names: the fourth field is
+    exactly the axis that ``(req, page2a, measured)`` could not express, and
+    unpacking a fixed arity is how a consumer silently keeps ignoring it.
+    """
+
+    requested: int
+    page2a: int
+    measured: float
+    verdict: str | None = None
 
 
 def read_speed(device: str) -> tuple[int | None, int | None]:
@@ -737,7 +759,7 @@ def read_speed(device: str) -> tuple[int | None, int | None]:
     return (int(cur_m.group(1)) if cur_m else None), int(max_m.group(1))
 
 
-def _speed_ladder_binding(module: Any, device: str) -> list[tuple[int, int, float]]:
+def _speed_ladder_binding(module: Any, device: str) -> list[SpeedRow]:
     """``speed_ladder_rows`` over ``Device.probe_speed_ladder``.
 
     ``points=3`` — the default, and load-bearing rather than incidental. It cuts
@@ -755,40 +777,73 @@ def _speed_ladder_binding(module: Any, device: str) -> list[tuple[int, int, floa
     correction we can copy wrong.
 
     ``measured_x`` is the middle band, matching the CLI's ``measured=`` token, so
-    the triple this returns is identical on both transports.
+    the rows this returns are identical on both transports — including the
+    verdict class, once :func:`_verdict_class` has stripped the ``:<rung>`` suffix
+    that only the CLI carries.
     """
     with module.Device(device) as dev:
         rungs = dev.probe_speed_ladder(points=3)
-    return [(r.requested_x, r.reported_x, r.measured_x) for r in rungs]
+    return [
+        SpeedRow(r.requested_x, r.reported_x, r.measured_x, _verdict_class(r.verdict))
+        for r in rungs
+    ]
 
 
-def speed_ladder_rows(device: str) -> list[tuple[int, int, float]]:
-    """Timed streaming reads per rung: ``(req, page2a, measured)``.
+def _verdict_class(raw: Any) -> str | None:
+    """The verdict *class* — ``admitted``/``duplicate``/``quantized``/``unknown``.
+
+    Normalised so the two transports produce the **same string**, not merely
+    equivalent information. That took a correction: the CLI prints
+    ``verdict=duplicate:40`` while the binding's enum yields ``duplicate`` and
+    carries the collapsed-onto rung in a separate ``equiv_x`` field. So the raw
+    tokens differ, and the suffix is stripped here rather than at the call sites.
+
+    The divergence was invisible in testing because ``admitted`` — the only
+    verdict the ladder policy compares against — has no suffix on either side.
+    A future branch on ``duplicate`` would have matched on one carrier and not
+    the other, which is the shape of a bug that survives every test that does not
+    happen to use the affected value.
+
+    The collapsed-onto rung is dropped rather than parsed: nothing consumes it,
+    and a field that is populated on one transport only is worse than absent.
+    """
+    if raw is None:
+        return None
+    token = getattr(raw, "token", None) or getattr(raw, "name", None) or raw
+    return str(token).split(":", 1)[0].strip().lower() or None
+
+
+def speed_ladder_rows(device: str) -> list[SpeedRow]:
+    """Timed streaming reads per rung: ``(req, page2a, measured, verdict)``.
 
     *req* is what was asked for, *page2a* what the drive settled on (0 = the page
-    did not report), *measured* the achieved throughput in X. The probe performs
-    real reads, so it warms the disc and **leaves the drive at its last rung** —
-    restoring it is the caller's job (``drive_speed.admitted_ladder``).
+    did not report), *measured* the achieved throughput in X, *verdict* AccuDisc's
+    own judgement of the rung. The probe performs real reads, so it warms the disc
+    and **leaves the drive at its last rung** — restoring it is the caller's job
+    (``drive_speed.admitted_ladder``).
 
     Empty list on any failure.
 
-    **The triple is deliberately unchanged by the binding migration**, though the
-    binding offers more: ``SpeedRung`` also carries ``min_x``/``max_x``,
-    ``spread_cx`` and a ``verdict``, and ``Device.admitted_ladder()`` applies
-    AccuDisc's own admission rule. Adopting that rule would *fix* the known gap
-    documented in ``drive_speed.admitted_ladder`` — with the Plextor uncap set,
-    ``req=48 page2a=48 measured=20.99`` sits beside ``req=40 page2a=40
-    measured=22.83``, and our ``req == page2a`` test admits both, labelling the
-    top rung a rate the drive never reaches on audio; their verdict calls it
-    ``duplicate:40``. That is a change of **policy**, not of carrier, and folding
-    it into a transport swap would mean a ladder that changed for two reasons at
-    once with no way to attribute the difference. It gets its own change and its
-    own evidence.
+    The verdict is the whole point of the fourth field: ``req == page2a`` cannot
+    detect a rung that is real-but-redundant, because both of its operands derive
+    from the same advertised ceiling, so the equality cross-checks the drive's
+    *quantiser* and never its ceiling. With the Plextor uncap set, page 2A
+    advertises the 48x **data** ceiling while CD-DA is governed to 40x, and
+    ``req=48 page2a=48 measured=22.96`` sits above ``req=40 page2a=40
+    measured=23.68`` — one speed wearing two labels, the top one slower than the
+    rung below it. Only a rate comparison sees that, and AccuDisc's verdict
+    (``duplicate:40``) is a rate comparison made against three radii.
 
-    Note ``min_x``/``max_x`` are ``None`` — not ``0.0`` — when no gradient was
-    measured. Flattening that to zero would make "not measured" indistinguishable
-    from "this rung stalled", the same sentinel-that-looks-like-a-measurement
-    shape as exit 3 being a projection rather than a return.
+    Both transports produce the same token, but only after normalisation: the
+    CLI prints ``verdict=duplicate:40`` where the binding's enum gives
+    ``duplicate`` and puts the collapsed-onto rung in a separate field. The suffix
+    is stripped by :func:`_verdict_class`, so what reaches a caller is the verdict
+    *class* on both.
+
+    ``min_x``/``max_x`` are deliberately **not** surfaced: they are ``None`` (not
+    ``0.0``) when no gradient was measured, and this row type has no way to carry
+    that distinction without inviting a caller to flatten it. The verdict already
+    encodes what the gradient was measured *for*.
     """
     module = _binding("speed ladder")
     if module is not None:
@@ -806,7 +861,12 @@ def speed_ladder_rows(device: str) -> list[tuple[int, int, float]]:
         log.debug("accudisc speeds exited %d for %s", rc, device)
         return []
     return [
-        (int(m.group(1)), int(m.group(2)), float(m.group(3)))
+        SpeedRow(
+            int(m.group(1)),
+            int(m.group(2)),
+            float(m.group(3)),
+            _verdict_class(m.group(4)),
+        )
         for m in _SPEED_ROW_RE.finditer(stdout + "\n" + stderr)
     ]
 

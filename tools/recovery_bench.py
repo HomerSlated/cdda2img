@@ -638,35 +638,44 @@ def engine_identity() -> str:
     return f"{version}  sha256:{digest}  {size}B  {real}"
 
 
-def probe_ladder(device: str) -> list[int]:
-    """The drive's **distinct achievable** read speeds for the loaded disc, from
-    ``accudisc speeds`` (timed reads — ground truth, and they warm the disc so the
-    governor settles to its true ceiling). Descending; default set when empty.
+#: Stamped into every run written from 2026-07-29 onward. Runs WITHOUT this key
+#: were indexed by this file's own ladder rule (dedupe on any non-zero `page2a`),
+#: which is not the rule in force now — see :func:`probe_ladder`.
+LADDER_RULE = "verdict@2026-07-29"
 
-    The drive quantizes requests to discrete accepted ceilings and caps at its
-    governor, so several requests collapse to one speed (ABBA req 40/32 -> 32x).
-    Dedupe on the accepted ceiling (``page2a``) so the matrix sweeps each real
-    speed once, not redundant requests that all deliver the same rate. The highest
-    entry is the governor ceiling."""
+
+def probe_ladder(device: str) -> list[int]:
+    """The drive's distinct achievable read speeds — now the *same* rule as `src/`.
+
+    This used to be a second, independent implementation: it deduped on any
+    non-zero ``page2a`` while ``drive_speed.admitted_ladder`` required
+    ``req == page2a``. They agreed on every row set observed and would have
+    diverged the moment a quantised row yielded a ceiling no other row reached
+    (``req=16 -> page2a=10`` with no ``req=10`` row: dropped there, admitted as 10
+    here). Two rules meant a bench cell and a rip could disagree about what "32x"
+    named, with nothing to say which was right.
+
+    It also bypassed the seam, spawning ``accudisc`` directly — so after the
+    binding migration this file would have kept measuring the subprocess while the
+    rip path measured the library.
+
+    Both fixed by delegating. The rule now in force is AccuDisc's verdict (a rate
+    comparison at three radii), which drops a rung that ``req == page2a`` admits:
+    on Tracy, ``req=48 measured=22.96`` sits above ``req=40 measured=23.68``, one
+    speed wearing two labels with the faster-looking one slower.
+
+    **Past runs are NOT re-indexed.** Every archived result is keyed by the ladder
+    the bench used at the time, and relabelling them retroactively would change
+    what the archive means — silently, and after the fact, which is the one thing
+    a measurement archive must never do. New runs carry :data:`LADDER_RULE`; runs
+    without that key predate the reconciliation and are fenced off by its absence
+    rather than by a date anyone has to remember.
+    """
     try:
-        r = subprocess.run(  # noqa: S603 — snapshot/PATH binary, fixed argv
-            [_ACCUDISC, "--device", device, "speeds"],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-    except OSError:
+        from cdda2img.drive_speed import admitted_ladder
+    except ImportError:  # pragma: no cover — src/ always importable from tools/
         return list(DEFAULT_SPEED_LADDER)
-    achieved: set[int] = set()
-    for line in r.stdout.splitlines():
-        if line.startswith("speed ") and "page2a=" in line:
-            for tok in line.split():
-                if tok.startswith("page2a="):
-                    with contextlib.suppress(ValueError):
-                        v = int(tok[7:])
-                        if v:
-                            achieved.add(v)
-    return sorted(achieved, reverse=True) or list(DEFAULT_SPEED_LADDER)
+    return admitted_ladder(device) or list(DEFAULT_SPEED_LADDER)
 
 
 def _flagged_bbox(
@@ -1538,7 +1547,19 @@ def run_matrix(
         _prewarm_ctdb_cache(g_lsns, g_last, out_dir)
 
     def emit() -> None:
-        out_path.write_text("".join(row_to_toml(r) for r in rank(rows)))
+        # The header is what fences this run off from the archive. Every result in
+        # rips/ is indexed by whichever ladder rule the bench used when it ran, and
+        # those are NOT being re-indexed — relabelling archived measurements after
+        # the fact changes what they mean, silently. A run carrying `ladder_rule`
+        # used the reconciled rule; a run without the key predates it. Fenced by a
+        # property of the file rather than by a date someone has to remember.
+        header = (
+            f"# ladder_rule = {LADDER_RULE!r}\n"
+            f"# ladder = {speeds!r}\n"
+            f"# runs without a ladder_rule key used the bench's own former rule\n"
+            f"# (dedupe on any non-zero page2a) and are not comparable rung-for-rung\n\n"
+        )
+        out_path.write_text(header + "".join(row_to_toml(r) for r in rank(rows)))
 
     try:
         for speed in speeds:

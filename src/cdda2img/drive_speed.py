@@ -34,6 +34,13 @@ from __future__ import annotations
 import fcntl
 import logging
 import os
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    # Type-only: the runtime import stays inside read_speed_rows, because
+    # accudisc_reader imports nothing from here and this module is imported by
+    # the rip path long before any drive is touched.
+    from cdda2img.accudisc_reader import SpeedRow
 
 log = logging.getLogger(__name__)
 
@@ -41,6 +48,13 @@ log = logging.getLogger(__name__)
 # it by ~177 into a SET CD SPEED command); arg 0 is the "fastest possible" sentinel.
 _CDROM_SELECT_SPEED = 0x5322
 _KBPS_PER_X = 176  # 1x CD = 75 sectors/s * 2352 bytes / 1000 ≈ 176 kB/s
+
+#: AccuDisc's verdict tokens that :func:`admitted_ladder` keys on. The others —
+#: ``duplicate:<n>`` and ``quantized:<n>`` — carry the rung they collapse onto in
+#: the token itself, so they are matched by exclusion rather than by name.
+#: ``unknown`` means "not judged", which is NOT the same as "rejected".
+_VERDICT_ADMITTED = "admitted"
+_VERDICT_UNKNOWN = "unknown"
 
 # Candidate Nx values to probe for the drive's real speed ladder; the drive snaps each to a
 # supported speed and we read back the achieved value (so the ladder is the drive's own,
@@ -103,12 +117,13 @@ def restore_drive_speed(device: str) -> None:
         log.info("drive %s read speed: %sX -> %dX (restored)", device, cur_x, nx)
 
 
-def read_speed_rows(device: str) -> list[tuple[int, int, float]]:
-    """``accudisc speeds`` rows as ``(req, page2a, measured)``.
+def read_speed_rows(device: str) -> list[SpeedRow]:
+    """``accudisc speeds`` rows as ``(req, page2a, measured, verdict)``.
 
     Each row is a timed streaming read at a requested rung: *req* is what we asked
     for, *page2a* what mode page 2A reported the drive settled on (0 = the page did
-    not report), *measured* the achieved throughput in X.
+    not report), *measured* the achieved throughput in X, *verdict* AccuDisc's own
+    judgement (``None`` from an engine that does not supply one).
 
     The probe performs real reads, so it both warms the disc — letting a
     self-throttling governor settle to its true ceiling — and leaves the drive at
@@ -123,38 +138,47 @@ def read_speed_rows(device: str) -> list[tuple[int, int, float]]:
 
 
 def admitted_ladder(device: str) -> list[int]:
-    """The rungs this drive honoured *exactly*, fastest first (migration plan §9.3).
+    """The rungs this drive honoured *distinctly*, fastest first (migration plan §9.3).
 
-    **Strict rule** — whenever any row reports a non-zero ``page2a``, admit only rows
-    where ``req == page2a``. A row where they differ means the drive quantised the
-    request: reading at 8x while the row is labelled 32x is worse than not having the
-    rung, because it silently mislabels every measurement taken there.
+    Three rules in priority order. Each exists because the one below it cannot see
+    something, and the top one closes the §9.3 known gap (2026-07-29).
 
-    **Fallback** — when *every* row reports ``page2a == 0``, the page did not report
-    at all (which is not the same as "quantised to zero"), so the equality test would
-    admit nothing. Admit on ``measured`` instead, collapsing rungs that achieved the
-    same rate. AccuDisc caught this case: on a drive with no usable page 2A the
-    strict rule alone yields a silently empty ladder.
+    **1. Verdict (preferred).** Admit rows AccuDisc judged ``admitted``. Their
+    verdict is a *rate* comparison taken at three radii, so it distinguishes a real
+    rung from one that merely got its request echoed back — which is the thing
+    ``req == page2a`` structurally cannot do, since both operands derive from the
+    same advertised ceiling and the equality therefore cross-checks the drive's
+    quantiser rather than its ceiling. Measured on Tracy, 2026-07-29, uncap
+    latched: ``req=48 page2a=48 measured=22.96`` sits **above** ``req=40 page2a=40
+    measured=23.68``. Page 2A advertises the 48x *data* ceiling while CD-DA is
+    governed to 40x, so those two rows are one speed wearing two labels — and the
+    faster-looking one is the slower one. The old rule admitted both and produced
+    ``[48, 40, 32, 24, 8, 4]``; the verdict rule yields ``[40, 32, 24, 8, 4]``,
+    matching AccuDisc's ``ladder admitted=`` line exactly.
+
+    **2. ``req == page2a``** — the previous rule, kept for an engine that reports no
+    verdict (an older build, or a ``points=1`` probe where nothing was judged). It
+    still catches outright quantisation: a row where they differ means the drive
+    silently read at 8x under a label saying 32x, which mislabels every measurement
+    taken there. It cannot catch case 1, which is why it is second.
+
+    **3. ``measured``** — when *every* row reports ``page2a == 0`` the page did not
+    report at all (not the same as "quantised to zero"), so rule 2 would admit
+    nothing. Collapse rungs achieving the same rate. AccuDisc caught this case: on a
+    drive with no usable page 2A, rule 2 alone yields a silently empty ladder.
 
     **Outcome guard** — if the ladder still resolves empty by any path, degrade to a
     single rung at the drive's reported maximum and warn. The guard is on the
     *outcome*, not on the causes, because the causes are open-ended: a drive
     reporting a real ``page2a`` that never equals ``req`` (it supports 10x/20x while
-    we probe {40,32,24,16,8,4}) is non-zero, so the fallback does not fire, and the
-    ladder is empty again for a completely different reason.
+    we probe {40,32,24,16,8,4}) is non-zero, so rule 3 does not fire, and the ladder
+    is empty again for a completely different reason.
 
-    **Known gap (2026-07-25)** — the strict rule does not guarantee *distinct* rungs,
-    which is what the ladder actually needs. Both of its operands come from the same
-    advertised ceiling, so it cross-checks the drive's quantiser and not the ceiling
-    itself. With the Plextor SpeedRead uncap set, page 2A advertises the 48x **data**
-    ceiling while CD-DA tops out at 40x by specification, and `req=48 page2a=48
-    measured=20.99` sits alongside `req=40 page2a=40 measured=22.83` (AccuDisc's
-    measurement): both admitted, one speed, and the top rung labelled a rate the drive
-    never reaches on audio. Only `measured` can see this, and this branch never reads
-    it -- while the `page2a == 0` branch below dedupes on `round(measured)`, so the two
-    disagree about what ground truth is. Not guarded here: the uncap needs
-    CAP_SYS_RAWIO, we never set it, and one n=1 table is not enough to design a
-    monotonicity rule against. Migration plan 9.3 carries the full correction.
+    Note the guard must not fire on a legitimately empty *verdict* set. AccuDisc
+    warn that an empty ``admitted_ladder()`` at ``points=1`` means "nothing was
+    judged", not "no rungs" — we always probe at ``points=3``, and the branch is
+    entered only when some row carries a verdict at all, so an all-``unknown``
+    result falls through to rule 2 rather than degrading.
 
     The ladder is a property of **drive x disc**, not of the drive: a self-throttling
     governor caps a degraded disc regardless of what the drive can do. The PX-716A
@@ -164,14 +188,27 @@ def admitted_ladder(device: str) -> list[int]:
     rows = read_speed_rows(device)
     ladder: list[int] = []
 
-    if any(page2a for _, page2a, _ in rows):
-        ladder = sorted({p for req, p, _ in rows if req == p and p}, reverse=True)
+    # "Some row was JUDGED", not "some row has a verdict string": `unknown` is a
+    # verdict and it is truthy, so gating on presence would send an all-unknown
+    # probe into the verdict branch, out with an empty ladder, and on to the
+    # degrade guard — reporting one rung at max for a drive that has several.
+    # AccuDisc flagged this shape directly (§ce.3): an empty admitted set means
+    # "nothing was judged", never "no rungs".
+    if any(r.verdict and r.verdict != _VERDICT_UNKNOWN for r in rows):
+        # Preferred: AccuDisc's own verdict, a rate comparison across three radii.
+        ladder = sorted(
+            {r.requested for r in rows if r.verdict == _VERDICT_ADMITTED}, reverse=True
+        )
+    elif any(r.page2a for r in rows):
+        ladder = sorted(
+            {r.page2a for r in rows if r.requested == r.page2a and r.page2a},
+            reverse=True,
+        )
     elif rows:
         # No page 2A anywhere: rank by achieved throughput, one rung per distinct rate.
         by_rate: dict[int, int] = {}
-        for req, _, measured in rows:
-            key = round(measured)
-            by_rate.setdefault(key, req)
+        for r in rows:
+            by_rate.setdefault(round(r.measured), r.requested)
         ladder = [by_rate[k] for k in sorted(by_rate, reverse=True)]
 
     restore_drive_speed(device)  # the probe left the drive at its last rung

@@ -617,7 +617,10 @@ def test_speed_ladder_rows_parses_the_accudisc_format(
 ) -> None:
     out = "speed req=40 page2a=8 measured=8.01\nspeed req=4 page2a=4 measured=4.01\n"
     monkeypatch.setattr(ar.subprocess, "run", lambda *a, **k: _TextResult(stdout=out))
-    assert ar.speed_ladder_rows("/dev/sr0") == [(40, 8, 8.01), (4, 4, 4.01)]
+    assert ar.speed_ladder_rows("/dev/sr0") == [
+        ar.SpeedRow(40, 8, 8.01, None),
+        ar.SpeedRow(4, 4, 4.01, None),
+    ]
 
 
 def test_speed_ladder_rows_empty_on_failure(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1785,10 +1788,13 @@ def test_write_passes_simulate_and_speed_through() -> None:
 
 
 class _FakeRung:
-    def __init__(self, requested: int, reported: int, measured: float) -> None:
+    def __init__(
+        self, requested: int, reported: int, measured: float, verdict: object = None
+    ) -> None:
         self.requested_x = requested
         self.reported_x = reported
         self.measured_x = measured
+        self.verdict = verdict
 
 
 class _FakeLadderDevice:
@@ -1821,7 +1827,11 @@ def test_speed_ladder_binding_returns_the_same_triple() -> None:
         _FakeRung(16, 8, 8.0),
     ))
     rows = ar._speed_ladder_binding(_binding_with(dev), "/dev/sr0")  # type: ignore[arg-type]
-    assert rows == [(48, 48, 22.96), (40, 40, 23.69), (16, 8, 8.0)]
+    assert rows == [
+        ar.SpeedRow(48, 48, 22.96, None),
+        ar.SpeedRow(40, 40, 23.69, None),
+        ar.SpeedRow(16, 8, 8.0, None),
+    ]
 
 
 def test_speed_ladder_binding_asks_for_three_points_and_no_span() -> None:
@@ -1835,3 +1845,88 @@ def test_speed_ladder_binding_asks_for_three_points_and_no_span() -> None:
     dev = _FakeLadderDevice(())
     ar._speed_ladder_binding(_binding_with(dev), "/dev/sr0")  # type: ignore[arg-type]
     assert dev.kwargs == {"points": 3}
+
+
+# ── the speeds verdict, on both transports ───────────────────────────────────
+
+
+class _FakeVerdict:
+    """Stands in for AccuDisc's Verdict enum, which exposes `.token`."""
+
+    def __init__(self, token: str, name: str = "X") -> None:
+        self.token = token
+        self.name = name
+
+
+def test_verdict_is_parsed_from_the_subprocess_row(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The real `accudisc speeds --sweep` line shape, verdict token and all."""
+    out = (
+        "speed req=48 page2a=48 measured=22.96 min=16.18 max=27.62 verdict=duplicate:40\n"
+        "speed req=40 page2a=40 measured=23.69 min=18.05 max=28.22 verdict=admitted\n"
+        "speed req=16 page2a=8  measured=8.00  min=8.00  max=8.01  verdict=quantized:8\n"
+        "ladder admitted=40\n"
+    )
+    monkeypatch.setattr(
+        ar,
+        "_run_probe",
+        lambda *a, **k: (0, out, ""),
+    )
+    rows = ar.speed_ladder_rows("/dev/sr0")
+    # The `:40` / `:8` suffixes are stripped: the binding does not carry them
+    # (it has a separate equiv_x field), so keeping them here would make the
+    # two transports disagree on a string the policy compares.
+    assert [r.verdict for r in rows] == ["duplicate", "admitted", "quantized"]
+    assert rows[0].requested == 48
+    assert rows[0].measured == 22.96
+
+
+def test_a_row_without_a_verdict_reports_none_not_empty_string(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An older engine emits no verdict= token, and that must stay distinguishable.
+
+    An empty string is falsy but present; None says "this engine did not judge".
+    drive_speed.admitted_ladder picks its rule on exactly that distinction.
+    """
+    monkeypatch.setattr(
+        ar,
+        "_run_probe",
+        lambda *a, **k: (0, "speed req=8 page2a=8 measured=8.01\n", ""),
+    )
+    rows = ar.speed_ladder_rows("/dev/sr0")
+    assert rows[0].verdict is None
+
+
+def test_both_transports_yield_the_same_verdict_string() -> None:
+    """Normalised, not merely equivalent — and this test was wrong once.
+
+    It originally asserted the binding emits "duplicate:40". It does not: the CLI
+    prints `verdict=duplicate:40` while the enum yields `duplicate` and carries
+    the collapsed-onto rung in a separate `equiv_x`. Live hardware said so.
+
+    The divergence was invisible because `admitted` — the only verdict the ladder
+    policy compares against — has no suffix on either side. A future branch on
+    `duplicate` would have matched one carrier and not the other.
+    """
+    dev = _FakeLadderDevice((
+        _FakeRung(48, 48, 22.96),
+        _FakeRung(40, 40, 23.68),
+    ))
+    dev._rungs[0].verdict = _FakeVerdict("DUPLICATE:40")  # type: ignore[attr-defined]
+    dev._rungs[1].verdict = _FakeVerdict("ADMITTED")  # type: ignore[attr-defined]
+    rows = ar._speed_ladder_binding(_binding_with(dev), "/dev/sr0")  # type: ignore[arg-type]
+    assert [r.verdict for r in rows] == ["duplicate", "admitted"]
+
+
+def test_verdict_class_normalises_every_shape_to_one_string() -> None:
+    """The four inputs this has to survive, including the CLI's suffix form."""
+
+    class _NameOnly:
+        name = "ADMITTED"
+
+    assert ar._verdict_class(_NameOnly()) == "admitted"  # no .token attribute
+    assert ar._verdict_class("duplicate:40") == "duplicate"  # CLI form
+    assert ar._verdict_class("DUPLICATE") == "duplicate"  # binding form
+    assert ar._verdict_class(None) is None  # engine did not judge
