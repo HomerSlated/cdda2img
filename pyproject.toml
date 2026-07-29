@@ -49,6 +49,16 @@ dev = [
 
     "ty>=0.0.1a16",
 
+    # Runtime dependency of AccuDisc's Python binding, not of cdda2img — an
+    # API-mode cffi extension needs _cffi_backend to import, so a module that
+    # built cleanly still dies at `from ._accudisc import ffi, lib` without it.
+    # Carried here only because their package is not yet installable (their
+    # build_accudisc.py sets an RPATH into their build tree; "install properly"
+    # is an open TODO there). When that lands, cffi arrives as its dependency
+    # and this line goes. Declared rather than hand-installed because `uv sync`
+    # prunes anything absent from the lockfile — `make check` uninstalled it.
+    "cffi>=1.16",
+
     "ruff>=0.11.5",
     "mkdocs>=1.4.2",
     "mkdocs-material>=8.5.10",

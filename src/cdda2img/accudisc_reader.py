@@ -67,6 +67,7 @@ import logging
 import os
 import re
 import subprocess
+import sys
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -117,26 +118,84 @@ _SECTOR_BYTES = 2352
 TRANSPORT_ENV = "CDDA2IMG_ACCUDISC_TRANSPORT"
 _TRANSPORT_MODES = ("auto", "binding", "subprocess")
 
-# What is flipped, and what is not. Each unflipped call is unflipped for a reason,
-# not for lack of time:
+# What is flipped, and what is not. Each entry names the evidence that would
+# retire it, because the previous version of this block did not and rotted twice:
 #   flipped   read_toc          — Device.read_toc_src(), structs instead of regexes
 #   flipped   read_span_bytes   — the call a subprocess cannot express (no temp file)
-#   NOT       read_disc_c2      — whole-disc output is a file either way; the
-#                                 binding would add a Python-level copy of ~800 MB
-#   NOT       write_disc        — the write path is not bound at all
-#   NOT       speed_ladder_rows — `speeds` is not bound (it is a timed measurement,
-#                                 not a device call we can reassemble)
+#   flipped   read_disc_c2      — a sequence on one Device: read_full_toc_raw() →
+#                                 read_cdtext_raw() → read_to_file(). The old reason
+#                                 recorded here ("the binding would add a
+#                                 Python-level copy of ~800 MB") was never true:
+#                                 read_to_file passes copy=False and the sink gets
+#                                 a memoryview over library memory. It was a cost
+#                                 model nobody measured until tools/sink_prescreen.py
+#                                 put 0.55 s of CPU per disc against it (2026-07-29).
+#   NOT       write_disc        — accudisc_write is unbound, and accudisc_write_opts
+#                                 carries no `size` field. Retire when both land: a
+#                                 provisional struct without the ABI guard cannot
+#                                 raise AbiMismatch, so a future field addition
+#                                 becomes a well-formed call about the wrong bytes
+#                                 on the one operation here that is not idempotent.
+#   NOT       speed_ladder_rows — accudisc_probe_speed_ladder is unbound. Retire when
+#                                 it is bound AND AccuDisc confirm `speeds --sweep`
+#                                 is hardware-validated; bind the CLI's span choice
+#                                 (lba = leadout/4, count clamped to leadout/2) or
+#                                 the rows stop comparing with past measurements.
 #   NOT       read_lead_in / engine_version / eject / park_spindle — bound or
-#                                 trivial, but flipping them adds paths that no
-#                                 environment here can currently execute.
+#                                 trivial; no measured reason to move them.
 
 # The names this module actually calls on the binding. Used as an identity proof,
 # not a version check — see _import_binding for the namespace-package trap it
 # closes. Keep in step with the call sites, or a real binding gets rejected.
-_BINDING_SURFACE = ("Device", "AccuDiscError", "AbiMismatch", "anomaly_token")
+_BINDING_SURFACE = (
+    "Device",
+    "AccuDiscError",
+    "AbiMismatch",
+    "anomaly_token",
+    "C2",
+    "Sub",
+)
 
 _binding_warned = False
 _abi_warned = False
+
+
+#: Sibling of the binary symlink: ``tools/accudisc/pybinding`` points at AccuDisc's
+#: ``bindings/python``. Git-ignored, machine-local, same arrangement and the same
+#: reasons as :func:`_resolve_accudisc` — see :func:`_binding_search_path`.
+_PYBINDING_LINK = (
+    Path(__file__).parent.parent.parent / "tools" / "accudisc" / "pybinding"
+)
+
+
+def _binding_search_path() -> str | None:
+    """``tools/accudisc/pybinding`` if it holds the real package, else ``None``.
+
+    AccuDisc's Python binding is not on PyPI and its build sets an RPATH into
+    their **build tree**, so the artefact is correct in exactly one directory and
+    non-relocatable by construction (their ``build_accudisc.py`` names this as an
+    open TODO). It therefore cannot be a declared dependency here — the only
+    honest expression of "external project, resolved locally" is the one this
+    repo already uses for their *binary*: a git-ignored symlink under ``tools/``.
+
+    Installing it into the virtualenv instead was tried and rejected: ``uv sync``
+    prunes anything absent from the lockfile, so ``make check`` uninstalled it
+    every run. A hand-written ``.pth`` survives that, but leaves the arrangement
+    invisible to the repo — which is the failure that cost us two days (the
+    transport default was flipped to ``binding`` on 2026-07-27 and was inert
+    until 2026-07-29, because nothing anywhere stated what the environment
+    needed). A symlink that the code names out loud is discoverable; a ``.pth``
+    is not.
+
+    Note ``cffi`` is still required and *is* declared, in the dev group: it is a
+    runtime dependency of an API-mode cffi extension, not a build-time one, so a
+    module that builds cleanly still fails at ``from ._accudisc import ffi, lib``.
+    """
+    return (
+        str(_PYBINDING_LINK)
+        if (_PYBINDING_LINK / "accudisc" / "__init__.py").is_file()
+        else None
+    )
 
 
 @functools.cache
@@ -164,7 +223,18 @@ def _import_binding() -> tuple[Any | None, str]:
     carrying the names we actually call, and a namespace portion (``__file__``
     is None) is named as such in the reason rather than reported as a vague
     missing attribute.
+
+    The local symlink is **appended** to ``sys.path``, never prepended. A
+    properly installed ``accudisc`` must win over our machine-local shim, so that
+    the day AccuDisc close their "install properly" TODO this resolution retires
+    itself silently instead of shadowing the thing it was standing in for.
+    Appending is safe against the namespace trap above: a portion without
+    ``__init__.py`` does not end the scan, so a real package later on the path
+    still wins.
     """
+    extra = _binding_search_path()
+    if extra is not None and extra not in sys.path:
+        sys.path.append(extra)
     try:
         import accudisc
     except ImportError as exc:
@@ -716,6 +786,158 @@ def _run_read(
     log.debug("accudisc %s (exit %d): %s", what, returncode, stderr_text.strip())
 
 
+def _log_read_caveats(stats: Any, what: str) -> None:
+    """Reconstruct the CLI's exit-3 verdict from ``ReadStats`` and log it.
+
+    Exit 3 is **not** a library return. ``cli/main.c`` computes it after the read
+    from three counters — ``(hard_errors || sectors_suspect || sectors_flagged)
+    ? 3 : 0`` — and ``Device.read`` raises on genuine failure and discards ``rc``
+    otherwise. So the caveat signal exists only if this side rebuilds it; without
+    this the binding transport would report "clean" on exactly the discs where
+    the subprocess said "delivered, but gate it".
+
+    Neither value fails a read on either transport, which is why this only logs.
+    "Delivered with caveats" means the image is complete (AccuDisc zero-fills
+    hard-unreadable sectors and flags them); whether it is *trustworthy* is
+    AccurateRip's and CTDB's question, not the engine's.
+
+    The subchannel counters have no CLI equivalent at all — the exit code cannot
+    carry them — so they are reported here as the extra the binding buys. Q-frame
+    yield falls off a cliff at high speed (98% at 24x, 47% at 32x on the PX-716A)
+    and takes pre-gaps and INDEX points with it while the audio stays clean, so a
+    rip can pass every audio gate and still have lost the disc's structure.
+    """
+    if stats.subq_total:
+        log.debug(
+            "accudisc %s subchannel: %d/%d Q frames good (%d bad)",
+            what,
+            stats.subq_ok,
+            stats.subq_total,
+            stats.subq_bad,
+        )
+    if not (stats.hard_errors or stats.sectors_suspect or stats.sectors_flagged):
+        log.debug("accudisc %s: clean (%d sectors)", what, stats.sectors_read)
+        return
+    log.debug(
+        "accudisc %s: completed with caveats — %d hard, %d suspect, %d flagged "
+        "(the subprocess transport would have exited 3 here)",
+        what,
+        stats.hard_errors,
+        stats.sectors_suspect,
+        stats.sectors_flagged,
+    )
+
+
+def _split_streams(chunk: Any, files: dict[str, Any]) -> None:
+    """De-interleave one chunk into its per-stream files.
+
+    ``chunk.data`` is valid **only** for the duration of the sink call: with
+    ``copy=False`` it is a ``memoryview`` over library memory, and a view that
+    escapes the call raises ``RetainedBufferError`` rather than quietly reading
+    freed bytes. Every slice here is consumed before returning.
+
+    The lengths come from the chunk rather than from constants because the
+    request decides them: ``c2_len``/``sub_len`` are zero when those streams were
+    not requested, and hard-coding 294/96 would mis-slice a pcm-only read.
+    """
+    for i in range(chunk.nsec):
+        base = i * chunk.sector_len
+        if "pcm" in files:
+            files["pcm"].write(chunk.data[base : base + chunk.audio_len])
+        if "c2" in files and chunk.c2_len:
+            off = base + chunk.audio_len
+            files["c2"].write(chunk.data[off : off + chunk.c2_len])
+        if "sub" in files and chunk.sub_len:
+            off = base + chunk.audio_len + chunk.c2_len
+            files["sub"].write(chunk.data[off : off + chunk.sub_len])
+
+
+def _read_disc_binding(
+    module: Any,
+    device: str,
+    output_pcm: Path | None,
+    output_c2: Path | None,
+    output_sub: Path | None,
+    output_cdtext: Path | None,
+    output_fulltoc: Path | None,
+    read_speed: int | None,
+    progress_cb: Callable[[int, int], None] | None,
+) -> bool:
+    """:func:`read_disc_c2` over the binding: one ``Device``, one spin-up.
+
+    Returns ``True`` — a truthy success sentinel, not information. ``_try_binding``
+    signals "declined, fall back" with ``None``, so a function whose natural
+    return is also ``None`` cannot be distinguished from one that never ran.
+
+    The call order — full TOC, then CD-Text, then the audio pass — is the CLI's
+    and is deliberate rather than incidental. Both lead-in reads happen while the
+    disc is already spinning for the audio read that follows, which is the whole
+    point of the inline capture; and reordering them re-opens the ground the
+    stale-cached-lead-in incident was fought on.
+
+    Two request fields are set to match ``cli/main.c`` rather than to match this
+    function's arguments, because an A/B between transports is only meaningful if
+    the drive is asked for the same thing both times:
+
+    * **C2 is always requested** (``req.c2 = ACCUDISC_C2_PTRS`` at main.c:1176,
+      independent of ``--c2f``). Requesting it only when writing it would change
+      the sector length from 2646 to 2352 and silently make the binding arm a
+      different measurement, not a different carrier.
+    * Everything else is left at its default, matching ``ACCUDISC_READ_REQ_INIT``
+      — a designated initialiser, so retries/chunk/overlap are all zero on the
+      CLI path too.
+
+    ``read_to_file`` is not used despite doing the same de-interleave: it has no
+    progress callback, and a whole-disc rip with no progress is not an option.
+    """
+    result = None
+    with module.Device(device) as dev:
+        if output_fulltoc is not None:
+            output_fulltoc.write_bytes(dev.read_full_toc_raw())
+        if output_cdtext is not None:
+            packs = dev.read_cdtext_raw()
+            # None is absence, not failure — a disc without CD-Text writes no
+            # file, exactly as the subprocess path leaves none behind.
+            if packs:
+                output_cdtext.write_bytes(packs)
+
+        count = dev.read_toc().leadout_lba
+        if count <= 0:
+            msg = f"accudisc read: lead-out reported at LBA {count} — nothing to read"
+            raise RuntimeError(msg)
+
+        with contextlib.ExitStack() as stack:
+            files: dict[str, Any] = {
+                key: stack.enter_context(path.open("wb"))
+                for key, path in (
+                    ("pcm", output_pcm),
+                    ("c2", output_c2),
+                    ("sub", output_sub),
+                )
+                if path is not None
+            }
+            done = 0
+
+            def split(chunk: Any) -> None:
+                nonlocal done
+                _split_streams(chunk, files)
+                done += chunk.nsec
+                if progress_cb is not None:
+                    progress_cb(done, count)
+
+            result = dev.read(
+                0,
+                count,
+                sink=split,
+                copy=False,
+                c2=module.C2.PTRS,
+                sub=module.Sub.RAW if output_sub is not None else module.Sub.NONE,
+                speed_x=read_speed or 0,
+            )
+    _log_read_caveats(result.stats, "read")
+    return True
+
+
 def read_disc_c2(
     device: str,
     output_pcm: Path | None = None,
@@ -740,7 +962,29 @@ def read_disc_c2(
     ``--progress-fd`` machine channel.
 
     Raises RuntimeError only on a genuine read failure (exit 1/2); exit 3
-    (completed with caveats) is not a failure."""
+    (completed with caveats) is not a failure — on the binding transport there is
+    no exit code to inspect, so :func:`_log_read_caveats` rebuilds that verdict
+    from ``ReadStats``."""
+    module = _binding("disc read")
+    if module is not None:
+        served = _try_binding(
+            module,
+            "disc read",
+            lambda: _read_disc_binding(
+                module,
+                device,
+                output_pcm,
+                output_c2,
+                output_sub,
+                output_cdtext,
+                output_fulltoc,
+                read_speed,
+                progress_cb,
+            ),
+        )
+        if served:
+            return
+
     # Whole-disc read (no --count → through the lead-out); each output is opt-in.
     cmd = [_ACCUDISC, "--device", device, "read"]
     if output_pcm is not None:

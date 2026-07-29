@@ -8,8 +8,11 @@ capture, ``--progress-fd 1`` machine tokens on stdout, and the exit contract
 
 from __future__ import annotations
 
+import enum
 import io
+import logging
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -1277,3 +1280,354 @@ def test_read_span_binding_refuses_a_short_span() -> None:
     device = _FakeDevice(chunks=[_FakeChunk(2, b"\x00" * 4704)])  # asked for 3
     with pytest.raises(RuntimeError, match="delivered 2 of 3 sectors"):
         ar._read_span_binding(_binding_with(device), "/dev/sr0", 500, 3, None, None)
+
+
+# ── read_disc_c2 over the binding ────────────────────────────────────────────
+#
+# conftest pins the whole suite to the subprocess transport, so nothing above
+# reaches this path: `make check` can be green while the binding carrier is
+# broken. Every test here therefore drives _read_disc_binding directly, with a
+# fake module. That keeps them device-free AND build-tree-free — AccuDisc's
+# extension links libaccudisc from their build tree, so a test that imported the
+# real binding would fail whenever they are mid-rebuild.
+
+
+class _FakeReadChunk:
+    """One delivered chunk, with the per-stream lengths the real Chunk carries."""
+
+    def __init__(
+        self, nsec: int, audio_len: int = 2352, c2_len: int = 294, sub_len: int = 96
+    ) -> None:
+        self.nsec = nsec
+        self.audio_len = audio_len
+        self.c2_len = c2_len
+        self.sub_len = sub_len
+        self.sector_len = audio_len + c2_len + sub_len
+        # Distinct byte per stream so a mis-sliced sink shows up as wrong
+        # content, not merely wrong length.
+        sector = b"A" * audio_len + b"C" * c2_len + b"S" * sub_len
+        self.data = sector * nsec
+
+
+class _FakeStats:
+    def __init__(
+        self,
+        sectors_read: int = 100,
+        hard_errors: int = 0,
+        sectors_suspect: int = 0,
+        sectors_flagged: int = 0,
+        subq_total: int = 0,
+        subq_ok: int = 0,
+    ) -> None:
+        self.sectors_read = sectors_read
+        self.hard_errors = hard_errors
+        self.sectors_suspect = sectors_suspect
+        self.sectors_flagged = sectors_flagged
+        self.subq_total = subq_total
+        self.subq_ok = subq_ok
+
+    @property
+    def subq_bad(self) -> int:
+        return self.subq_total - self.subq_ok
+
+
+class _FakeReadResult:
+    def __init__(self, stats: _FakeStats) -> None:
+        self.stats = stats
+
+
+class _FakeDiscDevice:
+    """Records the lead-in call order and the read request it was given."""
+
+    def __init__(
+        self,
+        leadout: int = 10,
+        chunks: tuple[_FakeReadChunk, ...] = (),
+        cdtext: bytes | None = b"CDTEXT",
+        stats: _FakeStats | None = None,
+    ) -> None:
+        self._leadout = leadout
+        self._chunks = chunks
+        self._cdtext = cdtext
+        self._stats = stats or _FakeStats()
+        self.calls: list[str] = []
+        self.read_kwargs: dict[str, Any] = {}
+        self.closed = False
+
+    def __enter__(self) -> _FakeDiscDevice:
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        self.closed = True
+
+    def read_full_toc_raw(self) -> bytes:
+        self.calls.append("fulltoc")
+        return b"FULLTOC"
+
+    def read_cdtext_raw(self) -> bytes | None:
+        self.calls.append("cdtext")
+        return self._cdtext
+
+    def read_toc(self):
+        self.calls.append("toc")
+        return SimpleNamespace(leadout_lba=self._leadout)
+
+    def read(self, lba: int, count: int, **kwargs: Any):
+        self.calls.append("read")
+        self.read_kwargs = {"lba": lba, "count": count, **kwargs}
+        for chunk in self._chunks:
+            kwargs["sink"](chunk)
+        return _FakeReadResult(self._stats)
+
+
+class _FakeC2(enum.IntEnum):
+    NONE = 0
+    PTRS = 1
+    PTRS_BEB = 2
+
+
+class _FakeSub(enum.IntEnum):
+    NONE = 0
+    RAW = 1
+    Q = 2
+
+
+def _disc_binding(device: _FakeDiscDevice) -> _FakeBinding:
+    module = _binding_with(device)  # type: ignore[arg-type]
+    module.C2 = _FakeC2  # type: ignore[attr-defined]
+    module.Sub = _FakeSub  # type: ignore[attr-defined]
+    return module
+
+
+def _run_disc(device: _FakeDiscDevice, tmp_path: Path, **kw: Any) -> None:
+    defaults: dict[str, Any] = {
+        "output_pcm": None,
+        "output_c2": None,
+        "output_sub": None,
+        "output_cdtext": None,
+        "output_fulltoc": None,
+        "read_speed": None,
+        "progress_cb": None,
+    }
+    defaults.update(kw)
+    ar._read_disc_binding(_disc_binding(device), "/dev/sr0", **defaults)
+
+
+def test_disc_binding_reads_lead_in_before_audio_on_one_device(tmp_path: Path) -> None:
+    """Order is the contract, not an implementation detail.
+
+    Both lead-in reads must land on the same spin-up as the audio pass — that is
+    the entire reason the CLI captures them inline. A reordering that moved them
+    after the read would still pass a content assertion.
+    """
+    device = _FakeDiscDevice(chunks=(_FakeReadChunk(2),))
+    _run_disc(
+        device,
+        tmp_path,
+        output_pcm=tmp_path / "a.pcm",
+        output_cdtext=tmp_path / "a.cdtext",
+        output_fulltoc=tmp_path / "a.toc",
+    )
+
+    assert device.calls == ["fulltoc", "cdtext", "toc", "read"]
+    assert device.closed
+    assert (tmp_path / "a.toc").read_bytes() == b"FULLTOC"
+    assert (tmp_path / "a.cdtext").read_bytes() == b"CDTEXT"
+
+
+def test_disc_binding_always_requests_c2_even_when_not_writing_it(
+    tmp_path: Path,
+) -> None:
+    """cli/main.c:1176 sets req.c2 = ACCUDISC_C2_PTRS independent of --c2f.
+
+    Requesting C2 only when a --c2f path is given would drop the sector length
+    from 2646 to 2352 on this arm alone, which makes an A/B against the
+    subprocess a comparison of two different reads rather than two carriers.
+    """
+    device = _FakeDiscDevice(chunks=(_FakeReadChunk(1),))
+    _run_disc(device, tmp_path, output_pcm=tmp_path / "a.pcm")
+
+    assert device.read_kwargs["c2"] is _FakeC2.PTRS
+    assert device.read_kwargs["sub"] is _FakeSub.NONE
+
+
+def test_disc_binding_requests_raw_sub_only_when_capturing_it(
+    tmp_path: Path,
+) -> None:
+    device = _FakeDiscDevice(chunks=(_FakeReadChunk(1),))
+    _run_disc(device, tmp_path, output_sub=tmp_path / "a.sub")
+
+    assert device.read_kwargs["sub"] is _FakeSub.RAW
+
+
+def test_disc_binding_reads_the_whole_disc_from_lba_zero(tmp_path: Path) -> None:
+    """[0, leadout) — including any track-1 program-area pregap.
+
+    Starting at the first track's INDEX 01 instead would drop ABBA Gold's 33
+    head frames and shift every boundary and the disc ID (fixed 2026-07-12).
+    """
+    device = _FakeDiscDevice(leadout=162892, chunks=(_FakeReadChunk(1),))
+    _run_disc(device, tmp_path, output_pcm=tmp_path / "a.pcm")
+
+    assert device.read_kwargs["lba"] == 0
+    assert device.read_kwargs["count"] == 162892
+    assert device.read_kwargs["copy"] is False
+
+
+def test_disc_binding_splits_the_streams_by_offset(tmp_path: Path) -> None:
+    """Each stream gets its own bytes — a mis-sliced sink writes the wrong ones."""
+    device = _FakeDiscDevice(chunks=(_FakeReadChunk(3),))
+    _run_disc(
+        device,
+        tmp_path,
+        output_pcm=tmp_path / "a.pcm",
+        output_c2=tmp_path / "a.c2",
+        output_sub=tmp_path / "a.sub",
+    )
+
+    assert (tmp_path / "a.pcm").read_bytes() == b"A" * 2352 * 3
+    assert (tmp_path / "a.c2").read_bytes() == b"C" * 294 * 3
+    assert (tmp_path / "a.sub").read_bytes() == b"S" * 96 * 3
+
+
+def test_disc_binding_progress_is_cumulative_against_the_disc_total(
+    tmp_path: Path,
+) -> None:
+    """Matches the subprocess `progress <done> <total>` tokens the TUI consumes."""
+    seen: list[tuple[int, int]] = []
+    device = _FakeDiscDevice(
+        leadout=6, chunks=(_FakeReadChunk(2), _FakeReadChunk(2), _FakeReadChunk(2))
+    )
+    _run_disc(
+        device,
+        tmp_path,
+        output_pcm=tmp_path / "a.pcm",
+        progress_cb=lambda d, t: seen.append((d, t)),
+    )
+
+    assert seen == [(2, 6), (4, 6), (6, 6)]
+
+
+def test_disc_binding_writes_no_cdtext_file_when_the_disc_has_none(
+    tmp_path: Path,
+) -> None:
+    """None is absence, not failure — and absence must leave no file behind.
+
+    A zero-byte .cdtext would be read downstream as a present-but-empty block
+    rather than as "this disc has no CD-Text".
+    """
+    device = _FakeDiscDevice(chunks=(_FakeReadChunk(1),), cdtext=None)
+    _run_disc(device, tmp_path, output_cdtext=tmp_path / "a.cdtext")
+
+    assert not (tmp_path / "a.cdtext").exists()
+
+
+def test_disc_binding_reads_with_no_outputs_at_all(tmp_path: Path) -> None:
+    """The metadata-only pass: no PCM, no C2, no sub, but still a whole-disc read.
+
+    read_to_file raises ValueError on an empty file set, which is why this path
+    does its own sink rather than calling it.
+    """
+    device = _FakeDiscDevice(chunks=(_FakeReadChunk(1),))
+    _run_disc(device, tmp_path)
+
+    assert device.calls == ["toc", "read"]
+
+
+def test_disc_binding_refuses_a_nonsense_leadout(tmp_path: Path) -> None:
+    """count <= 0 reaches Device.read as ValueError('count must be > 0').
+
+    Caught here so the message names the disc geometry rather than the argument.
+    """
+    device = _FakeDiscDevice(leadout=0)
+    with pytest.raises(RuntimeError, match="lead-out reported at LBA 0"):
+        _run_disc(device, tmp_path)
+
+
+def test_disc_binding_passes_the_requested_speed(tmp_path: Path) -> None:
+    device = _FakeDiscDevice(chunks=(_FakeReadChunk(1),))
+    _run_disc(device, tmp_path, read_speed=8)
+    assert device.read_kwargs["speed_x"] == 8
+
+    device = _FakeDiscDevice(chunks=(_FakeReadChunk(1),))
+    _run_disc(device, tmp_path)
+    assert device.read_kwargs["speed_x"] == 0  # 0 = leave the drive alone
+
+
+def test_read_disc_c2_prefers_the_binding_and_never_spawns(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The public entry point routes to the binding when policy allows it."""
+    device = _FakeDiscDevice(chunks=(_FakeReadChunk(1),))
+    _install(monkeypatch, _disc_binding(device))
+    monkeypatch.setenv(ar.TRANSPORT_ENV, "binding")
+
+    def _no_spawn(*a: object, **k: object) -> None:
+        pytest.fail("the binding path must not shell out")
+
+    monkeypatch.setattr(ar.subprocess, "run", _no_spawn)
+    ar.read_disc_c2("/dev/sr0", output_pcm=tmp_path / "a.pcm")
+
+    assert device.calls == ["toc", "read"]
+
+
+def test_read_disc_c2_falls_back_to_the_subprocess_on_abi_mismatch(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A broken extension against a good binary is exactly what the fallback is for."""
+    module = _disc_binding(_FakeDiscDevice())
+
+    def _boom(_path: str) -> object:
+        msg = "built against a different header"
+        raise _FakeAbiMismatch(msg)
+
+    module.Device = _boom  # type: ignore[assignment]
+    _install(monkeypatch, module)
+    monkeypatch.setenv(ar.TRANSPORT_ENV, "auto")
+
+    spawned: list[list[str]] = []
+
+    def _run(cmd: list[str], **_kw: object) -> object:
+        spawned.append(cmd)
+        return SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
+
+    monkeypatch.setattr(ar.subprocess, "run", _run)
+    ar.read_disc_c2("/dev/sr0", output_pcm=tmp_path / "a.pcm")
+
+    assert spawned and "read" in spawned[0]
+
+
+@pytest.mark.parametrize(
+    ("stats", "expected"),
+    [
+        (_FakeStats(), "clean"),
+        (_FakeStats(hard_errors=1), "completed with caveats"),
+        (_FakeStats(sectors_suspect=1), "completed with caveats"),
+        (_FakeStats(sectors_flagged=1), "completed with caveats"),
+    ],
+)
+def test_exit_three_is_reconstructed_from_stats(
+    caplog: pytest.LogCaptureFixture, stats: _FakeStats, expected: str
+) -> None:
+    """Exit 3 is a CLI projection, not a library return.
+
+    cli/main.c computes it as (hard_errors || sectors_suspect || sectors_flagged)
+    after the read; Device.read discards its rc. Without this reconstruction the
+    binding transport would report clean on precisely the discs where the
+    subprocess said "delivered, but gate it".
+    """
+    with caplog.at_level(logging.DEBUG, logger=ar.log.name):
+        ar._log_read_caveats(stats, "read")
+    assert expected in caplog.text
+
+
+def test_subchannel_yield_is_reported(caplog: pytest.LogCaptureFixture) -> None:
+    """The counter the exit code cannot carry, and the one the Q speed cliff moves.
+
+    Q yield collapses at high speed (98% at 24x, 47% at 32x on the PX-716A) while
+    the audio stays clean, so a rip can pass every audio gate having lost the
+    disc's pre-gaps and INDEX points.
+    """
+    with caplog.at_level(logging.DEBUG, logger=ar.log.name):
+        ar._log_read_caveats(_FakeStats(subq_total=100, subq_ok=47), "read")
+    assert "47/100 Q frames good (53 bad)" in caplog.text
