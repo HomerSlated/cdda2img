@@ -2500,6 +2500,77 @@ def _ar_has_partial_mismatch(results: list) -> bool:
     return 0 < n_ok < len(in_db)
 
 
+def _ar_has_total_mismatch(results: list) -> bool:
+    """True when the disc IS in AccurateRip and **no** track verified.
+
+    The other side of :func:`_ar_has_partial_mismatch`, which that function's
+    docstring has always diagnosed ("all-tracks mismatch means offset
+    misconfiguration") without anything acting on it. The recovery ladder is
+    gated on *partial*, correctly — re-reading every track is not a read-error
+    remedy — so a whole-disc miss produced no recovery, no diagnosis and no PROV
+    key: a rip that silently failed to verify with nothing saying why.
+
+    The Step-D CD-R is the worked example: a `+30` read offset applied to a disc
+    burned uncorrected on the same drive shifted every track, so every track
+    missed, so the partial condition never held.
+    """
+    in_db = [r for r in results if r.max_confidence is not None]
+    if not in_db:
+        return False  # not in the database at all — a different, honest answer
+    return not any(
+        r.confidence_v1 is not None or r.confidence_v2 is not None for r in in_db
+    )
+
+
+def _diagnose_total_ar_miss(
+    pcm_path: Path,
+    track_lsns: list[int],
+    disc_last_lsn: int,
+    cddb_id: int,
+    read_offset: int,
+) -> dict[str, str]:
+    """PROV keys explaining a whole-disc AccurateRip miss. Never raises.
+
+    Diagnostic only — **the audio is not touched.** An offset that makes the disc
+    verify is not automatically the right one to store: `detect_offset`'s own
+    docstring warns that a widely-pressed disc verifies at several offsets at
+    once (Tracy Chapman at 0, -669, -1333 and -1997, the first two at identical
+    confidence), so choosing between them needs evidence from outside the audio.
+    Silently re-storing at the winner would be picking one pressing's cohort and
+    calling it the truth.
+
+    What this does is convert "verification failed, no reason given" into a named
+    cause the user can act on. `ar_offset_candidates` lists what would have
+    verified; `ar_offset_suggests` names the delta from the offset actually used.
+    """
+    try:
+        from cdda2img.accuraterip import detect_offset, fetch_ar_responses
+
+        # Fetched here rather than passed in: the responses live inside the
+        # partial-mismatch branch, and this path is mutually exclusive with it.
+        # One extra request on a rip that has already failed to verify.
+        responses, _transport, _b3 = fetch_ar_responses(
+            track_lsns, disc_last_lsn, cddb_id
+        )
+        matches = detect_offset(pcm_path, track_lsns, disc_last_lsn, responses)
+    except Exception as exc:
+        log.debug("AR offset diagnosis failed: %s", exc)
+        return {"ar_total_miss": "offset_probe_failed"}
+
+    if not matches:
+        # In the database, verifies at no offset in the swept radius. That is a
+        # real result: the audio differs from every submitted copy, which is
+        # damage or a different pressing — not a misconfiguration.
+        return {"ar_total_miss": "no_offset_verifies"}
+
+    cands = ",".join(str(m.offset) for m in matches[:4])
+    return {
+        "ar_total_miss": "offset_mismatch",
+        "ar_offset_candidates": cands,
+        "ar_offset_suggests": str(matches[0].offset - read_offset),
+    }
+
+
 def _recovery_status_cb(
     ui: TerminalUI | None, status_line: list[str]
 ) -> Callable[[int, int], None] | None:
@@ -3028,6 +3099,22 @@ def rip_image(  # noqa: C901
                     )
         for _t, _outcome in sorted(recovery_outcomes.items()):
             provenance[f"recovery_track_{_t}"] = _outcome
+        # A whole-disc AR miss runs no recovery — the ladder is gated on a PARTIAL
+        # mismatch, correctly, since re-reading every track is not a read-error
+        # remedy. Without this the rip just fails to verify and says nothing about
+        # why. Diagnostic only: the audio is untouched, because an offset that
+        # verifies is not automatically the right one to store (a widely-pressed
+        # disc verifies at several at once).
+        if _ar_has_total_mismatch(ar_verify.tracks):
+            provenance.update(
+                _diagnose_total_ar_miss(
+                    temp.pcm_file,
+                    final_track_lsns,
+                    final_disc_last_lsn,
+                    cddb_id,
+                    read_offset,
+                )
+            )
         # Frame-450 partial verification: a track that still fails full AR but
         # matches the crc450 sub-CRC is graded "damaged, right pressing" —
         # recorded so an unrecovered track carries the strongest statement the
