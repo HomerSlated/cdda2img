@@ -46,6 +46,28 @@ Standalone utility scripts live in `tools/` (tracked, not part of the installed 
     checkout changes what `cdda2img rip` does with no action here. **A measurement run needs
     a quiet build tree**, agreed with them in advance — a rebuild mid-A/B silently compares
     two library versions.
+- **`tools/disc_ab.py`** — whole-disc **A/B/A** across transports: `A1` subprocess, `B`
+  binding, `A2` subprocess. `|A1−A2|` is the noise floor; a binding-vs-subprocess delta
+  smaller than the drift between two runs of the *same* transport is not a measurement.
+  Byte digests are classified rather than merely compared — `identical` / `carrier`
+  (`A1 == A2 ≠ B`, the only pattern that indicts the transport) / `cold-first-pass`
+  (`A1 ≠ B == A2`) / `nondeterministic` — and only `carrier` suppresses the timing
+  verdict. Refuses to run against a binding extension older than `libaccudisc`. Result
+  2026-07-29, Tracy, req=40: binding 112.69 s vs subprocess 112.75 s, PCM and C2
+  byte-identical → **no library-side whole-disc entry point needed** (AccuDisc closed
+  that item on this number).
+- **`tools/write_smoke.py`** — burns through `write_disc` onto a **CDEmu blank**
+  (`cdemu create-blank --writer-id=WRITER-TOC --medium-type=cdr74`) and reads it back.
+  The round trip is the point: `WriteResult.OK` proves only the return path, since a
+  burn that wrote the wrong bytes or the right bytes at the wrong LBA returns `OK` too.
+  Payload is a known pattern, never silence (zeros are also what a burn that wrote
+  nothing produces). Passes byte-identical; scope is **virtual writer only** — no laser
+  timing, no media quality, no real DAO lead-in, and `CAVEATS` is unreachable without a
+  CD-Text SIZE_INFO mismatch. A burn on the PX-716A remains the acceptance test.
+- **`tools/sink_prescreen.py`** — device-free timing of the de-interleave-and-write loop
+  against synthetic chunks at the real geometry. Answered "is the Python sink
+  *intrinsically* too slow" (no: 654k sectors/s, 0.55 s per disc, 273× headroom at 32×).
+  It cannot see the nonlinear cache-drain failure — that needed `disc_ab.py`.
 - **`tools/make_preemph_disc.py`** — generate a `PRE_EMPHASIS` CD-DA test image (cdrdao
   TOC+BIN, pure-Python tone). cdemu-load it (`cdemu load 0 preemph.toc` → /dev/sr1) to
   validate pre-emphasis detection end-to-end through the subchannel/`subq_toc` read path.
