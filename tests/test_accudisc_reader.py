@@ -1631,3 +1631,189 @@ def test_subchannel_yield_is_reported(caplog: pytest.LogCaptureFixture) -> None:
     with caplog.at_level(logging.DEBUG, logger=ar.log.name):
         ar._log_read_caveats(_FakeStats(subq_total=100, subq_ok=47), "read")
     assert "47/100 Q frames good (53 bad)" in caplog.text
+
+
+# ── write_disc + speed_ladder_rows over the binding ──────────────────────────
+#
+# The write mapping carries more test weight than usual because it CANNOT be
+# hardware-tested here: burning needs blank media and --simulate needs it too.
+# These fakes are the only thing standing between the four-token contract and a
+# burn nobody can undo.
+
+
+class _FakeUnsupported(_FakeBindingError):
+    pass
+
+
+class _FakeWriteResult(enum.Enum):
+    OK = "ok"
+    CAVEATS = "caveats"
+
+    @property
+    def token(self) -> str:
+        return self.value
+
+
+class _FakeWriteDevice:
+    def __init__(
+        self, outcome: object = _FakeWriteResult.OK, logs: tuple[str, ...] = ()
+    ) -> None:
+        self._outcome = outcome
+        self._logs = logs
+        self.rdwr: bool | None = None
+        self.kwargs: dict[str, Any] = {}
+        self._sink: Any = None
+
+    def __call__(self, path: str, *, rdwr: bool = False) -> _FakeWriteDevice:
+        self.rdwr = rdwr
+        return self
+
+    def __enter__(self) -> _FakeWriteDevice:
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        return None
+
+    def set_log(self, fn: Any) -> None:
+        self._sink = fn
+
+    def write(self, toc: str, binp: str, **kwargs: Any) -> object:
+        self.kwargs = {"toc": toc, "bin": binp, **kwargs}
+        for line in self._logs:
+            self._sink(line)
+        if isinstance(self._outcome, BaseException):
+            raise self._outcome
+        return self._outcome
+
+
+def _write_binding(device: _FakeWriteDevice) -> _FakeBinding:
+    module = _FakeBinding()
+    module.Device = device  # type: ignore[assignment]
+    module.Unsupported = _FakeUnsupported  # type: ignore[attr-defined]
+    module.WriteResult = _FakeWriteResult  # type: ignore[attr-defined]
+    return module
+
+
+def _do_write(device: _FakeWriteDevice, **kw: Any) -> tuple[int, str, str | None]:
+    return ar._write_disc_binding(
+        _write_binding(device),
+        "/dev/sr0",
+        Path("/x/a.toc"),
+        Path("/x/a.bin"),
+        kw.pop("speed", 8),
+        kw.pop("simulate", False),
+        kw.pop("progress_cb", None),
+    )
+
+
+def test_write_ok_maps_to_exit_zero() -> None:
+    rc, _err, token = _do_write(_FakeWriteDevice(_FakeWriteResult.OK))
+    assert (rc, token) == (0, "ok")
+
+
+def test_write_caveats_means_the_disc_WAS_written() -> None:
+    """Exit 3, not a failure. Telling the user their disc is blank when it is not
+    is the single mistake this whole mapping exists to prevent."""
+    dev = _FakeWriteDevice(_FakeWriteResult.CAVEATS, logs=("cdtext size_info odd",))
+    rc, err, token = _do_write(dev)
+    assert (rc, token) == (3, "caveats")
+    # CAVEATS without the log is a boolean with no cause, so the sink must be
+    # installed BEFORE the burn or the reason is unrecoverable.
+    assert "cdtext size_info odd" in err
+
+
+def test_write_not_blank_raises_unsupported_and_maps_to_not_blank() -> None:
+    dev = _FakeWriteDevice(_FakeUnsupported("disc is not blank"))
+    rc, err, token = _do_write(dev)
+    assert (rc, token) == (2, "not_blank")
+    assert "not blank" in err
+
+
+def test_write_other_errors_map_to_error_and_do_not_fall_back() -> None:
+    """A failed burn must NOT reach _try_binding's subprocess fallback.
+
+    Falling back would attempt a second burn of a disc whose state is now
+    unknown. Returning rc=2 keeps the decision with the caller, which is the same
+    place the subprocess path left it.
+    """
+    dev = _FakeWriteDevice(_FakeBindingError("laser said no"))
+    rc, _err, token = _do_write(dev)
+    assert (rc, token) == (2, "error")
+
+
+def test_write_abi_mismatch_is_re_raised_so_it_can_degrade() -> None:
+    """AbiMismatch subclasses AccuDiscError, so arm order is load-bearing.
+
+    It surfaces on Device() — before any laser fires — and means the extension is
+    broken while the binary is fine. Swallowing it into result=error would turn a
+    perfectly good subprocess burn into a refusal.
+    """
+    dev = _FakeWriteDevice(_FakeAbiMismatch("header drift"))
+    with pytest.raises(_FakeAbiMismatch):
+        _do_write(dev)
+
+
+def test_write_opens_the_device_read_write() -> None:
+    dev = _FakeWriteDevice()
+    _do_write(dev)
+    assert dev.rdwr is True
+
+
+def test_write_passes_simulate_and_speed_through() -> None:
+    dev = _FakeWriteDevice()
+    _do_write(dev, speed=16, simulate=True)
+    assert dev.kwargs["simulate"] is True
+    assert dev.kwargs["speed"] == 16
+
+
+class _FakeRung:
+    def __init__(self, requested: int, reported: int, measured: float) -> None:
+        self.requested_x = requested
+        self.reported_x = reported
+        self.measured_x = measured
+
+
+class _FakeLadderDevice:
+    def __init__(self, rungs: tuple[_FakeRung, ...]) -> None:
+        self._rungs = rungs
+        self.kwargs: dict[str, Any] = {}
+
+    def __enter__(self) -> _FakeLadderDevice:
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        return None
+
+    def probe_speed_ladder(self, **kwargs: Any) -> tuple[_FakeRung, ...]:
+        self.kwargs = kwargs
+        return self._rungs
+
+
+def test_speed_ladder_binding_returns_the_same_triple() -> None:
+    """The transport swap must be invisible to drive_speed.admitted_ladder.
+
+    That consumer unpacks 3-tuples and applies the req == page2a rule. The
+    binding offers verdicts, min_x/max_x and its own admission rule, all of which
+    would CHANGE the ladder — a policy question that does not belong in a carrier
+    swap.
+    """
+    dev = _FakeLadderDevice((
+        _FakeRung(48, 48, 22.96),
+        _FakeRung(40, 40, 23.69),
+        _FakeRung(16, 8, 8.0),
+    ))
+    rows = ar._speed_ladder_binding(_binding_with(dev), "/dev/sr0")  # type: ignore[arg-type]
+    assert rows == [(48, 48, 22.96), (40, 40, 23.69), (16, 8, 8.0)]
+
+
+def test_speed_ladder_binding_asks_for_three_points_and_no_span() -> None:
+    """points=3 is what makes verdicts possible at all; the span is AccuDisc's.
+
+    Our plan had recorded the CLI's span as leadout/4 + leadout/2 — the NON-sweep
+    span. At points=3 the CLI opens out to the whole disc, because three bands of
+    the middle half sample much the same neighbourhood. Passing no span gets
+    their computation rather than our copy of it.
+    """
+    dev = _FakeLadderDevice(())
+    ar._speed_ladder_binding(_binding_with(dev), "/dev/sr0")  # type: ignore[arg-type]
+    assert dev.kwargs == {"points": 3}

@@ -55,8 +55,15 @@ The subprocess path is not a hedge that will be retired. It is the acceptance
 instrument: parity is "same disc, both transports, compare bytes"
 (AccuDisc API_PLAN §7.3 names us as the only consumer who can run that test —
 ``tools/binding_ab.py`` is it), and it is also what serves a machine that has the
-binary but no importable library, which is currently *every* machine running this
-project's 3.10 venv.
+binary but no importable library.
+
+That last clause used to read "which is currently *every* machine running this
+project's 3.10 venv", and it stopped being true on 2026-07-29: AccuDisc's
+extension is now built ``py_limited_api``, so one ``abi3`` artefact imports on
+3.10 through 3.14 and the binding serves this venv. It is corrected rather than
+deleted because the sentence was accurate when written and the situation it
+described lasted two days longer than anyone noticed — the flip to ``binding``
+landed on 2026-07-27 and was inert until the day it was fixed.
 """
 
 from __future__ import annotations
@@ -130,15 +137,23 @@ _TRANSPORT_MODES = ("auto", "binding", "subprocess")
 #                                 a memoryview over library memory. It was a cost
 #                                 model nobody measured until tools/sink_prescreen.py
 #                                 put 0.55 s of CPU per disc against it (2026-07-29).
-#   NOT       write_disc        — accudisc_write is unbound, and accudisc_write_opts
-#                                 carries no `size` field. Retire when both land: a
-#                                 provisional struct without the ABI guard cannot
-#                                 raise AbiMismatch, so a future field addition
+#   flipped   speed_ladder_rows — probe_speed_ladder(points=3), span left to the
+#                                 library. AccuDisc hardware-validated `speeds
+#                                 --sweep` and bound the probe (2026-07-29). The
+#                                 (req, page2a, measured) triple is UNCHANGED: the
+#                                 binding also offers verdicts and min/max, and
+#                                 adopting its admission rule would fix the known
+#                                 gap in drive_speed.admitted_ladder — but that is
+#                                 policy, not carrier, and gets its own change.
+#   flipped   write_disc        — Device.write(), after accudisc_write_opts gained
+#                                 its `size` field (2026-07-29), which was the
+#                                 stated blocker: without the ABI guard a future
+#                                 field addition cannot raise AbiMismatch and
 #                                 becomes a well-formed call about the wrong bytes
 #                                 on the one operation here that is not idempotent.
-#   NOT       speed_ladder_rows — accudisc_probe_speed_ladder is unbound. Retire when
-#                                 it is bound AND AccuDisc confirm `speeds --sweep`
-#                                 is hardware-validated; bind the CLI's span choice
+#                                 NOT hardware-tested — burning needs blank media
+#                                 and --simulate needs it too. Retire that caveat
+#                                 with one simulated burn on a blank CD-R.
 #                                 (lba = leadout/4, count clamped to leadout/2) or
 #                                 the rows stop comparing with past measurements.
 #   NOT       read_lead_in / engine_version / eject / park_spindle — bound or
@@ -154,6 +169,8 @@ _BINDING_SURFACE = (
     "anomaly_token",
     "C2",
     "Sub",
+    "Unsupported",
+    "WriteResult",
 )
 
 _binding_warned = False
@@ -1261,6 +1278,83 @@ def _run_with_progress(
 # ── write path (the one destructive subcommand) ───────────────────────────────
 
 
+def _write_disc_binding(
+    module: Any,
+    device: str,
+    toc_path: Path,
+    bin_path: Path,
+    speed: int,
+    simulate: bool,
+    progress_cb: Callable[[int, int], None] | None,
+) -> tuple[int, str, str | None]:
+    """:func:`write_disc` over ``Device.write``, reproducing the CLI's triple.
+
+    **The contract is a line, not a value: a return means the disc WAS written,
+    an exception means it was not.** ``WriteResult`` has no failure member on
+    purpose — AccuDisc removed the possibility rather than documenting it,
+    because "report a written disc as blank" is the one mistake this call exists
+    to prevent, and a failure member makes it a one-line bug. The mapping:
+
+    ==================  ==========================  ====  ==============
+    CLI ``result=``     binding                     rc    written?
+    ==================  ==========================  ====  ==============
+    ``ok``              ``WriteResult.OK``          0     yes
+    ``caveats``         ``WriteResult.CAVEATS``     3     **yes**
+    ``not_blank``       raises ``Unsupported``      2     no
+    ``error``           raises ``AccuDiscError``    2     no
+    ==================  ==========================  ====  ==============
+
+    The exit codes are **ours**, synthesised to keep this function's signature
+    and every caller's branch unchanged. AccuDisc deliberately do not expose them
+    (a process convention belongs to the process, API_PLAN §3), so this is the
+    seam absorbing a difference rather than the library leaking one.
+
+    A ``set_log`` sink is installed before the burn because ``CAVEATS`` is
+    otherwise a boolean with no cause — the detail (today, a CD-Text SIZE_INFO
+    pack whose track range disagrees with the ``.toc``) arrives only through the
+    log. Those lines become this function's ``stderr`` return, which is where the
+    subprocess path put the same information.
+
+    ``rdwr=True``: burning needs a writable handle, and the failure without it
+    surfaces at the burn rather than at open.
+    """
+    lines: list[str] = []
+    try:
+        with module.Device(device, rdwr=True) as dev:
+            dev.set_log(lines.append)
+            result = dev.write(
+                str(toc_path),
+                str(bin_path),
+                simulate=simulate,
+                speed=speed,
+                progress=progress_cb,
+            )
+    except module.AbiMismatch:
+        # MUST outrank the AccuDiscError arm below, which it subclasses. An ABI
+        # mismatch surfaces on Device() — before any laser fires — and means the
+        # extension is broken while the binary is fine, so it is the one error
+        # here that should degrade to the subprocess rather than be reported as
+        # a failed burn. Swallowing it into `result=error` would turn a working
+        # subprocess burn into a refusal, on the one operation a user cannot
+        # simply retry.
+        raise
+    except module.Unsupported as exc:
+        # "Not blank" — nothing was written. The subprocess reports this as
+        # exit 2 with result=not_blank, and the caller distinguishes it from a
+        # transport failure by the token, never by the code.
+        return 2, str(exc), "not_blank"
+    except module.AccuDiscError as exc:
+        # Deliberately returned, not raised: a raise would reach _try_binding,
+        # which falls back to the subprocess — and the subprocess would attempt
+        # a SECOND BURN of a disc whose state we no longer know.
+        return 2, str(exc), "error"
+    return (
+        (3 if result is module.WriteResult.CAVEATS else 0),
+        "\n".join(lines),
+        result.token,
+    )
+
+
 def write_disc(
     device: str,
     toc_path: Path,
@@ -1283,7 +1377,24 @@ def write_disc(
 
     stderr goes to a temp file, never a pipe, so a chatty burn cannot deadlock the
     single-threaded stdout reader.
+
+    On the binding, ``stderr`` carries the ``set_log`` lines instead and the exit
+    code is synthesised — see :func:`_write_disc_binding`. **Not hardware-tested
+    on either transport as of 2026-07-29**: burning needs blank media, and
+    ``--simulate`` needs it too, so no burn has exercised the binding path.
     """
+    module = _binding("write")
+    if module is not None:
+        served = _try_binding(
+            module,
+            "write",
+            lambda: _write_disc_binding(
+                module, device, toc_path, bin_path, speed, simulate, progress_cb
+            ),
+        )
+        if served is not None:
+            return served
+
     cmd = [
         _ACCUDISC,
         "--device",
