@@ -73,28 +73,108 @@ _INDEX_RE = re.compile(r"^\s*INDEX\s+(\d{2}:\d{2}:\d{2})", re.MULTILINE)
 _ALL_ZEROS_MCN = "0000000000000"
 
 
-def _first(pattern: re.Pattern[str], text: str, default: str = "") -> str:
-    m = pattern.search(text)
-    return m.group(1) if m else default
+def _first(pattern: re.Pattern[str], masked: str, raw: str, default: str = "") -> str:
+    """First capture of *pattern*, located in *masked* and read from *raw*.
+
+    Two texts, one offset space. The keyword has to be found in the masked view
+    or a ``TITLE "..."`` sitting inside somebody else's quoted string counts as a
+    field; the value has to be read from the raw text because masking is exactly
+    what blanked it. :func:`mask_quoted` preserves length, so one match position
+    indexes both.
+    """
+    m = pattern.search(masked)
+    return raw[m.start(1) : m.end(1)] if m else default
 
 
-def _first_or_none(pattern: re.Pattern[str], text: str) -> str | None:
-    m = pattern.search(text)
-    return m.group(1) if m else None
+def _first_or_none(pattern: re.Pattern[str], masked: str, raw: str) -> str | None:
+    m = pattern.search(masked)
+    return raw[m.start(1) : m.end(1)] if m else None
+
+
+class TocParseError(ValueError):
+    """A TOC that cannot be parsed safely. Refused rather than half-understood."""
+
+
+def mask_quoted(text: str) -> str:
+    """Blank the *interiors* of ``"..."`` strings, preserving length and offsets.
+
+    The structural patterns here are line-anchored with ``re.MULTILINE`` and have
+    no idea whether a line sits inside a quoted string. So a foreign TOC whose
+    ``TITLE`` value contains a newline followed by ``START 00:02:00`` gets that
+    line read as a real directive — the parser cannot tell an attacker's payload
+    from the file's own structure. Only the ``import`` subcommand is exposed
+    (nothing we write ever contains one, and ``escape_toc_string`` guards the
+    write side), but "we only feed it our own files" is a property of today's
+    callers, not of the parser.
+
+    Masking rather than stripping is deliberate: **every offset must survive.**
+    ``parse_toc`` slices per-track blocks by the byte positions of the ``// Track``
+    markers, so a mask that changed length would silently mis-slice every track —
+    trading an injection bug for a corruption bug.
+
+    A newline inside an open quote is a **hard error**, not something to mask
+    around. cdrdao strings do not span lines, so an unterminated one means the
+    file is either malformed or hostile, and in both cases the honest answer is
+    to refuse. Guessing where the author "meant" to close it is how a parser ends
+    up with two readings of the same bytes.
+
+    ``\\`` escapes are honoured (cdrdao's lexer treats ``\\"`` as a literal quote),
+    or a value ending in a backslash would appear to swallow its own delimiter.
+    """
+    out = list(text)
+    in_string = False
+    escaped = False
+    line = 1
+    for i, ch in enumerate(text):
+        if ch == "\n":
+            if in_string:
+                msg = (
+                    f"TOC line {line}: unterminated string — a quoted value may not "
+                    f"span lines. Refusing to parse rather than guess where it ends."
+                )
+                raise TocParseError(msg)
+            line += 1
+            continue
+        if in_string and escaped:
+            escaped = False
+            out[i] = " "
+            continue
+        if in_string and ch == "\\":
+            escaped = True
+            out[i] = " "
+            continue
+        if ch == '"':
+            in_string = not in_string
+            continue
+        if in_string:
+            out[i] = " "
+    if in_string:
+        msg = f"TOC line {line}: unterminated string at end of file"
+        raise TocParseError(msg)
+    return "".join(out)
 
 
 def parse_toc(toc_bytes: bytes) -> ParsedDisc:
-    """Parse cdrdao-format TOC bytes and return disc/track metadata."""
+    """Parse cdrdao-format TOC bytes and return disc/track metadata.
+
+    Raises :class:`TocParseError` on a TOC whose quoting is unparseable — see
+    :func:`mask_quoted`. Structure is read from a masked view; string *values*
+    come from the original text, since the mask blanks exactly what they want.
+    """
     text = toc_bytes.decode("utf-8")
-    markers = list(_TRACK_MARKER_RE.finditer(text))
+    # Structure comes from here; values from `text`. Same length, same offsets,
+    # so a match position in one indexes the other.
+    masked = mask_quoted(text)
+    markers = list(_TRACK_MARKER_RE.finditer(masked))
 
-    disc_section = text[: markers[0].start()] if markers else text
-    disc_title = _first(_TITLE_RE, disc_section)
-    disc_performer = _first(_PERFORMER_RE, disc_section)
+    cut = markers[0].start() if markers else len(text)
+    disc_raw, disc_masked = text[:cut], masked[:cut]
+    disc_title = _first(_TITLE_RE, disc_masked, disc_raw)
+    disc_performer = _first(_PERFORMER_RE, disc_masked, disc_raw)
 
-    catalog_raw = _first_or_none(_CATALOG_RE, disc_section)
+    catalog_raw = _first_or_none(_CATALOG_RE, disc_masked, disc_raw)
     catalog = catalog_raw if catalog_raw and catalog_raw != _ALL_ZEROS_MCN else None
-    disc_id = _first_or_none(_DISC_ID_RE, disc_section)
+    disc_id = _first_or_none(_DISC_ID_RE, disc_masked, disc_raw)
 
     tracks = []
     any_pre_emph = False
@@ -105,7 +185,10 @@ def parse_toc(toc_bytes: bytes) -> ParsedDisc:
     cumulative_out_of_file_silence = 0
     for i, marker in enumerate(markers):
         block_end = markers[i + 1].start() if i + 1 < len(markers) else len(text)
-        block = text[marker.start() : block_end]
+        raw_block = text[marker.start() : block_end]
+        # Structure is read from `block` (masked), values from `raw_block`. Same
+        # slice bounds, so a match in one indexes the other.
+        block = masked[marker.start() : block_end]
         # R14: track-level PRE_EMPHASIS aggregated to disc level. The
         # presence of "NO PRE_EMPHASIS" must not false-match because of
         # the trailing "PRE_EMPHASIS" — match against the cleaned block.
@@ -119,14 +202,16 @@ def parse_toc(toc_bytes: bytes) -> ParsedDisc:
         if not file_m:
             continue
 
-        unicode_m = _TITLE_UNICODE_RE.search(block)
+        # The unicode title is a `//` COMMENT carrying JSON, not a quoted TOC
+        # string, so it survives masking untouched and is read from the raw block.
+        unicode_m = _TITLE_UNICODE_RE.search(raw_block)
         if unicode_m:
             try:
                 track_title = json.loads(unicode_m.group(1))
             except (json.JSONDecodeError, ValueError):
-                track_title = _first(_TITLE_RE, block)
+                track_title = _first(_TITLE_RE, block, raw_block)
         else:
-            track_title = _first(_TITLE_RE, block)
+            track_title = _first(_TITLE_RE, block, raw_block)
 
         # SILENCE/ZERO frames before the FILE line are synthetic (not in the
         # audio file). Add them to this track's slot and to the accumulator
@@ -153,11 +238,11 @@ def parse_toc(toc_bytes: bytes) -> ParsedDisc:
             ParsedTrack(
                 track_number=int(marker.group(1)),
                 title=track_title,
-                performer=_first(_PERFORMER_RE, block, disc_performer),
+                performer=_first(_PERFORMER_RE, block, raw_block, disc_performer),
                 start_frame=start_frame,
                 duration_frames=duration_frames,
                 pregap_frames=pregap_frames,
-                isrc=_first_or_none(_ISRC_RE, block),
+                isrc=_first_or_none(_ISRC_RE, block, raw_block),
                 pre_emphasis=track_pre_emph,
                 copy_permitted=track_copy,
                 index_points=[

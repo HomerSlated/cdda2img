@@ -2,6 +2,9 @@
 test_toc.py — Round-trip and canonical-format tests for generate_toc / parse_toc.
 """
 
+import pytest
+
+from cdda2img import toc_parser
 from cdda2img.barcode import normalize_barcode
 from cdda2img.cdrdao_reader import parsed_to_rbi_disc
 from cdda2img.rbi_format import RBIDisc, RBITocEntry
@@ -486,3 +489,82 @@ def test_isrc_with_injection_payload_is_escaped() -> None:
     disc.tracks[0].isrc = 'X"\n  PERFORMER "Z'
     toc_text = generate_toc(disc).decode("utf-8")
     assert '"Z' not in toc_text
+
+
+# ── TOC injection: quote-aware parsing (SECURITY, 2026-07-29) ────────────────
+#
+# The exposure is the `import` subcommand, which parses foreign cdrdao TOC+BIN
+# images that nothing of ours ever escaped. `escape_toc_string` is on the WRITE
+# side and gives zero protection here. Found while cross-checking AccuDisc's
+# equivalent parser bug, which produced a phantom track, a shifted lead-out and
+# an attacker-chosen ISRC returned as OK.
+
+
+def _one_track_toc(title: str) -> bytes:
+    return (
+        f'CD_DA\n\nCD_TEXT {{ LANGUAGE 0 {{ TITLE "{title}" }} }}\n\n'
+        f"// Track 1\nTRACK AUDIO\nNO COPY\nNO PRE_EMPHASIS\n"
+        f'CD_TEXT {{ LANGUAGE 0 {{ TITLE "{title}" }} }}\n'
+        f'FILE "a.bin" 0 00:04:00\n'
+    ).encode()
+
+
+def test_a_newline_inside_a_quoted_value_is_refused_not_parsed() -> None:
+    """The demonstrated exploit: a payload in a CD_TEXT block changed the parsed
+    title. The line-anchored patterns match inside a quoted string because they
+    have no idea they are in one.
+
+    Refusing beats sanitising: cdrdao strings do not span lines, so an
+    unterminated one means malformed or hostile, and guessing where it was meant
+    to close is how a parser ends up with two readings of the same bytes.
+    """
+    payload = b'CD_DA\n\nCD_TEXT { LANGUAGE 0 { TITLE "Normal\nx" } }\n\n// Track 1\n'
+    with pytest.raises(toc_parser.TocParseError, match="unterminated string"):
+        toc_parser.parse_toc(payload)
+
+
+def test_a_directive_inside_a_quoted_value_is_not_a_directive() -> None:
+    """Structure must come from the masked view, or a value becomes a field.
+
+    START inside a title would have added a phantom pre-gap and silently shifted
+    every downstream offset — the same class as AccuDisc's shifted lead-out.
+    """
+    masked = toc_parser.mask_quoted('TITLE "a START 00:02:00 b"\nSTART 00:01:00\n')
+    assert masked.count("START") == 1  # the real one only
+    assert len(masked) == len('TITLE "a START 00:02:00 b"\nSTART 00:01:00\n')
+
+
+def test_masking_preserves_length_exactly() -> None:
+    """Offsets are load-bearing: parse_toc slices per-track blocks by the byte
+    positions of the `// Track` markers. A mask that changed length would trade an
+    injection bug for a silent mis-slicing bug, which is worse."""
+    for src in (
+        'TITLE "abc"\n',
+        'TITLE ""\n',
+        'ISRC "GBAYE0000123"\nPERFORMER "x"\n',
+        'TITLE "with \\" an escaped quote"\n',
+        "no strings here at all\n",
+    ):
+        assert len(toc_parser.mask_quoted(src)) == len(src)
+
+
+def test_escaped_quotes_do_not_end_the_string() -> None:
+    """cdrdao's lexer treats \\" as a literal quote. Toggling on it would leave
+    the parser's idea of "inside a string" inverted for the rest of the file —
+    every subsequent directive misread, in whichever direction is worse."""
+    masked = toc_parser.mask_quoted('TITLE "a \\" b"\nSTART 00:01:00\n')
+    assert "START" in masked  # the real directive still visible
+    assert masked.count('"') == 2  # both delimiters kept, the escaped one blanked
+
+
+def test_values_still_round_trip_through_the_mask() -> None:
+    """The mask must not eat the data. Values are read from the raw text at the
+    offsets the masked view located, so both halves have to line up."""
+    disc = toc_parser.parse_toc(_one_track_toc("Regular Title"))
+    assert disc.title == "Regular Title"
+    assert disc.tracks[0].title == "Regular Title"
+
+
+def test_an_unterminated_string_at_eof_is_refused() -> None:
+    with pytest.raises(toc_parser.TocParseError, match="end of file"):
+        toc_parser.mask_quoted('TITLE "never closed')
