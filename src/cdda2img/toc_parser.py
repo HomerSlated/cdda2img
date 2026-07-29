@@ -122,36 +122,47 @@ def mask_quoted(text: str) -> str:
     or a value ending in a backslash would appear to swallow its own delimiter.
     """
     out = list(text)
-    in_string = False
-    escaped = False
-    line = 1
-    for i, ch in enumerate(text):
-        if ch == "\n":
-            if in_string:
-                msg = (
-                    f"TOC line {line}: unterminated string — a quoted value may not "
-                    f"span lines. Refusing to parse rather than guess where it ends."
-                )
-                raise TocParseError(msg)
-            line += 1
-            continue
-        if in_string and escaped:
-            escaped = False
-            out[i] = " "
-            continue
-        if in_string and ch == "\\":
-            escaped = True
-            out[i] = " "
-            continue
-        if ch == '"':
-            in_string = not in_string
-            continue
-        if in_string:
-            out[i] = " "
-    if in_string:
-        msg = f"TOC line {line}: unterminated string at end of file"
-        raise TocParseError(msg)
+    base = 0
+    for lineno, line in enumerate(text.split("\n"), start=1):
+        _mask_line(line, base, out, lineno)
+        base += len(line) + 1  # + the newline that split() consumed
     return "".join(out)
+
+
+def _mask_line(line: str, base: int, out: list[str], lineno: int) -> None:
+    """Blank quoted interiors of one line, in place, at offset *base* in *out*.
+
+    Per line rather than per file because a cdrdao string cannot span one — so
+    "unterminated at end of line" and "unterminated at end of file" are the same
+    condition, and the scanner needs no state that outlives a line.
+    """
+    in_string = escaped = False
+    for j, ch in enumerate(line):
+        if escaped:
+            escaped = False
+            out[base + j] = " "
+        elif in_string and ch == "\\":
+            escaped = True
+            out[base + j] = " "
+        elif not in_string and line[j : j + 2] == "//":
+            # A `//` comment runs to end-of-line and cannot contain a TOC string,
+            # so its quotes are not delimiters. Not a convenience: our own
+            # `// TRACK_TITLE_UNICODE:` lines carry JSON, which is full of them,
+            # and a hand-edited comment with a lone quote would otherwise flip
+            # `in_string` and refuse a well-formed file. parse_toc is on the
+            # extract/list/test path, not just import, so a false refusal there
+            # is a regression on our own archives.
+            return
+        elif ch == '"':
+            in_string = not in_string
+        elif in_string:
+            out[base + j] = " "
+    if in_string:
+        msg = (
+            f"TOC line {lineno}: unterminated string — a quoted value may not span "
+            f"lines. Refusing to parse rather than guess where it ends."
+        )
+        raise TocParseError(msg)
 
 
 def parse_toc(toc_bytes: bytes) -> ParsedDisc:

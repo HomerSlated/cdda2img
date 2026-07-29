@@ -566,5 +566,50 @@ def test_values_still_round_trip_through_the_mask() -> None:
 
 
 def test_an_unterminated_string_at_eof_is_refused() -> None:
-    with pytest.raises(toc_parser.TocParseError, match="end of file"):
+    """Same condition as mid-file: a cdrdao string cannot span a line, so the
+    last line's unterminated quote is not a special case."""
+    with pytest.raises(toc_parser.TocParseError, match="unterminated string"):
         toc_parser.mask_quoted('TITLE "never closed')
+
+
+def test_a_comment_is_not_string_context() -> None:
+    """`//` runs to end-of-line and cannot contain a TOC string.
+
+    Our own `// TRACK_TITLE_UNICODE:` lines carry JSON, which is full of quotes.
+    Treating those as delimiters would flip the scanner's idea of "inside a
+    string" and refuse a file we wrote — and parse_toc is on the extract / list /
+    test path, not just import, so that is a regression on our own archives.
+    """
+    src = '// a lone " quote in a comment\nTITLE "real"\nSTART 00:01:00\n'
+    masked = toc_parser.mask_quoted(src)
+    assert "START" in masked  # the real directive survived
+    assert len(masked) == len(src)
+
+
+def test_a_unicode_title_comment_with_embedded_quotes_round_trips() -> None:
+    """The concrete case: json.dumps of a title containing quotes.
+
+    Four raw quote characters on the line, two of them escaped. It balances — but
+    it only balances because the escape handling is right, so this pins both.
+    """
+    from cdda2img.rbi_format import RBIDisc as _D
+    from cdda2img.rbi_format import RBITocEntry as _T
+
+    disc = _D(
+        album="A",
+        artist="B",
+        tracks=[
+            _T(
+                track_number=1,
+                title="She said Ubermensch",
+                performer="B",
+                start_frame=0,
+                duration_frames=7500,
+                pregap_frames=0,
+            )
+        ],
+    )
+    toc = generate_toc(disc, ['She said "Übermensch"'])
+    assert b"TRACK_TITLE_UNICODE" in toc
+    parsed = toc_parser.parse_toc(toc)
+    assert parsed.tracks[0].title == 'She said "Übermensch"'
