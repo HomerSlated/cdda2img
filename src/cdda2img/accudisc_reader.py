@@ -1357,6 +1357,7 @@ def _write_disc_binding(
     speed: int,
     simulate: bool,
     progress_cb: Callable[[int, int], None] | None,
+    cdtext_path: Path | None,
 ) -> tuple[int, str, str | None]:
     """:func:`write_disc` over ``Device.write``, reproducing the CLI's triple.
 
@@ -1386,13 +1387,19 @@ def _write_disc_binding(
     log. Those lines become this function's ``stderr`` return, which is where the
     subprocess path put the same information.
 
-    ``cdtext_path`` is **not wired on either transport**. ``Device.write`` accepts
-    it and lays the blob into the lead-in verbatim, and the subprocess argv has
-    never carried a ``--cdtext`` either, so burns lose CD-Text on both. Stated
-    because it is the *only* reason ``CAVEATS`` is currently unreachable in
-    testing — that is a property of this call, not of the fixture that failed to
-    provoke it — and because "AccuDisc never exposed it" is the wrong conclusion
-    to draw from its absence here.
+    ``cdtext_path`` is a raw READ TOC format-0x05 blob, byte-for-byte as
+    ``read_disc_c2``'s ``output_cdtext`` writes it, laid into the lead-in verbatim.
+    Supported on both transports (``Device.write(cdtext_path=…)`` and the CLI's
+    ``write --cdtext``).
+
+    **No caller supplies it yet, and that is a container limitation rather than an
+    oversight**: the RBI stores CD-Text only as decoded strings inside the TOC
+    text, and the raw pack blob is discarded after ``subq_toc`` has read it. Round-
+    tripping CD-Text through a burn therefore needs a new RBI block, which is
+    spec-before-code work. Wired here so the capability exists, is testable, and
+    does not have to be rediscovered — and because its absence is the only reason
+    ``WriteResult.CAVEATS`` (a SIZE_INFO/TOC track-range disagreement) is
+    unreachable in testing today.
 
     ``rdwr=True``: burning needs a writable handle, and the failure without it
     surfaces at the burn rather than at open.
@@ -1406,6 +1413,7 @@ def _write_disc_binding(
                 str(bin_path),
                 simulate=simulate,
                 speed=speed,
+                cdtext_path=str(cdtext_path) if cdtext_path else None,
                 progress=progress_cb,
             )
     except module.AbiMismatch:
@@ -1441,6 +1449,7 @@ def write_disc(
     speed: int,
     simulate: bool = False,
     progress_cb: Callable[[int, int], None] | None = None,
+    cdtext_path: Path | None = None,
 ) -> tuple[int, str, str | None]:
     """Burn *toc_path* + *bin_path* via ``accudisc write``. Returns (rc, stderr, result).
 
@@ -1468,7 +1477,14 @@ def write_disc(
             module,
             "write",
             lambda: _write_disc_binding(
-                module, device, toc_path, bin_path, speed, simulate, progress_cb
+                module,
+                device,
+                toc_path,
+                bin_path,
+                speed,
+                simulate,
+                progress_cb,
+                cdtext_path,
             ),
         )
         if served is not None:
@@ -1488,7 +1504,21 @@ def write_disc(
     ]
     if simulate:
         cmd.append("--simulate")
+    if cdtext_path is not None:
+        cmd += ["--cdtext", str(cdtext_path)]
 
+    return _run_write_subprocess(cmd, progress_cb)
+
+
+def _run_write_subprocess(
+    cmd: list[str], progress_cb: Callable[[int, int], None] | None
+) -> tuple[int, str, str | None]:
+    """Run a built ``accudisc write`` argv, returning ``(rc, stderr, result_token)``.
+
+    stderr goes to a temp file, never a pipe, so a chatty burn cannot deadlock the
+    single-threaded stdout reader — the machine channel is what this loop is
+    reading, and blocking on the human one would stall the burn's progress.
+    """
     result_token: str | None = None
     with tempfile.TemporaryFile() as err_fp:
         proc = subprocess.Popen(  # noqa: S603 — snapshot/PATH binary, fixed argv

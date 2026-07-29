@@ -1724,6 +1724,7 @@ def _do_write(device: _FakeWriteDevice, **kw: Any) -> tuple[int, str, str | None
         kw.pop("speed", 8),
         kw.pop("simulate", False),
         kw.pop("progress_cb", None),
+        kw.pop("cdtext_path", None),
     )
 
 
@@ -1930,3 +1931,44 @@ def test_verdict_class_normalises_every_shape_to_one_string() -> None:
     assert ar._verdict_class("duplicate:40") == "duplicate"  # CLI form
     assert ar._verdict_class("DUPLICATE") == "duplicate"  # binding form
     assert ar._verdict_class(None) is None  # engine did not judge
+
+
+def test_write_passes_cdtext_path_when_given() -> None:
+    """The raw lead-in blob, laid in verbatim. Supported on both transports.
+
+    No caller supplies it yet — the RBI keeps CD-Text only as decoded strings in
+    the TOC text and discards the raw packs, so round-tripping it through a burn
+    needs a new container block. Covered here so the capability cannot silently
+    rot before that lands.
+    """
+    dev = _FakeWriteDevice()
+    _do_write(dev, cdtext_path=Path("/x/a.cdtext"))
+    assert dev.kwargs["cdtext_path"] == "/x/a.cdtext"
+
+    dev = _FakeWriteDevice()
+    _do_write(dev)
+    assert dev.kwargs["cdtext_path"] is None
+
+
+def test_write_subprocess_carries_cdtext_and_simulate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The argv half of the same contract."""
+    seen: list[list[str]] = []
+
+    def _fake(cmd: list[str], _cb: object) -> tuple[int, str, str | None]:
+        seen.append(cmd)
+        return 0, "", "ok"
+
+    monkeypatch.setattr(ar, "_run_write_subprocess", _fake)
+    monkeypatch.setenv(ar.TRANSPORT_ENV, "subprocess")
+    ar.write_disc(
+        "/dev/sr1",
+        Path("/x/a.toc"),
+        Path("/x/a.bin"),
+        speed=8,
+        simulate=True,
+        cdtext_path=Path("/x/a.cdtext"),
+    )
+    assert "--simulate" in seen[0]
+    assert seen[0][seen[0].index("--cdtext") + 1] == "/x/a.cdtext"

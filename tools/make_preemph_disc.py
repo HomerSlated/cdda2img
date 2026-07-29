@@ -1,8 +1,12 @@
 #!/usr/bin/env python3
 """make_preemph_disc.py — generate a PRE_EMPHASIS CD-DA test image (cdrdao TOC+BIN).
 
-Builds a small synthetic audio disc whose every track carries the ``PRE_EMPHASIS``
-flag, for validating the pipeline's pre-emphasis handling end-to-end. The image is
+Builds a small synthetic audio disc for validating the pipeline's pre-emphasis
+handling end-to-end. Tracks **alternate** ``PRE_EMPHASIS`` and ``NO
+PRE_EMPHASIS``: a disc where every track is flagged cannot distinguish a working
+detector from one that returns True unconditionally, since both score 100%.
+Alternating makes a false positive and a false negative separately visible. The
+image is
 a cdrdao ``.toc`` + raw ``.bin`` (s16be, cdrdao's byte order), which cdemu loads
 directly into a virtual drive:
 
@@ -73,12 +77,19 @@ def build(outdir: Path, tracks: int, seconds: int) -> Path:
         for hz in freqs:
             fp.write(_sine_track_s16be(seconds, hz))
 
+    # ALTERNATING, not all-on. A disc where every track is flagged cannot tell a
+    # working detector from one that returns True unconditionally — both score
+    # 100%. Mixing the flag is what makes the fixture able to be wrong in the way
+    # the code can be wrong: track 1 on, track 2 off, track 3 on, so a false
+    # positive and a false negative are separately visible, and the disc-level
+    # aggregate (any track flagged → True) still has a True case to aggregate.
     lines = ["CD_DA", ""]
     for t in range(tracks):
+        flagged = t % 2 == 0
         lines += [
-            f"// Track {t + 1} — PRE_EMPHASIS",
+            f"// Track {t + 1} — {'PRE_EMPHASIS' if flagged else 'NO PRE_EMPHASIS'}",
             "TRACK AUDIO",
-            "PRE_EMPHASIS",
+            "PRE_EMPHASIS" if flagged else "NO PRE_EMPHASIS",
             "TWO_CHANNEL_AUDIO",
             f'FILE "{bin_path.name}" {_msf(t * seconds)} {_msf(seconds)}',
             "",
