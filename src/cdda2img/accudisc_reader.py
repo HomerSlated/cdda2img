@@ -1326,6 +1326,14 @@ def _write_disc_binding(
     log. Those lines become this function's ``stderr`` return, which is where the
     subprocess path put the same information.
 
+    ``cdtext_path`` is **not wired on either transport**. ``Device.write`` accepts
+    it and lays the blob into the lead-in verbatim, and the subprocess argv has
+    never carried a ``--cdtext`` either, so burns lose CD-Text on both. Stated
+    because it is the *only* reason ``CAVEATS`` is currently unreachable in
+    testing — that is a property of this call, not of the fixture that failed to
+    provoke it — and because "AccuDisc never exposed it" is the wrong conclusion
+    to draw from its absence here.
+
     ``rdwr=True``: burning needs a writable handle, and the failure without it
     surfaces at the burn rather than at open.
     """
