@@ -399,7 +399,7 @@ CONFIG_SCHEMA = Schema(
         "embedart": FieldSpec((bool,), default=False),
         "recovery_passes": FieldSpec((int,), default=3),
         "c2_recovery": FieldSpec(
-            (str,), default="off", enum=frozenset({"auto", "on", "off"})
+            (str,), default="auto", enum=frozenset({"auto", "on", "off"})
         ),
         "preferred_country": FieldSpec((list,), default=(), item_types=(str,)),
         # §9.4 rung 3: the profile used when no --profile and no --ad-* flag is given.

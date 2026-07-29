@@ -417,11 +417,30 @@ def test_recovery_passes_out_of_range_now_raises(
         load_config()
 
 
-def test_c2_recovery_defaults_to_off(
+def test_c2_recovery_defaults_to_auto(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Flipped from "off" 2026-07-29 (user-authorised 2026-07-05).
+
+    The setting now controls exactly one thing: whether the C2 bitmap is WRITTEN
+    to a scratch file. C2 pointers are requested on the wire on every read
+    regardless — the CLI sets ACCUDISC_C2_PTRS unconditionally and the binding
+    matches it — so the sector is 2646 bytes either way and the read costs the
+    same. "off" therefore bought ~48 MB of scratch and gave up the erasure boost
+    that roughly doubles what ctanalyse can reconstruct.
+    """
     cfg = tmp_path / "cfg.toml"
     cfg.write_text("")
+    monkeypatch.setattr("cdda2img.config.config_path", lambda: cfg)
+    assert load_config().c2_recovery == "auto"
+
+
+def test_c2_recovery_off_is_still_honoured(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A default flip must not become a removal — the escape hatch stays."""
+    cfg = tmp_path / "cfg.toml"
+    cfg.write_text('c2_recovery = "off"\n')
     monkeypatch.setattr("cdda2img.config.config_path", lambda: cfg)
     assert load_config().c2_recovery == "off"
 

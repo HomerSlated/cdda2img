@@ -2,7 +2,17 @@
 
 ## Open
 
-### Full API migration — our *use* of the CLI is deprecated (2026-07-27)
+### ✅ DONE 2026-07-29 — Full API migration: every call is on the binding
+
+All three calls (`read_disc_c2`, `write_disc`, `speed_ladder_rows`) are on the
+binding, and it imports in this project's own 3.10 venv — AccuDisc shipped an abi3
+extension (`py_limited_api`) so one artefact serves 3.10-3.14. Validated: whole-disc
+A/B/A (binding 112.69 s vs subprocess 112.75 s against a 3.68 s noise floor, PCM and
+C2 byte-identical), ladder cross-check to <=0.02x on all seven rungs, CD-Text capture
+byte-identical across transports, and a CDEmu burn round-tripped byte-identical.
+Remaining: a burn on physical media (needs a blank CD-R).
+
+#### Original item (2026-07-27)
 
 **Draft. Work starts next session.** The three calls left on the subprocess in the
 2026-07-27 default flip (`read_disc_c2`, `write_disc`, `speed_ladder_rows`) must move
@@ -129,7 +139,14 @@ Still true: **do not remove the subprocess code paths until all three are migrat
 A/B'd on media.** The reason is now "the acceptance instrument needs them", not "we are
 about to lose them".
 
-### AccuDisc migration §5 Phase E — dead-module removal + docs (2026-07-26)
+### ✅ DONE 2026-07-29 — Phase E: modules already gone; the real find was the backup manifest
+
+All §3 modules were already deleted and `sync.py` no longer warns. Checking that turned up
+worse: `scripts/backup.manifest` enumerated paths and had fallen ~70 files behind — 25 of 57
+source modules (including `accudisc_reader.py`), 44 of 58 tests and 38 of ~40 tools were
+outside every backup. `_load_manifest` now expands globs; 97 files -> 211.
+
+#### Original item (2026-07-26)
 
 The last unfinished phase of `accudisc-migration-plan.md`. §9 (validator, profiles,
 strict config) is complete and the snapshot pin is retired, so the soak condition is met.
@@ -139,7 +156,15 @@ Delete the §3 modules, update CLAUDE.md, close the plan.
 `Skipping missing: disc_reader.py` on every run — its manifest still lists modules that
 were deleted, which is the tidy-up this phase is for.
 
-### §9.3 speed ladder — the rule is settled; implementation pending (2026-07-26)
+### ✅ DONE 2026-07-29 — §9.3 speed ladder: admission now keys on AccuDisc's verdict
+
+Shipped. `req == page2a` gave `[48, 40, 32, 24, 8, 4]` on Tracy; the verdict rule gives
+`[40, 32, 24, 8, 4]`, matching AccuDisc's own `ladder admitted=` line. Three rules in
+priority order (verdict, then `req == page2a`, then `measured`), gated on "some row was
+**judged**" rather than "some row has a verdict" — `unknown` is truthy, and
+presence-gating would send a `points=1` probe to an empty ladder and the degrade guard.
+
+#### Original item (2026-07-26)
 
 Documented in `accudisc-migration-plan.md` §9.3 and the `drive_speed.admitted_ladder`
 docstring. **No fix shipped yet, but the design question is closed** — Keith ruled it
@@ -211,7 +236,16 @@ applies to any rule spanning the full ladder: timed window length is `min(req*75
 so 48/40/32× are length-comparable at 2250 sectors but 24× times 1800, 16× 1200, 8× 600,
 4× 300. Scope any collapse rule to length-comparable rungs.
 
-### Two ladder implementations with different admission rules (2026-07-26)
+### ✅ DONE 2026-07-29 — reconciled; past runs fenced, not re-indexed
+
+`tools/recovery_bench.py:probe_ladder` now delegates to `drive_speed.admitted_ladder`,
+which also stops it bypassing the seam (it spawned `accudisc` directly, so after the
+binding migration it would have measured the subprocess while the rip path measured the
+library). **Past runs are NOT re-indexed** — relabelling archived measurements changes
+what they mean, silently. New runs carry `ladder_rule = 'verdict@2026-07-29'` in the file
+header; runs without that key predate the change and are fenced by its absence.
+
+#### Original item (2026-07-26)
 
 `drive_speed.admitted_ladder` admits `page2a` only where `req == page2a`;
 `tools/recovery_bench.py:probe_ladder` admits **every** non-zero `page2a` regardless of
@@ -353,7 +387,14 @@ looking for. Two unit tests now pin the domain contract from both sides
 PCM buffer), because the hazard is a future "fix" that narrows the Python side and applies
 the shift twice.
 
-### Whole-disc AR miss disables per-track recovery (2026-07-24)
+### ✅ DONE 2026-07-29 — diagnosed (not silently repaired)
+
+`_ar_has_total_mismatch` + `_diagnose_total_ar_miss` run `detect_offset` on an all-tracks
+miss and record `ar_total_miss` / `ar_offset_candidates` / `ar_offset_suggests` in PROV.
+**Audio untouched by design**: a widely-pressed disc verifies at several offsets at once, so
+picking the winner would be choosing one pressing's cohort and calling it truth.
+
+#### Original item (2026-07-24)
 
 Same report, §2b. The Step-D CD-R readback contained **15 stereo samples of a transient read
 error** at LBA 327495 that two re-reads did not reproduce. Whether C2 flagged it is *not
@@ -482,7 +523,14 @@ CD-Text length pads for npacks 1..64).
 > `stanley_road__fulltoc_12tracks.bin`, 170 B — kept deliberately as a marker of the bug).
 > From `e9df8c7` the artefact is clean at source and file size is a safe comparison again.
 
-### SECURITY AUDIT — `toc_parser.py` accepts untrusted foreign TOCs (2026-07-24)
+### ✅ DONE 2026-07-29 — quote-aware parse shipped
+
+`mask_quoted()` blanks quoted-string interiors while preserving length exactly (offsets
+are load-bearing — `parse_toc` slices per-track blocks by marker byte positions). Structure
+reads from the masked view, values from the original text at the located offsets. A newline
+inside an open quote is a hard `TocParseError`. `escape_toc_string` kept on the write side.
+
+#### Original item (2026-07-24)
 
 Found while cross-checking AccuDisc's parser injection report. `toc_parser.py` is
 regex-based with `re.MULTILINE` and **no quote-context tracking**: `_START_RE`,
@@ -508,7 +556,24 @@ defence-in-depth rather than load-bearing — but on **this** (import/read) side
 still the primary guard: `accudisc_write()` never runs on an imported foreign `.toc`.
 Cross-project contract, recorded in `accudisc-migration-plan.md` §10.1.
 
-### NEXT SESSION — USER-AUTHORIZED (2026-07-05): default flip + pre-emphasis virtual disc
+### ✅ DONE 2026-07-29 — both parts, and part 1's premise had drifted
+
+**Part 1 (default flip) shipped, but not as written.** The item says "c2read becomes the
+normal-path primary read engine" — c2read was retired in July and AccuDisc is now the only
+engine, so that decision had already been taken by other means. What actually remained was
+narrower: `c2_recovery` now controls only whether the C2 bitmap is **written to a scratch
+file**. C2 pointers are requested on the wire on every read regardless (`cli/main.c:1176`
+sets `ACCUDISC_C2_PTRS` unconditionally; the binding matches), so the sector is 2646 B either
+way and the read costs the same. `off` bought ~48 MB of scratch and gave up the erasure boost
+that roughly doubles what ctanalyse can reconstruct. Default is now `auto`; `off` still honoured.
+
+**Part 2 (pre-emphasis virtual disc) shipped, with the fixture corrected.**
+`make_preemph_disc.py` flagged *every* track, which cannot distinguish a working detector from
+one that always returns True. Tracks now alternate. CDEmu + `toc_parity` -> `PARITY: ALL MATCH`
+against `cdrdao read-toc`, and the pattern itself asserted separately
+(`[True, False, True, False]`) since agreement alone could mean both sides wrong together.
+
+#### Original item (2026-07-05)
 
 The user gave the go-ahead for both; deferred to next session for execution.
 
@@ -732,7 +797,11 @@ log below.
 
 ### Minor / pre-existing
 
-- **AcoustID `_chain_to_mb` reads an empty release-group stub.** On the recording
+- **AcoustID `_chain_to_mb` reads an empty release-group stub.** *(2026-07-29: deferral
+  unchanged — the fix is one extra request per row, the cost declined for Trk, and the
+  full-release fetch on select recovers both fields. The CODE now states the
+  impossibility at the read site, because "populated from a stub that is always empty"
+  is indistinguishable from "populated" at the call site.)* On the recording
   endpoint, `inc=releases` does *not* embed the release-group's fields, so
   `rg.get("id")` and `rg.get("first-release-date")` are always None on the AcoustID
   path — `mb_release_group_id` and `original_release_date` have never populated there.

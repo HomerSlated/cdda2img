@@ -236,7 +236,7 @@ class Config:
     # metadata assembled by subq_toc, so no second cdrdao read-toc pass); the erasure
     # boost only helps discs too damaged for error-only ctanalyse. Default off is
     # conservative -- opt in for a troublesome disc, or for production testing.
-    c2_recovery: str = "off"
+    c2_recovery: str = "auto"
     # Ordered priority ranking of release-country codes for the release-selection
     # rung (rbi_spec.md §6.3.2; trust_model_design.md §10.2). NOT a filter: listed
     # codes rank in order, unlisted codes share the lowest rank, empty = key skipped.

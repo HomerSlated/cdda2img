@@ -123,8 +123,16 @@
 # can reconstruct. C2 is only a *modifier* to ctanalyse, so "off" never disables
 # recovery -- it just skips the erasure boost (error-only ctanalyse, then the speed
 # ladder). "auto" uses C2 only when the drive both advertises and functionally
-# supports it; "on" forces it; "off" never uses it. Default: off
-# c2_recovery = "off"
+# supports it; "on" forces it; "off" never uses it. Default: auto
+#
+# "off" costs almost nothing to reverse and buys almost nothing: C2 pointers are
+# requested on the wire on EVERY read regardless of this setting (the CLI sets
+# ACCUDISC_C2_PTRS unconditionally, and the binding matches it), so the sector is
+# 2646 bytes either way and the read takes exactly as long. All "off" skips is
+# WRITING the bitmap to a scratch file -- about 48 MB per disc, deleted with the
+# rest of the temp directory. Set it "off" only if that scratch write is itself
+# the problem.
+# c2_recovery = "auto"
 
 # Per-drive read and write offsets.
 # read_offset is stored automatically after AccurateRip confirmation.

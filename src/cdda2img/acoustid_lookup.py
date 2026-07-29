@@ -155,6 +155,18 @@ def _chain_to_mb(top: list, *, verbose: bool = False) -> list[DiscMeta]:
             if not rid or rid in seen_releases:
                 continue
             seen_releases.add(rid)
+            # The release-group stub comes back EMPTY under `inc=releases` on the
+            # recording endpoint, so both fields read from it below are `None` on
+            # every AcoustID row — confirmed live 2026-06-09 and not a bug to go
+            # hunting. Read rather than hardcoded to None so the path starts
+            # working if MB ever embeds it, but stated here because "populated
+            # from a stub that is always empty" is indistinguishable from
+            # "populated" at the call site, and the next reader would otherwise
+            # either chase a phantom or trust an always-absent value.
+            #
+            # Not fixed by a per-release follow-up call: that is one extra request
+            # per row, the same cost declined for the Trk column, and the
+            # full-release fetch on select recovers both fields anyway.
             rg = release.get("release-group") or {}
             date = release.get("date") or ""
             original_date = rg.get("first-release-date") or ""
