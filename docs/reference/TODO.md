@@ -2,6 +2,98 @@
 
 ## Open
 
+### ⭐ LIVE — outstanding work as of 2026-07-29 (evening)
+
+Consolidated from both projects. AccuDisc is a peer project with its own
+`docs/reference/TODO.md`; items owned by them are listed here only where our work
+depends on them. Owner: **C2I** = cdda2img, **AD** = AccuDisc, **K** = Keith.
+
+#### Blocked on AccuDisc's `make install` reaching this machine
+
+AccuDisc pushed `make install` + a wheel + `accudisc 0.4.0` on 2026-07-29. Nothing
+below can start until the library and binding are actually installed here, because
+every step assumes the binding resolves without our `tools/` shim.
+
+1. **[C2I] Install and verify.** `cmake --build build --target wheel` produces a
+   `cp310-abi3-linux_x86_64` wheel; install it alongside their `make install`. The
+   wheel's RUNPATH is the configured install prefix, so wheel and install belong
+   together — installing one against a different prefix reproduces the failure the
+   staging split exists to prevent.
+2. **[C2I] Set `ACCUDISC_REQUIRE_INSTALLED=1` in whatever installs the binding.**
+   Their discovery order is `ACCUDISC_INCLUDE_DIR`+`ACCUDISC_LIB_DIR` → `pkg-config`
+   → their checkout. `pkg-config` wins **when it answers**, and on a machine that has
+   never installed it is silent, so the checkout fallback wins by default. That is how
+   our 2026-07-29 pipx probe ended up linked to their build tree while reporting
+   success. The env var turns that fallback into a build-time error.
+3. **[C2I] Retire the shim.** Delete `tools/accudisc/accudisc` and
+   `tools/accudisc/pybinding`, delete `_binding_search_path()`, and declare `accudisc`
+   as a real dependency. `cffi` then arrives as *its* dependency and the stopgap line
+   in our dev group goes.
+4. **[C2I] Packaging.** `pipx install .` + `pipx inject cdda2img <accudisc binding>`
+   is proven end-to-end (binding active, `transport: binding`, real archive rendered).
+   A `make install` target should wrap those two commands rather than hand-rolling a
+   site-packages installer. **Do not** mix distro packages with the pipx venv: five
+   deps are PyPI-only regardless (`av`, `blake3`, `ortools`, `pyebur128`,
+   `questionary`), so the mixed model buys fragility and no coverage. Full audit in
+   `private/DEPS.md`.
+5. **[K/AD] `setcap` the installed binary.** Enabled in their install
+   (`ACCUDISC_SETCAP_ON_INSTALL`) but not in effect until the binaries actually
+   invoked come from the install. Until then their rebuild drops the capability from
+   the inode *we* execute — a **measurement-validity** defect, not an inconvenience: a
+   rip with the vendor path disarmed is a different configuration, so any bench run
+   straddling a rebuild compares two configurations while looking like one series.
+
+#### Then, and only then
+
+6. **[C2I] Retire the subprocess transport entirely** (Keith's ruling, 2026-07-29).
+   Sequencing is load-bearing — retiring before the install lands leaves cdda2img
+   unrunnable anywhere the binding is missing. Removes: the subprocess arm of
+   `accudisc_read()`, `_run_write_subprocess`, `CDDA2IMG_ACCUDISC_TRANSPORT`,
+   `_try_binding`'s decline path, `active_transport()` in the RLOG engine line, the
+   `AbiMismatch`→degrade path (becomes a hard raise), exit-code translation, and both
+   two-carrier instruments (`tools/disc_ab.py`, `tools/binding_ab.py`).
+   **The largest single piece is `conftest._pin_accudisc_transport`** — the whole suite
+   currently runs against the carrier being deleted, not the env var.
+   `test_no_module_outside_the_seam_invokes_accudisc` **stays**: it becomes trivially
+   true, which is exactly when a guard is worth keeping.
+   The acceptance instrument is deliberately being deleted with it; the counter-argument
+   was put and the trade taken, because the carrier question is settled on banked
+   evidence (112.69 s vs 112.75 s, PCM and C2 byte-identical).
+
+#### Blocked on media
+
+7. **[K] A real burn.** `write_disc` is exercised only against a CDEmu virtual writer —
+   that proves the return path, byte layout and TOC grammar, not laser timing, DAO
+   lead-in or media quality. Needs a blank CD-R. `--simulate` needs one too.
+8. **[K] One-sided (pre-boundary) static-Q clustering** — needs a disc with a denser
+   static population than Tracy's 1314. See the dedicated item below.
+
+#### Independent of all the above
+
+9. **[C2I] B-7 menu alternatives UI** — the confirmed destination for the trust model.
+   The §11.5 prerequisite is half-shipped (`Resolution.contenders` + `skipped`,
+   `6154526`); what remains is routing the adapter's invalid-ISRC / "Unknown Artist"
+   drops through `skipped`, which needs propose-then-skip instead of filter-first.
+   **Wants a design conversation before code.**
+10. **[C2I] B-4 post-soak cleanup** — delete the legacy merge chain. Needs the two
+    mid-pipeline consumers decoupled first; retires `test_shadow_equivalence`.
+11. **[C2I] `pyproject.toml` dependency hygiene** — `textual` is declared but imported
+    by nothing shipped (only `scratch/test_tui.py`; the app's TUI is `terminal_ui.py`,
+    pure stdlib), and `wayback` is used only by `tools/wayback/fetch.py` so it belongs
+    in a tools group, not `[project.dependencies]`. `ortools` is the heaviest wheel in
+    the set and serves one batching strategy via a top-level import — worth a look at
+    making it optional, which would also make it lazily importable.
+12. **[C2I] `CLAUDE.md` drift** — the `track_preview.py` entry still says cd-paranoia;
+    it uses `read_span` through the seam.
+13. **[AD, we supply evidence] Their task 0 — RECOVERED sectors returned wrong, 9/9.**
+    Our report, their `[P1]`, still undiagnosed. H3 (coordinate-system mismatch) was
+    eliminated 2026-07-29 from artefacts we hold: the shift is exactly one sector, the
+    read offset is +30 samples = 0.051 sectors, and the CTDB image-domain shift is zero
+    on Tracy because track 1 carries no `START` line. Field is H1 (storage off by one)
+    vs H2 (`RECOVERED` simply false). Discriminator handed to them and device-free:
+    they report **10 flagged map bytes for 9 corrupt sectors** — where the tenth sits
+    separates the two.
+
 ### ✅ DONE 2026-07-29 — Full API migration: every call is on the binding
 
 All three calls (`read_disc_c2`, `write_disc`, `speed_ladder_rows`) are on the
