@@ -311,6 +311,47 @@ def _linked_library(origin: Path) -> str:
     return ""
 
 
+def _binding_library(package_dir: Path) -> str:
+    """Which ``libaccudisc`` the binding's compiled extension resolves to.
+
+    The extension has to be found first. Asking ``ldd`` about the package's
+    ``__init__.py`` — which is what ``spec.origin`` names — yields "not a dynamic
+    executable" and an empty answer, so the library line was silently never
+    emitted for an *installed* binding. That is the one configuration where it
+    matters most: a pipx-injected wheel is exactly the artefact whose linkage
+    §123.2 turned out to be wrong while every check said fine.
+
+    The name is globbed rather than assumed: it carries an ABI tag
+    (``_accudisc.abi3.so`` here, but ``_accudisc.cpython-314-x86_64-linux-gnu.so``
+    for a non-abi3 build).
+    """
+    for so in sorted(package_dir.glob("_accudisc*.so")):
+        lib = _linked_library(so)
+        if lib:
+            return lib
+    return ""
+
+
+def _library_skew(binding_lib: str, cli_lib: str) -> str:
+    """A note when the binding and the CLI resolve different ``libaccudisc``es.
+
+    Deliberately not a ``WARN``. On a development box the two *should* differ the
+    moment a split install exists — an injected wheel is pinned to the install
+    prefix at build time, the symlinked CLI tracks a build tree that moves on
+    every compile — so warning would cry wolf at the normal state. What is not
+    acceptable is the report implying there is one library when there are two.
+
+    Silent when either side is unknown: an empty string means ``ldd`` could not
+    answer, and "unknown" must not be rendered as "differs".
+    """
+    if not binding_lib or not cli_lib or binding_lib == cli_lib:
+        return ""
+    return (
+        f"\n      NOTE: the CLI resolves a different libaccudisc ({cli_lib})."
+        "\n      Expected after a split install; `pipx inject --force` realigns them."
+    )
+
+
 def _check_accudisc() -> list[Result]:
     """The AccuDisc engine: the binding, its cffi runtime, and the binary.
 
@@ -332,6 +373,18 @@ def _check_accudisc() -> list[Result]:
         )
     )
 
+    # Resolved first, because the binding's line compares against it. The two
+    # routes to the engine can resolve two *different* libraries, and after a
+    # split install (AccuDisc §cp.4) they normally do: an injected wheel's
+    # RUNPATH is the install prefix, while the development symlink stays on the
+    # build tree — which moves on every compile, with no event marking the drift.
+    # Both are individually correct, which is why only reporting one of them is
+    # the failure mode rather than either being wrong.
+    resolved = _resolve_engine_binary()
+    on_path = shutil.which("accudisc")
+    binary = resolved if resolved != "accudisc" else on_path
+    cli_lib = _linked_library(Path(binary)) if binary is not None else ""
+
     spec = None
     try:
         spec = importlib.util.find_spec("accudisc")
@@ -341,10 +394,11 @@ def _check_accudisc() -> list[Result]:
 
     if installed and spec is not None and spec.origin is not None:
         origin = Path(spec.origin)
-        lib = _linked_library(origin)
+        binding_lib = _binding_library(origin.parent)
         detail = f"{_version('accudisc')} at {origin.parent}"
-        if lib:
-            detail += f"\n      libaccudisc -> {lib}"
+        if binding_lib:
+            detail += f"\n      libaccudisc -> {binding_lib}"
+        detail += _library_skew(binding_lib, cli_lib)
         results.append(Result("accudisc (binding)", OK, detail))
     else:
         shim = _dev_shim_path()
@@ -353,12 +407,19 @@ def _check_accudisc() -> list[Result]:
             # appends this path at import time; on any other machine it is
             # simply absent. Rendering this as OK is the exact false pass that
             # left the binding transport inert for two days.
+            binding_lib = _binding_library(shim / "accudisc")
+            detail = (
+                "not installed — resolved at runtime only via the development"
+                f"\n      shim {shim}. Not portable to another system."
+            )
+            if binding_lib:
+                detail += f"\n      libaccudisc -> {binding_lib}"
+            detail += _library_skew(binding_lib, cli_lib)
             results.append(
                 Result(
                     "accudisc (binding)",
                     WARN,
-                    f"not installed — resolved at runtime only via the development"
-                    f"\n      shim {shim}. Not portable to another system.",
+                    detail,
                     remedy="install AccuDisc's Python binding (see its `make install`)",
                 )
             )
@@ -375,10 +436,6 @@ def _check_accudisc() -> list[Result]:
     # Which one *runs*, not merely whether one exists. The reader prefers the
     # `tools/accudisc/` symlink over `$PATH`, so `shutil.which` can name a
     # perfectly good system install that is being bypassed — and did, here.
-    resolved = _resolve_engine_binary()
-    on_path = shutil.which("accudisc")
-    binary = resolved if resolved != "accudisc" else on_path
-
     if binary is None:
         results.append(
             Result(
@@ -390,7 +447,7 @@ def _check_accudisc() -> list[Result]:
         )
     else:
         detail = binary
-        lib = _linked_library(Path(binary))
+        lib = cli_lib
         if lib:
             detail += f"\n      libaccudisc -> {lib}"
         if on_path is not None and on_path != binary:

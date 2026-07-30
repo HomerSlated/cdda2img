@@ -273,6 +273,48 @@ def test_doctor_does_not_report_the_dev_shim_as_ok(
     assert "shim" in binding.detail
 
 
+def test_binding_library_asks_the_extension_not_the_python_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`spec.origin` names `__init__.py`, which `ldd` cannot answer about.
+
+    Passing it straight through returned "not a dynamic executable" and an empty
+    string, so the `libaccudisc ->` line was silently never emitted for an
+    *installed* binding — the one configuration where it matters most, since a
+    pipx-injected wheel is exactly the artefact whose linkage was wrong in
+    §123.2 while every check reported success.
+    """
+    pkg = tmp_path / "accudisc"
+    pkg.mkdir()
+    (pkg / "__init__.py").touch()
+    (pkg / "_accudisc.abi3.so").touch()
+
+    asked: list[Path] = []
+
+    def fake(origin: Path) -> str:
+        asked.append(origin)
+        return "/prefix/lib64/libaccudisc.so.0"
+
+    monkeypatch.setattr(depcheck, "_linked_library", fake)
+
+    assert depcheck._binding_library(pkg) == "/prefix/lib64/libaccudisc.so.0"
+    assert [p.name for p in asked] == ["_accudisc.abi3.so"]
+
+
+def test_library_skew_is_silent_unless_both_are_known_and_differ() -> None:
+    """ "Unknown" must not render as "differs".
+
+    An empty string means `ldd` declined to answer, which is not evidence of a
+    mismatch — reporting one would manufacture a discrepancy out of a missing
+    measurement.
+    """
+    assert "different" in depcheck._library_skew("/a/lib.so.0", "/b/lib.so.0")
+    assert depcheck._library_skew("/a/lib.so.0", "/a/lib.so.0") == ""
+    assert depcheck._library_skew("", "/b/lib.so.0") == ""
+    assert depcheck._library_skew("/a/lib.so.0", "") == ""
+    assert depcheck._library_skew("", "") == ""
+
+
 def test_a_bare_shim_directory_is_not_evidence_of_a_binding(tmp_path: Path) -> None:
     """The shim must hold the package, not merely exist.
 
