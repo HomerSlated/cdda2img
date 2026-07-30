@@ -249,6 +249,26 @@ def _dev_shim_path() -> Path | None:
     return shim if shim.is_dir() else None
 
 
+def _resolve_engine_binary() -> str:
+    """The ``accudisc`` the application will actually run.
+
+    A deliberate duplicate of ``accudisc_reader._resolve_accudisc``, which this
+    module cannot call: that one is on the far side of the heavy imports this
+    whole file exists to stay clear of. The copy is pinned to the original by
+    ``tests/test_depcheck.py::test_engine_resolution_matches_the_reader``,
+    because a report that silently stopped agreeing with the reader would be
+    the very defect this function was added to fix, wearing a new cause.
+
+    Reporting ``shutil.which`` instead was wrong, and measurably so on the
+    development box: ``which`` answered ``/usr/local/bin/accudisc`` while the
+    reader ran ``tools/accudisc/accudisc`` — different sha256, different
+    ``RUNPATH``, resolving different ``libaccudisc.so.0`` files. Both work, so
+    nothing failed; ``doctor`` simply named an artefact that never runs.
+    """
+    local = Path(__file__).parent.parent.parent / "tools" / "accudisc" / "accudisc"
+    return str(local) if local.is_file() else "accudisc"
+
+
 def _linked_library(origin: Path) -> str:
     """Which ``libaccudisc`` the compiled binding actually resolves to.
 
@@ -334,17 +354,34 @@ def _check_accudisc() -> list[Result]:
                 )
             )
 
-    binary = shutil.which("accudisc")
-    results.append(
-        Result("accudisc (binary)", OK, binary)
-        if binary
-        else Result(
-            "accudisc (binary)",
-            MISSING,
-            "fallback transport, used when the binding is unavailable",
-            remedy="install AccuDisc (https://github.com/HomerSlated/accudisc)",
+    # Which one *runs*, not merely whether one exists. The reader prefers the
+    # `tools/accudisc/` symlink over `$PATH`, so `shutil.which` can name a
+    # perfectly good system install that is being bypassed — and did, here.
+    resolved = _resolve_engine_binary()
+    on_path = shutil.which("accudisc")
+    binary = resolved if resolved != "accudisc" else on_path
+
+    if binary is None:
+        results.append(
+            Result(
+                "accudisc (binary)",
+                MISSING,
+                "fallback transport, used when the binding is unavailable",
+                remedy="install AccuDisc (https://github.com/HomerSlated/accudisc)",
+            )
         )
-    )
+    else:
+        detail = binary
+        lib = _linked_library(Path(binary))
+        if lib:
+            detail += f"\n      libaccudisc -> {lib}"
+        if on_path is not None and on_path != binary:
+            # Not an error — the symlink is the documented development
+            # arrangement — but invisible otherwise, and "an install exists and
+            # is not the one being used" is precisely the fact a dependency
+            # report is for.
+            detail += f"\n      shadows the $PATH install at {on_path}"
+        results.append(Result("accudisc (binary)", OK, detail))
 
     if not installed and binary is None and _dev_shim_path() is None:
         results.append(

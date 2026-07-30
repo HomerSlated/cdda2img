@@ -273,6 +273,60 @@ def test_doctor_does_not_report_the_dev_shim_as_ok(
     assert "shim" in binding.detail
 
 
+def test_engine_resolution_matches_the_reader() -> None:
+    """`depcheck` must name the same `accudisc` the reader will actually run.
+
+    The logic is duplicated rather than imported, because `accudisc_reader` sits
+    behind the heavy imports `depcheck` exists to stay clear of. That makes drift
+    the obvious failure and it is not one an ordinary test would catch: the two
+    copies would simply disagree, and `doctor` would go back to confidently
+    naming an artefact that never runs — the defect this pins, with a new cause.
+    """
+    from cdda2img import accudisc_reader
+
+    assert depcheck._resolve_engine_binary() == accudisc_reader._resolve_accudisc()
+
+
+def test_doctor_names_the_resolved_binary_and_the_install_it_shadows(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """`shutil.which` is the wrong answer when the symlink outranks `$PATH`.
+
+    Measured on the development box: `which` said `/usr/local/bin/accudisc`
+    while the reader ran `tools/accudisc/accudisc` — different sha256, different
+    `RUNPATH`, different `libaccudisc.so.0`. Nothing failed, so only the report
+    was wrong, which is the kind of wrong that survives.
+    """
+    runs = tmp_path / "build" / "accudisc"
+    runs.parent.mkdir()
+    runs.touch()
+
+    monkeypatch.setattr(depcheck, "_resolve_engine_binary", lambda: str(runs))
+    monkeypatch.setattr(depcheck.shutil, "which", lambda _n: "/usr/local/bin/accudisc")
+
+    binary = next(
+        r for r in depcheck._check_accudisc() if r.name == "accudisc (binary)"
+    )
+    assert binary.status == depcheck.OK
+    assert str(runs) in binary.detail
+    assert "shadows" in binary.detail
+    assert "/usr/local/bin/accudisc" in binary.detail
+
+
+def test_doctor_does_not_claim_shadowing_when_there_is_none(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The other half: an installed-only machine gets a plain line."""
+    monkeypatch.setattr(depcheck, "_resolve_engine_binary", lambda: "accudisc")
+    monkeypatch.setattr(depcheck.shutil, "which", lambda _n: "/usr/local/bin/accudisc")
+
+    binary = next(
+        r for r in depcheck._check_accudisc() if r.name == "accudisc (binary)"
+    )
+    assert binary.status == depcheck.OK
+    assert "shadows" not in binary.detail
+
+
 def test_doctor_flags_a_total_absence_of_the_disc_engine(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -291,6 +345,9 @@ def test_doctor_flags_a_total_absence_of_the_disc_engine(
     monkeypatch.setattr(importlib.util, "find_spec", fake)
     monkeypatch.setattr(depcheck, "_dev_shim_path", lambda: None)
     monkeypatch.setattr(depcheck.shutil, "which", lambda _n: None)
+    # Also the symlink: it outranks `$PATH`, so clearing `which` alone leaves
+    # the development tree's own binary answering and no absence to detect.
+    monkeypatch.setattr(depcheck, "_resolve_engine_binary", lambda: "accudisc")
 
     results = depcheck._check_accudisc()
     engine = [r for r in results if r.name == "disc engine"]
