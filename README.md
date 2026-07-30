@@ -133,19 +133,35 @@ Full specification: `docs/reference/rbi_spec.md`.
 
 ## Installation
 
-**Requirements:** Python 3.10+, [ffmpeg](https://ffmpeg.org/) (system install). Ripping
-additionally needs [cdrdao](https://github.com/cdrdao/cdrdao) (primary path) and
-cd-paranoia (fallback path).
+**Requirements:** Python 3.10+. Anything that touches a physical disc — `rip` and
+`burn` — additionally needs [AccuDisc](https://github.com/HomerSlated/accudisc), the
+CD-DA read/write engine, either as its Python binding (preferred) or its `accudisc`
+executable. Creating, importing, extracting, and verifying RBI images need neither.
 
-> **cdrdao note:** correct per-track ISRCs require a cdrdao built with the fix for
-> [bug #75](https://github.com/cdrdao/cdrdao/issues/79) — an ISRC stale-latch in `read-cd`.
-> Affected versions misread a track's ISRC as the *previous* track's code when the ISRC
-> lies in the track's first sectors, which can silently prevent automatic release
-> identification.
+Audio transcoding does *not* need an ffmpeg installation — PyAV carries the FFmpeg
+libraries in its own wheel. The `ffplay` binary is used only for interactive audition.
 
 ```bash
-uv sync
+uv sync          # development checkout
+pipx install .   # installed copy
 ```
+
+Then check what the machine actually has:
+
+```bash
+cdda2img doctor
+```
+
+It reports every dependency — Python packages, the AccuDisc engine, external binaries,
+native libraries — and for each missing one, what it would have enabled and the command
+that would install it. It **checks only**: nothing there installs, downloads, or modifies
+anything, and it makes no network requests. Exit status is 1 if something *required* is
+missing, 0 otherwise; a missing optional dependency is reported without failing, since
+the absence of `ffplay` costs the audition preview and not the rip.
+
+A shorter form of the same check runs automatically before every other subcommand, so a
+missing package produces a list of everything that is absent rather than an `ImportError`
+naming one at a time.
 
 ## Usage
 

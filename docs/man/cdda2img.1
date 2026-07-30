@@ -1,6 +1,6 @@
 .\" cdda2img.1 — manual page for cdda2img
 .\" Install: doas install -m 644 docs/man/cdda2img.1 /usr/local/share/man/man1/
-.TH CDDA2IMG 1 "2026\-06\-20" "cdda2img 0.1.7" "User Commands"
+.TH CDDA2IMG 1 "2026\-07\-30" "cdda2img 0.2.1" "User Commands"
 .\"
 .SH NAME
 cdda2img \- create and extract RBI audio CD archive images
@@ -41,6 +41,8 @@ cdda2img \- create and extract RBI audio CD archive images
 .br
 .B "cdda2img setup"
 .RI [ options ]
+.br
+.B "cdda2img doctor"
 .br
 .B "cdda2img \-\-version"
 .\"
@@ -627,6 +629,50 @@ catalogues).
 The setup wizard fires automatically (as a warning + hint) when a required
 file is missing at startup. It does not block the requested subcommand.
 .\"
+.SS doctor \(em Check dependencies
+.B cdda2img doctor
+reports every dependency \(em Python packages, the AccuDisc engine, the
+external binaries, and the native libraries \(em with, for each missing one,
+what it would have enabled and the command that would install it.
+It takes no options.
+.PP
+It
+.I checks
+only. Nothing here installs, downloads, or modifies anything, and it makes
+no network requests, so it is safe to run on a machine you are only
+inspecting.
+.PP
+Exit status is
+.B 1
+if a
+.I required
+dependency is missing and
+.B 0
+otherwise.
+A missing optional dependency is reported without failing: the absence of
+.B ffplay
+costs the audition preview, not the rip.
+.PP
+A shorter form of the same check runs automatically before every other
+subcommand and refuses to start when a required Python package is missing,
+listing all of them at once.
+.PP
+Three states are reported rather than two.
+Besides
+.B ok
+and
+.BR MISS ,
+a
+.B WARN
+marks something that works on this machine and would not work on another \(em
+notably an AccuDisc binding reachable only through the development shim in
+.IR tools/accudisc/pybinding ,
+which is present in a source checkout and nowhere else.
+That state is deliberately not rendered as
+.BR ok :
+a report that certified an unreproducible machine as clean would be worse
+than no report.
+.\"
 .SH GLOBAL OPTIONS
 .TP
 .B \-\-version
@@ -1061,42 +1107,46 @@ cdemu daemon
 .RE
 .\"
 .SH SYSTEM DEPENDENCIES
+Run
+.B cdda2img doctor
+to check all of the following on the current machine.
+It reports what is missing and what each missing item would have enabled;
+it never installs anything.
 .SS Required
 .TP
-.B ffmpeg
-Audio transcoding (via PyAV) and EBU\~R128 normalisation.
+.B AccuDisc
+The CD\-DA read and write engine
+.RI ( https://github.com/HomerSlated/accudisc ),
+and the only one \(em no other disc binary is invoked.
+Either its Python binding (preferred) or its
+.B accudisc
+executable will do; the binding is used when importable.
+Nothing that touches a physical disc works without one of them.
+Not required for creating, extracting, or verifying RBI images.
+.SS Optional
+Each of these enables one feature and is skipped cleanly when absent.
+.TP
+.B ctanalyse
+CTDB parity repair of damaged rips (the first recovery exit, before the
+AccuDisc speed ladder). Part of the CUETools database tooling.
+Without it, a partial AccurateRip mismatch goes straight to the speed ladder.
+.TP
+.B ffplay
+Interactive audition and the rip\(cqs track\-1 preview.
+Part of FFmpeg.
+Note that audio
+.I transcoding
+does not need an FFmpeg installation: PyAV carries the FFmpeg libraries
+inside its own wheel.
 .TP
 .B fpcalc
-AcoustID audio fingerprinting binary, part of the Chromaprint library.
+AcoustID audio fingerprinting, part of the Chromaprint library.
 Package names:
 .B chromaprint
 (Void Linux),
 .B libchromaprint\-tools
 (Debian/Ubuntu).
-.SS Optional
-.TP
-.B cdrdao
-Required for ripping physical discs
-.RB ( "cdda2img rip" ,
-primary path) and for importing cdrdao TOC/BIN images
-.RB ( "cdda2img import " *.toc ).
-The rip path uses cdrdao to capture subchannel data (MCN, ISRC, CD\-Text)
-in a single pass.
-Not required for creating, extracting, or verifying RBI images.
-.TP
-.B cd\-paranoia
-Used as the fallback rip path when cdrdao fails, and for full-paranoia re-rips
-triggered by AccurateRip track mismatches.
-Provides jitter correction and overlapping reads.
-The
-.B cd\-paranoia
-binary is part of libcdio\-paranoia; only the runtime package is needed.
-Package name:
-.B libcdio\-paranoia
-(Void Linux),
-.B libcdio\-paranoia2
-(Debian/Ubuntu).
-Not required for creating, importing, extracting, or verifying RBI images.
+The AcoustID lookup gates itself on this binary\(cqs presence.
 .TP
 .B cdemu\-daemon
 Required for
@@ -1107,8 +1157,17 @@ kernel module provides the virtual SCSI host.
 Package name:
 .B cdemu\-daemon
 (most distributions).
+.TP
+.BR chafa ", " timg ", " kitten
+Terminal preview of cover art \(em the first one found is used.
+With none of them, artwork is still fetched and stored, just not displayed.
+.SS Native libraries
+.TP
+.B libchromaprint
+Loaded at call time by
+.BR pyacoustid .
 .SS Python packages
-All Python dependencies are installed automatically by
+In a development checkout, all Python dependencies are installed by
 .BR uv :
 .PP
 .RS
@@ -1117,7 +1176,15 @@ uv sync
 .fi
 .RE
 .PP
-No separate Python package installation is needed.
+An installed copy gets them from its installer
+.RB ( "pipx install ." ,
+.BR "pip install ." ).
+They are listed, with what each one is for, by
+.BR "cdda2img doctor" ;
+the same check runs automatically on every invocation and refuses to start
+with a list of everything that is missing, rather than an
+.B ImportError
+naming one package at a time.
 .\"
 .SH FILES
 .TP

@@ -68,6 +68,14 @@ def parse_args() -> argparse.Namespace:
         prog="cdda2img",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=textwrap.dedent("""\
+            diagnostics:
+              cdda2img doctor       Report every dependency (Python packages, the
+                                    AccuDisc engine, external binaries, native
+                                    libraries) and exit 1 if a required one is
+                                    missing. Checks only — installs nothing.
+                                    Handled before this parser is reached, so it
+                                    still works when a dependency is missing.
+
             create options:
               --silence {trim|notrim}
                                     trim: remove leading/trailing silence and add a

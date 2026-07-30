@@ -2,7 +2,7 @@
 
 ## Open
 
-### ⭐ LIVE — outstanding work as of 2026-07-29 (evening)
+### ⭐ LIVE — outstanding work as of 2026-07-30
 
 Consolidated from both projects. AccuDisc is a peer project with its own
 `docs/reference/TODO.md`; items owned by them are listed here only where our work
@@ -36,6 +36,10 @@ every step assumes the binding resolves without our `tools/` shim.
    deps are PyPI-only regardless (`av`, `blake3`, `ortools`, `pyebur128`,
    `questionary`), so the mixed model buys fragility and no coverage. Full audit in
    `private/DEPS.md`.
+   **Keith's ruling, 2026-07-30: the installer checks for missing dependencies and
+   does not install them.** `cdda2img doctor` is that check and it already exists
+   (below); what remains here is the `make install` wrapper itself, which must end by
+   invoking `doctor` and must not acquire an install-things mode later.
 5. **[K/AD] `setcap` the installed binary.** Enabled in their install
    (`ACCUDISC_SETCAP_ON_INSTALL`) but not in effect until the binaries actually
    invoked come from the install. Until then their rebuild drops the capability from
@@ -77,15 +81,14 @@ every step assumes the binding resolves without our `tools/` shim.
    **Wants a design conversation before code.**
 10. **[C2I] B-4 post-soak cleanup** — delete the legacy merge chain. Needs the two
     mid-pipeline consumers decoupled first; retires `test_shadow_equivalence`.
-11. **[C2I] `pyproject.toml` dependency hygiene** — `textual` is declared but imported
-    by nothing shipped (only `scratch/test_tui.py`; the app's TUI is `terminal_ui.py`,
-    pure stdlib), and `wayback` is used only by `tools/wayback/fetch.py` so it belongs
-    in a tools group, not `[project.dependencies]`. `ortools` is the heaviest wheel in
-    the set and serves one batching strategy via a top-level import — worth a look at
-    making it optional, which would also make it lazily importable.
-12. **[C2I] `CLAUDE.md` drift** — the `track_preview.py` entry still says cd-paranoia;
-    it uses `read_span` through the seam.
-13. **[AD, we supply evidence] Their task 0 — RECOVERED sectors returned wrong, 9/9.**
+11. **[C2I] Make `ortools` optional.** The remainder of the dependency-hygiene item
+    (`textual` and `wayback` closed 2026-07-30, below). It is the heaviest wheel in
+    the set and serves exactly one thing — the `best` batching strategy — through a
+    top-level import in `input_selector.py`, so every user installs a CP-SAT solver
+    whether or not they ever pick that strategy. Making it an extra means making the
+    import lazy first; `depcheck.RUNTIME_PYTHON` would then need a notion of
+    "declared optional" rather than the flat required list it has now.
+12. **[AD, we supply evidence] Their task 0 — RECOVERED sectors returned wrong, 9/9.**
     Our report, their `[P1]`, still undiagnosed. H3 (coordinate-system mismatch) was
     eliminated 2026-07-29 from artefacts we hold: the shift is exactly one sector, the
     read offset is +30 samples = 0.051 sectors, and the CTDB image-domain shift is zero
@@ -93,6 +96,34 @@ every step assumes the binding resolves without our `tools/` shim.
     vs H2 (`RECOVERED` simply false). Discriminator handed to them and device-free:
     they report **10 flagged map bytes for 9 corrupt sectors** — where the tenth sits
     separates the two.
+
+### ✅ DONE 2026-07-30 — Dependency pre-flight: `cdda2img doctor` + a runtime gate
+
+Both halves of Keith's ruling ("check, do not install"): `cdda2img doctor` reports
+every dependency with what each missing one would have enabled and the command that
+would install it, and a short form of the same check runs before every other
+subcommand and refuses to start, naming *all* the missing packages at once instead of
+one `ImportError` at a time. Neither installs, downloads, or touches the network.
+
+The load-bearing finding is that **the check cannot live behind the application
+import**: `import cdda2img.cdda2img` eagerly pulls in `av`, `mutagen`, `numpy`,
+`ortools` and `unidecode` (measured), so an argparse subcommand would have raised
+`ImportError` before reporting anything — able to diagnose every dependency except the
+ones actually missing. `cli.py` and the new `depcheck.py` are therefore standard-library
+only, enforced by a test that reads `depcheck.py`'s own AST, because an import-based
+test passes trivially in an environment that has everything.
+
+Verified on a genuinely bare venv (`pip install --no-deps .`, nothing else): all twelve
+reported in one run, exit 1. Three states, not two — a binding reachable only via the
+git-ignored `tools/accudisc/pybinding` shim reports `WARN`, never `ok`, since that is
+the exact false pass that left the binding transport inert for two days.
+
+Swept up with it: `textual` dropped from `[project.dependencies]` (imported by nothing
+shipped), `wayback` moved to the dev group (ty type-checks `tools/`, and `uv sync`
+installs only `dev`), the `track_preview.py` cd-paranoia line in `CLAUDE.md` corrected,
+and the stale dependency sections of both `README.md` and the man page rewritten —
+both still named cdrdao and cd-paranoia as the rip path and marked `ffmpeg`/`fpcalc`
+required, when PyAV carries FFmpeg in its own wheel and AcoustID gates itself.
 
 ### ✅ DONE 2026-07-29 — Full API migration: every call is on the binding
 

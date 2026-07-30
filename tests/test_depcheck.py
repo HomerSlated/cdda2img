@@ -1,0 +1,257 @@
+"""Tests for the dependency pre-flight.
+
+Two of these guard properties that no ordinary test would catch, because the
+test environment has every dependency installed and therefore exercises only
+the path where nothing is wrong:
+
+* :func:`test_depcheck_imports_only_the_standard_library` reads the module's own
+  AST instead of trusting the import to fail. Adding ``from cdda2img.container
+  import ...`` to ``depcheck.py`` would leave every other test green while
+  making the checker unable to run on the machines it was written for.
+* :func:`test_dependency_table_matches_pyproject` diffs the written table
+  against ``[project.dependencies]``. The table exists because the
+  distribution-to-import-name mapping is not derivable; this keeps it from
+  becoming a second, drifting source of truth.
+"""
+
+from __future__ import annotations
+
+import ast
+import sys
+from pathlib import Path
+
+import pytest
+
+from cdda2img import depcheck
+
+if sys.version_info >= (3, 11):
+    import tomllib
+else:
+    import tomli as tomllib
+
+_PROJECT_ROOT = Path(__file__).resolve().parents[1]
+
+
+def _requirement_name(spec: str) -> str:
+    """``"tomli>=2.0.0 ; python_version < '3.11'"`` -> ``"tomli"``."""
+    name = spec.split(";", 1)[0]
+    for sep in ("<", ">", "=", "!", "~", "["):
+        name = name.split(sep, 1)[0]
+    return name.strip()
+
+
+# ---------------------------------------------------------------------------
+# The two guards that only an out-of-band check can make
+# ---------------------------------------------------------------------------
+
+
+def test_depcheck_imports_only_the_standard_library() -> None:
+    """`depcheck` must be reachable when the dependencies are absent.
+
+    `cdda2img.cdda2img` imports av/mutagen/numpy/ortools/unidecode eagerly, so a
+    checker that pulled in any `cdda2img` module risks inheriting that and dying
+    with `ImportError` before it can report anything — diagnosing every
+    dependency except the missing ones. Asserted against the source rather than
+    by importing, because in this environment the import would succeed.
+    """
+    tree = ast.parse((_PROJECT_ROOT / "src/cdda2img/depcheck.py").read_text())
+    roots: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            roots.update(a.name.split(".")[0] for a in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+            roots.add(node.module.split(".")[0])
+
+    non_stdlib = {r for r in roots if r not in sys.stdlib_module_names}
+    assert non_stdlib == set(), (
+        f"depcheck.py imports non-stdlib modules {sorted(non_stdlib)}; it must be "
+        "importable on a machine that has none of cdda2img's dependencies"
+    )
+
+
+def test_dependency_table_matches_pyproject() -> None:
+    """`RUNTIME_PYTHON` + `_TOMLI` must be exactly `[project.dependencies]`."""
+    raw = tomllib.loads((_PROJECT_ROOT / "pyproject.toml").read_text())
+    declared = {_requirement_name(s) for s in raw["project"]["dependencies"]}
+    tabled = {d.dist for d in depcheck.RUNTIME_PYTHON} | {depcheck._TOMLI.dist}
+    assert tabled == declared
+
+
+def test_every_tabled_module_is_importable_here() -> None:
+    """The import names in the table are real, not guessed.
+
+    `pyacoustid` imports as `acoustid` and `discogs-client` as `discogs_client`;
+    a typo in either column would make the checker report a present dependency
+    as missing and refuse to start.
+    """
+    for dep in depcheck.required_python_deps():
+        assert depcheck._module_present(dep.module), dep
+
+
+# ---------------------------------------------------------------------------
+# Probe semantics
+# ---------------------------------------------------------------------------
+
+
+def test_namespace_package_does_not_count_as_present(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An empty directory on `sys.path` imports fine and must still read absent.
+
+    This is the trap that `tools/accudisc/` — a directory holding a symlink to a
+    binary — springs on `import accudisc`: it binds as an empty PEP 420
+    namespace package and raises no `ImportError`. A presence check that only
+    asked "did `find_spec` return something" would call that installed.
+    """
+    (tmp_path / "phantom_pkg").mkdir()
+    monkeypatch.syspath_prepend(str(tmp_path))
+
+    import importlib.util
+
+    assert importlib.util.find_spec("phantom_pkg") is not None, "premise: it resolves"
+    assert depcheck._module_present("phantom_pkg") is False
+
+
+def test_tomli_is_required_only_below_311() -> None:
+    """3.11 absorbed it as `tomllib`; demanding it on 3.14 is a false finding."""
+    names = {d.dist for d in depcheck.required_python_deps()}
+    assert ("tomli" in names) == (sys.version_info < (3, 11))
+
+
+# ---------------------------------------------------------------------------
+# The runtime pre-flight
+# ---------------------------------------------------------------------------
+
+
+def test_preflight_is_silent_when_nothing_is_missing(
+    capsys: pytest.CaptureFixture,
+) -> None:
+    depcheck.preflight_or_exit()
+    assert capsys.readouterr().err == ""
+
+
+def test_preflight_names_every_missing_dependency(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    """All of them in one run, not the first one.
+
+    Python's own `ImportError` names a single module, so a user three
+    dependencies short learns that three times over. Reporting one here would
+    reproduce exactly the behaviour this replaces.
+    """
+    monkeypatch.setattr(
+        depcheck,
+        "RUNTIME_PYTHON",
+        (
+            depcheck.PyDep("absent-one", "absent_one_xyz", "first reason"),
+            depcheck.PyDep("absent-two", "absent_two_xyz", "second reason"),
+        ),
+    )
+    # Caught by hand rather than via `pytest.raises(...).value.code`: the exit
+    # code is half the contract (the shell has to be able to tell), and `ty`
+    # cannot resolve `.value` through `ExceptionInfo`.
+    code: object = None
+    try:
+        depcheck.preflight_or_exit()
+    except SystemExit as exc:
+        code = exc.code
+    else:
+        pytest.fail("preflight_or_exit returned instead of exiting")
+
+    assert code == 1
+    err = capsys.readouterr().err
+    assert "absent-one" in err
+    assert "absent-two" in err
+    assert "first reason" in err
+
+
+def test_preflight_hint_targets_pipx_inside_a_pipx_venv(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`pip install` into a pipx venv is wrong advice that appears to work.
+
+    It survives until the next `pipx upgrade` rebuilds the venv and silently
+    drops the hand-installed package.
+    """
+    monkeypatch.setattr(sys, "prefix", "/home/u/.local/pipx/venvs/cdda2img")
+    assert depcheck._install_hint(["blake3"]) == "pipx inject cdda2img blake3"
+
+    monkeypatch.setattr(sys, "prefix", "/usr")
+    assert "pip install blake3" in depcheck._install_hint(["blake3"])
+
+
+# ---------------------------------------------------------------------------
+# The doctor
+# ---------------------------------------------------------------------------
+
+
+def test_doctor_passes_on_this_machine(capsys: pytest.CaptureFixture) -> None:
+    """The development environment must have everything required."""
+    assert depcheck.run_doctor() == 0
+    assert "required missing" in capsys.readouterr().out
+
+
+def test_doctor_fails_when_a_required_dependency_is_missing(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    monkeypatch.setattr(
+        depcheck,
+        "RUNTIME_PYTHON",
+        (depcheck.PyDep("absent-one", "absent_one_xyz", "first reason"),),
+    )
+    assert depcheck.run_doctor() == 1
+    assert "absent-one" in capsys.readouterr().out
+
+
+def test_doctor_does_not_report_the_dev_shim_as_ok(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A binding reachable only through `tools/accudisc/pybinding` is not clean.
+
+    It works here and nowhere else, which is the whole point of the report — and
+    is the exact false pass that let the binding transport sit inert for two
+    days while every check said fine. It warns rather than fails, because the
+    machine does work; what it must never do is render as `ok`.
+    """
+    import importlib.util
+
+    real = importlib.util.find_spec
+
+    def fake(name: str, *a: object, **k: object) -> object | None:
+        return None if name == "accudisc" else real(name, *a, **k)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(importlib.util, "find_spec", fake)
+    monkeypatch.setattr(depcheck, "_dev_shim_path", lambda: tmp_path / "pybinding")
+
+    binding = next(
+        r for r in depcheck._check_accudisc() if r.name == "accudisc (binding)"
+    )
+    assert binding.status == depcheck.WARN
+    assert binding.status != depcheck.OK
+    assert "shim" in binding.detail
+
+
+def test_doctor_flags_a_total_absence_of_the_disc_engine(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Binding or binary is a one-of; neither is a required failure.
+
+    Marking each individually required would fail a working install that has
+    only one of them, which is the normal state after the subprocess retires.
+    """
+    import importlib.util
+
+    real = importlib.util.find_spec
+
+    def fake(name: str, *a: object, **k: object) -> object | None:
+        return None if name == "accudisc" else real(name, *a, **k)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(importlib.util, "find_spec", fake)
+    monkeypatch.setattr(depcheck, "_dev_shim_path", lambda: None)
+    monkeypatch.setattr(depcheck.shutil, "which", lambda _n: None)
+
+    results = depcheck._check_accudisc()
+    engine = [r for r in results if r.name == "disc engine"]
+    assert len(engine) == 1
+    assert engine[0].required is True
+    assert engine[0].status == depcheck.MISSING
