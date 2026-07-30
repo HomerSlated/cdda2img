@@ -55,6 +55,20 @@ every step assumes the binding resolves without our `tools/` shim.
    deps are PyPI-only regardless (`av`, `blake3`, `ortools`, `pyebur128`,
    `questionary`), so the mixed model buys fragility and no coverage. Full audit in
    `private/DEPS.md`.
+   **The split install has a cost `tools/disc_ab.py` must absorb first (AccuDisc
+   §cp.1/§cp.4, 2026-07-30).** Under `pipx install` + `pipx inject`, the injected
+   wheel's RUNPATH is the *install* prefix (`/usr/local/lib64`), while the
+   `tools/accudisc/` symlink keeps the CLI on AccuDisc's build tree. Two routes,
+   two `libaccudisc.so.0`s. That is fine for running and fatal for measuring: the
+   A/B's confound-freedom rests on both carriers resolving **one** library
+   (CLAUDE.md states this), so the instrument would silently start comparing two
+   library builds while still looking like a carrier comparison — the
+   `binding_ab.py` error again, with a packaging decision as the trigger instead
+   of a default flip. Today there is no skew (both resolve `build/src/`, measured);
+   `doctor` reports both libraries and flags divergence as of `9012639`, so the
+   condition is at least visible. **Before adopting the split: pin the A/B's
+   library explicitly, or re-inject with `pipx inject --force` as part of the
+   measurement protocol.**
    **Keith's ruling, 2026-07-30: the installer checks for missing dependencies and
    does not install them.** `cdda2img doctor` is that check and it already exists
    (below); what remains here is the `make install` wrapper itself, which must end by
