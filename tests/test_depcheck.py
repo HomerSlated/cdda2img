@@ -203,6 +203,48 @@ def test_doctor_fails_when_a_required_dependency_is_missing(
     assert "absent-one" in capsys.readouterr().out
 
 
+def test_doctor_rejects_arguments_instead_of_ignoring_them(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    """`cdda2img doctor --json` must fail, not quietly run the plain report.
+
+    The dispatch is a bare argv test rather than an argparse subparser, because
+    argparse lives behind the import `doctor` exists to survive — so the "takes
+    no options" contract has to be enforced by hand or not at all. Ignoring the
+    argument would make a `--json` that does not exist look like one that does.
+    """
+    from cdda2img import cli
+
+    monkeypatch.setattr(sys, "argv", ["cdda2img", "doctor", "--json"])
+    code: object = None
+    try:
+        cli.main()
+    except SystemExit as exc:
+        code = exc.code
+    else:
+        pytest.fail("cli.main() returned instead of exiting")
+
+    assert code == 2
+    assert "--json" in capsys.readouterr().err
+
+
+def test_doctor_runs_with_no_arguments(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The other half: a bare `doctor` still reaches the report."""
+    from cdda2img import cli
+
+    monkeypatch.setattr(sys, "argv", ["cdda2img", "doctor"])
+    monkeypatch.setattr(cli.depcheck, "run_doctor", lambda: 0)
+    code: object = None
+    try:
+        cli.main()
+    except SystemExit as exc:
+        code = exc.code
+    else:
+        pytest.fail("cli.main() returned instead of exiting")
+
+    assert code == 0
+
+
 def test_doctor_does_not_report_the_dev_shim_as_ok(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

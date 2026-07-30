@@ -34,8 +34,26 @@ def main() -> None:
     # bare argv test is enough: `doctor` takes no options and the application
     # parser never sees it.
     if sys.argv[1:2] == ["doctor"]:
+        # Rejected by hand because argparse — which would do this for free — is
+        # on the far side of the import being avoided. Without it,
+        # `cdda2img doctor --json` would run the plain report and exit 0,
+        # looking exactly like a `--json` that existed and worked.
+        if sys.argv[2:]:
+            print(
+                f"cdda2img doctor: unexpected argument(s): {' '.join(sys.argv[2:])}",
+                file=sys.stderr,
+            )
+            print("usage: cdda2img doctor   (takes no options)", file=sys.stderr)
+            raise SystemExit(2)
         raise SystemExit(depcheck.run_doctor())
 
+    # Every other subcommand needs the full package, so the gate is uniform.
+    # It is not *making* anything unrunnable that was runnable before: `ortools`
+    # and the other four are imported eagerly by `cdda2img.cdda2img`, so a
+    # missing one already broke `list`, `test` and `setup` with an `ImportError`
+    # naming a single module. This replaces that with the whole list. Per-
+    # subcommand requirements only become expressible once those imports are
+    # lazy — TODO item 11.
     depcheck.preflight_or_exit()
 
     # discogs_client/fetchers.py:102 uses '\w' in a non-raw string; the parser
