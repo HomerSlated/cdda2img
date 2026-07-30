@@ -324,6 +324,14 @@ def _binding_library(package_dir: Path) -> str:
     The name is globbed rather than assumed: it carries an ABI tag
     (``_accudisc.abi3.so`` here, but ``_accudisc.cpython-314-x86_64-linux-gnu.so``
     for a non-abi3 build).
+
+    The *location* is assumed, and the assumption was checked rather than
+    inferred: a cffi API-mode extension can install as a top-level module beside
+    the package instead of inside it, which would make this return "" again.
+    ``unzip -l`` on AccuDisc's 0.4.0 wheel (2026-07-30) shows
+    ``accudisc/_accudisc.abi3.so`` — package-internal, so one glob suffices. If a
+    later wheel moves it, this silently stops reporting; that is the failure to
+    look for, and searching ``package_dir.parent`` is the fix.
     """
     for so in sorted(package_dir.glob("_accudisc*.so")):
         lib = _linked_library(so)
