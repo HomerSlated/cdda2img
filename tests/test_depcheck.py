@@ -273,6 +273,26 @@ def test_doctor_does_not_report_the_dev_shim_as_ok(
     assert "shim" in binding.detail
 
 
+def test_a_bare_shim_directory_is_not_evidence_of_a_binding(tmp_path: Path) -> None:
+    """The shim must hold the package, not merely exist.
+
+    `_dev_shim_path` is read as evidence *against* a total engine absence — the
+    `disc engine` one-of does not fire while a shim is present. So a directory
+    that exists but holds no `accudisc` package would suppress the single
+    required failure this whole report exists to raise, and would do it on a
+    machine with no working engine at all.
+    """
+    shim = tmp_path / "tools" / "accudisc" / "pybinding"
+    shim.mkdir(parents=True)
+    assert shim.is_dir(), "premise: the directory exists"
+    assert depcheck._dev_shim_path(root=tmp_path) is None
+
+    pkg = shim / "accudisc"
+    pkg.mkdir()
+    (pkg / "__init__.py").touch()
+    assert depcheck._dev_shim_path(root=tmp_path) == shim
+
+
 def test_engine_resolution_matches_the_reader() -> None:
     """`depcheck` must name the same `accudisc` the reader will actually run.
 

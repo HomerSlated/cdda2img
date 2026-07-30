@@ -239,14 +239,27 @@ def _check_python() -> list[Result]:
     return results
 
 
-def _dev_shim_path() -> Path | None:
+def _dev_shim_path(root: Path | None = None) -> Path | None:
     """``tools/accudisc/pybinding`` relative to this checkout, if it exists.
+
+    ``root`` overrides the checkout location, so the "holds a package" predicate
+    can be tested against a built tree rather than by patching this function out
+    — patching it out is what every other test here does, which means none of
+    them exercise the check itself.
 
     Only meaningful when running from a source tree; an installed cdda2img has
     no ``tools/`` above it and this returns ``None``.
+
+    The package is looked for, not just the directory, because this result is
+    also read as evidence *against* a total engine absence — the ``disc engine``
+    one-of below does not fire while a shim is present. A bare or wrongly-aimed
+    directory answering "shim present" would therefore suppress the one required
+    failure this report exists to raise. Checking for ``accudisc/__init__.py`` is
+    what this docstring always claimed and what the code did not do.
     """
-    shim = Path(__file__).resolve().parents[2] / "tools" / "accudisc" / "pybinding"
-    return shim if shim.is_dir() else None
+    base = Path(__file__).resolve().parents[2] if root is None else root
+    shim = base / "tools" / "accudisc" / "pybinding"
+    return shim if (shim / "accudisc" / "__init__.py").is_file() else None
 
 
 def _resolve_engine_binary() -> str:
@@ -270,7 +283,12 @@ def _resolve_engine_binary() -> str:
 
 
 def _linked_library(origin: Path) -> str:
-    """Which ``libaccudisc`` the compiled binding actually resolves to.
+    """Which ``libaccudisc`` ``origin`` actually resolves to.
+
+    Called for both engine artefacts — the compiled binding extension and the
+    ``accudisc`` executable. They can resolve *different* libraries on one
+    machine, which is the whole reason this is reported per-artefact rather than
+    once.
 
     ``ldd`` is asked rather than the extension's ``RUNPATH`` read, because
     ``RUNPATH`` is one input to the search and not the answer — an
