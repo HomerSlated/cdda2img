@@ -25,10 +25,29 @@ every step assumes the binding resolves without our `tools/` shim.
    never installed it is silent, so the checkout fallback wins by default. That is how
    our 2026-07-29 pipx probe ended up linked to their build tree while reporting
    success. The env var turns that fallback into a build-time error.
+   **Amended 2026-07-30 (§125/§cn/§co).** "Silent on a machine that has never
+   installed" understates it: `pkg-config --exists accudisc` returns 1 on *this*
+   box, where the install did happen — the prefix is `/usr/local` and pkg-config's
+   built-in `pc_path` excludes `/usr/local/lib64/pkgconfig`. So a build here today
+   still takes the checkout branch, install or no install, and `ACCUDISC_REQUIRE_INSTALLED=1`
+   would currently turn that into a hard failure with nothing to fall back to.
+   Sequencing consequence: **do not set the env var until either the search path is
+   supplied or AccuDisc's new discovery rung exists.** That rung is agreed in
+   principle (§co.2): `accudisc config` reports `pkgconfigdir`, we set
+   `PKG_CONFIG_PATH` from it and let `pkg-config --exists` validate — the binary
+   supplies a search hint, the `.pc` on disk supplies the answer. Not built on
+   their side; nothing here is blocked on it. AccuDisc confirmed the new rung
+   counts as "installed" for the env var (§co.3).
 3. **[C2I] Retire the shim.** Delete `tools/accudisc/accudisc` and
    `tools/accudisc/pybinding`, delete `_binding_search_path()`, and declare `accudisc`
    as a real dependency. `cffi` then arrives as *its* dependency and the stopgap line
    in our dev group goes.
+   **The completion signal is now visible** (`80384ba`, prompted by §co.4): `doctor`
+   reports the binary that will actually run, the `libaccudisc` it links, and any
+   `$PATH` install it shadows. Today that reads `tools/accudisc/accudisc` →
+   `build/src/libaccudisc.so.0`, *shadowing* `/usr/local/bin/accudisc` — two different
+   artefacts (`991cb02` vs `cf1a248`, different `RUNPATH`s). This item is done when
+   that line names the install and the shadow line is gone.
 4. **[C2I] Packaging.** `pipx install .` + `pipx inject cdda2img <accudisc binding>`
    is proven end-to-end (binding active, `transport: binding`, real archive rendered).
    A `make install` target should wrap those two commands rather than hand-rolling a
