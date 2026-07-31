@@ -101,15 +101,23 @@ Standalone utility scripts live in `tools/` (tracked, not part of the installed 
   `if pkg-config …` takes the success branch and yields `""`. A missing wheel warns and
   the install still succeeds (only `rip`/`burn`/`mount` need an engine). `uninstall`
   never touches the user's config — it holds measured drive offsets.
-- **`tools/mkdist.sh`** (`make dist`) — source tarball into `dist/` via **`git archive`**,
-  never `tar --exclude`. The direction of the guarantee is the point: `git archive` ships
-  only tracked files, so every gitignored private path (`private/`, `.claude/`,
-  `.remember/`, `CLAUDE.local.md`, `tools/accudisc/`, `backups/`, `rips/`, `example/`) is
-  excluded **by construction** and a private directory added later is covered with no
-  action. An exclude list is the reverse — included unless someone remembered — and fails
-  silently. "No binaries" falls out of the same rule. Refuses a dirty tree (`git archive`
-  reads HEAD, so uncommitted work would be silently absent) and re-scans the finished
-  archive for private prefixes, which can only fire if something private was *committed*.
+- **`tools/mkdist.sh`** (`make dist`) — **user** distribution tarball into `dist/` (80
+  files, 344K — not a developer checkout). **Two independent filters, both load-bearing.**
+  (1) `git archive`, never `tar --exclude`: it ships only tracked files, so every
+  gitignored private path (`private/`, `.claude/`, `.remember/`, `CLAUDE.local.md`,
+  `tools/accudisc/`, `backups/`, `rips/`, `example/`) is excluded **by construction**, and
+  a private directory added later is covered with no action. An exclude list is the
+  reverse — included unless someone remembered — and fails silently; "no binaries" falls
+  out of the same rule. (2) A `DIST_PATHS` pathspec narrows that to what a user needs:
+  `pyproject.toml`, `README.md` (also *required* — `readme =` makes hatchling fail without
+  it), `LICENSE`, `install.sh`, `src/cdda2img/`, `docs/man/cdda2img.1`. No `tests/`,
+  `tools/`, `Makefile`, `uv.lock`, `.github/`, `CLAUDE.md`, or any other `docs/`. Filter 2
+  only ever *removes*, so narrowing it cannot weaken filter 1's privacy guarantee — and
+  being an allow-list it fails **incomplete and loud** (the install breaks) rather than
+  leaky and silent. A pre-flight asserts every `DIST_PATHS` entry exists in HEAD, so a
+  moved file is named instead of silently dropped. Refuses a dirty tree (`git archive`
+  reads HEAD, so uncommitted work would be absent) and re-scans the finished archive for
+  private prefixes, which can only fire if something private was *committed*.
 
 ## Commit and push workflow
 

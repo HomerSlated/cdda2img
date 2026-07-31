@@ -9,6 +9,35 @@
 # Output: dist/cdda2img-<version>.tar.gz, unpacking into cdda2img-<version>/.
 #
 # ---------------------------------------------------------------------------
+# WHAT GOES IN: what a USER needs to run cdda2img, and nothing else
+# ---------------------------------------------------------------------------
+#
+# This is a user distribution, not a developer checkout. Someone who unpacks it
+# wants to install and run the tool; they are not going to run the test suite,
+# read the migration plan, or rebuild the man page. So the contents are an
+# explicit allow-list (DIST_PATHS below):
+#
+#   pyproject.toml            the build definition `pipx install` reads
+#   README.md                 user documentation — AND required by the build,
+#                             because pyproject.toml has `readme = "README.md"`
+#                             and hatchling fails without it
+#   LICENSE                   legal, and a distribution without one is defective
+#   install.sh                the installer itself
+#   src/cdda2img/             the package, including profiles/ and conf/
+#   docs/man/cdda2img.1       the man page, which install.sh installs
+#
+# Deliberately absent: tests/, tools/, .github/, Makefile, uv.lock,
+# .pre-commit-config.yaml, CLAUDE.md, CONTRIBUTING.md, and all of docs/ except
+# the man page. Every one of those exists to develop cdda2img, not to run it.
+# Anyone who wants them wants the git repository, which is public.
+#
+# NOTE the direction this list fails in. It is an ALLOW-list, so forgetting an
+# entry produces a tarball that is *incomplete* — the install breaks loudly on
+# the next test — never one that leaks. An exclude list fails the other way:
+# forgetting an entry ships something, silently. Same reasoning as the paragraph
+# below, applied one level in.
+#
+# ---------------------------------------------------------------------------
 # WHY git archive AND NOT tar WITH AN EXCLUDE LIST
 # ---------------------------------------------------------------------------
 #
@@ -36,6 +65,13 @@
 # which holds symlinks into AccuDisc's build tree — is ignored as a whole. There
 # is no step here that strips binaries, because none can get in.
 #
+# THE TWO FILTERS ARE INDEPENDENT AND BOTH ARE LOAD-BEARING. `git archive`
+# decides what *may* ship (tracked only — the privacy guarantee); the pathspec
+# decides what *does* (user-facing only — the scope decision). Narrowing the
+# second cannot weaken the first, because the pathspec only ever removes. If the
+# allow-list were dropped tomorrow the tarball would be bloated but still safe;
+# if `git archive` were swapped for plain `tar` it would be neither.
+#
 # ---------------------------------------------------------------------------
 # WHY A DIRTY TREE IS AN ERROR
 # ---------------------------------------------------------------------------
@@ -47,6 +83,18 @@
 # noticed. `--allow-dirty` exists for deliberate exceptions and says so loudly.
 #
 set -euo pipefail
+
+# The allow-list. Passed to `git archive` as a pathspec, so these select from the
+# tracked set at HEAD — they can never widen it. See the header for why each is
+# here and why the omissions are omissions.
+DIST_PATHS=(
+    pyproject.toml
+    README.md
+    LICENSE
+    install.sh
+    src/cdda2img
+    docs/man/cdda2img.1
+)
 
 ALLOW_DIRTY=0
 [ "${1:-}" = "--allow-dirty" ] && ALLOW_DIRTY=1
@@ -89,8 +137,16 @@ NAME="cdda2img-$VERSION"
 OUT="dist/$NAME.tar.gz"
 mkdir -p dist
 
+# Fail early and by name if an allow-listed path has been moved or removed.
+# Without this, `git archive` silently ships a tarball missing that entry and the
+# first symptom is a broken install on somebody else's machine.
+for p in "${DIST_PATHS[@]}"; do
+    git cat-file -e "HEAD:$p" 2>/dev/null || git ls-tree -d --name-only "HEAD" -- "$p" | grep -q . \
+        || die "DIST_PATHS entry '$p' is not in HEAD — update tools/mkdist.sh"
+done
+
 say "Building $OUT from $(git rev-parse --short HEAD)"
-git archive --format=tar.gz --prefix="$NAME/" -o "$OUT" HEAD
+git archive --format=tar.gz --prefix="$NAME/" -o "$OUT" HEAD -- "${DIST_PATHS[@]}"
 
 # Report what went in. A tarball is opaque once written, and the one property
 # worth confirming out loud is that nothing private came along.
