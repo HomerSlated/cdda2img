@@ -169,7 +169,10 @@ Options:
   -h, --help             this text
 
 Environment:
-  CDDA2IMG_SUDO          privilege command to use (default: sudo, then doas)
+  CDDA2IMG_SUDO          privilege command to use. Set this to override the
+                         search, which tries doas then sudo and accepts one only
+                         if it identifies itself AND is setuid root. Whatever you
+                         name here is used verbatim and never probed.
 EOF
 }
 
@@ -216,16 +219,102 @@ need_sudo() {
     [ ! -w "$target" ]
 }
 
+# Is $1 on $PATH and *actually the thing it is named after*?
+#
+# `command -v sudo` answers "is there a file called sudo", which is not the
+# question. Measured on the development machine: a dummy `sudo` shell script
+# exists on $PATH that prints "This is a dummy file. This system actually uses
+# doas." — deliberately, to catch exactly this assumption. `command -v` finds it,
+# the old code selected it, and every privileged step would have silently done
+# nothing while reporting success.
+#
+# So each candidate must identify itself, and must be capable of the job:
+#
+#   1. IDENTITY — ask the tool what it is. Real sudo answers `--version` with a
+#      line beginning "Sudo version"; real doas is identified from its own usage
+#      text. A dummy would have to impersonate the tool to pass, which is a
+#      different and much less likely accident than merely being named after it.
+#
+#   2. CAPABILITY — the binary must be setuid root. This is structural rather
+#      than cosmetic: a helper that is not setuid root and holds no file
+#      capability cannot raise privilege, whatever it prints. It is also the
+#      check that needs no per-tool knowledge, so it still holds for a privilege
+#      helper neither of us has heard of.
+#
+# Both must pass. Identity without capability is a convincing impostor; capability
+# without identity is some other setuid program we have no business running.
+#
+# Note what is NOT used: exit status. The dummy could exit 0 all day. This is the
+# same trap as `pkg-config --variable` returning rc=0 with empty output — a check
+# whose inputs cannot represent the difference it is meant to detect.
+#
+# The `|| true` inside each probe is load-bearing, not decoration. This script
+# runs under `set -o pipefail`, and `doas -h` exits NON-ZERO by design (it is an
+# invalid option — that is how you make it print its usage without escalating).
+# Under pipefail that non-zero status propagates through the pipeline and the
+# grep result is discarded, so the check rejects real doas. Measured: the first
+# version of this function did exactly that.
+_is_setuid_root() {
+    local path
+    path=$(command -v "$1" 2>/dev/null) || return 1
+    # -u is "setuid bit set"; the owner must also be root for that to mean
+    # anything. `stat -c %U` is coreutils; fall back to `ls` where it is not.
+    [ -u "$path" ] || return 1
+    local owner
+    owner=$(stat -c '%U' "$path" 2>/dev/null) || owner=$(ls -ld "$path" | awk '{print $3}')
+    [ "$owner" = "root" ]
+}
+
+_is_real_privilege_cmd() {
+    local name=$1
+    command -v "$name" >/dev/null 2>&1 || return 1
+    _is_setuid_root "$name" || return 1
+    case "$name" in
+        sudo)
+            # `--version` neither escalates nor prompts.
+            { "$name" --version 2>/dev/null || true; } | head -1 \
+                | grep -qi '^sudo version' ;;
+        doas)
+            # doas has no --version on OpenBSD and the Linux ports differ, so ask
+            # for usage instead: an unknown flag makes it print `usage: doas ...`
+            # without escalating or prompting.
+            { "$name" -h 2>&1 || true; } | head -2 | grep -qi 'usage:.*doas' ;;
+        *)
+            # An unrecognised helper: setuid root is all we can check, and the
+            # user named it deliberately. Accept it.
+            return 0 ;;
+    esac
+}
+
 sudo_cmd() {
+    # An explicit CDDA2IMG_SUDO is honoured verbatim and never probed. The user
+    # naming a command is a decision, not a guess, and it may legitimately be a
+    # wrapper, an alias, or something with no version flag at all.
     if [ -n "${CDDA2IMG_SUDO:-}" ]; then
         printf '%s' "$CDDA2IMG_SUDO"
-    elif command -v sudo >/dev/null 2>&1; then
-        printf 'sudo'
-    elif command -v doas >/dev/null 2>&1; then
-        printf 'doas'
-    else
-        die "need to write $MANDIR but found neither sudo nor doas (try --prefix ~/.local, or --no-man)"
+        return 0
     fi
+    # doas is tried first. On a machine that has both, sudo is frequently just
+    # present while doas was installed on purpose — so where they disagree, doas
+    # is the better guess at intent. Where only one is real, verification decides
+    # and the order is irrelevant.
+    local candidate
+    for candidate in doas sudo; do
+        if _is_real_privilege_cmd "$candidate"; then
+            printf '%s' "$candidate"
+            return 0
+        fi
+    done
+    # Say which ones were rejected and why — "found neither" would be a lie on a
+    # machine that has both names on $PATH.
+    local seen=""
+    for candidate in doas sudo; do
+        command -v "$candidate" >/dev/null 2>&1 && seen="$seen $candidate"
+    done
+    if [ -n "$seen" ]; then
+        die "need to write $MANDIR, but$seen on \$PATH did not verify as a real privilege command (set CDDA2IMG_SUDO to override, or use --prefix ~/.local / --no-man)"
+    fi
+    die "need to write $MANDIR but found neither doas nor sudo (try --prefix ~/.local, or --no-man)"
 }
 
 # ---------------------------------------------------------------------------
