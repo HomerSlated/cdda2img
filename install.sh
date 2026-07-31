@@ -318,6 +318,33 @@ sudo_cmd() {
 }
 
 # ---------------------------------------------------------------------------
+# Outcome verification: did the filesystem actually change?
+# ---------------------------------------------------------------------------
+# Adopted from AccuDisc's §ct.3 field report on the same placeholder-`sudo` bug.
+# Their point, which is the right one: the identity check above picks the correct
+# privilege tool, and THIS makes being wrong about it non-fatal. It catches every
+# cause identity cannot see — a genuine sudo the user is not permitted to use, a
+# doas rule that refuses, a read-only mount, a destination that is not where we
+# thought — because it does not care WHY the write failed, only whether it did.
+#
+# `set -e` already aborts on a non-zero `install`/`rm`, so this is the second
+# line rather than the first. It exists because the failure that got past them
+# exited 0: a command that never ran cannot report that it did not run.
+#
+# Skipped under --dry-run, where nothing was supposed to happen.
+verify_present() {
+    [ "$DRY_RUN" -eq 1 ] && return 0
+    [ -e "$1" ] || die "reported success but $1 is not there — nothing was written"
+    return 0
+}
+
+verify_absent() {
+    [ "$DRY_RUN" -eq 1 ] && return 0
+    [ ! -e "$1" ] || die "reported success but $1 still exists — nothing was removed"
+    return 0
+}
+
+# ---------------------------------------------------------------------------
 # Step 2's search. Prints the wheel path on stdout, or nothing.
 # ---------------------------------------------------------------------------
 find_accudisc_wheel() {
@@ -383,12 +410,14 @@ if [ "$ACTION" = "uninstall" ]; then
         else
             run rm -f "$manpage"
         fi
+        verify_absent "$manpage"
         ok "man page removed"
     fi
 
     magicfile="$HOME/.magic.d/cdda2img.magic"
     if [ -e "$magicfile" ]; then
         run rm -f "$magicfile"
+        verify_absent "$magicfile"
         ok "libmagic rule removed"
     fi
 
@@ -455,6 +484,7 @@ else
         run install -d "$MANDIR"
         run install -m 644 "$SRC_DIR/docs/man/cdda2img.1" "$MANDIR/"
     fi
+    verify_present "$MANDIR/cdda2img.1"
     ok "man cdda2img"
 fi
 
@@ -470,6 +500,7 @@ elif [ ! -f "$SRC_DIR/src/cdda2img/conf/magic" ]; then
 else
     run install -d "$HOME/.magic.d"
     run install -m 644 "$SRC_DIR/src/cdda2img/conf/magic" "$HOME/.magic.d/cdda2img.magic"
+    verify_present "$HOME/.magic.d/cdda2img.magic"
     ok "file(1) will now identify .rbi images"
 fi
 
