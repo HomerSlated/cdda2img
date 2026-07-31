@@ -40,6 +40,10 @@ OK = "ok"
 MISSING = "missing"
 WARN = "warn"
 
+# Mirrors `recovery_profile.BUILTIN_PROFILE`. Duplicated rather than imported for
+# the stdlib-only reason documented on `_shipped_profiles_dir`; pinned by a test.
+_BUILTIN_PROFILE = "track-ladder"
+
 
 @dataclass(frozen=True)
 class PyDep:
@@ -478,6 +482,72 @@ def _check_accudisc() -> list[Result]:
     return results
 
 
+def _shipped_profiles_dir() -> Path:
+    """Where the shipped recovery profiles live.
+
+    A deliberate duplicate of :func:`cdda2img.recovery_profile.shipped_profiles_dir`,
+    for the same reason :func:`_resolve_engine_binary` duplicates the reader's
+    resolver: importing that module would pull in ``tomli`` on 3.10 and breach the
+    stdlib-only rule this file exists to honour. `tests/test_depcheck.py` pins the
+    two implementations to the same answer, so the copy cannot drift silently.
+    """
+    import contextlib
+    import importlib.resources
+
+    with contextlib.suppress(Exception):
+        ref = importlib.resources.files("cdda2img").joinpath("profiles")
+        p = Path(str(ref))
+        if p.is_dir():
+            return p
+    return Path(__file__).parent / "profiles"
+
+
+def _check_package_data() -> list[Result]:
+    """Check the data files the package must carry, not just its dependencies.
+
+    This group exists because of a real hole. Until 2026-07-31 the shipped recovery
+    profiles lived in a top-level ``conf/`` that the wheel did not package, so an
+    installed cdda2img had none of them — and `rip` aborts on that, because rung 4
+    of the resolver loads ``track-ladder`` whether or not the user named a profile.
+    `doctor` reported **21 ok, 0 warnings** on exactly that machine: every
+    dependency was genuinely present, and it had never been asked whether the
+    package's own files came along. A checker that only inspects dependencies
+    certifies an application that cannot start.
+
+    Required, matching the ``disc engine`` entry: both are needed by `rip` and by
+    nothing else, and both make it fail outright rather than degrade.
+    """
+    directory = _shipped_profiles_dir()
+    found = (
+        sorted(p.stem for p in directory.glob("*.toml")) if directory.is_dir() else []
+    )
+    if _BUILTIN_PROFILE in found:
+        return [
+            Result(
+                "recovery profiles",
+                OK,
+                f"{len(found)} in {directory}\n      {', '.join(found)}",
+            )
+        ]
+    # Distinguish the two ways this fails: an empty/absent directory is a packaging
+    # fault, a populated one missing the built-in is a tampered install. The remedy
+    # differs, so the report must not merge them.
+    why = (
+        f"the built-in profile {_BUILTIN_PROFILE!r} is absent from {directory}"
+        if found
+        else f"no profiles found at {directory}"
+    )
+    return [
+        Result(
+            "recovery profiles",
+            MISSING,
+            f"{why} — `rip` cannot start without them",
+            remedy="reinstall cdda2img (the profiles ship inside the package)",
+            required=True,
+        )
+    ]
+
+
 def _check_binaries() -> list[Result]:
     results = []
     for b in EXTERNAL_BINARIES:
@@ -552,6 +622,7 @@ def run_doctor(stream: TextIO | None = None) -> int:
             _install_hint(absent_dists) if absent_dists else "",
         ),
         ("Disc engine — AccuDisc", _check_accudisc(), ""),
+        ("Package data", _check_package_data(), ""),
         ("External tools (optional; each enables one feature)", _check_binaries(), ""),
         ("Native libraries (optional)", _check_native(), ""),
     ]

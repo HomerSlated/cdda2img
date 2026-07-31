@@ -416,3 +416,89 @@ def test_doctor_flags_a_total_absence_of_the_disc_engine(
     assert len(engine) == 1
     assert engine[0].required is True
     assert engine[0].status == depcheck.MISSING
+
+
+# ---------------------------------------------------------------------------
+# Package data
+# ---------------------------------------------------------------------------
+
+
+def test_profile_location_matches_the_loader() -> None:
+    """`depcheck` must check the directory `recovery_profile` will actually read.
+
+    Duplicated for the stdlib-only rule (`recovery_profile` imports `tomli` on
+    3.10), so drift is the obvious failure — and a silent one: `doctor` would
+    certify a directory nothing loads from, which is precisely the class of
+    wrongness this whole group was added to end.
+    """
+    from cdda2img import recovery_profile
+
+    assert depcheck._shipped_profiles_dir() == recovery_profile.shipped_profiles_dir()
+    assert depcheck._BUILTIN_PROFILE == recovery_profile.BUILTIN_PROFILE
+
+
+def test_shipped_profiles_are_inside_the_package() -> None:
+    """The profiles must sit under `cdda2img/`, not above it.
+
+    A path that escapes the package resolves in a source checkout and nowhere
+    else — the wheel ships `src/cdda2img` alone. This asserts the property that
+    was violated, not merely the current spelling of the path.
+    """
+    from cdda2img import recovery_profile
+
+    package = Path(recovery_profile.__file__).parent
+    directory = depcheck._shipped_profiles_dir()
+    assert directory.is_relative_to(package)
+    assert (directory / f"{depcheck._BUILTIN_PROFILE}.toml").is_file()
+
+
+def test_doctor_fails_when_the_shipped_profiles_are_absent(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """An install with no profiles must not report clean.
+
+    It did: 21 ok, 0 warnings, on a machine where `rip` aborted immediately with
+    "unknown recovery profile 'track-ladder'". Every dependency was present; the
+    package's own data files were not, and nothing asked.
+    """
+    monkeypatch.setattr(depcheck, "_shipped_profiles_dir", lambda: tmp_path / "gone")
+
+    results = depcheck._check_package_data()
+    assert len(results) == 1
+    assert results[0].status == depcheck.MISSING
+    assert results[0].required is True
+    assert "no profiles found" in results[0].detail
+
+
+def test_doctor_separates_an_empty_install_from_a_tampered_one(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Profiles present but the built-in missing is a different fault.
+
+    `resolve_recovery` rung 4 loads the built-in whether or not the user named a
+    profile, so its absence breaks every rip while `--list-profiles` still shows
+    a populated set. Reporting that as "no profiles found" would send the user
+    looking for a packaging bug that is not there.
+    """
+    (tmp_path / "whole-disc.toml").write_text('name = "whole-disc"\n')
+    monkeypatch.setattr(depcheck, "_shipped_profiles_dir", lambda: tmp_path)
+
+    result = depcheck._check_package_data()[0]
+    assert result.status == depcheck.MISSING
+    assert depcheck._BUILTIN_PROFILE in result.detail
+    assert "no profiles found" not in result.detail
+
+
+def test_all_seven_shipped_profiles_load_and_validate() -> None:
+    """The files `doctor` counts must also be loadable.
+
+    Counting `*.toml` proves packaging, not validity — a profile whose `name`
+    field disagrees with its filename passes the count and raises on use.
+    """
+    from cdda2img.recovery_profile import load_profile
+
+    directory = depcheck._shipped_profiles_dir()
+    names = sorted(p.stem for p in directory.glob("*.toml"))
+    assert len(names) == 7
+    for name in names:
+        assert load_profile(name).name == name

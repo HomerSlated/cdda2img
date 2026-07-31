@@ -739,10 +739,17 @@ Emits a profile from selected flags/answers into the user profiles dir. Guards:
 2. **Overwrite guard** — reject a name matching any **shipped** or existing **user**
    profile: "Profile already exists, please choose a different name." No `--force`.
 
-Storage: shipped → package `conf/profiles/*.toml` (immutable, ships all 7); user →
+Storage: shipped → package `src/cdda2img/profiles/*.toml` (immutable, ships all 7); user →
 `$XDG_CONFIG_HOME/cdda2img/profiles/*.toml`. Resolution searches **user then shipped**;
 shipped names reserved. Creation writes atomically (`.tmp`+rename) through §9.5's validator
 so a profile cannot be born invalid.
+
+> **Corrected 2026-07-31.** This said `conf/profiles/*.toml`, and P2 built it there.
+> "Package" was the operative word and the path contradicted it: a top-level `conf/`
+> is not in the package, so the wheel shipped none of the seven and `rip` failed at
+> rung 4 on every installed copy while working perfectly from a checkout. The
+> directory now lives inside the package, where `importlib.resources` can reach it
+> without `..`. See `recovery_profile.shipped_profiles_dir`.
 
 ### 9.8 Delta to the §5 phasing
 

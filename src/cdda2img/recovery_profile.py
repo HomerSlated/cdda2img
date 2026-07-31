@@ -78,16 +78,32 @@ class Profile:
 
 
 def shipped_profiles_dir() -> Path:
-    """The immutable profiles that ship with the package."""
+    """The immutable profiles that ship with the package.
+
+    They live *inside* the package (``cdda2img/profiles/``) rather than beside it in
+    a top-level ``conf/``, because only the former is addressable without escaping
+    the package root. The previous arrangement did escape it — ``files("cdda2img")``
+    joined with ``"../../conf/profiles"`` — and so resolved in a source checkout and
+    nowhere else: the wheel ships ``src/cdda2img`` alone, and two levels up from an
+    installed package is site-packages, which has no ``conf/``. Every install was
+    therefore missing all seven profiles, and since rung 4 of :func:`resolve_recovery`
+    loads ``track-ladder`` unconditionally, `rip` failed outright with "unknown
+    recovery profile" rather than degrading.
+
+    Both branches are kept. ``importlib.resources`` is correct for a zipped or
+    otherwise non-filesystem distribution; the ``__file__`` fallback covers the case
+    where the traversable cannot be materialised as a real path. Neither uses ``..``
+    now, so a wrong answer is no longer reachable by construction.
+    """
     import contextlib
     import importlib.resources
 
     with contextlib.suppress(Exception):
-        ref = importlib.resources.files("cdda2img").joinpath("../../conf/profiles")
+        ref = importlib.resources.files("cdda2img").joinpath("profiles")
         p = Path(str(ref))
         if p.is_dir():
             return p
-    return Path(__file__).parent.parent.parent / "conf" / "profiles"
+    return Path(__file__).parent / "profiles"
 
 
 def user_profiles_dir() -> Path:

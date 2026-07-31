@@ -142,9 +142,23 @@ Audio transcoding does *not* need an ffmpeg installation — PyAV carries the FF
 libraries in its own wheel. The `ffplay` binary is used only for interactive audition.
 
 ```bash
+./install.sh     # installed copy — see below
 uv sync          # development checkout
-pipx install .   # installed copy
 ```
+
+`install.sh` does the four things an install needs and then verifies the result:
+it `pipx install`s the application, finds and injects AccuDisc's Python binding if
+one is installed, puts the man page under `--prefix` (default `/usr/local`), adds a
+`file(1)` rule for `.rbi` images, and finally runs `cdda2img doctor`. Every step is
+a command you can run by hand; the script exists because finding the AccuDisc wheel
+is genuinely awkward — it lives under *AccuDisc's* prefix, since its compiled
+extension is only valid beside the `libaccudisc.so.0` it was built against.
+
+A missing wheel is a warning, not a failure: `create`, `import`, `extract`, `list`
+and `test` never touch a drive. `./install.sh --help` lists the options,
+`--dry-run` prints every command without running any, and `./install.sh uninstall`
+reverses it — leaving your config alone, because it holds drive offsets that took
+measurement to obtain.
 
 Then check what the machine actually has:
 
@@ -153,8 +167,8 @@ cdda2img doctor
 ```
 
 It reports every dependency — Python packages, the AccuDisc engine, external binaries,
-native libraries — and for each missing one, what it would have enabled and the command
-that would install it. It **checks only**: nothing there installs, downloads, or modifies
+native libraries — plus the package's own data files, and for each missing one, what it
+would have enabled and the command that would install it. It **checks only**: nothing there installs, downloads, or modifies
 anything, and it makes no network requests. Exit status is 1 if something *required* is
 missing, 0 otherwise; a missing optional dependency is reported without failing, since
 the absence of `ffplay` costs the audition preview and not the rip.

@@ -23,6 +23,11 @@ build: clean-build ## Build wheel file
 	@echo "🚀 Creating wheel file"
 	@uvx --from build pyproject-build --installer uv
 
+.PHONY: dist
+dist: ## Create a source-only distribution tarball in dist/
+	@echo "🚀 Creating source tarball"
+	@bash tools/mkdist.sh
+
 .PHONY: clean-build
 clean-build: ## Clean build artifacts
 	@echo "🚀 Removing build artifacts"
