@@ -502,6 +502,25 @@ def _shipped_profiles_dir() -> Path:
     return Path(__file__).parent / "profiles"
 
 
+def _example_config_path() -> Path:
+    """Where the bundled config template lives. Mirrors ``config._example_path``.
+
+    Duplicated for the same stdlib-only reason as :func:`_shipped_profiles_dir`, and
+    pinned to the original by a test.
+    """
+    import contextlib
+    import importlib.resources
+
+    with contextlib.suppress(Exception):
+        ref = importlib.resources.files("cdda2img").joinpath(
+            "conf/cdda2img.toml.example"
+        )
+        p = Path(str(ref))
+        if p.is_file():
+            return p
+    return Path(__file__).parent / "conf" / "cdda2img.toml.example"
+
+
 def _check_package_data() -> list[Result]:
     """Check the data files the package must carry, not just its dependencies.
 
@@ -517,35 +536,56 @@ def _check_package_data() -> list[Result]:
     Required, matching the ``disc engine`` entry: both are needed by `rip` and by
     nothing else, and both make it fail outright rather than degrade.
     """
+    results = []
+
     directory = _shipped_profiles_dir()
     found = (
         sorted(p.stem for p in directory.glob("*.toml")) if directory.is_dir() else []
     )
     if _BUILTIN_PROFILE in found:
-        return [
+        results.append(
             Result(
                 "recovery profiles",
                 OK,
                 f"{len(found)} in {directory}\n      {', '.join(found)}",
             )
-        ]
-    # Distinguish the two ways this fails: an empty/absent directory is a packaging
-    # fault, a populated one missing the built-in is a tampered install. The remedy
-    # differs, so the report must not merge them.
-    why = (
-        f"the built-in profile {_BUILTIN_PROFILE!r} is absent from {directory}"
-        if found
-        else f"no profiles found at {directory}"
-    )
-    return [
-        Result(
-            "recovery profiles",
-            MISSING,
-            f"{why} — `rip` cannot start without them",
-            remedy="reinstall cdda2img (the profiles ship inside the package)",
-            required=True,
         )
-    ]
+    else:
+        # Distinguish the two ways this fails: an empty/absent directory is a
+        # packaging fault, a populated one missing the built-in is a tampered
+        # install. The remedy differs, so the report must not merge them.
+        why = (
+            f"the built-in profile {_BUILTIN_PROFILE!r} is absent from {directory}"
+            if found
+            else f"no profiles found at {directory}"
+        )
+        results.append(
+            Result(
+                "recovery profiles",
+                MISSING,
+                f"{why} — `rip` cannot start without them",
+                remedy="reinstall cdda2img (the profiles ship inside the package)",
+                required=True,
+            )
+        )
+
+    # The config template, moved into the package on the same day and for the same
+    # reason. NOT required: cdda2img runs on defaults with no config at all, so its
+    # absence costs `setup`'s create/update actions and nothing else — whereas a
+    # missing profile stops `rip` dead. Reporting both as fatal would be wrong about
+    # this one, and a report that overstates is one users learn to skim.
+    example = _example_config_path()
+    results.append(
+        Result("config template", OK, str(example))
+        if example.is_file()
+        else Result(
+            "config template",
+            MISSING,
+            f"absent at {example} — `cdda2img setup` cannot create or update a config",
+            remedy="reinstall cdda2img (the template ships inside the package)",
+        )
+    )
+    return results
 
 
 def _check_binaries() -> list[Result]:

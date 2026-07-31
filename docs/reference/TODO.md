@@ -73,6 +73,31 @@ every step assumes the binding resolves without our `tools/` shim.
    does not install them.** `cdda2img doctor` is that check and it already exists
    (below); what remains here is the `make install` wrapper itself, which must end by
    invoking `doctor` and must not acquire an install-things mode later.
+   **DONE 2026-07-31 — as `install.sh`, not a `make install` target**, because it has
+   to run from an unpacked source tarball where `make` may not be installed and the
+   user is not a developer. Four steps + `doctor`, honouring the ruling. AccuDisc's
+   wheel is **found, not asked for**: their `install.sh` header and `cmake/accudisc.pc.in`
+   already froze the contract as `$PREFIX/share/accudisc/wheel/accudisc-*.whl`, *the
+   directory, not the filename*. Three search routes; pkg-config is tested for a
+   non-empty answer rather than exit 0 — measured, `--variable=wheeldir` returns rc=0
+   with empty stdout against the installed 0.4.0 `.pc`, so branching on rc yields `""`
+   from the success path. Reinstall is uninstall-then-install: `pipx install --force`
+   over a venv from an earlier pipx session fails (uv refuses to overwrite, pipx
+   declines to remove, exit 1). Sent to AccuDisc as §130; the two open questions there
+   (is the layout frozen; `ACCUDISC_PC_WHEELDIR` appears never `set()`) do not block us
+   because the glob needs no pkg-config.
+   **Still open here:** the `disc_ab.py` precondition above, and AccuDisc's §cq.2
+   remedy for it — build the A/B wheel with `-DACCUDISC_INSTALL_RPATH` pointed at the
+   build tree, in a **separate throwaway tree**, and never let that wheel leave the
+   machine or become the one Keith installs.
+4a. **[C2] `doctor` should keep growing with the package's data files.** The
+   **Package data** group added 2026-07-31 checks the recovery profiles only. It exists
+   because `doctor` reported *21 ok, 0 warnings* on an install where `rip` aborted at
+   startup: the profiles lived in a top-level `conf/` the wheel never packaged, and a
+   dependency checker had no reason to notice. Any future non-`.py` file the package
+   must carry needs a line in that group, or the same hole reopens with a different
+   file. Related sweep worth doing once: `Path(__file__).parent.parent` in `src/` is the
+   tell for this defect class — resolution that works in a checkout and nowhere else.
 5. **[K/AD] `setcap` the installed binary.** Enabled in their install
    (`ACCUDISC_SETCAP_ON_INSTALL`) but not in effect until the binaries actually
    invoked come from the install. Until then their rebuild drops the capability from

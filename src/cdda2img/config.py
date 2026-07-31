@@ -4,7 +4,7 @@ config.py — cdda2img user configuration.
 Reads $XDG_CONFIG_HOME/cdda2img/cdda2img.toml
 (default: ~/.config/cdda2img/cdda2img.toml).
 When the file is absent and stdin is a TTY, the user is offered the option to
-create it from the bundled example (conf/cdda2img.toml.example).
+create it from the bundled example (src/cdda2img/conf/cdda2img.toml.example).
 
 Validation is **strict by default** (accudisc-migration-plan.md §9.6): the file is
 checked against ``validation.CONFIG_SCHEMA`` and any failure raises
@@ -65,12 +65,12 @@ def _example_path() -> Path:
 
     with contextlib.suppress(Exception):
         ref = importlib.resources.files("cdda2img").joinpath(
-            "../../conf/cdda2img.toml.example"
+            "conf/cdda2img.toml.example"
         )
         p = Path(str(ref))
         if p.is_file():
             return p
-    return Path(__file__).parent.parent.parent / "conf" / "cdda2img.toml.example"
+    return Path(__file__).parent / "conf" / "cdda2img.toml.example"
 
 
 _DRIVE_KEY_RE = re.compile(r"^(name|read_offset|write_offset)\s*=")

@@ -463,11 +463,12 @@ def test_doctor_fails_when_the_shipped_profiles_are_absent(
     """
     monkeypatch.setattr(depcheck, "_shipped_profiles_dir", lambda: tmp_path / "gone")
 
-    results = depcheck._check_package_data()
-    assert len(results) == 1
-    assert results[0].status == depcheck.MISSING
-    assert results[0].required is True
-    assert "no profiles found" in results[0].detail
+    result = next(
+        r for r in depcheck._check_package_data() if r.name == "recovery profiles"
+    )
+    assert result.status == depcheck.MISSING
+    assert result.required is True
+    assert "no profiles found" in result.detail
 
 
 def test_doctor_separates_an_empty_install_from_a_tampered_one(
@@ -502,3 +503,44 @@ def test_all_seven_shipped_profiles_load_and_validate() -> None:
     assert len(names) == 7
     for name in names:
         assert load_profile(name).name == name
+
+
+def test_config_template_location_matches_the_loader() -> None:
+    """The template `doctor` checks must be the one `setup` reads.
+
+    Third duplicated resolver in this file, same stdlib-only cause, same silent
+    failure if it drifts: `doctor` would certify a file nothing loads.
+    """
+    from cdda2img import config
+
+    assert depcheck._example_config_path() == config._example_path()
+
+
+def test_config_template_is_inside_the_package() -> None:
+    """As with the profiles: a path that escapes the package is checkout-only.
+
+    Measured before the fix — `cdda2img setup` on a pipx install reported
+    "template not found at .../lib/python3.14/conf/cdda2img.toml.example", two
+    levels above the installed package.
+    """
+    from cdda2img import config
+
+    package = Path(config.__file__).parent
+    assert depcheck._example_config_path().is_relative_to(package)
+
+
+def test_a_missing_config_template_is_reported_but_not_fatal(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """cdda2img runs on defaults with no config, so this must not exit 1.
+
+    Only `setup`'s create/update actions need it. Marking it required would fail
+    `doctor` on an otherwise perfectly working install.
+    """
+    monkeypatch.setattr(depcheck, "_example_config_path", lambda: tmp_path / "gone")
+
+    result = next(
+        r for r in depcheck._check_package_data() if r.name == "config template"
+    )
+    assert result.status == depcheck.MISSING
+    assert result.required is False

@@ -91,7 +91,7 @@
 # Overwriting one with a template would silently discard hours of measurement and
 # then produce rips that are wrong by a few samples — an error with no symptom.
 # `uninstall` leaves it alone for the same reason. Run `cdda2img setup` to create
-# one, or copy conf/cdda2img.toml.example yourself.
+# one, or copy src/cdda2img/conf/cdda2img.toml.example yourself.
 #
 # The recovery profiles are also not installed here: they ship *inside* the
 # Python package, so pipx carries them along with the code. That is a change from
@@ -163,7 +163,8 @@ Options:
   --no-man               skip the man page
   --no-magic             skip the libmagic file-type rule
   --no-doctor            skip the post-install verification
-  --force                pass --force to pipx (reinstall over an existing copy)
+  --force                replacing an existing install is expected; do not warn
+                         about it (the replacement happens either way)
   -n, --dry-run          print every command without running any of them
   -h, --help             this text
 
@@ -313,14 +314,21 @@ fi
 [ -f "$SRC_DIR/pyproject.toml" ] || die "$SRC_DIR does not look like the cdda2img source tree"
 
 say "1/4  Installing the application (pipx)"
-if [ "$FORCE" -eq 1 ]; then
-    run pipx install --force "$SRC_DIR"
-elif pipx list --short 2>/dev/null | grep -q '^cdda2img '; then
-    warn "cdda2img is already installed; reinstalling over it"
-    run pipx install --force "$SRC_DIR"
-else
-    run pipx install "$SRC_DIR"
+# Reinstall is uninstall-then-install, NOT `pipx install --force`. Measured on
+# this machine: `--force` over a venv that a previous pipx run created fails,
+# because pipx delegates venv creation to uv, uv refuses to overwrite the
+# existing directory, and pipx then declines to remove it ("not created in this
+# session") — it prints "Installing to existing venv" and exits 1 anyway. The
+# two-step path has none of that ambiguity and is what actually works. It also
+# removes any injected AccuDisc binding, which is why step 2 runs unconditionally
+# afterwards rather than only on a first install.
+if pipx list --short 2>/dev/null | grep -q '^cdda2img '; then
+    if [ "$FORCE" -eq 0 ]; then
+        warn "cdda2img is already installed; replacing it"
+    fi
+    run pipx uninstall cdda2img
 fi
+run pipx install "$SRC_DIR"
 ok "cdda2img installed"
 
 say "2/4  Installing the AccuDisc binding (disc engine)"
@@ -368,11 +376,11 @@ say "4/4  Installing the libmagic rule"
 # to the distribution's `file` package.
 if [ "$WANT_MAGIC" -eq 0 ]; then
     warn "skipped (--no-magic)"
-elif [ ! -f "$SRC_DIR/conf/magic" ]; then
-    warn "conf/magic not found in the source tree — skipping"
+elif [ ! -f "$SRC_DIR/src/cdda2img/conf/magic" ]; then
+    warn "src/cdda2img/conf/magic not found in the source tree — skipping"
 else
     run install -d "$HOME/.magic.d"
-    run install -m 644 "$SRC_DIR/conf/magic" "$HOME/.magic.d/cdda2img.magic"
+    run install -m 644 "$SRC_DIR/src/cdda2img/conf/magic" "$HOME/.magic.d/cdda2img.magic"
     ok "file(1) will now identify .rbi images"
 fi
 
