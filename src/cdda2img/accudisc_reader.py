@@ -181,6 +181,13 @@ _BINDING_SURFACE = (
     "NotBlank",
     "WriteResult",
     "Anomaly",
+    # Added with the CLI retirement (TODO item 6). `C2Verdict` decides whether the
+    # rip asks for C2 at all and `version_string` is what a rip log records itself
+    # as; both are read on paths that degrade quietly, so a binding missing either
+    # would answer "no C2" and "version unknown" rather than fail — which is the
+    # kind of wrong that survives a release. Named here, it is refused at import.
+    "C2Verdict",
+    "version_string",
 )
 
 _binding_warned = False
@@ -516,6 +523,42 @@ def parse_toc_output(stdout: str) -> TocGeometry:
     )
 
 
+def _lead_in_via_binding(
+    device: str, fulltoc_path: Path, cdtext_path: Path | None
+) -> bool:
+    """Lead-in dump through the binding. False means "fall back to the subprocess".
+
+    Writes each file only once its bytes are in hand. The subprocess contract is
+    that a failed dump leaves **no file**, and every caller tests for the file
+    rather than catching — so a half-written or empty ``fulltoc`` would read as a
+    successful capture of a disc with no TOC, which is worse than no answer.
+
+    ``read_cdtext_raw`` returning ``None`` is the ordinary case, not an error:
+    most discs carry no CD-Text. It leaves no file, exactly as the CLI does.
+    """
+    module = _binding("lead-in")
+    if module is None:
+        return False
+
+    def _run() -> bool:
+        try:
+            with module.Device(device) as dev:
+                fulltoc = dev.read_full_toc_raw()
+                cdtext = dev.read_cdtext_raw() if cdtext_path is not None else None
+        except module.AbiMismatch:
+            raise
+        except (module.AccuDiscError, OSError) as exc:
+            log.debug("accudisc lead-in read failed for %s: %s", device, exc)
+            return True
+        if fulltoc:
+            fulltoc_path.write_bytes(fulltoc)
+        if cdtext and cdtext_path is not None:
+            cdtext_path.write_bytes(cdtext)
+        return True
+
+    return _try_binding(module, "lead-in", _run) is not None
+
+
 def read_lead_in(
     device: str, fulltoc_path: Path, cdtext_path: Path | None = None
 ) -> None:
@@ -529,7 +572,14 @@ def read_lead_in(
     none — so a missing or failed ``cdtext`` leaves no file and is not an error.
     A failed ``fulltoc`` likewise leaves no file; the caller checks for it rather
     than catching, because every caller of this is cosmetic.
+
+    Binding path takes **one** ``Device`` for both reads, as the CLI's inline
+    capture does and as ``_read_disc_binding`` already does. Two devices would be
+    two spin-ups for data that lives in the same lead-in, which is the entire
+    reason this is cheap enough to sit in front of a rip.
     """
+    if _lead_in_via_binding(device, fulltoc_path, cdtext_path):
+        return
     for sub, out in (("fulltoc", fulltoc_path), ("cdtext", cdtext_path)):
         if out is None:
             continue
@@ -681,11 +731,52 @@ def _run_features(device: str) -> tuple[int, str] | None:
     return None if probe is None else (probe[0], probe[1])
 
 
+#: The binding's ``Features.combos`` keys spelled the way the CLI prints them —
+#: and the way this module has always published them. The two differ by one
+#: character on two keys (``c2_sub_raw`` vs ``c2+sub_raw``), which is enough for
+#: a caller testing ``combos["c2+sub_raw"]`` to get a ``KeyError`` on one carrier
+#: and a working single-pass capture on the other. Absorbing that is what a seam
+#: is for; leaving it to callers is how a transport swap becomes a behaviour swap.
+_COMBO_KEY_ALIASES = {"c2_sub_raw": "c2+sub_raw", "c2_sub_q": "c2+sub_q"}
+
+
+def _features_via_binding(device: str) -> tuple[bool, dict[str, bool]] | None:
+    """``(c2_supported, combos)`` from ``Device.probe_features``, or None to fall back.
+
+    ``C2Verdict.SUPPORTED`` is the binding's spelling of the CLI's exit 0, and it
+    means the same conservative thing: claimed **and** functional. ``UNVERIFIED``
+    is not a weaker yes — it is "we could not tell" — so it maps to False, which
+    is the answer the subprocess gives for the same drive.
+    """
+    module = _binding("features")
+    if module is None:
+        return None
+
+    def _run() -> tuple[bool, dict[str, bool]]:
+        try:
+            with module.Device(device) as dev:
+                feats = dev.probe_features()
+        except module.AbiMismatch:
+            raise
+        except (module.AccuDiscError, OSError) as exc:
+            log.debug("accudisc features failed for %s: %s", device, exc)
+            return (False, {})
+        combos = {_COMBO_KEY_ALIASES.get(k, k): v for k, v in feats.combos.items()}
+        return (feats.c2_verdict == module.C2Verdict.SUPPORTED, combos)
+
+    return _try_binding(module, "features", _run)
+
+
 def drive_supports_c2(device: str) -> bool:
-    """True iff ``accudisc features`` reports the drive both advertises AND
-    functionally supports C2 (exit 0 == verdict C2_SUPPORTED). Best-effort: any
-    failure (binary missing, probe error) → False, so the pipeline degrades to
-    the plain cdrdao read-cd path."""
+    """True iff the drive both advertises AND functionally supports C2.
+
+    (``C2Verdict.SUPPORTED`` on the binding; exit 0 from ``accudisc features`` on
+    the subprocess — the same conservative test either way.) Best-effort: any
+    failure → False, and the caller degrades to a read without C2.
+    """
+    served = _features_via_binding(device)
+    if served is not None:
+        return served[0]
     probe = _run_features(device)
     return probe is not None and probe[0] == 0
 
@@ -694,10 +785,13 @@ def probe_combos(device: str) -> dict[str, bool]:
     """Per-combination READ CD support from the ``features`` smoke probe.
 
     Returns e.g. ``{"c2": True, "sub_raw": True, "c2+sub_raw": True, ...}`` — the
-    ``c2+sub_raw`` key gates the single-pass audio+C2+subchannel capture. The
-    ``combo <name> ok|failed`` line format is byte-compatible with c2read. Empty
-    dict when the probe is unavailable.
+    ``c2+sub_raw`` key gates the single-pass audio+C2+subchannel capture. Empty
+    dict when the probe is unavailable. The key spelling is this module's
+    contract, not the carrier's: see ``_COMBO_KEY_ALIASES``.
     """
+    served = _features_via_binding(device)
+    if served is not None:
+        return served[1]
     probe = _run_features(device)
     if probe is None:
         return {}
@@ -1208,7 +1302,29 @@ def read_span(
 
     Same exit contract as :func:`read_disc_c2` (0/3 = completed; hard-unreadable
     sectors arrive zero-filled, so the output is always exactly ``count`` sectors
-    long)."""
+    long).
+
+    The binding path reuses ``_read_span_binding`` — the same function
+    :func:`read_span_bytes` has been served by since 2026-07-27 — and writes the
+    bytes out. Deliberately not ``Device.read_span``: that helper supplies its own
+    sink and so has nowhere to hang ``progress_cb``, which drives the TUI through
+    every recovery re-read, and a silent multi-minute stream reads as a hang.
+    (``read_to_file`` is ruled out for the same reason, and it is the API this
+    function most obviously resembles — which is exactly why it is named here.)
+    """
+    module = _binding("span read")
+    if module is not None:
+        data = _try_binding(
+            module,
+            "span read",
+            lambda: _read_span_binding(
+                module, device, start_lba, count, read_speed, progress_cb
+            ),
+        )
+        if data is not None:
+            output_pcm.write_bytes(data)
+            return
+
     cmd = [
         _ACCUDISC,
         "--device",

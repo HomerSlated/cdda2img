@@ -894,12 +894,22 @@ class _FakeAnomaly(enum.IntFlag):
     B = 2
 
 
+class _FakeC2Verdict(enum.IntEnum):
+    """Mirrors the real `C2Verdict`. UNVERIFIED is present on purpose: it is the
+    member most easily mistaken for a weaker yes, and it must map to False."""
+
+    UNSUPPORTED = 0
+    SUPPORTED = 1
+    UNVERIFIED = 2
+
+
 class _FakeBinding:
     """The minimum surface accudisc_reader calls, so _BINDING_SURFACE is satisfied."""
 
     AccuDiscError = _FakeBindingError
     AbiMismatch = _FakeAbiMismatch
     Anomaly = _FakeAnomaly
+    C2Verdict = _FakeC2Verdict
 
     def __init__(self) -> None:
         self.opened: list[str] = []
@@ -907,6 +917,10 @@ class _FakeBinding:
     @staticmethod
     def anomaly_token(bit: object) -> str:
         return getattr(bit, "name", str(bit)).lower()
+
+    @staticmethod
+    def version_string() -> str:
+        return "0.0.0-fake"
 
     def Device(self, path: str) -> object:
         raise NotImplementedError
@@ -2201,3 +2215,199 @@ def test_engine_version_comes_from_the_binding_without_a_device(
     banner = ar.engine_version()
     assert "0.4.0" in banner
     assert "[transport: binding]" in banner
+
+
+# ---- step 1b: lead-in, span-to-file, feature probe ---------------------------
+
+
+class _LeadInDevice:
+    def __init__(self, fulltoc: bytes | None, cdtext: bytes | None) -> None:
+        self._fulltoc = fulltoc
+        self._cdtext = cdtext
+        self.opens = 0
+
+    def __enter__(self) -> _LeadInDevice:
+        self.opens += 1
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        return None
+
+    def read_full_toc_raw(self) -> bytes | None:
+        return self._fulltoc
+
+    def read_cdtext_raw(self) -> bytes | None:
+        return self._cdtext
+
+
+def _bind(monkeypatch: pytest.MonkeyPatch, device: object) -> _FakeBinding:
+    fake = _FakeBinding()
+    monkeypatch.setattr(fake, "Device", lambda _p: device)
+    _install(monkeypatch, fake)
+    monkeypatch.setenv(ar.TRANSPORT_ENV, "binding")
+    return fake
+
+
+def test_lead_in_takes_one_device_for_both_reads(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Both dumps come from the same lead-in, so they must come from one spin-up.
+
+    Two devices would be two spin-ups for data sitting in the same place, which
+    is the entire reason this is cheap enough to run in front of a rip.
+    """
+    dev = _LeadInDevice(b"FULLTOC", b"CDTEXT")
+    _bind(monkeypatch, dev)
+    ft, ct = tmp_path / "a.fulltoc", tmp_path / "a.cdtext"
+
+    ar.read_lead_in("/dev/sr0", ft, ct)
+
+    assert dev.opens == 1
+    assert ft.read_bytes() == b"FULLTOC"
+    assert ct.read_bytes() == b"CDTEXT"
+
+
+def test_a_disc_without_cd_text_leaves_no_cdtext_file(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Absent CD-Text is the ordinary case, not a failure — most discs have none.
+
+    Writing an empty file would be worse than writing nothing: every caller tests
+    for the file's existence rather than catching, so a zero-byte sidecar reads as
+    a successful capture of a disc whose CD-Text says nothing.
+    """
+    _bind(monkeypatch, _LeadInDevice(b"FULLTOC", None))
+    ft, ct = tmp_path / "a.fulltoc", tmp_path / "a.cdtext"
+
+    ar.read_lead_in("/dev/sr0", ft, ct)
+
+    assert ft.exists()
+    assert not ct.exists()
+
+
+def test_a_failed_lead_in_read_leaves_no_file_at_all(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    class _Boom(_LeadInDevice):
+        def read_full_toc_raw(self) -> bytes:
+            msg = "no medium present"
+            raise _FakeBindingError(msg)
+
+    _bind(monkeypatch, _Boom(None, None))
+    ft = tmp_path / "a.fulltoc"
+
+    def _no_spawn(*a: object, **k: object) -> object:
+        msg = "a device failure must not be retried through the subprocess"
+        raise AssertionError(msg)
+
+    monkeypatch.setattr(ar.subprocess, "run", _no_spawn)
+    ar.read_lead_in("/dev/sr0", ft)
+
+    assert not ft.exists()
+
+
+def test_read_span_writes_the_bindings_bytes_to_the_file(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The file is this function's only contract; the binding hands back memory.
+
+    Routed through `_read_span_binding` — the same function `read_span_bytes` has
+    used since the first flip — rather than `Device.read_span`/`read_to_file`,
+    neither of which can carry the progress callback the recovery TUI needs.
+    """
+    fake = _FakeBinding()
+    _install(monkeypatch, fake)
+    monkeypatch.setenv(ar.TRANSPORT_ENV, "binding")
+    monkeypatch.setattr(ar, "_read_span_binding", lambda *a, **k: b"\x11\x22" * 8)
+
+    out = tmp_path / "span.pcm"
+    ar.read_span("/dev/sr0", 100, 2, out)
+
+    assert out.read_bytes() == b"\x11\x22" * 8
+
+
+def test_read_span_progress_callback_survives_the_flip(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A silent multi-minute stream reads as a hang, so the callback is the point."""
+    fake = _FakeBinding()
+    _install(monkeypatch, fake)
+    monkeypatch.setenv(ar.TRANSPORT_ENV, "binding")
+    seen: list[object] = []
+    monkeypatch.setattr(
+        ar,
+        "_read_span_binding",
+        lambda _m, _d, _s, _c, _sp, cb: seen.append(cb) or b"",
+    )
+
+    def _cb(done: int, total: int) -> None:
+        return None
+
+    ar.read_span("/dev/sr0", 0, 1, tmp_path / "s.pcm", progress_cb=_cb)
+    assert seen == [_cb]
+
+
+class _FeaturesDevice:
+    def __init__(self, verdict: _FakeC2Verdict) -> None:
+        self._verdict = verdict
+
+    def __enter__(self) -> _FeaturesDevice:
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        return None
+
+    def probe_features(self) -> object:
+        class _F:
+            c2_verdict = self._verdict
+            combos = {  # noqa: RUF012 — the binding's spelling, deliberately
+                "c2": True,
+                "sub_raw": True,
+                "sub_q": True,
+                "c2_sub_raw": True,
+                "c2_sub_q": False,
+            }
+
+        return _F()
+
+
+def test_probe_combos_publishes_our_key_spelling_not_the_carriers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`Features.combos` says `c2_sub_raw`; the CLI and this module say `c2+sub_raw`.
+
+    One character on two keys — enough that a caller testing `combos["c2+sub_raw"]`
+    gets a KeyError on one carrier and a working single-pass capture on the other.
+    Absorbing that is what the seam is for; the assertion is on the whole dict so a
+    future key cannot be added on one path only.
+    """
+    _bind(monkeypatch, _FeaturesDevice(_FakeC2Verdict.SUPPORTED))
+
+    assert ar.probe_combos("/dev/sr0") == {
+        "c2": True,
+        "sub_raw": True,
+        "sub_q": True,
+        "c2+sub_raw": True,
+        "c2+sub_q": False,
+    }
+
+
+@pytest.mark.parametrize(
+    ("verdict", "expected"),
+    [
+        (_FakeC2Verdict.SUPPORTED, True),
+        (_FakeC2Verdict.UNSUPPORTED, False),
+        (_FakeC2Verdict.UNVERIFIED, False),
+    ],
+)
+def test_c2_support_is_claimed_and_functional_or_it_is_false(
+    verdict: _FakeC2Verdict, expected: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """UNVERIFIED is "could not tell", not a weaker yes.
+
+    It is the member most easily read as one, and treating it as support would ask
+    a drive for C2 pointers that were never demonstrated — the subprocess answers
+    False for the same drive, since only exit 0 means supported there.
+    """
+    _bind(monkeypatch, _FeaturesDevice(verdict))
+    assert ar.drive_supports_c2("/dev/sr0") is expected
