@@ -21,6 +21,13 @@ bitmap but what the bitmap *changes*. Two decodes that agree are a real result
 (the erasures bought nothing here) and must be reported as one, not quietly
 dropped.
 
+``--control-align`` adds the negative control: the same flag population placed at a
+deliberately wrong alignment. Without it, the only evidence that the erasures landed
+in the right grid positions is that the reported column count looks plausible — and
+a coincidence of population reproduces that exactly. Measured on Tracy Chapman,
+``erasure_columns`` falls 533 → 30 between the real and the misaligned bitmap while
+the flag count is identical, which is what turns the plausible number into evidence.
+
 Usage::
 
     uv run python tools/ctdb_fixture.py \\
@@ -85,8 +92,15 @@ def analyse_arm(
     disc: cr.Disc,
     pcm_path: Path,
     erasures: Path | None,
+    control: Path | None = None,
 ) -> dict:
-    """Fetch parity for *en* and decode, error-only and (if given) with erasures."""
+    """Fetch parity for *en* and decode: error-only, with erasures, and the control.
+
+    The *control* run uses a bitmap with the same flag population placed at a
+    deliberately wrong alignment. Without it, an erasure arm's only evidence that the
+    flags landed in the right grid positions is that the column count looks plausible
+    — which a coincidence of population reproduces exactly.
+    """
     out = Path(args.out)
     tag = f"npar{en.npar}_entry{en.id}"
     parity = cr.fetch_parity(en, out / f"parity_{tag}.bin")
@@ -95,6 +109,8 @@ def analyse_arm(
     plan: list[tuple[str, Path | None]] = [("error_only", None)]
     if erasures is not None:
         plan.append(("erasures", erasures))
+    if control is not None:
+        plan.append(("erasures_misaligned", control))
 
     for label, eras in plan:
         result = cr.run_ctanalyse(args.ctanalyse, pcm_path, parity, en, disc, eras)
@@ -131,6 +147,12 @@ def _parse_args() -> argparse.Namespace:
     ap.add_argument("--name", required=True, help="basename prefix for the fixture")
     ap.add_argument("--c2", type=Path, help="matching AccuDisc C2 capture")
     ap.add_argument("--c2-align", type=int, default=-2, help="C2/audio offset, pairs")
+    ap.add_argument(
+        "--control-align",
+        type=int,
+        help="also build a deliberately misaligned bitmap at this align and decode "
+        "with it — the negative control for 'the erasures landed in the right place'",
+    )
     ap.add_argument("--entry", action="append", help="restrict to this CTDB entry id")
     ap.add_argument(
         "--sweep",
@@ -177,6 +199,7 @@ def main() -> int:
         return EXIT_NO_ENTRY
 
     erasures = None
+    control = None
     flagged = 0
     if args.c2 is not None:
         dest = out / f"{args.name}_erasures.bin"
@@ -188,11 +211,18 @@ def main() -> int:
         if flagged == 0:
             print("  WARNING: bitmap is all zeros — the erasure arm is vacuous")
         erasures = dest
+        if args.control_align is not None:
+            control = out / f"{args.name}_erasures_misaligned.bin"
+            n = build_erasures(args.c2, len(pcm), args.control_align, control)
+            print(
+                f"control: {control.name}, {n} words flagged "
+                f"(align_pairs={args.control_align})"
+            )
 
     arms: list[dict] = []
     for en in choose_entries(args, entries):
         print(f"arm: entry {en.id} npar={en.npar} conf={en.confidence}")
-        arms.append(analyse_arm(args, en, disc, args.pcm, erasures))
+        arms.append(analyse_arm(args, en, disc, args.pcm, erasures, control))
 
     summary = {
         "toc": disc.toc,
@@ -217,6 +247,8 @@ def main() -> int:
                 "words_flagged": flagged,
                 "words_total": len(pcm) // 2,
                 "derived_by": "tools/ctdb_repair.py:build_erasure_bitmap",
+                "control_file": control.name if control else None,
+                "control_align_pairs": args.control_align,
             }
         ),
         "arms": arms,

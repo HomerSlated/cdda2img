@@ -66,7 +66,12 @@ Standalone utility scripts live in `tools/` (tracked, not part of the installed 
   falsifiable claim) and no verification gate (nothing is spliced). With `--c2` it runs
   **both** decodes on identical inputs, error-only and errors-and-erasures, because the
   measurable quantity is what the bitmap *changes*; two runs that agree are a result and
-  are reported, not dropped. Three fixtures exist under `/var/tmp/ctdb-fixture*`
+  are reported, not dropped. `--control-align` adds the **negative control** — the same
+  flag population at a deliberately wrong alignment — because otherwise the only evidence
+  the erasures landed in the right grid positions is a plausible-looking column count,
+  which a coincidence of population reproduces exactly (measured: `erasure_columns`
+  533 → 30 at identical flag count, while the decode still succeeds, so misalignment is
+  detectable but not fatal at npar=16). Three fixtures exist under `/var/tmp/ctdb-fixture*`
   (2026-08-01): Tracy stored/basis, Tracy raw/erasures, ABBA `bounds[0]=33`/domain.
 - **AccuDisc** — the low-level CD-DA read engine `accudisc_reader.py` drives, a **separate
   project** (https://github.com/HomerSlated/accudisc), external like cdrdao / cd-paranoia and
