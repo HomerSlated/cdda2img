@@ -2939,7 +2939,14 @@ def rip_image(  # noqa: C901
                 c2_path=c2_path,
             )
             if _ctdb.repaired:
-                rip_type = "accudisc+ctdb" if c2_path is not None else "cdrdao+ctdb"
+                # Suffix the engine we actually used. This read
+                # `"accudisc+ctdb" if c2_path is not None else "cdrdao+ctdb"`,
+                # which was correct while there were two read engines and became
+                # a false provenance record when there was one: `c2_path` is None
+                # whenever `c2_recovery=off`, so a perfectly ordinary AccuDisc rip
+                # would have been stamped `cdrdao+ctdb` in its container. The
+                # branch tested for a C2 capture and labelled it an *engine*.
+                rip_type = f"{rip_type}+ctdb"
                 for _t in _ctdb.damaged_tracks:
                     recovery_outcomes[_t] = f"ctdb_repaired@{_ctdb.entry_id}"
                 _ui_status(ui, "Re-verifying AccurateRip (CTDB repair)…")

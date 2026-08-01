@@ -362,7 +362,7 @@ The PROV block stores provenance and extended metadata that has no natural home 
 | `created`              | Creation timestamp (ISO 8601), e.g. `2026-05-14T16:30:00Z` |
 | `mode`                 | Workflow that produced the container: `r` (rip) \| `c` (create from files) \| `i` (import foreign image) |
 | `source`               | Human-readable origin path, device node, or source description |
-| `ripper`               | Extraction engine: `cdrdao` \| `cdparanoia` \| `file` \| `ddp` \| `toc` |
+| `ripper`               | Extraction engine and the recovery exits that fired. `accudisc` for a rip, with `+ctdb` appended when a CTDB parity repair was committed and `+c2rec` when the speed-ladder re-read spliced a track; both may appear. `file` (create), `ddp`, `toc`, `nrg`, `ccd` for the import sources. `cdrdao` and `cdparanoia` were valid values in containers written before 2026-07; readers **SHOULD** accept them and **MUST NOT** write them. |
 | `drive_name`           | Human-readable drive name, e.g. `Plextor PX-716A` |
 | `drive_read_offset`    | Read offset applied during rip, as a signed integer string, e.g. `+30` or `-6` |
 | `drive_write_offset`   | Write offset for this drive (informational), e.g. `-30` |
@@ -391,9 +391,13 @@ The PROV block stores provenance and extended metadata that has no natural home 
 | `arip_dbar_b3sum`          | 64 lowercase hex chars. BLAKE3 of the raw dBAR response body (pre-parse). Emitted only when a body was actually received. Lets later re-fetches detect AR-side changes or mirror tampering without re-running verification. (`arip_dbar_sha256` was the name used in v4.x; the value is semantically equivalent but computed with BLAKE3.) |
 | `recovery_passes`          | Integer (decimal string). Emitted only when speed-laddered AR recovery ran (a track failed AR and `recovery_passes>0`). The configured number of full ladder sweeps attempted per failed track (total attempts per track = `recovery_passes` × ladder steps). |
 | `recovery_ladder`          | Comma-separated drive read speeds, e.g. `4X,8X,16X,24X,32X,40X`. The drive's own probed speed ladder that recovery swept (fastest→slowest). Emitted alongside `recovery_passes`. |
-| `recovery_track_<n>`       | `matched@<speed>X` \| `unrecovered`, per failed track `<n>`. `matched@32X` = a cd-paranoia re-rip at that ladder speed produced an AccurateRip-matching track that was spliced in; `unrecovered` = no speed in the budget matched, so the original cdrdao audio was kept. Emitted only for tracks that failed the initial AR check. |
+| `recovery_track_<n>`       | Per failed track `<n>`, which recovery exit produced the audio in the container. `ctdb_repaired@<entry_id>` = a CTDB parity repair was committed after passing both the CTDB per-track CRC and the AccurateRip gate, with **zero extra reads**. `matched@<speed>X` = the speed-ladder re-read at that rung produced an AccurateRip-matching track, spliced in sample-exactly. `unrecovered` = neither exit succeeded and the **original audio was kept unaltered** — an unverified splice is never written. Emitted only for tracks that failed the initial AR check. |
+| `ctdb_declined`            | Reason a CTDB repair was attempted and rejected, e.g. `disc not in CTDB`, `no CTDB entry reconciles with this rip`, `ctanalyse failed`. Present only when the attempt was made and did not commit; its absence means either no attempt or a success. A declined repair used to leave no trace at all, which made "we never tried" and "we tried and it failed" indistinguishable after the fact. |
+| `ctdb_entry`               | The CTDB entry id the repair was reconciled against. Emitted on success and on a decline that got as far as selecting an entry. |
+| `ctdb_offset`              | Signed sample offset (e.g. `-639`) at which the rip reconciled with that CTDB entry. |
+| `ctdb_erasures`            | `c2` when the C2 bitmap was supplied to the decoder as erasures (roughly doubling reconstruction capacity). Absent when the repair ran error-only. |
 | `acoustid_corroborates`    | `YES` \| `NO`. Emitted only when the pre-menu AcoustID helper (R6) ran (i.e. `acoustid_lookup.is_available()` was true and at least one per-track fingerprint produced a chained MB recording). `YES` = AcoustID's consistent-across-tracks winner agrees with the disc's existing MB release MBID; `NO` = disagrees. |
-| `pre_emphasis`             | `YES` \| `NO`. Aggregate disc-level pre-emphasis flag. `YES` if any track has CONTROL bit 0 set, `NO` otherwise. Absent when not captured by the source parser (today only the cdrdao TOC path populates it). |
+| `pre_emphasis`             | `YES` \| `NO`. Aggregate disc-level pre-emphasis flag. `YES` if any track has CONTROL bit 0 set, `NO` otherwise. Absent when not captured by the source parser; populated by the subchannel assembly on a rip and by the TOC parser on an import. |
 | `disagreement_cddb_mb`     | Comma-separated list of fields where CDDB and MB returned different answers, after NFC + casefold + reissue-suffix allow-list normalisation. Possible values: `album`, `artist`, or `album,artist`. Absent when both agree, when one side is blank, or when the pre-MB artist was the literal `Unknown Artist` default. |
 | `original_release_corroborated` | `discogs,mb`. Emitted when both the Discogs master `main_release.year` and the MB RG `first-release-date` were resolvable and agreed on the same 4-digit year. |
 | `original_release_disagreement` | `discogs:YYYY\|mb:YYYY`. Emitted when both years resolved and disagreed. The disc's stored `original_release_year` reflects the *earlier* of the two. |
@@ -564,7 +568,7 @@ Log creation date: <ISO 8601 datetime>
 
 Ripping phase information:
   Drive: <drive name>
-  Extraction engine: <cdrdao|cdparanoia> <version>
+  Extraction engine: accudisc <version>
   Read offset correction: <N>
   Gap detection: <method>
 
