@@ -263,7 +263,12 @@ def _import_binding() -> tuple[Any | None, str]:
     if extra is not None and extra not in sys.path:
         sys.path.append(extra)
     try:
-        import accudisc
+        # ty cannot resolve this and must not try: `accudisc` is an out-of-tree
+        # optional dependency that exists only where AccuDisc is installed, which
+        # is why the whole function is written around it being absent. The ignore
+        # is inert where it *does* resolve (measured — ty does not report an
+        # unused ignore here), so one spelling is correct in both environments.
+        import accudisc  # ty: ignore[unresolved-import]
     except ImportError as exc:
         return None, str(exc)
 

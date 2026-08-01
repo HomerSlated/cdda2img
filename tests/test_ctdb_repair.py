@@ -304,3 +304,35 @@ def test_without_a_c2_capture_only_error_only_runs(_repair_harness: dict) -> Non
     h["monkeypatch"].setattr(C, "_ctanalyse_and_verify", h["record"]([False]))
     _run(h, c2=False)
     assert h["calls"] == [False]
+
+
+# ---- D2: the binary is optional ---------------------------------------------
+
+
+def test_an_absent_ctanalyse_declines_the_repair_instead_of_raising(
+    _repair_harness: dict,
+) -> None:
+    """ctanalyse is not shipped, so its absence must be an outcome, not a crash.
+
+    Deliberately runs the *real* ``_ctanalyse_and_verify`` — the harness stubs it
+    for the attempt-policy tests above, and a stub cannot tell you what the
+    subprocess layer does with a `FileNotFoundError`. This is the case a
+    developer machine can never check, because it has the binary.
+    """
+    h = _repair_harness
+    before = h["pcm_path"].read_bytes()
+
+    result = C.repair_whole_disc(
+        h["pcm_path"],
+        [33, 100],
+        199,
+        0x1234,
+        30,
+        ctanalyse_bin="/nonexistent/ctanalyse",
+    )
+
+    assert not result.repaired
+    assert result.reason == "ctanalyse failed"
+    assert h["pcm_path"].read_bytes() == before, (
+        "a failed repair must not touch the PCM"
+    )

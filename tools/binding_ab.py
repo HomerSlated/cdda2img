@@ -97,7 +97,9 @@ def _binding() -> Any:
     tool only runs under an interpreter that has the binding — but the reasoning
     was true by environment, not by construction.
     """
-    import accudisc
+    # See the same ignore in `accudisc_reader._import_binding`: an out-of-tree
+    # optional dependency, absent in CI by design.
+    import accudisc  # ty: ignore[unresolved-import]
 
     return accudisc
 

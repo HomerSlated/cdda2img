@@ -185,9 +185,33 @@ def test_preflight_hint_targets_pipx_inside_a_pipx_venv(
 # ---------------------------------------------------------------------------
 
 
-def test_doctor_passes_on_this_machine(capsys: pytest.CaptureFixture) -> None:
-    """The development environment must have everything required."""
-    assert depcheck.run_doctor() == 0
+def _required_failures(results: list[depcheck.Result]) -> list[str]:
+    return [r.name for r in results if r.required and r.status != depcheck.OK]
+
+
+def test_doctor_is_clean_apart_from_the_out_of_tree_disc_engine(
+    capsys: pytest.CaptureFixture,
+) -> None:
+    """Everything installable from our own lockfile must be present.
+
+    The disc engine is not: AccuDisc is a separate project shipping a C library,
+    not a Python dependency we can pin, and CI has no drive to use it with. This
+    test used to assert ``run_doctor() == 0`` flat, which is a claim about the
+    author's workstation — true here, false on every runner, and the CI failure
+    it produced said nothing about cdda2img.
+
+    Skipping it there would have been the easy repair and the wrong one: it
+    would stop checking the twenty-odd things a runner *can* verify in order to
+    excuse the one it cannot. So the two groups that must always be clean are
+    asserted unconditionally, and the exit code is tied to the engine group —
+    which means a *new* required failure anywhere else still fails the test,
+    because ``rc`` would be 1 with no engine failure to account for it.
+    """
+    assert _required_failures(depcheck._check_python()) == []
+    assert _required_failures(depcheck._check_package_data()) == []
+
+    engine = _required_failures(depcheck._check_accudisc())
+    assert depcheck.run_doctor() == (1 if engine else 0)
     assert "required missing" in capsys.readouterr().out
 
 
