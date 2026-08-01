@@ -756,7 +756,33 @@ def read_speed(device: str) -> tuple[int | None, int | None]:
     Never raises — every failure is ``(None, None)``, which callers read as
     "unknown". Note that ``max`` is the *advertised* ceiling; the drive's governor
     enforces a lower one on CD-DA and does not expose it (§9.3).
+
+    **The binding returns the pair the other way round.** ``Device.get_speed()``
+    is documented ``(max_kbps, current_kbps)``; this function has always returned
+    ``(current, max)``. Both are two ints in the same units, so a straight
+    hand-over would type-check, run, and silently swap every caller's reading of
+    the drive — `drive_speed` would take the advertised ceiling for the current
+    rate and the current rate for the ceiling. The swap is written out below
+    rather than hidden in a comprehension for that reason.
     """
+    module = _binding("speed")
+    if module is not None:
+
+        def _read() -> tuple[int | None, int | None] | None:
+            try:
+                with module.Device(device) as dev:
+                    max_kbps, cur_kbps = dev.get_speed()
+            except module.AbiMismatch:
+                raise
+            except (module.AccuDiscError, OSError) as exc:
+                log.debug("accudisc speed failed for %s: %s", device, exc)
+                return (None, None)
+            return (cur_kbps or None, max_kbps or None)
+
+        pair = _try_binding(module, "speed", _read)
+        if pair is not None:
+            return pair
+
     probe = _run_probe(["--device", device, "speed"], "speed")
     if probe is None:
         return None, None
@@ -897,7 +923,19 @@ def engine_version() -> str:
     settle a later question about a discrepancy between them. The version still
     comes from the binary either way: it is the same library underneath, and this
     call is device-free on the subprocess path where the binding is not.
+
+    Binding path is ``version_string()`` — device-free on both carriers here, so
+    unlike every other flip this one has no drive to disagree about. Note it is a
+    module function, not a ``Device`` method: asking for a device would make the
+    version of a rip that has already finished depend on the drive still being
+    openable, which is the opposite of "must not fail a rip that succeeded".
     """
+    module = _binding("version")
+    if module is not None:
+        banner = _try_binding(module, "version", lambda: module.version_string())
+        if banner is not None:
+            return f"accudisc {banner} [transport: {active_transport()}]"
+
     probe = _run_probe(["--version"], "--version", timeout=5)
     if probe is None:
         return f"accudisc (version unknown) [transport: {active_transport()}]"
@@ -1571,8 +1609,44 @@ def _run_write_subprocess(
     return proc.returncode, stderr_text, result_token
 
 
+def _best_effort_device_op(device: str, what: str, method: str) -> bool:
+    """Run ``Device.<method>()`` on the binding. True if it ran, False to fall back.
+
+    Shared by the two tray/spindle operations, which are the only calls in the
+    seam whose contract is "never raises" *including* the device failing to open.
+    Everywhere else a failure to open is the caller's problem; here the whole
+    operation is a courtesy — a drive that will not eject has not broken a rip
+    that already finished.
+
+    Note what is *not* caught: ``AbiMismatch`` is left to ``_try_binding``, which
+    is the only condition under which falling back to the subprocess is right.
+    A device that refuses to open will refuse for the subprocess too, so
+    swallowing that here and returning True stops us running the same failing
+    operation twice to report the second failure as if it were the first.
+    """
+    module = _binding(what)
+    if module is None:
+        return False
+
+    def _run() -> bool:
+        try:
+            with module.Device(device) as dev:
+                getattr(dev, method)()
+        except module.AbiMismatch:
+            raise
+        except module.AccuDiscError as exc:
+            log.debug("accudisc %s failed for %s: %s", what, device, exc)
+        except OSError as exc:
+            log.debug("accudisc %s could not open %s: %s", what, device, exc)
+        return True
+
+    return _try_binding(module, what, _run) is not None
+
+
 def eject(device: str) -> None:
-    """Best-effort tray eject (``accudisc eject``). Never raises."""
+    """Best-effort tray eject (``Device.eject``). Never raises."""
+    if _best_effort_device_op(device, "eject", "eject"):
+        return
     try:
         subprocess.run(  # noqa: S603 — snapshot/PATH binary, fixed argv
             [_ACCUDISC, "--device", device, "eject"],
@@ -1584,8 +1658,15 @@ def eject(device: str) -> None:
 
 
 def park_spindle(device: str) -> None:
-    """Best-effort spindle stop (``accudisc stop`` → SCSI START STOP UNIT) once done
-    reading, so a finished pass doesn't leave the drive spinning. Never raises."""
+    """Best-effort spindle stop (SCSI START STOP UNIT) once done reading, so a
+    finished pass doesn't leave the drive spinning. Never raises.
+
+    ``Device.park_spindle`` already treats ``ERR_UNSUPPORTED`` as success, which
+    matches what this call means: a drive with no stop command has nothing to
+    stop, and that is not a failure to report.
+    """
+    if _best_effort_device_op(device, "stop", "park_spindle"):
+        return
     try:
         subprocess.run(  # noqa: S603 — snapshot/PATH binary, fixed argv
             [_ACCUDISC, "--device", device, "stop"],

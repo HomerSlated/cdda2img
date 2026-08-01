@@ -2005,3 +2005,199 @@ def test_write_subprocess_carries_cdtext_and_simulate(
     )
     assert "--simulate" in seen[0]
     assert seen[0][seen[0].index("--cdtext") + 1] == "/x/a.cdtext"
+
+
+# ---------------------------------------------------------------------------
+# Binding paths for the seven entry points that were subprocess-only until the
+# CLI retirement (TODO item 6). Each needs its own case because conftest pins
+# the suite to `subprocess`: the flip is invisible to every test above, which is
+# precisely why the pin exists and precisely why it is not enough on its own.
+# ---------------------------------------------------------------------------
+
+
+class _SpeedDevice:
+    """A Device whose only job is to report a speed pair — in the API's order."""
+
+    def __init__(self, pair: tuple[int, int]) -> None:
+        self._pair = pair
+
+    def __enter__(self) -> _SpeedDevice:
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        return None
+
+    def get_speed(self) -> tuple[int, int]:
+        return self._pair
+
+
+def test_read_speed_swaps_the_bindings_pair_into_our_order(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`Device.get_speed()` is `(max, current)`; `read_speed()` is `(current, max)`.
+
+    Both are two ints in the same units, so handing one straight to the other
+    type-checks, runs, and silently swaps every caller's reading of the drive:
+    `drive_speed` would take the advertised ceiling for the current rate. The
+    numbers here are deliberately far apart and non-multiples, so an accidental
+    identity mapping cannot pass by coincidence.
+    """
+    fake = _FakeBinding()
+    monkeypatch.setattr(fake, "Device", lambda _p: _SpeedDevice((7056, 706)))
+    _install(monkeypatch, fake)
+    monkeypatch.setenv(ar.TRANSPORT_ENV, "binding")
+
+    assert ar.read_speed("/dev/sr0") == (706, 7056)
+
+
+def test_read_speed_reports_unknown_rather_than_zero(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A drive that reports 0 has not told us it runs at 0 kB/s.
+
+    The subprocess path returns None when the line is absent; the binding returns
+    an unsigned 0 for the same "did not say". Collapsing those would make
+    `drive_speed` believe it had a measurement.
+    """
+    fake = _FakeBinding()
+    monkeypatch.setattr(fake, "Device", lambda _p: _SpeedDevice((0, 0)))
+    _install(monkeypatch, fake)
+    monkeypatch.setenv(ar.TRANSPORT_ENV, "binding")
+
+    assert ar.read_speed("/dev/sr0") == (None, None)
+
+
+def test_read_speed_on_a_device_failure_is_unknown_not_a_raise(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake = _FakeBinding()
+
+    def _boom(_p: str) -> object:
+        msg = "no medium"
+        raise _FakeBindingError(msg)
+
+    monkeypatch.setattr(fake, "Device", _boom)
+    _install(monkeypatch, fake)
+    monkeypatch.setenv(ar.TRANSPORT_ENV, "binding")
+
+    assert ar.read_speed("/dev/sr0") == (None, None)
+
+
+class _RecordingDevice:
+    """Records which best-effort method was called on it."""
+
+    def __init__(self, calls: list[str]) -> None:
+        self._calls = calls
+
+    def __enter__(self) -> _RecordingDevice:
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        return None
+
+    def eject(self) -> None:
+        self._calls.append("eject")
+
+    def park_spindle(self) -> None:
+        self._calls.append("park_spindle")
+
+
+@pytest.mark.parametrize(
+    ("fn", "method"), [("eject", "eject"), ("park_spindle", "park_spindle")]
+)
+def test_tray_and_spindle_go_through_the_binding_and_never_spawn(
+    fn: str, method: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[str] = []
+    fake = _FakeBinding()
+    monkeypatch.setattr(fake, "Device", lambda _p: _RecordingDevice(calls))
+    _install(monkeypatch, fake)
+    monkeypatch.setenv(ar.TRANSPORT_ENV, "binding")
+
+    def _no_spawn(*a: object, **k: object) -> object:
+        msg = "the subprocess must not be reached"
+        raise AssertionError(msg)
+
+    monkeypatch.setattr(ar.subprocess, "run", _no_spawn)
+    getattr(ar, fn)("/dev/sr0")
+
+    assert calls == [method]
+
+
+@pytest.mark.parametrize("fn", ["eject", "park_spindle"])
+def test_a_device_that_will_not_open_does_not_retry_through_the_subprocess(
+    fn: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """These two are the seam's only "never raises, including on open" calls.
+
+    A drive that refuses to open will refuse for the subprocess too, so falling
+    back would run the same failing operation twice and report the second failure
+    as if it were the first. Swallowing and returning is the correct end state —
+    the operation is a courtesy, and a tray that will not open has not broken a
+    rip that already finished.
+    """
+    fake = _FakeBinding()
+
+    def _boom(_p: str) -> object:
+        msg = "device busy"
+        raise _FakeBindingError(msg)
+
+    monkeypatch.setattr(fake, "Device", _boom)
+    _install(monkeypatch, fake)
+    monkeypatch.setenv(ar.TRANSPORT_ENV, "binding")
+
+    def _no_spawn(*a: object, **k: object) -> object:
+        msg = "the subprocess must not be reached"
+        raise AssertionError(msg)
+
+    monkeypatch.setattr(ar.subprocess, "run", _no_spawn)
+    getattr(ar, fn)("/dev/sr0")  # must return, not raise
+
+
+@pytest.mark.parametrize("fn", ["eject", "park_spindle"])
+def test_an_abi_mismatch_still_reaches_the_subprocess(
+    fn: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The one condition where falling back is right: the library is fine, the
+    extension is not. Distinguished from the case above, which must NOT fall back."""
+    fake = _FakeBinding()
+
+    def _skew(_p: str) -> object:
+        msg = "compiled against 0.2 but loaded 0.3"
+        raise _FakeAbiMismatch(msg)
+
+    monkeypatch.setattr(fake, "Device", _skew)
+    _install(monkeypatch, fake)
+    monkeypatch.setenv(ar.TRANSPORT_ENV, "auto")
+
+    seen: list[list[str]] = []
+    monkeypatch.setattr(ar.subprocess, "run", lambda cmd, **k: seen.append(cmd))
+    getattr(ar, fn)("/dev/sr0")
+
+    assert seen, "an ABI mismatch must degrade, not swallow"
+    assert seen[0][-1] in {"eject", "stop"}
+
+
+def test_engine_version_comes_from_the_binding_without_a_device(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A module function, not a Device method, on purpose.
+
+    The banner is written into the RLOG of a rip that has already succeeded, so
+    making it depend on the drive still being openable would let a tray ejected
+    one second early turn a good rip's provenance into "version unknown".
+    """
+    fake = _FakeBinding()
+    monkeypatch.setattr(fake, "version_string", lambda: "0.4.0", raising=False)
+
+    def _boom(_p: str) -> object:
+        msg = "engine_version must not open a device"
+        raise AssertionError(msg)
+
+    monkeypatch.setattr(fake, "Device", _boom)
+    _install(monkeypatch, fake)
+    monkeypatch.setenv(ar.TRANSPORT_ENV, "binding")
+
+    banner = ar.engine_version()
+    assert "0.4.0" in banner
+    assert "[transport: binding]" in banner
