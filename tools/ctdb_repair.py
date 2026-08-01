@@ -19,6 +19,19 @@ Two offsets, kept distinct: the CTDB *consensus* offset (our PCM ↔ CTDB parity
 detected by select_entry / ctanalyse) and the drive *read* offset (our PCM ↔
 AccurateRip-absolute, --read-offset, for the AR gate).
 
+They are not independent. The consensus offset is a property of ``--pcm``'s
+**domain**, and it moves by the read offset when the domain does: a *raw* capture
+(what ``--device`` produces, and what an AccuDisc read pass hands back) and the
+*stored* image extracted from an RBI (``apply_offset`` already applied) reconcile
+with the same CTDB entry at offsets differing by exactly the drive read offset.
+Measured 2026-08-01 on Tracy Chapman: entry 67116 at -639 raw vs -669 stored,
+entry 2451243 at +30 raw vs 0 stored, and ``stored[i] == raw[i + 30 pairs]`` on the
+bytes. So a reported consensus offset is meaningless without saying which image it
+came from — and do **not** read a difference of one read offset between two runs as
+two pressings. (The genuine pressing separation on that disc is the 669 *between
+entries*, which is a different pair of things entirely; docs/reference/RECOVERY.md
+§11.3.)
+
 Usage:
     # From files (raw whole-disc PCM + its C2 capture, e.g. an AccuDisc read pass):
     uv run python tools/ctdb_repair.py --pcm pass.pcm --c2 pass.c2 --toc L0:L1:…:LEADOUT
