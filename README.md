@@ -26,10 +26,21 @@ This is an active prototype. A Rust reimplementation is planned once the design 
 - **Silence trim mode** — `--silence trim` (default) removes leading/trailing silence
   (configurable threshold in -dBFS) and inserts 2-second Red Book inter-track gaps;
   `--silence notrim` preserves the source audio as-is
-- **Physical disc ripping** — `rip` subcommand rips directly from `/dev/sr0` (or any
-  optical drive); primary path uses cdrdao (captures MCN, ISRC, and CD-Text in one pass);
-  fallback uses cd-paranoia (full paranoia correction) when cdrdao fails; AccurateRip
-  partial-mismatch triggers an automatic cd-paranoia re-rip of affected tracks
+- **Physical disc ripping** — `rip` reads directly from `/dev/sr0` (or any optical
+  drive) via [AccuDisc](https://github.com/HomerSlated/accudisc), in **one pass and
+  one spin-up**: raw s16le audio, the C2 error bitmap, the raw P-W subchannel, and the
+  lead-in's full TOC and CD-Text. Track boundaries come from the error-corrected TOC;
+  pre-gaps, INDEX points, MCN and per-track ISRC are assembled from the Q stream by
+  majority vote. There is no second metadata pass and no second engine
+- **Two-stage recovery on a partial AccurateRip mismatch**, in cost order:
+  1. *CTDB parity repair* — Reed-Solomon reconstruction against crowd-sourced parity
+     from the CUETools database, with **zero extra reads**. Where a C2 bitmap was
+     captured it is fed in as erasures (roughly doubling what can be reconstructed);
+     a repair is committed only if a CTDB per-track CRC **and** AccurateRip both accept it
+  2. *Speed-ladder re-read* — only if CTDB declines. Each failed track's sector window is
+     re-read across the drive's admitted speeds, fastest to slowest, and the first
+     AccurateRip-verified result is spliced in sample-exactly. A track that never matches
+     keeps its original audio: no unverified splice ever lands
 - **AccurateRip v1/v2 verification** — per-track checksum computed against the AccurateRip
   database after every rip; matches against all drive-offset groups; reports confidence
   and mismatch status per track; results are stored in an ARIP block inside the RBI
@@ -37,7 +48,7 @@ This is an active prototype. A Rust reimplementation is planned once the design 
   1. per-drive `[[drives]]` config entries (user-confirmed, always authoritative)
   2. AccurateRip drive offset catalog (auto-applied at ≥ 3 submissions, interactive prompt
      below that threshold)
-  3. global `drive_offset` fallback in `cdda2img.toml`
+  3. `+0` with a warning, when the drive is neither configured nor matched
 
   Confirmed offsets are persisted to `[[drives]]` so subsequent rips skip the catalog lookup
 - **Disc image import** — `import` subcommand converts professional mastering images to
@@ -59,11 +70,12 @@ This is an active prototype. A Rust reimplementation is planned once the design 
      ladder over the album's plurality release-group (on-disc MCN match, then barcode
      plurality, then `preferred_country` priority, then earliest release date, then a
      terminal MBID tie-break); barcode hints from MB feed the Discogs lookup
-  3. *Discogs* — two-phase barcode lookup: the raw MCN/barcode is matched by substring to a
-     canonical 13-digit EAN and written to `disc.catalog` (always, even without enrichment);
-     if exactly one Discogs result matches the album title, full metadata is merged. The
-     selected MusicBrainz release's Discogs link is also followed and its barcode compared
-     against MusicBrainz's as a cross-source corroboration recorded in provenance
+  3. *Discogs* — barcode lookup for label, catalogue number and country. The **barcode**
+     (the service-side UPC/EAN) is the disambiguation key; the **MCN** read off the disc is
+     archival only and is never used to select a release — they are different identifiers in
+     different namespaces and are never cross-compared. The selected MusicBrainz release's
+     Discogs link is also followed and its barcode compared against MusicBrainz's, as a
+     cross-source corroboration recorded in provenance
   4. *AcoustID gate* — after the release is selected, per-track Chromaprint fingerprints are
      checked against the chosen release's album; a non-corroborating result records
      `acoustid_gate=failed` and suppresses `--auto` for that disc (informational; never fails
@@ -133,10 +145,12 @@ Full specification: `docs/reference/rbi_spec.md`.
 
 ## Installation
 
-**Requirements:** Python 3.10+. Anything that touches a physical disc — `rip` and
-`burn` — additionally needs [AccuDisc](https://github.com/HomerSlated/accudisc), the
-CD-DA read/write engine, either as its Python binding (preferred) or its `accudisc`
-executable. Creating, importing, extracting, and verifying RBI images need neither.
+**Requirements:** Python 3.10+. Anything that touches a physical disc — `rip`, `burn`
+and `mount` — additionally needs [AccuDisc](https://github.com/HomerSlated/accudisc),
+the CD-DA read/write engine, **as its Python binding**. Since 2026-08-01 that is the
+only route: cdda2img calls AccuDisc's API and never runs its `accudisc` executable, so
+having the binary on `$PATH` is not a substitute. Creating, importing, extracting, and
+verifying RBI images need none of it.
 
 Audio transcoding does *not* need an ffmpeg installation — PyAV carries the FFmpeg
 libraries in its own wheel. The `ffplay` binary is used only for interactive audition.
@@ -154,8 +168,11 @@ a command you can run by hand; the script exists because finding the AccuDisc wh
 is genuinely awkward — it lives under *AccuDisc's* prefix, since its compiled
 extension is only valid beside the `libaccudisc.so.0` it was built against.
 
-A missing wheel is a warning, not a failure: `create`, `import`, `extract`, `list`
-and `test` never touch a drive. `./install.sh --help` lists the options,
+A missing wheel does not fail the install — `create`, `import`, `extract`, `list` and
+`test` never touch a drive, so that machine is a legitimate one. It *does* make
+`cdda2img doctor` exit 1, because the engine is a required dependency of the disc
+subcommands; the installer reports that verdict without adopting it.
+`./install.sh --help` lists the options,
 `--dry-run` prints every command without running any, and `./install.sh uninstall`
 reverses it — leaving your config alone, because it holds drive offsets that took
 measurement to obtain.

@@ -70,33 +70,42 @@ ripping path \(em there is no
 flag on
 .BR rip ).
 .PP
-The primary rip path uses
-.BR cdrdao ,
-which captures the full subchannel data in one pass: MCN (Q\-channel Mode 2),
-per\-track ISRC (Q\-channel Mode 3), and CD\-Text (R\-W subchannels).
-If cdrdao fails, the fallback path uses the
-.B cd\-paranoia
-binary with full jitter correction and overlapping reads; subchannel data is not available
-on the fallback path.
-If AccurateRip verification subsequently reports mismatches on one or more tracks
-(indicating disc read errors rather than an offset problem), the disc is re-ripped with
-.B cd\-paranoia
-running at full paranoia.
-Disc metadata captured during the original cdrdao pass (MCN, ISRC, CD\-Text) is
-preserved even when the audio is re-ripped.
+The rip is a single pass on a single spin\-up, through
+.BR AccuDisc .
+One read captures raw s16le audio, the C2 error bitmap, the raw P\-W subchannel,
+and the lead\-in\(cqs full TOC and CD\-Text.
+Track boundaries are taken from the error\-corrected full TOC; pre\-gaps, INDEX
+points, CONTROL flags, the MCN (Q\-channel Mode 2) and per\-track ISRCs
+(Q\-channel Mode 3) are assembled from the Q stream by majority vote across all
+observations of each value.
+There is no second metadata pass and no second engine: if the assembly fails, the
+rip fails.
 .PP
-.B Note:
-correct per\-track ISRCs require a
-.B cdrdao
-built with the fix for bug #75 (an ISRC stale\-latch in
-.BR read\-cd ).
-Affected versions misread a track's ISRC as the
+Majority voting is not a refinement.
+It makes the ISRC read structurally immune to a class of defect \(em a decoder
+that latches the first value it sees reports the
 .I previous
-track's code when the ISRC lies in the track's first sectors, which can
-silently prevent automatic release identification.
-See
-.UR https://github.com/cdrdao/cdrdao/issues/79
-.UE .
+track\(cqs code whenever an ISRC lies in a track\(cqs first sectors, which
+silently prevents automatic release identification and is invisible in the
+output.
+A value that must win a vote across the whole track cannot be set by one frame.
+.PP
+If AccurateRip then reports a
+.I partial
+mismatch, two recovery exits are tried in cost order.
+First
+.BR ctanalyse :
+Reed\-Solomon repair against crowd\-sourced parity from the CUETools database,
+with zero extra reads, using the C2 bitmap as erasures where one was captured.
+A repair is committed only if a CTDB per\-track CRC
+.I and
+AccurateRip both accept it.
+Only if that declines does the drive spin again: each failed track\(cqs sector
+window is re\-read across the drive\(cqs admitted speed ladder, fastest to
+slowest, and the first AccurateRip\-verified result is spliced in
+sample\-exactly.
+A track that never matches keeps its original audio \(em an unverified splice is
+never written.
 .PP
 Before each rip,
 .B cdda2img rip
@@ -1067,29 +1076,22 @@ ls \-la /dev/sr0
 .fi
 .RE
 .PP
-.B Note on cdrdao and raw SCSI:
-When cdrdao is invoked with the Plextor\-specific driver
-.RB ( "\-\-driver plextor" ),
-root privileges are required.
-The driver sends vendor\-specific SCSI commands (CDB opcode 0xD8) via
-.BR SG_IO .
-The Linux kernel\(cqs SCSI generic driver blocks vendor\-specific commands
-(range 0xC0\(en0xFF) from unprivileged users regardless of device group membership;
-only root (or a process with
-.BR CAP_SYS_RAWIO )
-may issue them.
-Using
-.B \-\-driver generic\-mmc
-instead avoids this restriction but loses Plextor\-specific features
-such as C2 error pointer support.
-Standard cdrdao usage without
-.B \-\-driver plextor
+.B Note on vendor\-specific SCSI:
+.B cdda2img
 does not require root.
-.B cdda2img rip
-uses cdrdao with the default
-.B generic\-mmc
-driver (no vendor\-specific commands) and does not require root.
-The cd\-paranoia fallback path likewise issues only standard MMC commands.
+Reads go through AccuDisc, which issues standard MMC commands over
+.BR SG_IO ;
+group membership on the device node is sufficient.
+.PP
+The distinction matters because the Linux kernel\(cqs SCSI generic driver blocks
+.I vendor\-specific
+opcodes (0xC0\(en0xFF) from unprivileged users regardless of device group
+membership \(em only root, or a process holding
+.BR CAP_SYS_RAWIO ,
+may issue them.
+Some drives expose extra capability behind such opcodes; nothing on
+.BR cdda2img \(cqs
+path depends on one.
 .PP
 The
 .B mount
@@ -1117,11 +1119,21 @@ it never installs anything.
 .B AccuDisc
 The CD\-DA read and write engine
 .RI ( https://github.com/HomerSlated/accudisc ),
-and the only one \(em no other disc binary is invoked.
-Either its Python binding (preferred) or its
+and the only one.
+Required as its
+.I Python binding
+\(em since 2026\-08\-01
+.B cdda2img
+calls AccuDisc\(cqs API and never executes its
 .B accudisc
-executable will do; the binding is used when importable.
-Nothing that touches a physical disc works without one of them.
+binary, so having that binary on
+.B $PATH
+is not a substitute.
+Nothing that touches a physical disc \(em
+.BR rip ,
+.BR burn ,
+.B mount
+\(em works without the binding.
 Not required for creating, extracting, or verifying RBI images.
 .SS Optional
 Each of these enables one feature and is skipped cleanly when absent.
@@ -1345,8 +1357,7 @@ Interrupted by SIGINT
 .RB ( Ctrl\-C ).
 .\"
 .SH SEE ALSO
-.BR cdrdao (1),
-.BR cd\-paranoia (1),
+.BR accudisc (1),
 .BR cdemu (1),
 .BR flac (1),
 .BR ffmpeg (1),
