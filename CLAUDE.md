@@ -37,6 +37,25 @@ Standalone utility scripts live in `tools/` (tracked, not part of the installed 
   and found the taint is **narrower than our own headers claim**: `rs16.h:3` and
   `main.c:10` describe more of our work as derivative than it is. Narrowing them is
   kgr's call, not an agent's — a licence header is a claim that gets redistributed.
+  - **Two known reporting defects, deliberately NOT fixed** (2026-08-01) — the source is
+    pinned at tag `ctanalyse-ab-baseline` as AccuDisc's A/B reference arm, so changing it
+    would move the baseline they are measuring against. Fix only after they confirm the
+    rewrite is live. (1) **`corrected_errors` counts positions *touched*, not errors
+    corrected.** `cdrepair.c:274` adds `jisu = e + t` (`rs16.c:223`), the errata-locator
+    degree, which includes every erasure position whether damaged or not; the emission
+    loop then writes `new = old ^ 0` for a zero magnitude, i.e. a no-op correction. On
+    Tracy: 541 reported vs 539 real (npar 16), 12740 vs 12311 (npar 8). AccuDisc's
+    clean-room decoder drops zero magnitudes (`rs16.c:283-288` in their tree) and is
+    right; a naive A/B on this field reports a mismatch that means nothing. The author
+    knew zero magnitudes occur — the re-validation one function up skips them explicitly
+    (`rs16.c:148`) — so the knowledge was adjacent to the counter and never reached it.
+    (2) **`affected_sectors` inherits the same inflation**, being derived from all
+    corrections. It is invisible on a well-aligned C2 bitmap (the no-ops land in sectors
+    already affected) and shows up only on a bad one: 52 reported vs 46 real on the
+    deliberately-misaligned control. Neither defect touches audio — both consumers write
+    `new` only after checking `old`, so a no-op correction is a no-op write — and both
+    gate on `can_recover`, which matters because **corrections are emitted even when it
+    is false** (`src/cdda2img/ctdb_repair.py:433`, `tools/ctdb_repair.py:518`, verified).
 - **`tools/recovery_bench.py`** — **the last CLI consumer in the tree** (2026-08-01). It
   resolves its own `tools/accudisc/accudisc` and drives eight subcommands, including
   `read --map-file` with the per-rung recovery flags that *are* the experiment. Not ported
