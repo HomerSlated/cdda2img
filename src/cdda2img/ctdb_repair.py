@@ -217,7 +217,12 @@ def build_erasure_bitmap(c2_path: Path, nwords: int, align_pairs: int = -2) -> b
     bitmap in ctanalyse's PCM word domain.
 
     Collapse per-byte -> per-sample-pair (any of 4 bytes flagged), shift by the drive's
-    C2/audio offset (align_pairs, -2 on the PX-716A), expand each pair to its 2 words,
+    C2/audio offset (align_pairs, -2 on the PX-716A -- **re-measured 2026-08-01**
+    through AccuDisc's ``Device.probe_c2_lag``, 5/5 conclusive runs on Tracy
+    Chapman track 8 at 40x, ``lag_pairs=2`` every time; the underlying evidence
+    swung 3.4x between runs, 1263-4302 flags, and the estimate did not move.
+    It had been a literal carried on one earlier measurement and never re-checked),
+    expand each pair to its 2 words,
     packbits. packbits (not fancy-index ``|=``) is mandatory: C2 flags cluster, so many
     words share a byte and fancy-index OR silently drops duplicates.
 
