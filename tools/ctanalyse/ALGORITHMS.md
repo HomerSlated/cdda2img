@@ -55,6 +55,26 @@ GF(2¹⁶), polynomial **0x1100B**, generator α = 2, `symStart = 0`.
 
 ## 3. Syndromes
 
+**Which symbols (added 2026-08-02 — this was missing and it cost AccuDisc a day).**
+The formula below is useless without the window, and the window is not the obvious
+one. For image `[bounds[0], bounds[-1])` of `W` words and internal stride `S`:
+
+```
+stridecount = W / S − 2          (integer division)
+column c's codeword = words  S + c + j·S,  j = 0 … stridecount−1
+```
+
+**Row 0 is not a codeword symbol** (the window starts at `S + c`, not `c`) and neither
+is the final partial row (`W/S − 2`, not `W/S`). Both facts live in `cdrepair.h:6` and
+§5's "row-1..stridecount window"; neither was stated here, where a porter looks first.
+
+Measured cost of the omission: reconstructing the format with the window starting at
+`c` reproduces **plane 0 only** — 32/35 sampled columns — and **0/35 on every higher
+plane**, under any exponent, field polynomial or plane order. With the correct window
+all planes hit 37/40 (the misses being dirty columns). Plane 0 is an XOR and survives
+the wrong window for reasons we have *not* established — the excluded rows are not
+silence, measured — so **plane 0 cannot validate the geometry**, only the offset.
+
 Definition per column (data-only; Horner form, oldest symbol first):
 
 ```
