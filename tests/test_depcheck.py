@@ -325,20 +325,6 @@ def test_binding_library_asks_the_extension_not_the_python_file(
     assert [p.name for p in asked] == ["_accudisc.abi3.so"]
 
 
-def test_library_skew_is_silent_unless_both_are_known_and_differ() -> None:
-    """ "Unknown" must not render as "differs".
-
-    An empty string means `ldd` declined to answer, which is not evidence of a
-    mismatch — reporting one would manufacture a discrepancy out of a missing
-    measurement.
-    """
-    assert "different" in depcheck._library_skew("/a/lib.so.0", "/b/lib.so.0")
-    assert depcheck._library_skew("/a/lib.so.0", "/a/lib.so.0") == ""
-    assert depcheck._library_skew("", "/b/lib.so.0") == ""
-    assert depcheck._library_skew("/a/lib.so.0", "") == ""
-    assert depcheck._library_skew("", "") == ""
-
-
 def test_a_bare_shim_directory_is_not_evidence_of_a_binding(tmp_path: Path) -> None:
     """The shim must hold the package, not merely exist.
 
@@ -359,67 +345,17 @@ def test_a_bare_shim_directory_is_not_evidence_of_a_binding(tmp_path: Path) -> N
     assert depcheck._dev_shim_path(root=tmp_path) == shim
 
 
-def test_engine_resolution_matches_the_reader() -> None:
-    """`depcheck` must name the same `accudisc` the reader will actually run.
-
-    The logic is duplicated rather than imported, because `accudisc_reader` sits
-    behind the heavy imports `depcheck` exists to stay clear of. That makes drift
-    the obvious failure and it is not one an ordinary test would catch: the two
-    copies would simply disagree, and `doctor` would go back to confidently
-    naming an artefact that never runs — the defect this pins, with a new cause.
-    """
-    from cdda2img import accudisc_reader
-
-    assert depcheck._resolve_engine_binary() == accudisc_reader._resolve_accudisc()
-
-
-def test_doctor_names_the_resolved_binary_and_the_install_it_shadows(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    """`shutil.which` is the wrong answer when the symlink outranks `$PATH`.
-
-    Measured on the development box: `which` said `/usr/local/bin/accudisc`
-    while the reader ran `tools/accudisc/accudisc` — different sha256, different
-    `RUNPATH`, different `libaccudisc.so.0`. Nothing failed, so only the report
-    was wrong, which is the kind of wrong that survives.
-    """
-    runs = tmp_path / "build" / "accudisc"
-    runs.parent.mkdir()
-    runs.touch()
-
-    monkeypatch.setattr(depcheck, "_resolve_engine_binary", lambda: str(runs))
-    monkeypatch.setattr(depcheck.shutil, "which", lambda _n: "/usr/local/bin/accudisc")
-
-    binary = next(
-        r for r in depcheck._check_accudisc() if r.name == "accudisc (binary)"
-    )
-    assert binary.status == depcheck.OK
-    assert str(runs) in binary.detail
-    assert "shadows" in binary.detail
-    assert "/usr/local/bin/accudisc" in binary.detail
-
-
-def test_doctor_does_not_claim_shadowing_when_there_is_none(
+def test_the_binding_is_required_not_one_of_two_transports(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The other half: an installed-only machine gets a plain line."""
-    monkeypatch.setattr(depcheck, "_resolve_engine_binary", lambda: "accudisc")
-    monkeypatch.setattr(depcheck.shutil, "which", lambda _n: "/usr/local/bin/accudisc")
+    """Absent binding = a required failure, with nothing to fall back to.
 
-    binary = next(
-        r for r in depcheck._check_accudisc() if r.name == "accudisc (binary)"
-    )
-    assert binary.status == depcheck.OK
-    assert "shadows" not in binary.detail
-
-
-def test_doctor_flags_a_total_absence_of_the_disc_engine(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Binding or binary is a one-of; neither is a required failure.
-
-    Marking each individually required would fail a working install that has
-    only one of them, which is the normal state after the subprocess retires.
+    This group was a *one-of* until the CLI was retired: a read needed either the
+    binding or the `accudisc` executable, and marking each individually required
+    would have failed a working install that had only one. That is no longer the
+    shape — there is one route to a disc — so the binding line itself carries
+    `required`, and the separate synthetic "disc engine" row that existed only to
+    express the one-of is gone.
     """
     import importlib.util
 
@@ -430,16 +366,55 @@ def test_doctor_flags_a_total_absence_of_the_disc_engine(
 
     monkeypatch.setattr(importlib.util, "find_spec", fake)
     monkeypatch.setattr(depcheck, "_dev_shim_path", lambda: None)
-    monkeypatch.setattr(depcheck.shutil, "which", lambda _n: None)
-    # Also the symlink: it outranks `$PATH`, so clearing `which` alone leaves
-    # the development tree's own binary answering and no absence to detect.
-    monkeypatch.setattr(depcheck, "_resolve_engine_binary", lambda: "accudisc")
 
     results = depcheck._check_accudisc()
-    engine = [r for r in results if r.name == "disc engine"]
-    assert len(engine) == 1
-    assert engine[0].required is True
-    assert engine[0].status == depcheck.MISSING
+    binding = next(r for r in results if r.name == "accudisc (binding)")
+    assert binding.required is True
+    assert binding.status == depcheck.MISSING
+    assert [r for r in results if r.name == "disc engine"] == []
+
+
+def test_the_accudisc_binary_is_not_reported_at_all(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Present on nearly every machine, executed by nothing here.
+
+    AccuDisc's own install puts `accudisc` on `$PATH`, so a line for it would
+    read "ok" about an artefact cdda2img never runs. That is the same defect the
+    binary line was *added* to fix, inverted: it was added because `doctor` named
+    an artefact that never ran.
+    """
+    monkeypatch.setattr(depcheck.shutil, "which", lambda _n: "/usr/local/bin/accudisc")
+    names = [r.name for r in depcheck._check_accudisc()]
+    assert not any("binary" in n for n in names), names
+
+
+def test_the_dev_shim_still_warns_rather_than_passing(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A binding reachable only via `tools/accudisc/pybinding` works here and
+    nowhere else — the false pass that left the binding transport inert for two
+    days. Retiring the CLI does not make that acceptable; it makes it the only
+    route, so a WARN that is not an OK matters more, not less."""
+    import importlib.util
+
+    real = importlib.util.find_spec
+
+    def fake(name: str, *a: object, **k: object) -> object | None:
+        return None if name == "accudisc" else real(name, *a, **k)  # type: ignore[arg-type]
+
+    shim = tmp_path / "pybinding"
+    (shim / "accudisc").mkdir(parents=True)
+    (shim / "accudisc" / "__init__.py").touch()
+
+    monkeypatch.setattr(importlib.util, "find_spec", fake)
+    monkeypatch.setattr(depcheck, "_dev_shim_path", lambda: shim)
+
+    binding = next(
+        r for r in depcheck._check_accudisc() if r.name == "accudisc (binding)"
+    )
+    assert binding.status == depcheck.WARN
+    assert binding.required is False, "a working-here machine must not be a hard fail"
 
 
 # ---------------------------------------------------------------------------

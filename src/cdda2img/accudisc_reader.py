@@ -1,69 +1,48 @@
 """accudisc_reader.py — raw MMC audio + C2 + subchannel capture via AccuDisc.
 
-Drop-in AccuDisc replacement for :mod:`cdda2img.c2_reader` (which drove the
-``c2read`` prototype). The public surface is identical — ``read_disc_c2`` /
-``read_span`` / ``drive_supports_c2`` / ``probe_combos`` / ``park_spindle`` — so
-the rip pipeline swaps modules with no call-site logic change. AccuDisc is the
-successor to c2read; the invocation moved from flags to subcommands and the
-progress interface changed, both handled here.
-
-Differences from c2read, and how they are absorbed:
-
-* **Subcommand form** — ``accudisc --device DEV <command>`` (``--device`` is a
-  global option *before* the command), vs c2read's flat flag list.
-* **C2 bitmap file** is ``--c2f`` (was ``--c2``); C2 pointers are requested by
-  default (``--no-c2`` opts out).
-* **Whole-disc read** is ``read`` with no ``--count`` (defaults through the
-  lead-out), replacing c2read's ``--full``.
-* **CD-Text and full TOC** are captured inline on the read pass
-  (``read --fulltoc F --cdtext F``) — one spin-up, like c2read's single pass.
-  The ``fulltoc`` dump is byte-identical to c2read's, so
-  ``subq_toc.parse_fulltoc`` is unaffected. Absence of CD-Text writes no file and
-  does not change the read's exit code, so the caller just checks for the file.
-* **Progress** uses ``read --progress-fd 1``: newline-delimited machine tokens on
-  stdout — ``progress <done> <total>`` lines plus a final
-  ``summary hard=… c2=… recovered=… suspect=… rereads=… slips=…`` — unaffected by
-  ``-q`` (which mutes only the human ``\\r`` stderr line). Parsed in
-  :func:`_run_with_progress`. The frozen contract is the AccuDisc repo's
-  ``docs/cli-machine-interface.md`` — parse against that, never the human stderr.
-* **Exit contract** — ``0`` = completed clean; ``3`` = completed with caveats
-  (``hard``/``suspect``/residual-C2 after recovery). Both mean the image was
-  delivered, so the acceptance check is ``in (0, 3)``. ``1`` = usage/argument/
-  local-file; ``2`` = fatal device/transport. Exit 0 is **not** verification — it
-  means no *relative* signal fired; AccurateRip/CTDB gating stays with the caller.
+The whole of this project's disc access — read, probe, burn — goes through here
+and nowhere else.
 
 READ CD returns s16le, so — unlike cdrdao's s16be BIN — the PCM needs no
 byte-swap. Hard-unreadable sectors are zero-filled by AccuDisc (C2 bitmap
 all-ones), so the PCM/C2/sub streams always stay length-consistent.
 
-**Seam invariant: every AccuDisc invocation in the tree lives here.** No other
-module builds an argv or imports ``_ACCUDISC`` — five once did (``drive_speed``,
-``rip_log``, ``write_offset``, ``disc_writer``), which meant "swap the transport"
-was five scattered edits instead of one. That matters now because AccuDisc's
-API_PLAN phase 4 is a Python binding over ``libaccudisc``, and this module is
-what it replaces. Stdout parsing (six regexes, below) is the part the binding
-deletes; keep it here so there is exactly one place to delete it from.
+**Seam invariant: every AccuDisc call in the tree lives here.** Five modules once
+made their own (``drive_speed``, ``rip_log``, ``write_offset``, ``disc_writer``),
+which meant "change how we talk to the engine" was five scattered edits, each
+with its own chance of being missed. The invariant paid for itself twice: once
+when the CLI moved to a Python binding, and again when the CLI was removed
+altogether — both were one-module changes.
 
-**Two transports, one seam.** The AccuDisc Python binding (``import accudisc``, a
-cffi API-mode extension over ``libaccudisc``) is preferred where it is bound, and
-the subprocess path is the fallback. Both call the same ``accudisc_read()`` in the
-same C library, so this is a change of *carrier*, not of behaviour — the CLI is a
-thin argv layer over the calls the binding makes directly. See the transport
-section below for what is flipped and what deliberately is not.
+**One transport: the API.** Every call here goes through the AccuDisc Python
+binding (``import accudisc``, a cffi API-mode extension over ``libaccudisc``).
+There is no subprocess path and no ``accudisc`` binary is spawned anywhere in
+this project.
 
-The subprocess path is not a hedge that will be retired. It is the acceptance
-instrument: parity is "same disc, both transports, compare bytes"
-(AccuDisc API_PLAN §7.3 names us as the only consumer who can run that test —
-``tools/binding_ab.py`` is it), and it is also what serves a machine that has the
-binary but no importable library.
+This module used to carry both, and the older text here argued the subprocess
+"is not a hedge that will be retired" because it was the acceptance instrument
+for the binding — same disc, both carriers, compare bytes. That argument was
+sound while the question was open and it is retained here in summary because the
+answer it produced is what closed it: Tracy, req=40, binding 112.69 s vs
+subprocess 112.75 s, PCM and C2 byte-identical.
 
-That last clause used to read "which is currently *every* machine running this
-project's 3.10 venv", and it stopped being true on 2026-07-29: AccuDisc's
-extension is now built ``py_limited_api``, so one ``abi3`` artefact imports on
-3.10 through 3.14 and the binding serves this venv. It is corrected rather than
-deleted because the sentence was accurate when written and the situation it
-described lasted two days longer than anyone noticed — the flip to ``binding``
-landed on 2026-07-27 and was inert until the day it was fixed.
+kgr's ruling on 2026-08-01 is what makes the second carrier not merely redundant
+but counterproductive: **AccuDisc's CLI is built to the same API and cannot
+perform an operation the API does not define, so there is nothing for an A/B to
+measure — and if the two ever disagree, that is a bug in AccuDisc rather than a
+delta to characterise.** Testing exclusively through the API is the fastest way
+to surface such a bug, because a shortfall shows up as something we cannot do
+rather than as a discrepancy we have to reconcile against a CLI that would, by
+then, be broken.
+
+Consequences worth knowing before they surprise someone:
+
+* A missing or unimportable binding is now **fatal**, not a degrade. It was the
+  one condition the fallback existed for, and there is no second carrier to fall
+  back to.
+* An **ABI mismatch** is likewise fatal. It used to degrade — the extension is
+  broken while the binary is fine — and that reasoning still holds; what has
+  changed is that "the binary is fine" no longer helps us.
 """
 
 from __future__ import annotations
@@ -71,11 +50,7 @@ from __future__ import annotations
 import contextlib
 import functools
 import logging
-import os
-import re
-import subprocess
 import sys
-import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, NamedTuple, TypeVar
@@ -88,76 +63,28 @@ _T = TypeVar("_T")
 log = logging.getLogger(__name__)
 
 
-def _resolve_accudisc() -> str:
-    """Locate the AccuDisc binary: ``tools/accudisc/`` first, else ``$PATH``.
-
-    ``tools/accudisc/accudisc`` is a **symlink into the AccuDisc build tree**, not
-    a copy — it was a snapshot until their API was complete, and maintaining a
-    separate one stopped paying once the binding linked ``libaccudisc`` from that
-    same tree. ``is_file()`` follows the link, so a dangling one falls through.
-
-    That makes the ``$PATH`` fallback a **silent version change** rather than a
-    convenience. Previously it meant "pinned copy, or a system install if you
-    have no checkout"; now it means "their live build, or something else of
-    unknown vintage if their tree is momentarily absent" — mid-``make``, or a
-    checkout that has not relinked yet. Both are readable and neither announces
-    itself. :func:`engine_version` is what records which one actually ran, and is
-    the only reason a rip log can settle the question afterwards.
-
-    Path is dev-tree relative (mirrors the conf-example resolution); replace with
-    ``importlib.resources`` when packaging lands.
-    """
-    local = Path(__file__).parent.parent.parent / "tools" / "accudisc" / "accudisc"
-    return str(local) if local.is_file() else "accudisc"
-
-
-_ACCUDISC = _resolve_accudisc()
-
 #: Red Book audio frame. Plain PCM only — a span read requests no C2 and no
-#: subchannel, so this is the whole sector on both transports.
+#: subchannel, so this is the whole sector.
 _SECTOR_BYTES = 2352
 
 
-# ── transport selection (library binding, falling back to the subprocess) ─────
+# ── the binding: import, identity, and error translation ──────────────────────
 
-#: ``auto`` (default) prefers the binding and falls back silently-once to the
-#: subprocess; ``binding`` refuses to fall back; ``subprocess`` never imports it.
-TRANSPORT_ENV = "CDDA2IMG_ACCUDISC_TRANSPORT"
-_TRANSPORT_MODES = ("auto", "binding", "subprocess")
-
-# What is flipped, and what is not. Each entry names the evidence that would
-# retire it, because the previous version of this block did not and rotted twice:
-#   flipped   read_toc          — Device.read_toc_src(), structs instead of regexes
-#   flipped   read_span_bytes   — the call a subprocess cannot express (no temp file)
-#   flipped   read_disc_c2      — a sequence on one Device: read_full_toc_raw() →
-#                                 read_cdtext_raw() → read_to_file(). The old reason
-#                                 recorded here ("the binding would add a
-#                                 Python-level copy of ~800 MB") was never true:
-#                                 read_to_file passes copy=False and the sink gets
-#                                 a memoryview over library memory. It was a cost
-#                                 model nobody measured until tools/sink_prescreen.py
-#                                 put 0.55 s of CPU per disc against it (2026-07-29).
-#   flipped   speed_ladder_rows — probe_speed_ladder(points=3), span left to the
-#                                 library. AccuDisc hardware-validated `speeds
-#                                 --sweep` and bound the probe (2026-07-29). The
-#                                 (req, page2a, measured) triple is UNCHANGED: the
-#                                 binding also offers verdicts and min/max, and
-#                                 adopting its admission rule would fix the known
-#                                 gap in drive_speed.admitted_ladder — but that is
-#                                 policy, not carrier, and gets its own change.
-#   flipped   write_disc        — Device.write(), after accudisc_write_opts gained
-#                                 its `size` field (2026-07-29), which was the
-#                                 stated blocker: without the ABI guard a future
-#                                 field addition cannot raise AbiMismatch and
-#                                 becomes a well-formed call about the wrong bytes
-#                                 on the one operation here that is not idempotent.
-#                                 NOT hardware-tested — burning needs blank media
-#                                 and --simulate needs it too. Retire that caveat
-#                                 with one simulated burn on a blank CD-R.
-#                                 (lba = leadout/4, count clamped to leadout/2) or
-#                                 the rows stop comparing with past measurements.
-#   NOT       read_lead_in / engine_version / eject / park_spindle — bound or
-#                                 trivial; no measured reason to move them.
+# The table that used to live here tracked which entry points had been flipped to
+# the binding and which had not. It is gone because the answer is now "all of
+# them" and a table whose every row says the same thing is a place for a wrong row
+# to hide. One caveat from it survives and is NOT closed:
+#
+#   write_disc is not hardware-tested. Device.write() is exercised only against a
+#   CDEmu virtual writer, which proves the return path, byte layout and TOC
+#   grammar — not laser timing, DAO lead-in or media quality. Retire the caveat
+#   with one simulated burn on a blank CD-R.
+#
+# One policy item likewise survives the carrier work and is deliberately separate
+# from it: speed_ladder_rows returns the (req, page2a, measured) triple unchanged,
+# and the binding also offers AccuDisc's own admission verdicts, which would fix
+# the known gap in drive_speed.admitted_ladder. Adopting them changes what the
+# recovery ladder does, so it is a policy change needing its own evidence.
 
 # The names this module actually calls on the binding. Used as an identity proof,
 # not a version check — see _import_binding for the namespace-package trap it
@@ -190,13 +117,11 @@ _BINDING_SURFACE = (
     "version_string",
 )
 
-_binding_warned = False
-_abi_warned = False
-
 
 #: Sibling of the binary symlink: ``tools/accudisc/pybinding`` points at AccuDisc's
 #: ``bindings/python``. Git-ignored, machine-local, same arrangement and the same
-#: reasons as :func:`_resolve_accudisc` — see :func:`_binding_search_path`.
+#: reasons as the binary symlink that used to sit beside it — see
+#: :func:`_binding_search_path`.
 _PYBINDING_LINK = (
     Path(__file__).parent.parent.parent / "tools" / "accudisc" / "pybinding"
 )
@@ -292,97 +217,51 @@ def _import_binding() -> tuple[Any | None, str]:
     return accudisc, ""
 
 
-def _transport_mode() -> str:
-    """Read the transport policy fresh from the environment.
+def _binding(what: str) -> Any:
+    """The binding module, or raise. There is no second transport to fall back to.
 
-    Not frozen at import: a test that pins the transport must be able to pin it
-    per case, or it asserts against whichever path the machine happened to take —
-    and passing would then tell you nothing about the path you meant to exercise.
+    This used to return ``None`` to mean "use the subprocess", which made every
+    call site a two-branch decision. Raising collapses those branches and, more
+    usefully, makes "the binding is missing" arrive at the top of the operation
+    that needed it, naming the operation — rather than as a rip that quietly ran
+    on a different carrier.
     """
-    mode = os.environ.get(TRANSPORT_ENV, "auto").strip().lower() or "auto"
-    if mode not in _TRANSPORT_MODES:
-        log.warning(
-            "%s=%r is not one of %s — using auto",
-            TRANSPORT_ENV,
-            mode,
-            ", ".join(_TRANSPORT_MODES),
-        )
-        return "auto"
-    return mode
-
-
-def active_transport() -> str:
-    """Which transport a flipped call would use right now: ``binding``/``subprocess``.
-
-    Recorded in the rip log. A silent fallback would make the whole flip
-    untestable — a later A/B would pass and nobody could say which transport
-    passed it. Deliberately does not warn: this is the reporting path, and a
-    report that changes the log it describes is its own bug.
-    """
-    if _transport_mode() == "subprocess":
-        return "subprocess"
-    return "binding" if _import_binding()[0] is not None else "subprocess"
-
-
-def _binding(what: str) -> Any | None:
-    """The binding module if it should serve *what*, else None (use subprocess)."""
-    global _binding_warned
-
-    mode = _transport_mode()
-    if mode == "subprocess":
-        return None
     module, why = _import_binding()
-    if module is not None:
-        return module
-    if mode == "binding":
-        # Explicitly demanded, so falling back would answer a question nobody
-        # asked. The whole point of pinning it is to be sure which one ran.
-        msg = f"{TRANSPORT_ENV}=binding requested but it is not importable: {why}"
-        raise RuntimeError(msg)
-    if not _binding_warned:
-        _binding_warned = True
-        log.warning(
-            "AccuDisc Python binding unavailable (%s) — using the subprocess "
-            "transport for %s and everything after it. Set %s=subprocess to "
-            "silence this.",
-            why,
-            what,
-            TRANSPORT_ENV,
+    if module is None:
+        msg = (
+            f"the AccuDisc Python binding is required for {what} but could not be "
+            f"imported: {why}. Install AccuDisc's binding wheel "
+            f"(cdda2img's install.sh does this via `pipx inject`)."
         )
-    return None
+        raise RuntimeError(msg)
+    return module
 
 
-def _try_binding(module: Any, what: str, fn: Callable[[], _T]) -> _T | None:
-    """Run *fn* on the binding path. ``None`` means "fall back to the subprocess".
+def _call(module: Any, what: str, fn: Callable[[], _T]) -> _T:
+    """Run *fn*, translating AccuDisc's exceptions into this module's contract.
 
-    Only an **ABI mismatch** degrades: it means the extension and
-    ``libaccudisc`` were built from different headers, which breaks the binding
-    while leaving the CLI binary perfectly good — precisely the "binary but no
-    working library" case the fallback exists for. It surfaces on ``Device()``
-    rather than on import (the binding runs its skew check in ``__init__``), so
-    it cannot be probed for in advance.
+    Callers document ``RuntimeError``, so both arms raise that rather than making
+    every consumer of the seam learn AccuDisc's exception hierarchy.
 
-    Every other ``AccuDiscError`` is a real device or media failure. Retrying it
-    through the subprocess would re-run the same failing operation against the
-    same drive and report the second failure as if it were the first, so it is
-    raised — as ``RuntimeError``, the exception the subprocess path already
-    documents, so no caller needs to learn a new type.
+    ``AbiMismatch`` is kept as a distinct arm even though both now raise, because
+    the two mean genuinely different things and the remedy differs: a mismatch
+    says the extension and ``libaccudisc`` were built from different headers and
+    the fix is a rebuild, while an ``AccuDiscError`` is a real device or media
+    failure and a rebuild would be wasted effort. It used to degrade to the
+    subprocess — correct while a second carrier existed, since a skewed extension
+    leaves the binary perfectly good. What changed is not that reasoning but the
+    availability of the thing it fell back to.
     """
-    global _abi_warned
-
     try:
         return fn()
     except module.AbiMismatch as exc:
-        if not _abi_warned:
-            _abi_warned = True
-            log.warning(
-                "AccuDisc binding/library ABI mismatch (%s) — falling back to the "
-                "subprocess transport. Rebuild the binding to use it.",
-                exc,
-            )
-        return None
+        msg = (
+            f"accudisc {what} failed: the Python binding and libaccudisc were "
+            f"built from different headers ({exc}). Rebuild the binding."
+        )
+        raise RuntimeError(msg) from exc
     except module.AccuDiscError as exc:
-        msg = f"accudisc {what} failed (binding transport): {exc}"
+        msg = f"accudisc {what} failed: {exc}"
         raise RuntimeError(msg) from exc
 
 
@@ -464,135 +343,40 @@ class TocGeometry:
         return True, "all-audio, single session inferred (NOT measured)"
 
 
-_TRACK_RE = re.compile(r"^track\s+(\d+)\s+lba\s+(-?\d+)\s+sectors\s+(\d+)\s+(\w+)")
-_LEADOUT_RE = re.compile(r"^leadout\s+lba\s+(\d+)")
-
-
-def parse_toc_output(stdout: str) -> TocGeometry:
-    """Parse ``accudisc toc`` output. Frozen in AccuDisc's cli-machine-interface.md.
-
-    The acquisition line is ``key=value`` tokens and may gain keys, so it is
-    parsed as tokens, never by position.
-    """
-    lsns: list[int] = []
-    data_tracks: list[int] = []
-    leadout: int | None = None
-    tokens: dict[str, str] = {}
-
-    for line in stdout.splitlines():
-        track = _TRACK_RE.match(line)
-        if track:
-            number, lba, _sectors, kind = track.groups()
-            lsns.append(int(lba))
-            if kind != "audio":
-                data_tracks.append(int(number))
-            continue
-        tail = _LEADOUT_RE.match(line)
-        if tail:
-            leadout = int(tail.group(1))
-            continue
-        if "=" in line:
-            for item in line.split():
-                key, _, value = item.partition("=")
-                if value:
-                    tokens[key] = value
-
-    if not lsns or leadout is None:
-        msg = f"could not parse accudisc toc output:\n{stdout}"
-        raise ValueError(msg)
-
-    session_count: int | None = None
-    if "session_count" in tokens:
-        with contextlib.suppress(ValueError):
-            session_count = int(tokens["session_count"])
-
-    return TocGeometry(
-        track_lsns=lsns,
-        disc_last_lsn=leadout - 1,
-        # Pre-degrade AccuDisc builds emit no acquisition line; they only ever
-        # answered from the lead-in, so "fulltoc"/"none" is the honest default.
-        source=tokens.get("source", "fulltoc"),
-        degrade=tokens.get("degrade", "none"),
-        sessions=tokens.get("sessions"),
-        data_tracks=data_tracks,
-        session_count=session_count,
-        # `anomalies=` is absent when clean; `toc_trusted=0` appears only when the
-        # geometry is untrusted (its absence means trusted).
-        anomalies=tokens["anomalies"].split(",") if tokens.get("anomalies") else [],
-        toc_trusted=tokens.get("toc_trusted") != "0",
-    )
-
-
-def _lead_in_via_binding(
-    device: str, fulltoc_path: Path, cdtext_path: Path | None
-) -> bool:
-    """Lead-in dump through the binding. False means "fall back to the subprocess".
-
-    Writes each file only once its bytes are in hand. The subprocess contract is
-    that a failed dump leaves **no file**, and every caller tests for the file
-    rather than catching — so a half-written or empty ``fulltoc`` would read as a
-    successful capture of a disc with no TOC, which is worse than no answer.
-
-    ``read_cdtext_raw`` returning ``None`` is the ordinary case, not an error:
-    most discs carry no CD-Text. It leaves no file, exactly as the CLI does.
-    """
-    module = _binding("lead-in")
-    if module is None:
-        return False
-
-    def _run() -> bool:
-        try:
-            with module.Device(device) as dev:
-                fulltoc = dev.read_full_toc_raw()
-                cdtext = dev.read_cdtext_raw() if cdtext_path is not None else None
-        except module.AbiMismatch:
-            raise
-        except (module.AccuDiscError, OSError) as exc:
-            log.debug("accudisc lead-in read failed for %s: %s", device, exc)
-            return True
-        if fulltoc:
-            fulltoc_path.write_bytes(fulltoc)
-        if cdtext and cdtext_path is not None:
-            cdtext_path.write_bytes(cdtext)
-        return True
-
-    return _try_binding(module, "lead-in", _run) is not None
-
-
 def read_lead_in(
     device: str, fulltoc_path: Path, cdtext_path: Path | None = None
 ) -> None:
     """Dump the raw full TOC (and optionally CD-Text) from the lead-in only.
 
-    The two standalone subcommands answer from the lead-in without spinning the
-    program area, which is what makes this cheap enough for the pre-rip banner
-    (M3, replacing ``cdrdao read-toc --fast-toc``).
+    Answers from the lead-in without spinning the program area, which is what
+    makes this cheap enough for the pre-rip banner.
 
-    Best-effort by contract: **CD-Text absence is normal** — most discs have
-    none — so a missing or failed ``cdtext`` leaves no file and is not an error.
-    A failed ``fulltoc`` likewise leaves no file; the caller checks for it rather
-    than catching, because every caller of this is cosmetic.
+    Best-effort by contract, and **this one swallows even a device failure** —
+    unlike every other read here. Every caller is cosmetic and tests for the file
+    rather than catching, so a banner that cannot be drawn must not stop a rip.
+    Files are written only once their bytes are in hand: a half-written or empty
+    ``fulltoc`` would read as a successful capture of a disc with no TOC, which
+    is worse than no answer at all.
 
-    Binding path takes **one** ``Device`` for both reads, as the CLI's inline
-    capture does and as ``_read_disc_binding`` already does. Two devices would be
-    two spin-ups for data that lives in the same lead-in, which is the entire
-    reason this is cheap enough to sit in front of a rip.
+    **CD-Text absence is normal** — most discs have none — so
+    ``read_cdtext_raw()`` returning ``None`` leaves no file and is not an error.
+
+    Both reads share **one** ``Device``, as ``_read_disc_binding`` does: they come
+    from the same lead-in, and two devices would be two spin-ups for data sitting
+    in the same place, which is the entire reason this is cheap.
     """
-    if _lead_in_via_binding(device, fulltoc_path, cdtext_path):
+    module = _binding("lead-in")
+    try:
+        with module.Device(device) as dev:
+            fulltoc = dev.read_full_toc_raw()
+            cdtext = dev.read_cdtext_raw() if cdtext_path is not None else None
+    except (module.AccuDiscError, OSError) as exc:
+        log.debug("accudisc lead-in read failed for %s: %s", device, exc)
         return
-    for sub, out in (("fulltoc", fulltoc_path), ("cdtext", cdtext_path)):
-        if out is None:
-            continue
-        try:
-            subprocess.run(  # noqa: S603 — snapshot/PATH binary, fixed argv
-                [_ACCUDISC, "--device", device, sub, str(out)],
-                capture_output=True,
-                text=True,
-                check=False,
-                timeout=60,
-            )
-        except (OSError, subprocess.TimeoutExpired) as exc:
-            log.debug("accudisc %s failed for %s: %s", sub, device, exc)
+    if fulltoc:
+        fulltoc_path.write_bytes(fulltoc)
+    if cdtext and cdtext_path is not None:
+        cdtext_path.write_bytes(cdtext)
 
 
 def _toc_geometry_from_binding(module: Any, device: str) -> TocGeometry:
@@ -648,7 +432,7 @@ def _toc_geometry_from_binding(module: Any, device: str) -> TocGeometry:
 
 
 def _warn_about_geometry(geom: TocGeometry) -> None:
-    """Surface an untrusted or degraded TOC. Shared, so both transports say it."""
+    """Surface an untrusted or degraded TOC."""
     if not geom.toc_trusted:
         log.warning(
             "TOC geometry is untrusted (anomalies: %s) — the track map contradicts "
@@ -667,161 +451,76 @@ def _warn_about_geometry(geom: TocGeometry) -> None:
 def read_toc(device: str) -> TocGeometry:
     """Track geometry via AccuDisc, tolerating an unreadable lead-in.
 
-    Raises RuntimeError when the command itself fails; a *degrade* is a success
-    (exit 0) and is reported in the result, not raised — failing it would break
-    exactly the discs the fallback exists to serve.
-
-    Served by the binding where available (structs, no regexes), else by
-    ``accudisc toc`` and :func:`parse_toc_output`.
+    Raises RuntimeError when the read itself fails; a *degrade* is a success and
+    is reported in the result, not raised — failing it would break exactly the
+    discs the degrade path exists to serve.
     """
     module = _binding("toc")
-    if module is not None:
-        geom = _try_binding(
-            module, "toc", lambda: _toc_geometry_from_binding(module, device)
-        )
-        if geom is not None:
-            _warn_about_geometry(geom)
-            return geom
-
-    try:
-        proc = subprocess.run(  # noqa: S603 — snapshot/PATH binary, fixed argv
-            [_ACCUDISC, "--device", device, "toc"],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-    except OSError as exc:
-        msg = f"accudisc toc failed to run: {exc}"
-        raise RuntimeError(msg) from exc
-    if proc.returncode not in (0, 3):
-        msg = f"accudisc toc exited {proc.returncode}: {proc.stderr.strip()}"
-        raise RuntimeError(msg)
-    geom = parse_toc_output(proc.stdout)
+    geom = _call(module, "toc", lambda: _toc_geometry_from_binding(module, device))
     _warn_about_geometry(geom)
     return geom
 
 
-def _run_probe(
-    args: list[str], what: str, timeout: float | None = None
-) -> tuple[int, str, str] | None:
-    """Run a read-only ``accudisc`` probe; return ``(rc, stdout, stderr)`` or None.
-
-    Every probe on this module's surface is best-effort — ``features``, ``speed``,
-    ``speeds``, ``--version`` — so a missing binary or a transport error yields
-    None and the caller degrades. None means *"could not ask"*; a non-zero ``rc``
-    means *"asked and was refused"*, which is a different thing and stays visible.
-    """
-    try:
-        result = subprocess.run(  # noqa: S603 — snapshot/PATH binary, fixed argv
-            [_ACCUDISC, *args],
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=timeout,
-        )
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        log.debug("accudisc %s unavailable: %s", what, exc)
-        return None
-    return result.returncode, result.stdout, result.stderr
-
-
-def _run_features(device: str) -> tuple[int, str] | None:
-    """Run ``accudisc features``; return (returncode, stdout) or None if unavailable."""
-    probe = _run_probe(["--device", device, "features"], "features")
-    return None if probe is None else (probe[0], probe[1])
-
-
-#: The binding's ``Features.combos`` keys spelled the way the CLI prints them —
-#: and the way this module has always published them. The two differ by one
-#: character on two keys (``c2_sub_raw`` vs ``c2+sub_raw``), which is enough for
-#: a caller testing ``combos["c2+sub_raw"]`` to get a ``KeyError`` on one carrier
-#: and a working single-pass capture on the other. Absorbing that is what a seam
-#: is for; leaving it to callers is how a transport swap becomes a behaviour swap.
+#: The binding's ``Features.combos`` keys spelled the way this module publishes
+#: them. They differ by one character on two keys (``c2_sub_raw`` vs
+#: ``c2+sub_raw``). Kept as an explicit map rather than adopting the library's
+#: spelling because ``c2+sub_raw`` is this seam's published contract and the key
+#: that gates the single-pass capture: renaming it here would move a rename into
+#: every caller, which is the opposite of what a seam is for.
 _COMBO_KEY_ALIASES = {"c2_sub_raw": "c2+sub_raw", "c2_sub_q": "c2+sub_q"}
 
 
-def _features_via_binding(device: str) -> tuple[bool, dict[str, bool]] | None:
-    """``(c2_supported, combos)`` from ``Device.probe_features``, or None to fall back.
+def _probe_features(device: str) -> tuple[bool, dict[str, bool]]:
+    """``(c2_supported, combos)`` from ``Device.probe_features``.
 
-    ``C2Verdict.SUPPORTED`` is the binding's spelling of the CLI's exit 0, and it
-    means the same conservative thing: claimed **and** functional. ``UNVERIFIED``
-    is not a weaker yes — it is "we could not tell" — so it maps to False, which
-    is the answer the subprocess gives for the same drive.
+    Best-effort: a device that will not open or will not answer yields
+    ``(False, {})``, and the caller degrades to a read without C2 rather than
+    failing. That is the honest reading — we could not establish C2 support, and
+    asking a drive for pointers it never demonstrated is the worse error.
+
+    ``C2Verdict.SUPPORTED`` is deliberately the only true: it means claimed **and**
+    functional. ``UNVERIFIED`` is "could not tell", not a weaker yes.
     """
     module = _binding("features")
-    if module is None:
-        return None
 
     def _run() -> tuple[bool, dict[str, bool]]:
         try:
             with module.Device(device) as dev:
                 feats = dev.probe_features()
-        except module.AbiMismatch:
-            raise
         except (module.AccuDiscError, OSError) as exc:
             log.debug("accudisc features failed for %s: %s", device, exc)
             return (False, {})
         combos = {_COMBO_KEY_ALIASES.get(k, k): v for k, v in feats.combos.items()}
         return (feats.c2_verdict == module.C2Verdict.SUPPORTED, combos)
 
-    return _try_binding(module, "features", _run)
+    return _call(module, "features", _run)
 
 
 def drive_supports_c2(device: str) -> bool:
     """True iff the drive both advertises AND functionally supports C2.
 
-    (``C2Verdict.SUPPORTED`` on the binding; exit 0 from ``accudisc features`` on
-    the subprocess — the same conservative test either way.) Best-effort: any
-    failure → False, and the caller degrades to a read without C2.
+    Best-effort: any failure → False, and the caller degrades to a read with no
+    C2 rather than aborting.
     """
-    served = _features_via_binding(device)
-    if served is not None:
-        return served[0]
-    probe = _run_features(device)
-    return probe is not None and probe[0] == 0
+    return _probe_features(device)[0]
 
 
 def probe_combos(device: str) -> dict[str, bool]:
-    """Per-combination READ CD support from the ``features`` smoke probe.
+    """Per-combination READ CD support from the feature probe.
 
     Returns e.g. ``{"c2": True, "sub_raw": True, "c2+sub_raw": True, ...}`` — the
     ``c2+sub_raw`` key gates the single-pass audio+C2+subchannel capture. Empty
-    dict when the probe is unavailable. The key spelling is this module's
-    contract, not the carrier's: see ``_COMBO_KEY_ALIASES``.
+    dict when the probe could not answer. The key spelling is this module's
+    contract, not the library's: see ``_COMBO_KEY_ALIASES``.
     """
-    served = _features_via_binding(device)
-    if served is not None:
-        return served[1]
-    probe = _run_features(device)
-    if probe is None:
-        return {}
-    combos: dict[str, bool] = {}
-    for line in probe[1].splitlines():
-        parts = line.split()
-        if len(parts) == 3 and parts[0] == "combo":
-            combos[parts[1]] = parts[2] == "ok"
-    return combos
+    return _probe_features(device)[1]
 
 
 # ── speed probes (page 2A, and the timed ladder) ──────────────────────────────
 
-# `accudisc speed` page-2A line, e.g.
-#   page2A     max 40x (7056 kB/s)  current 8x (1411 kB/s)
-# The Nx figure is the drive's own rounding; we take the kB/s, which is what every
-# caller compares against.
-_AD_MAX_RE = re.compile(r"\bmax\s+\d+x\s+\((\d+)\s*kB/s\)")
-_AD_CUR_RE = re.compile(r"\bcurrent\s+\d+x\s+\((\d+)\s*kB/s\)")
-
-# `accudisc speeds` row, e.g. `speed req=32 page2a=32 measured=19.20`.
-_SPEED_ROW_RE = re.compile(
-    r"^speed\s+req=(\d+)\s+page2a=(\d+)\s+measured=([\d.]+)"
-    r"(?:.*?\bverdict=(\S+))?",
-    re.MULTILINE,
-)
-
 
 class SpeedRow(NamedTuple):
-    """One rung of a ``speeds`` probe, on either transport.
+    """One rung of a ``probe_speed_ladder`` sweep.
 
     ``verdict`` is AccuDisc's own judgement of the rung and is the field that
     matters: ``admitted`` / ``duplicate:<n>`` / ``quantized:<n>`` / ``unknown``.
@@ -841,7 +540,7 @@ class SpeedRow(NamedTuple):
 
 
 def read_speed(device: str) -> tuple[int | None, int | None]:
-    """``(current_kbps, max_kbps)`` from ``accudisc speed``, or ``(None, None)``.
+    """``(current_kbps, max_kbps)``, or ``(None, None)`` when it cannot be read.
 
     MODE SENSE page 2A read at the correct offsets (max = page[8:10], current =
     page[14:16] — the fields ``cdrdao drive-info`` reports; the "page 2A lies"
@@ -851,46 +550,32 @@ def read_speed(device: str) -> tuple[int | None, int | None]:
     "unknown". Note that ``max`` is the *advertised* ceiling; the drive's governor
     enforces a lower one on CD-DA and does not expose it (§9.3).
 
-    **The binding returns the pair the other way round.** ``Device.get_speed()``
-    is documented ``(max_kbps, current_kbps)``; this function has always returned
-    ``(current, max)``. Both are two ints in the same units, so a straight
-    hand-over would type-check, run, and silently swap every caller's reading of
-    the drive — `drive_speed` would take the advertised ceiling for the current
-    rate and the current rate for the ceiling. The swap is written out below
-    rather than hidden in a comprehension for that reason.
+    **The library returns the pair the other way round.** ``Device.get_speed()``
+    is documented ``(max_kbps, current_kbps)``; this function returns
+    ``(current, max)`` and always has. Both are two ints in the same units, so a
+    straight hand-over would type-check, run, and silently swap every caller's
+    reading of the drive — `drive_speed` would take the advertised ceiling for
+    the current rate and the current rate for the ceiling. The swap is written
+    out below rather than hidden in a comprehension for exactly that reason, and
+    it was verified against the drive with the two fields deliberately made to
+    differ (8x: 1411 vs 7056), since at a drive's default they are equal and the
+    order is unobservable.
+
+    ``0`` maps to ``None``: an unsigned zero from the library means "did not
+    report", and a caller told 0 kB/s has been handed a measurement nobody made.
     """
     module = _binding("speed")
-    if module is not None:
 
-        def _read() -> tuple[int | None, int | None] | None:
-            try:
-                with module.Device(device) as dev:
-                    max_kbps, cur_kbps = dev.get_speed()
-            except module.AbiMismatch:
-                raise
-            except (module.AccuDiscError, OSError) as exc:
-                log.debug("accudisc speed failed for %s: %s", device, exc)
-                return (None, None)
-            return (cur_kbps or None, max_kbps or None)
+    def _read() -> tuple[int | None, int | None]:
+        try:
+            with module.Device(device) as dev:
+                max_kbps, cur_kbps = dev.get_speed()
+        except (module.AccuDiscError, OSError) as exc:
+            log.debug("accudisc speed failed for %s: %s", device, exc)
+            return (None, None)
+        return (cur_kbps or None, max_kbps or None)
 
-        pair = _try_binding(module, "speed", _read)
-        if pair is not None:
-            return pair
-
-    probe = _run_probe(["--device", device, "speed"], "speed")
-    if probe is None:
-        return None, None
-    rc, stdout, stderr = probe
-    if rc != 0:
-        log.debug("accudisc speed exited %d for %s", rc, device)
-        return None, None
-    text = stdout + "\n" + stderr
-    max_m = _AD_MAX_RE.search(text)
-    if max_m is None:
-        log.debug("accudisc speed output unparseable for %s", device)
-        return None, None
-    cur_m = _AD_CUR_RE.search(text)
-    return (int(cur_m.group(1)) if cur_m else None), int(max_m.group(1))
+    return _call(module, "speed", _read)
 
 
 def _speed_ladder_binding(module: Any, device: str) -> list[SpeedRow]:
@@ -968,11 +653,9 @@ def speed_ladder_rows(device: str) -> list[SpeedRow]:
     rung below it. Only a rate comparison sees that, and AccuDisc's verdict
     (``duplicate:40``) is a rate comparison made against three radii.
 
-    Both transports produce the same token, but only after normalisation: the
-    CLI prints ``verdict=duplicate:40`` where the binding's enum gives
-    ``duplicate`` and puts the collapsed-onto rung in a separate field. The suffix
-    is stripped by :func:`_verdict_class`, so what reaches a caller is the verdict
-    *class* on both.
+    The enum gives ``duplicate`` with the collapsed-onto rung in a separate
+    field; :func:`_verdict_class` normalises to the verdict *class*, which is
+    what a caller acts on.
 
     ``min_x``/``max_x`` are deliberately **not** surfaced: they are ``None`` (not
     ``0.0``) when no gradient was measured, and this row type has no way to carry
@@ -980,108 +663,47 @@ def speed_ladder_rows(device: str) -> list[SpeedRow]:
     encodes what the gradient was measured *for*.
     """
     module = _binding("speed ladder")
-    if module is not None:
-        rows = _try_binding(
-            module, "speed ladder", lambda: _speed_ladder_binding(module, device)
-        )
-        if rows is not None:
-            return rows
-
-    probe = _run_probe(["--device", device, "speeds"], "speeds")
-    if probe is None:
-        return []
-    rc, stdout, stderr = probe
-    if rc != 0:
-        log.debug("accudisc speeds exited %d for %s", rc, device)
-        return []
-    return [
-        SpeedRow(
-            int(m.group(1)),
-            int(m.group(2)),
-            float(m.group(3)),
-            _verdict_class(m.group(4)),
-        )
-        for m in _SPEED_ROW_RE.finditer(stdout + "\n" + stderr)
-    ]
+    return _call(module, "speed ladder", lambda: _speed_ladder_binding(module, device))
 
 
 def engine_version() -> str:
     """AccuDisc's version banner, for the RLOG block. Device-free; never raises.
 
-    Recorded verbatim so a rip can be traced to the build that produced it. Falls
-    back to a placeholder rather than raising — a missing version must not fail a
-    rip that has already succeeded.
+    Recorded verbatim so a rip can be traced to the build that produced it. A
+    missing version degrades to a placeholder rather than raising — it must not
+    fail a rip that has already succeeded, which is also why it uses the module
+    function and not a ``Device`` method: routing it through the drive would let
+    a tray opened one second early turn good provenance into "version unknown".
 
-    The transport is appended because the fallback is silent after its one
-    warning, and a rip log that does not say which carrier read the disc cannot
-    settle a later question about a discrepancy between them. The version still
-    comes from the binary either way: it is the same library underneath, and this
-    call is device-free on the subprocess path where the binding is not.
-
-    Binding path is ``version_string()`` — device-free on both carriers here, so
-    unlike every other flip this one has no drive to disagree about. Note it is a
-    module function, not a ``Device`` method: asking for a device would make the
-    version of a rip that has already finished depend on the drive still being
-    openable, which is the opposite of "must not fail a rip that succeeded".
-    """
-    module = _binding("version")
-    if module is not None:
-        banner = _try_binding(module, "version", lambda: module.version_string())
-        if banner is not None:
-            return f"accudisc {banner} [transport: {active_transport()}]"
-
-    probe = _run_probe(["--version"], "--version", timeout=5)
-    if probe is None:
-        return f"accudisc (version unknown) [transport: {active_transport()}]"
-    lines = (probe[1] + probe[2]).splitlines()
-    first = next((ln for ln in lines if ln.strip()), None)
-    banner = first.strip() if first else "accudisc (version unknown)"
-    return f"{banner} [transport: {active_transport()}]"
-
-
-def _run_read(
-    cmd: list[str],
-    progress_cb: Callable[[int, int], None] | None,
-    what: str,
-) -> None:
-    """Run an ``accudisc read`` command, raising RuntimeError on a fatal exit.
-
-    Shared by :func:`read_disc_c2` and :func:`read_span`. Exit 0 (clean) and 3
-    (completed with caveats — hard/suspect/residual-C2, all zero-filled and
-    reported) both mean the image was delivered, so neither raises; 1 (usage) and
-    2 (fatal device/transport) do. Exit 0 is not verification — AR/CTDB gating is
-    the caller's job.
+    The ``[transport: …]`` suffix this used to carry is gone. It existed because
+    a silent fallback between two carriers would otherwise leave a rip log unable
+    to say which one read the disc; with one carrier it was a constant, and a
+    constant in a provenance field is noise that reads like information.
     """
     try:
-        if progress_cb is None:
-            # -q silences the human stderr line; capture the rest for logging.
-            result = subprocess.run(  # noqa: S603 — snapshot/PATH binary, fixed argv
-                [*cmd, "-q"], capture_output=True, check=False
-            )
-            returncode = result.returncode
-            stderr_text = result.stderr.decode(errors="replace")
-        else:
-            returncode, stderr_text = _run_with_progress(cmd, progress_cb)
-    except FileNotFoundError:
-        msg = "accudisc not found — symlink it into tools/accudisc/ or put it on $PATH"
-        raise RuntimeError(msg) from None
-    if returncode not in (0, 3):
-        msg = f"accudisc {what} failed (exit {returncode}): {stderr_text.strip()}"
-        raise RuntimeError(msg)
-    log.debug("accudisc %s (exit %d): %s", what, returncode, stderr_text.strip())
+        module = _binding("version")
+    except RuntimeError:
+        return "accudisc (version unknown)"
+    try:
+        return f"accudisc {module.version_string()}"
+    except Exception:
+        log.debug("accudisc version_string() failed", exc_info=True)
+        return "accudisc (version unknown)"
 
 
 def _log_read_caveats(stats: Any, what: str) -> None:
-    """Reconstruct the CLI's exit-3 verdict from ``ReadStats`` and log it.
+    """Reconstruct the retired CLI's exit-3 verdict from ``ReadStats`` and log it.
 
-    Exit 3 is **not** a library return. ``cli/main.c`` computes it after the read
+    Exit 3 was **not** a library return. ``cli/main.c`` computed it after the read
     from three counters — ``(hard_errors || sectors_suspect || sectors_flagged)
     ? 3 : 0`` — and ``Device.read`` raises on genuine failure and discards ``rc``
-    otherwise. So the caveat signal exists only if this side rebuilds it; without
-    this the binding transport would report "clean" on exactly the discs where
-    the subprocess said "delivered, but gate it".
+    otherwise. So the caveat signal exists only because this side rebuilds it.
+    That was written to stop the binding reporting "clean" on exactly the discs
+    where the CLI said "delivered, but gate it"; with the CLI gone it is no longer
+    a parity measure but the **only** source of the signal, which makes it more
+    load-bearing than when it was added, not less.
 
-    Neither value fails a read on either transport, which is why this only logs.
+    Neither value fails a read, which is why this only logs.
     "Delivered with caveats" means the image is complete (AccuDisc zero-fills
     hard-unreadable sectors and flags them); whether it is *trustworthy* is
     AccurateRip's and CTDB's question, not the engine's.
@@ -1246,45 +868,25 @@ def read_disc_c2(
     for existence. *progress_cb(done, total)* receives sector counts from the
     ``--progress-fd`` machine channel.
 
-    Raises RuntimeError only on a genuine read failure (exit 1/2); exit 3
-    (completed with caveats) is not a failure — on the binding transport there is
-    no exit code to inspect, so :func:`_log_read_caveats` rebuilds that verdict
-    from ``ReadStats``."""
+    Raises RuntimeError only on a genuine read failure; "completed with caveats"
+    is not a failure, and since the library returns no verdict for it,
+    :func:`_log_read_caveats` rebuilds one from ``ReadStats``."""
     module = _binding("disc read")
-    if module is not None:
-        served = _try_binding(
+    _call(
+        module,
+        "disc read",
+        lambda: _read_disc_binding(
             module,
-            "disc read",
-            lambda: _read_disc_binding(
-                module,
-                device,
-                output_pcm,
-                output_c2,
-                output_sub,
-                output_cdtext,
-                output_fulltoc,
-                read_speed,
-                progress_cb,
-            ),
-        )
-        if served:
-            return
-
-    # Whole-disc read (no --count → through the lead-out); each output is opt-in.
-    cmd = [_ACCUDISC, "--device", device, "read"]
-    if output_pcm is not None:
-        cmd += ["--pcm", str(output_pcm)]
-    if output_c2 is not None:
-        cmd += ["--c2f", str(output_c2)]
-    if output_sub is not None:
-        cmd += ["--sub", "raw", "--subf", str(output_sub)]
-    if output_fulltoc is not None:
-        cmd += ["--fulltoc", str(output_fulltoc)]
-    if output_cdtext is not None:
-        cmd += ["--cdtext", str(output_cdtext)]
-    if read_speed:
-        cmd += ["--speed", str(read_speed)]
-    _run_read(cmd, progress_cb, "read")
+            device,
+            output_pcm,
+            output_c2,
+            output_sub,
+            output_cdtext,
+            output_fulltoc,
+            read_speed,
+            progress_cb,
+        ),
+    )
 
 
 def read_span(
@@ -1297,49 +899,29 @@ def read_span(
 ) -> None:
     """Targeted raw read of ``[start_lba, start_lba + count)`` sectors (s16le PCM only,
     no C2/sub capture) — the AR-recovery re-read primitive. Speed is set per invocation
-    (``--speed``) and NOT restored by AccuDisc, so a recovery sweep can step the ladder
-    without re-spinning between attempts; the caller restores once after.
+    and NOT restored, so a recovery sweep can step the ladder without re-spinning
+    between attempts; the caller restores once after.
 
-    Same exit contract as :func:`read_disc_c2` (0/3 = completed; hard-unreadable
-    sectors arrive zero-filled, so the output is always exactly ``count`` sectors
-    long).
+    Hard-unreadable sectors arrive zero-filled, so the output is always exactly
+    ``count`` sectors long.
 
-    The binding path reuses ``_read_span_binding`` — the same function
-    :func:`read_span_bytes` has been served by since 2026-07-27 — and writes the
-    bytes out. Deliberately not ``Device.read_span``: that helper supplies its own
-    sink and so has nowhere to hang ``progress_cb``, which drives the TUI through
-    every recovery re-read, and a silent multi-minute stream reads as a hang.
-    (``read_to_file`` is ruled out for the same reason, and it is the API this
-    function most obviously resembles — which is exactly why it is named here.)
+    Routed through ``_read_span_binding`` — the same function
+    :func:`read_span_bytes` uses — and the bytes are written out here.
+    Deliberately not ``Device.read_span`` or ``read_to_file``: both supply their
+    own sink and so have nowhere to hang ``progress_cb``, which drives the TUI
+    through every recovery re-read, and a silent multi-minute stream reads as a
+    hang. ``read_to_file`` is the API this function most obviously resembles,
+    which is exactly why it is named here rather than left to be rediscovered.
     """
     module = _binding("span read")
-    if module is not None:
-        data = _try_binding(
-            module,
-            "span read",
-            lambda: _read_span_binding(
-                module, device, start_lba, count, read_speed, progress_cb
-            ),
-        )
-        if data is not None:
-            output_pcm.write_bytes(data)
-            return
-
-    cmd = [
-        _ACCUDISC,
-        "--device",
-        device,
-        "read",
-        "--start",
-        str(start_lba),
-        "--count",
-        str(count),
-        "--pcm",
-        str(output_pcm),
-    ]
-    if read_speed:
-        cmd += ["--speed", str(read_speed)]
-    _run_read(cmd, progress_cb, "span read")
+    data = _call(
+        module,
+        "span read",
+        lambda: _read_span_binding(
+            module, device, start_lba, count, read_speed, progress_cb
+        ),
+    )
+    output_pcm.write_bytes(data)
 
 
 def _read_span_binding(
@@ -1438,83 +1020,25 @@ def read_span_bytes(
     Every caller of ``read_span`` bar one immediately did ``read_bytes()`` and
     unlinked — a full filesystem round-trip for bytes that only ever wanted to be
     in memory, repeated ``recovery_passes * ladder_rungs`` times per failed track.
-    The temp file here is an implementation detail of the *subprocess* transport
-    and is exactly what AccuDisc's library binding removes (their API_PLAN §7.3:
-    the sink is the binding's reason to exist, and a bounded span is the case where
-    that pays off). Expressing the call as "give me the bytes" is what let the
-    binding swap in underneath without touching a call site — which it now has:
-    :func:`_read_span_binding` serves this where the binding is importable, and
-    the temp-file body below is the fallback.
+    That temp file was an implementation detail of the subprocess, which could not
+    express "give me the bytes"; naming the call for what it wanted rather than
+    for how it was then implemented is what let the library swap in underneath
+    without touching a single call site.
 
     Bounded reads only — one track is ~50 MB at worst. Use :func:`read_span` when
     the destination genuinely is a file, and :func:`read_disc_c2` for a whole disc.
-
-    The scratch file goes through ``container.resolve_temp_dir`` rather than bare
-    ``tempfile``: this project's ``/tmp`` is RAM-backed, and that resolver is where
-    the "prefer disk-backed ``/var/tmp``, and check free space first" decision
-    already lives. Bypassing it would silently put disc-recovery scratch in RAM.
     """
     module = _binding("span read")
-    if module is not None:
-        data = _try_binding(
-            module,
-            "span read",
-            lambda: _read_span_binding(
-                module, device, start_lba, count, read_speed, progress_cb
-            ),
-        )
-        if data is not None:
-            return data
-
-    # Local import: this module is the drive seam and everything else in the tree
-    # imports *it*, so it stays free of package-level dependencies.
-    from cdda2img.container import resolve_temp_dir
-
-    need = count * _SECTOR_BYTES
-    with tempfile.TemporaryDirectory(
-        prefix="accudisc-span-", dir=resolve_temp_dir(need)
-    ) as td:
-        out = Path(td) / "span.pcm"
-        read_span(device, start_lba, count, out, read_speed, progress_cb)
-        return out.read_bytes()
+    return _call(
+        module,
+        "span read",
+        lambda: _read_span_binding(
+            module, device, start_lba, count, read_speed, progress_cb
+        ),
+    )
 
 
-def _run_with_progress(
-    cmd: list[str], progress_cb: Callable[[int, int], None]
-) -> tuple[int, str]:
-    """Run ``accudisc read`` with the ``--progress-fd`` machine channel on stdout.
-
-    We add ``-q --progress-fd 1``: ``-q`` mutes the human ``\\r`` stderr line, and
-    ``--progress-fd 1`` emits newline-delimited ``progress <done> <total>`` tokens
-    (plus a final ``summary …`` line) on stdout, which we iterate line by line and
-    forward to *progress_cb*. stderr goes to a temp file (not a pipe) so a heavily
-    damaged disc printing many log lines can never deadlock the single-threaded
-    stdout reader; it is read back afterwards for error detail.
-    """
-    with tempfile.TemporaryFile() as err_fp:
-        proc = subprocess.Popen(  # noqa: S603 — snapshot/PATH binary, fixed argv
-            [*cmd, "-q", "--progress-fd", "1"],
-            stdout=subprocess.PIPE,
-            stderr=err_fp,
-            text=True,
-        )
-        assert proc.stdout is not None  # noqa: S101 — guaranteed by stdout=PIPE
-        for line in proc.stdout:
-            parts = line.split()
-            if len(parts) == 3 and parts[0] == "progress":
-                try:
-                    progress_cb(int(parts[1]), int(parts[2]))
-                except ValueError:  # pragma: no cover — malformed token
-                    log.debug("accudisc: unparseable progress line %r", line)
-            elif parts and parts[0] == "summary":
-                log.debug("accudisc read %s", line.strip())
-        proc.wait()
-        err_fp.seek(0)
-        stderr_text = err_fp.read().decode(errors="replace")
-    return proc.returncode, stderr_text
-
-
-# ── write path (the one destructive subcommand) ───────────────────────────────
+# ── write path (the one destructive operation) ────────────────────────────────
 
 
 def _write_disc_binding(
@@ -1563,13 +1087,10 @@ def _write_disc_binding(
     A ``set_log`` sink is installed before the burn because ``CAVEATS`` is
     otherwise a boolean with no cause — the detail (today, a CD-Text SIZE_INFO
     pack whose track range disagrees with the ``.toc``) arrives only through the
-    log. Those lines become this function's ``stderr`` return, which is where the
-    subprocess path put the same information.
+    log. Those lines become this function's ``stderr`` return.
 
     ``cdtext_path`` is a raw READ TOC format-0x05 blob, byte-for-byte as
     ``read_disc_c2``'s ``output_cdtext`` writes it, laid into the lead-in verbatim.
-    Supported on both transports (``Device.write(cdtext_path=…)`` and the CLI's
-    ``write --cdtext``).
 
     **No caller supplies it yet, and that is a container limitation rather than an
     oversight**: the RBI stores CD-Text only as decoded strings inside the TOC
@@ -1596,24 +1117,24 @@ def _write_disc_binding(
                 progress=progress_cb,
             )
     except module.AbiMismatch:
-        # MUST outrank the AccuDiscError arm below, which it subclasses. An ABI
-        # mismatch surfaces on Device() — before any laser fires — and means the
-        # extension is broken while the binary is fine, so it is the one error
-        # here that should degrade to the subprocess rather than be reported as
-        # a failed burn. Swallowing it into `result=error` would turn a working
-        # subprocess burn into a refusal, on the one operation a user cannot
-        # simply retry.
+        # MUST outrank the AccuDiscError arm below, which it subclasses. A
+        # mismatch surfaces on Device() — before any laser fires — so it is not a
+        # failed burn and must not be reported as one. Re-raised for `_call` to
+        # turn into a RuntimeError naming the rebuild, rather than swallowed into
+        # `result=error`, which would report a disc as spoiled that was never
+        # touched. (It used to degrade to the subprocess here; with one carrier
+        # the distinction it protects is "nothing was written", not "try again".)
         raise
     except module.NotBlank as exc:
-        # Nothing was written. The subprocess reports this as exit 2 with
-        # result=not_blank, and the caller distinguishes it from a transport
-        # failure by the token, never by the code. Caught by its own type since
-        # 0.4.0 — `Unsupported` no longer implies it and must NOT be caught here.
+        # Nothing was written. Callers distinguish this from a transport failure
+        # by the token, never by the code. Caught by its own type since 0.4.0 —
+        # `Unsupported` no longer implies it and must NOT be caught here.
         return 2, str(exc), "not_blank"
     except module.AccuDiscError as exc:
-        # Deliberately returned, not raised: a raise would reach _try_binding,
-        # which falls back to the subprocess — and the subprocess would attempt
-        # a SECOND BURN of a disc whose state we no longer know.
+        # Deliberately returned, not raised. The code shape is inherited from
+        # when a raise would have triggered a second burn of a disc whose state
+        # was unknown; it survives because callers of write_disc branch on the
+        # (code, token) pair and a raise here would bypass every one of them.
         return 2, str(exc), "error"
     return (
         (3 if result is module.WriteResult.CAVEATS else 0),
@@ -1631,102 +1152,42 @@ def write_disc(
     progress_cb: Callable[[int, int], None] | None = None,
     cdtext_path: Path | None = None,
 ) -> tuple[int, str, str | None]:
-    """Burn *toc_path* + *bin_path* via ``accudisc write``. Returns (rc, stderr, result).
+    """Burn *toc_path* + *bin_path*. Returns ``(rc, stderr, result)``.
 
-    Deliberately returns the exit code rather than raising: exit **3** means
-    *completed with caveats* — the disc **was** written — and a caller that treats
-    that as a failure has told the user their disc is blank when it is not. Only
-    the caller knows how to say that, so the decision stays there.
+    Deliberately returns a code rather than raising: **3** means *completed with
+    caveats* — the disc **was** written — and a caller that treats that as a
+    failure has told the user their disc is blank when it is not. Only the caller
+    knows how to say that, so the decision stays there.
 
-    *result* is the ``summary … result=<token>`` machine token. Decisions key on
-    it, never on stderr wording — AccuDisc reserve the right to reword stderr and
-    exit 2 covers both "not blank" and transport failure, so the code alone cannot
-    disambiguate. None when no summary line arrived.
+    The codes and the *result* token are this seam's invention, synthesised in
+    :func:`_write_disc_binding` from ``WriteResult`` and the exception type.
+    AccuDisc deliberately do not expose process conventions through the library,
+    so keeping the shape here is the seam absorbing a difference rather than the
+    library leaking one — and it keeps every caller's branch untouched. Decisions
+    key on the token, never on stderr wording.
 
-    stderr goes to a temp file, never a pipe, so a chatty burn cannot deadlock the
-    single-threaded stdout reader.
-
-    On the binding, ``stderr`` carries the ``set_log`` lines instead and the exit
-    code is synthesised — see :func:`_write_disc_binding`. **Not hardware-tested
-    on either transport as of 2026-07-29**: burning needs blank media, and
-    ``--simulate`` needs it too, so no burn has exercised the binding path.
+    **Not hardware-tested**: burning needs blank media and ``--simulate`` needs it
+    too, so no real burn has exercised this. Only a CDEmu virtual writer has.
     """
     module = _binding("write")
-    if module is not None:
-        served = _try_binding(
-            module,
-            "write",
-            lambda: _write_disc_binding(
-                module,
-                device,
-                toc_path,
-                bin_path,
-                speed,
-                simulate,
-                progress_cb,
-                cdtext_path,
-            ),
-        )
-        if served is not None:
-            return served
-
-    cmd = [
-        _ACCUDISC,
-        "--device",
-        device,
+    return _call(
+        module,
         "write",
-        "--toc",
-        str(toc_path),
-        "--bin",
-        str(bin_path),
-        "--speed",
-        str(speed),
-    ]
-    if simulate:
-        cmd.append("--simulate")
-    if cdtext_path is not None:
-        cmd += ["--cdtext", str(cdtext_path)]
-
-    return _run_write_subprocess(cmd, progress_cb)
+        lambda: _write_disc_binding(
+            module,
+            device,
+            toc_path,
+            bin_path,
+            speed,
+            simulate,
+            progress_cb,
+            cdtext_path,
+        ),
+    )
 
 
-def _run_write_subprocess(
-    cmd: list[str], progress_cb: Callable[[int, int], None] | None
-) -> tuple[int, str, str | None]:
-    """Run a built ``accudisc write`` argv, returning ``(rc, stderr, result_token)``.
-
-    stderr goes to a temp file, never a pipe, so a chatty burn cannot deadlock the
-    single-threaded stdout reader — the machine channel is what this loop is
-    reading, and blocking on the human one would stall the burn's progress.
-    """
-    result_token: str | None = None
-    with tempfile.TemporaryFile() as err_fp:
-        proc = subprocess.Popen(  # noqa: S603 — snapshot/PATH binary, fixed argv
-            [*cmd, "--progress-fd", "1"],
-            stdout=subprocess.PIPE,
-            stderr=err_fp,
-            text=True,
-        )
-        assert proc.stdout is not None  # noqa: S101 — guaranteed by stdout=PIPE
-        for line in proc.stdout:
-            parts = line.split()
-            if len(parts) == 3 and parts[0] == "progress" and progress_cb is not None:
-                try:
-                    progress_cb(int(parts[1]), int(parts[2]))
-                except ValueError:  # pragma: no cover — malformed token
-                    log.debug("accudisc write: unparseable progress line %r", line)
-            elif parts and parts[0] == "summary":
-                for tok in parts[1:]:
-                    if tok.startswith("result="):
-                        result_token = tok.partition("=")[2]
-        proc.wait()
-        err_fp.seek(0)
-        stderr_text = err_fp.read().decode(errors="replace")
-    return proc.returncode, stderr_text, result_token
-
-
-def _best_effort_device_op(device: str, what: str, method: str) -> bool:
-    """Run ``Device.<method>()`` on the binding. True if it ran, False to fall back.
+def _best_effort_device_op(device: str, what: str, method: str) -> None:
+    """Run ``Device.<method>()``, swallowing a device that will not cooperate.
 
     Shared by the two tray/spindle operations, which are the only calls in the
     seam whose contract is "never raises" *including* the device failing to open.
@@ -1734,17 +1195,14 @@ def _best_effort_device_op(device: str, what: str, method: str) -> bool:
     operation is a courtesy — a drive that will not eject has not broken a rip
     that already finished.
 
-    Note what is *not* caught: ``AbiMismatch`` is left to ``_try_binding``, which
-    is the only condition under which falling back to the subprocess is right.
-    A device that refuses to open will refuse for the subprocess too, so
-    swallowing that here and returning True stops us running the same failing
-    operation twice to report the second failure as if it were the first.
+    ``AbiMismatch`` is deliberately **not** swallowed here — it reaches ``_call``
+    and raises. A skewed extension is a build fault the user must be told about,
+    and letting the one courtesy call in the seam hide it would mean discovering
+    it on the next operation that matters instead.
     """
     module = _binding(what)
-    if module is None:
-        return False
 
-    def _run() -> bool:
+    def _run() -> None:
         try:
             with module.Device(device) as dev:
                 getattr(dev, method)()
@@ -1754,40 +1212,21 @@ def _best_effort_device_op(device: str, what: str, method: str) -> bool:
             log.debug("accudisc %s failed for %s: %s", what, device, exc)
         except OSError as exc:
             log.debug("accudisc %s could not open %s: %s", what, device, exc)
-        return True
 
-    return _try_binding(module, what, _run) is not None
+    _call(module, what, _run)
 
 
 def eject(device: str) -> None:
-    """Best-effort tray eject (``Device.eject``). Never raises."""
-    if _best_effort_device_op(device, "eject", "eject"):
-        return
-    try:
-        subprocess.run(  # noqa: S603 — snapshot/PATH binary, fixed argv
-            [_ACCUDISC, "--device", device, "eject"],
-            capture_output=True,
-            check=False,
-        )
-    except (FileNotFoundError, OSError) as exc:
-        log.debug("accudisc eject failed for %s: %s", device, exc)
+    """Best-effort tray eject (``Device.eject``)."""
+    _best_effort_device_op(device, "eject", "eject")
 
 
 def park_spindle(device: str) -> None:
     """Best-effort spindle stop (SCSI START STOP UNIT) once done reading, so a
-    finished pass doesn't leave the drive spinning. Never raises.
+    finished pass doesn't leave the drive spinning.
 
     ``Device.park_spindle`` already treats ``ERR_UNSUPPORTED`` as success, which
     matches what this call means: a drive with no stop command has nothing to
     stop, and that is not a failure to report.
     """
-    if _best_effort_device_op(device, "stop", "park_spindle"):
-        return
-    try:
-        subprocess.run(  # noqa: S603 — snapshot/PATH binary, fixed argv
-            [_ACCUDISC, "--device", device, "stop"],
-            capture_output=True,
-            check=False,
-        )
-    except (FileNotFoundError, OSError) as exc:
-        log.debug("accudisc stop failed for %s: %s", device, exc)
+    _best_effort_device_op(device, "stop", "park_spindle")

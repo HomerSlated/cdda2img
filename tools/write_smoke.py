@@ -135,7 +135,6 @@ def main() -> int:
     medium = args.workdir / "cdda2img_smoke"
     toc, binp, source = _make_source(args.workdir)
 
-    print(f"# transport: {ar.active_transport()}")
     print(f"# engine   : {ar.engine_version()}")
 
     # A previous failed run leaves the slot loaded, and create-blank refuses.

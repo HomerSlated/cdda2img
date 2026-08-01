@@ -1,15 +1,28 @@
-"""accudisc_reader: AccuDisc subprocess wrappers — args, combos, progress streaming.
+"""accudisc_reader: the AccuDisc API seam.
 
-Asserts the AccuDisc machine interface: subcommand form, ``--c2f`` (not ``--c2``),
-whole-disc read via no ``--count``, inline ``--cdtext`` / ``--fulltoc`` lead-in
-capture, ``--progress-fd 1`` machine tokens on stdout, and the exit contract
-(0/3 = completed, 1/2 = fatal).
+Every disc operation in this project goes through `accudisc_reader`, and since
+the CLI was retired on 2026-08-01 every one of those goes through AccuDisc's
+Python binding. These tests therefore assert against a **fake binding module**
+installed via `_install`, never against a subprocess.
+
+The whole first half of this file used to assert argv construction (`--c2f`, no
+`--count` for a whole disc, `--progress-fd 1`) and stdout parsing (`track … lba`,
+`page2A max …`, `speed req=… page2a=…`). Those tests were not ported when the CLI
+went — they were deleted, because what they pinned no longer exists. Losing them
+is not a loss of coverage: a test for a text format nobody emits is a test that
+can only ever pass.
+
+What survived the cut, and why:
+
+* `TocGeometry.session_safe` — a policy this project owns, not AccuDisc. Only the
+  way the fixtures are *built* changed (structs now, not parsed text).
+* The seam invariant — now "no module outside this one imports `accudisc`".
+* Everything below the binding heading, which was already carrier-correct.
 """
 
 from __future__ import annotations
 
 import enum
-import io
 import logging
 from pathlib import Path
 from types import SimpleNamespace
@@ -19,763 +32,125 @@ import pytest
 
 import cdda2img.accudisc_reader as ar
 
-_ACC = ar._ACCUDISC
-
-_FEATURES_OUT = """\
-cd_read_feature present current=1 dap=0 c2_flags=1 cd_text=1
-combo c2 ok
-combo sub_raw ok
-combo sub_q ok
-combo c2+sub_raw ok
-combo c2+sub_q failed
-verdict C2_SUPPORTED
-accurate_stream yes
-"""
-
-
-class _Result:
-    def __init__(
-        self, stdout: str | bytes = "", stderr: bytes = b"", returncode: int = 0
-    ) -> None:
-        self.stdout = stdout
-        self.stderr = stderr
-        self.returncode = returncode
-
-
-def _patch_run(monkeypatch, result_for=None):
-    """Record every subprocess.run argv; return a per-command _Result."""
-    calls: list[list[str]] = []
-    make = result_for or (lambda cmd: _Result(returncode=0))
-
-    def _run(cmd, **k):
-        calls.append(cmd)
-        return make(cmd)
-
-    monkeypatch.setattr(ar.subprocess, "run", _run)
-    return calls
-
-
-# ── drive_supports_c2 / probe_combos ─────────────────────────────────────────
-
-
-def test_drive_supports_c2_gates_on_exit_code(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(
-        ar.subprocess, "run", lambda *a, **k: _Result(stdout=_FEATURES_OUT)
-    )
-    assert ar.drive_supports_c2("/dev/sr0") is True
-    monkeypatch.setattr(
-        ar.subprocess,
-        "run",
-        lambda *a, **k: _Result(stdout=_FEATURES_OUT, returncode=1),
-    )
-    assert ar.drive_supports_c2("/dev/sr0") is False
-
-
-def test_drive_supports_c2_missing_binary(monkeypatch: pytest.MonkeyPatch) -> None:
-    def _raise(*a: object, **k: object) -> None:
-        raise FileNotFoundError
-
-    monkeypatch.setattr(ar.subprocess, "run", _raise)
-    assert ar.drive_supports_c2("/dev/sr0") is False
-
-
-def test_probe_combos_parses_lines(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(
-        ar.subprocess, "run", lambda *a, **k: _Result(stdout=_FEATURES_OUT)
-    )
-    combos = ar.probe_combos("/dev/sr0")
-    assert combos == {
-        "c2": True,
-        "sub_raw": True,
-        "sub_q": True,
-        "c2+sub_raw": True,
-        "c2+sub_q": False,
-    }
-
-
-# ── read_disc_c2 command construction ────────────────────────────────────────
-
-
-def test_read_disc_c2_default_args(monkeypatch: pytest.MonkeyPatch) -> None:
-    calls = _patch_run(monkeypatch)
-    ar.read_disc_c2("/dev/sr0", Path("a.pcm"), Path("a.c2"))
-    (cmd,) = calls  # no cdtext/fulltoc requested → only the read
-    assert cmd[:4] == [_ACC, "--device", "/dev/sr0", "read"]
-    assert cmd[cmd.index("--c2f") + 1] == "a.c2"
-    assert cmd[cmd.index("--pcm") + 1] == "a.pcm"
-    assert "--full" not in cmd  # whole-disc read is no --count, not --full
-    assert "--count" not in cmd
-    assert "--c2" not in cmd  # bitmap flag is --c2f
-    assert cmd[-1] == "-q"  # no progress_cb → quiet
-
-
-def test_read_disc_c2_sub_and_speed(monkeypatch: pytest.MonkeyPatch) -> None:
-    calls = _patch_run(monkeypatch)
-    ar.read_disc_c2(
-        "/dev/sr0", Path("a.pcm"), Path("a.c2"), output_sub=Path("a.sub"), read_speed=8
-    )
-    (cmd,) = calls
-    i = cmd.index("--sub")
-    assert cmd[i : i + 4] == ["--sub", "raw", "--subf", "a.sub"]
-    assert cmd[cmd.index("--speed") + 1] == "8"
-
-
-def test_read_disc_c2_inline_leadin(monkeypatch: pytest.MonkeyPatch) -> None:
-    calls = _patch_run(monkeypatch)
-    ar.read_disc_c2(
-        "/dev/sr0",
-        Path("a.pcm"),
-        Path("a.c2"),
-        output_cdtext=Path("a.cdtext"),
-        output_fulltoc=Path("a.fulltoc"),
-    )
-    # Single read pass; lead-in dumps captured inline (one spin-up).
-    (cmd,) = calls
-    assert cmd[3] == "read"
-    assert cmd[cmd.index("--fulltoc") + 1] == "a.fulltoc"
-    assert cmd[cmd.index("--cdtext") + 1] == "a.cdtext"
-
-
-def test_read_disc_c2_metadata_only_omits_pcm_and_c2(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    # The parity gate wants sub + lead-in only: a whole-disc read with no audio
-    # write. Omitting output_pcm/output_c2 must drop --pcm/--c2f entirely (no
-    # ~600 MB PCM), while --sub/--fulltoc/--cdtext still appear.
-    calls = _patch_run(monkeypatch)
-    ar.read_disc_c2(
-        "/dev/sr0",
-        output_sub=Path("a.sub"),
-        output_fulltoc=Path("a.fulltoc"),
-        output_cdtext=Path("a.cdtext"),
-    )
-    (cmd,) = calls
-    assert cmd[:4] == [_ACC, "--device", "/dev/sr0", "read"]
-    assert "--pcm" not in cmd
-    assert "--c2f" not in cmd
-    assert cmd[cmd.index("--sub") : cmd.index("--sub") + 4] == [
-        "--sub",
-        "raw",
-        "--subf",
-        "a.sub",
-    ]
-    assert cmd[cmd.index("--fulltoc") + 1] == "a.fulltoc"
-    assert cmd[cmd.index("--cdtext") + 1] == "a.cdtext"
-
-
-def test_read_disc_c2_exit_3_is_completed(monkeypatch: pytest.MonkeyPatch) -> None:
-    # Exit 3 = completed with caveats (hard/suspect/residual C2) — not a failure.
-    monkeypatch.setattr(ar.subprocess, "run", lambda *a, **k: _Result(returncode=3))
-    ar.read_disc_c2("/dev/sr0", Path("a.pcm"), Path("a.c2"))  # no raise
-
-
-def test_read_disc_c2_exit_1_raises(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(
-        ar.subprocess,
-        "run",
-        lambda *a, **k: _Result(stderr=b"boom", returncode=1),
-    )
-    with pytest.raises(RuntimeError, match=r"exit 1.*boom"):
-        ar.read_disc_c2("/dev/sr0", Path("a.pcm"), Path("a.c2"))
-
-
-# ── read_span (targeted recovery re-read) ────────────────────────────────────
-
-
-def test_read_span_command_and_speed(monkeypatch: pytest.MonkeyPatch) -> None:
-    calls = _patch_run(monkeypatch)
-    ar.read_span("/dev/sr0", 111142, 9481, Path("w.pcm"), read_speed=8)
-    (cmd,) = calls
-    assert cmd[:4] == [_ACC, "--device", "/dev/sr0", "read"]
-    assert cmd[cmd.index("--start") + 1] == "111142"
-    assert cmd[cmd.index("--count") + 1] == "9481"
-    assert cmd[cmd.index("--speed") + 1] == "8"
-    assert cmd[cmd.index("--pcm") + 1] == "w.pcm"
-    assert "--c2f" not in cmd  # span read captures PCM only
-
-
-def test_read_span_no_speed_flag_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
-    calls = _patch_run(monkeypatch)
-    ar.read_span("/dev/sr0", 0, 10, Path("w.pcm"))
-    (cmd,) = calls
-    assert "--speed" not in cmd
-
-
-def test_read_span_exit_1_raises(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(
-        ar.subprocess,
-        "run",
-        lambda *a, **k: _Result(stderr=b"boom", returncode=1),
-    )
-    with pytest.raises(RuntimeError, match=r"exit 1.*boom"):
-        ar.read_span("/dev/sr0", 0, 10, Path("w.pcm"))
-
-
-def test_read_span_exit_3_is_completed(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(ar.subprocess, "run", lambda *a, **k: _Result(returncode=3))
-    ar.read_span("/dev/sr0", 0, 10, Path("w.pcm"))  # no raise
-
-
-# ── progress streaming (--progress-fd 1 machine tokens on stdout) ─────────────
-
-
-class _FakeProc:
-    """Popen stand-in: stdout yields the --progress-fd machine lines; returncode set.
-
-    stderr is written to a real TemporaryFile by _run_with_progress (which the
-    mock ignores), so only stdout + wait()/returncode need faking here.
-    """
-
-    def __init__(self, stdout_lines: str, returncode: int = 0) -> None:
-        self.stdout = io.StringIO(stdout_lines)
-        self.returncode = returncode
-
-    def wait(self) -> int:
-        return self.returncode
-
-
-def _patch_popen(monkeypatch, stdout_lines: str, returncode: int = 0) -> dict:
-    captured: dict = {}
-
-    def _popen(cmd, **k):
-        captured["cmd"] = cmd
-        return _FakeProc(stdout_lines, returncode)
-
-    monkeypatch.setattr(ar.subprocess, "Popen", _popen)
-    return captured
-
-
-def test_read_disc_c2_streams_progress(monkeypatch: pytest.MonkeyPatch) -> None:
-    # --progress-fd 1 machine tokens on stdout, then the summary line.
-    stdout = (
-        "progress 23 100\n"
-        "progress 100 100\n"
-        "summary hard=0 c2=0 recovered=0 suspect=0 rereads=0 slips=0\n"
-    )
-    captured = _patch_popen(monkeypatch, stdout, returncode=0)
-    seen: list[tuple[int, int]] = []
-    ar.read_disc_c2(
-        "/dev/sr0",
-        Path("a.pcm"),
-        Path("a.c2"),
-        progress_cb=lambda d, t: seen.append((d, t)),
-    )
-    assert seen == [(23, 100), (100, 100)]
-    # The machine channel is requested on fd 1, with the human line muted.
-    cmd = captured["cmd"]
-    assert cmd[cmd.index("--progress-fd") + 1] == "1"
-    assert "-q" in cmd
-
-
-def test_read_disc_c2_progress_exit_3_ok(monkeypatch: pytest.MonkeyPatch) -> None:
-    # Exit 3 via the progress path is completed-with-caveats, not a failure.
-    _patch_popen(monkeypatch, "progress 100 100\n", returncode=3)
-    ar.read_disc_c2(
-        "/dev/sr0", Path("a.pcm"), Path("a.c2"), progress_cb=lambda d, t: None
-    )  # no raise
-
-
-def test_read_disc_c2_progress_failure_raises(monkeypatch: pytest.MonkeyPatch) -> None:
-    _patch_popen(monkeypatch, "", returncode=1)
-    with pytest.raises(RuntimeError, match="exit 1"):
-        ar.read_disc_c2(
-            "/dev/sr0", Path("a.pcm"), Path("a.c2"), progress_cb=lambda d, t: None
-        )
-
-
-# ── binary resolution ────────────────────────────────────────────────────────
-
-
-def test_resolve_accudisc_prefers_snapshot(monkeypatch: pytest.MonkeyPatch) -> None:
-    # The snapshot is git-ignored (AccuDisc ships from its own repo), so whether it
-    # exists is an environment fact — stub the probe and assert the branch instead.
-    monkeypatch.setattr(Path, "is_file", lambda self: True)
-    resolved = ar._resolve_accudisc()
-    assert resolved.endswith("tools/accudisc/accudisc")
-    assert Path(resolved).is_absolute()
-
-
-def test_resolve_accudisc_falls_back_to_path(monkeypatch: pytest.MonkeyPatch) -> None:
-    # No snapshot in the checkout (the CI case): fall back to a bare PATH lookup.
-    monkeypatch.setattr(Path, "is_file", lambda self: False)
-    assert ar._resolve_accudisc() == "accudisc"
-
-
 # ---------------------------------------------------------------------------
 # TOC geometry — the 0x02 -> 0x00 degrade and the session-safety rule
 # ---------------------------------------------------------------------------
 
-_HEALTHY = """track 1 lba 0 sectors 25705 audio
-track 2 lba 25705 sectors 25110 audio
-leadout lba 253937
-source=fulltoc degrade=none pregaps=none sessions=1..1 disc_type=0x00
-"""
 
-_DEGRADED = """track 1 lba 0 sectors 18350 audio
-track 2 lba 18350 sectors 22125 audio
-leadout lba 236435
-source=toc degrade=leadin_unreadable pregaps=none
-"""
+def _geom(**kw: Any) -> ar.TocGeometry:
+    """A `TocGeometry` with healthy defaults, overridden per case.
 
-
-def test_parse_toc_healthy_full_toc() -> None:
-    from cdda2img.accudisc_reader import parse_toc_output
-
-    geom = parse_toc_output(_HEALTHY)
-    assert geom.track_lsns == [0, 25705]
-    assert geom.disc_last_lsn == 253936  # lead-out - 1
-    assert geom.source == "fulltoc"
-    assert not geom.degraded
-    assert geom.sessions == "1..1"
-    assert geom.data_tracks == []
+    Built directly rather than through a parser. The values are the same ones the
+    old text fixtures encoded — `source=fulltoc degrade=none sessions=1..1` and a
+    degraded `source=toc degrade=leadin_unreadable` — so each case still says what
+    it is testing rather than carrying an inert wall of track lines.
+    """
+    base: dict[str, Any] = {
+        "track_lsns": [0, 25705],
+        "disc_last_lsn": 253936,
+        "source": "fulltoc",
+        "degrade": "none",
+        "sessions": "1..1",
+    }
+    base.update(kw)
+    return ar.TocGeometry(**base)
 
 
-def test_parse_toc_degraded_carries_the_reason() -> None:
-    from cdda2img.accudisc_reader import parse_toc_output
-
-    geom = parse_toc_output(_DEGRADED)
-    assert geom.track_lsns == [0, 18350]
-    assert geom.degraded
-    assert geom.degrade == "leadin_unreadable"
-    assert geom.sessions is None
-
-
-def test_parse_toc_geometry_is_identical_across_both_paths() -> None:
-    """AccuDisc cross-checked the two decodes byte-for-byte on real hardware;
-    this pins that our parse does not introduce a difference either."""
-    from cdda2img.accudisc_reader import parse_toc_output
-
-    body = "track 1 lba 0 sectors 100 audio\nleadout lba 100\n"
-    a = parse_toc_output(body + "source=fulltoc degrade=none sessions=1..1\n")
-    b = parse_toc_output(body + "source=toc degrade=leadin_unreadable\n")
-    assert (a.track_lsns, a.disc_last_lsn) == (b.track_lsns, b.disc_last_lsn)
-
-
-def test_parse_toc_marks_data_tracks() -> None:
-    from cdda2img.accudisc_reader import parse_toc_output
-
-    geom = parse_toc_output(
-        "track 1 lba 0 sectors 100 audio\n"
-        "track 2 lba 100 sectors 200 data\n"
-        "leadout lba 300\nsource=toc degrade=leadin_unreadable\n"
-    )
-    assert geom.data_tracks == [2]
-
-
-def test_parse_toc_tolerates_a_missing_acquisition_line() -> None:
-    """Pre-degrade AccuDisc builds emit no source=/degrade= line; they only ever
-    answered from the lead-in, so that is the honest default."""
-    from cdda2img.accudisc_reader import parse_toc_output
-
-    geom = parse_toc_output("track 1 lba 0 sectors 100 audio\nleadout lba 100\n")
-    assert geom.source == "fulltoc"
-    assert not geom.degraded
-
-
-def test_parse_toc_rejects_unparseable_output() -> None:
-    import pytest
-
-    from cdda2img.accudisc_reader import parse_toc_output
-
-    with pytest.raises(ValueError, match="could not parse"):
-        parse_toc_output("accudisc: something went wrong\n")
+_DEGRADED_KW: dict[str, Any] = {
+    "source": "toc",
+    "degrade": "leadin_unreadable",
+    "sessions": None,
+}
 
 
 def test_session_safe_full_toc_is_always_safe() -> None:
-    from cdda2img.accudisc_reader import parse_toc_output
-
-    safe, _why = parse_toc_output(_HEALTHY).session_safe
+    safe, _why = _geom().session_safe
     assert safe
 
 
 def test_session_safe_degraded_all_audio_is_inferred_not_measured() -> None:
     """Accepted, but the reason must say it is an inference — a multi-session
     all-audio disc would pass this test and still be unsafe."""
-    from cdda2img.accudisc_reader import parse_toc_output
-
-    safe, why = parse_toc_output(_DEGRADED).session_safe
+    safe, why = _geom(**_DEGRADED_KW).session_safe
     assert safe
     assert "NOT measured" in why
 
 
 def test_session_safe_degraded_with_a_data_track_refuses() -> None:
-    """Cannot distinguish mixed-mode (refuse) from Enhanced CD (exclude) without
-    session structure, and the two demand opposite handling."""
-    from cdda2img.accudisc_reader import parse_toc_output
-
-    geom = parse_toc_output(
-        "track 1 lba 0 sectors 100 audio\n"
-        "track 2 lba 100 sectors 200 data\n"
-        "leadout lba 300\nsource=toc degrade=leadin_unreadable\n"
-    )
-    safe, why = geom.session_safe
+    safe, why = _geom(**_DEGRADED_KW, data_tracks=[2]).session_safe
     assert not safe
-    assert "mixed-mode" in why
+    assert "data track" in why
 
 
 def test_session_safe_measured_single_session_beats_the_inference() -> None:
-    """session_count=1 on the degrade path (READ DISC INFORMATION, a separate
-    opcode that does not re-read the lead-in) settles it as a measured fact —
-    even against a data track that the inference alone would refuse on."""
-    from cdda2img.accudisc_reader import parse_toc_output
-
-    geom = parse_toc_output(
-        "track 1 lba 0 sectors 100 audio\n"
-        "track 2 lba 100 sectors 200 data\n"
-        "leadout lba 300\nsource=toc degrade=leadin_unreadable session_count=1\n"
-    )
-    assert geom.session_count == 1
-    safe, why = geom.session_safe
-    assert safe  # measured single session outranks the data-track inference
-    assert "measured" in why
+    """A measured session count outranks the all-audio guess in both directions."""
+    safe, why = _geom(**_DEGRADED_KW, session_count=1).session_safe
+    assert safe
+    assert "NOT measured" not in why
 
 
 def test_session_safe_measured_multisession_refuses_even_if_all_audio() -> None:
-    """The hole AccuDisc found: an audio CD-R written in two TAO sessions is all
-    audio, so the data-track inference would wrongly call it safe. A measured
-    count catches it."""
-    from cdda2img.accudisc_reader import parse_toc_output
-
-    geom = parse_toc_output(
-        "track 1 lba 0 sectors 100 audio\n"
-        "track 2 lba 100 sectors 200 audio\n"
-        "leadout lba 300\nsource=toc degrade=leadin_unreadable session_count=2\n"
-    )
-    safe, why = geom.session_safe
+    """The case the inference cannot see: every track is audio and the disc is
+    still multi-session, so session 2 would be read as if it were session 1."""
+    safe, why = _geom(**_DEGRADED_KW, session_count=2).session_safe
     assert not safe
-    assert "2 sessions" in why
+    assert "2" in why
 
 
 def test_session_count_is_ignored_when_the_toc_is_healthy() -> None:
-    """session_count is always emitted now, including on a full TOC. It must not
-    override the full-TOC path — degrade=none is already the strongest evidence."""
-    from cdda2img.accudisc_reader import parse_toc_output
-
-    body = (
-        "track 1 lba 0 sectors 100 audio\nleadout lba 100\n"
-        "source=fulltoc degrade=none sessions=1..1 session_count=2\n"
-    )
-    geom = parse_toc_output(body)
-    assert geom.session_count == 2
-    safe, why = geom.session_safe
-    assert safe  # a full TOC carries real session structure regardless of the count
-    assert why == "full TOC"
+    """A healthy full TOC already carries the session range; the fallback count
+    must not be able to override it."""
+    safe, _why = _geom(session_count=2).session_safe
+    assert safe
 
 
 def test_session_count_zero_on_degrade_falls_back_to_the_inference() -> None:
-    """session_count=0 means READ DISC INFORMATION could not say — indistinguishable
-    from a pre-count build, so the conservative data-track inference governs."""
-    from cdda2img.accudisc_reader import parse_toc_output
-
-    geom = parse_toc_output(
-        "track 1 lba 0 sectors 100 audio\n"
-        "track 2 lba 100 sectors 200 data\n"
-        "leadout lba 300\nsource=toc degrade=leadin_unreadable session_count=0\n"
-    )
-    assert geom.session_count == 0
-    safe, why = geom.session_safe
-    assert not safe  # falls through to the data-track refusal
-    assert "mixed-mode" in why
+    """0 is "not measured", not "zero sessions"."""
+    safe, why = _geom(**_DEGRADED_KW, session_count=0).session_safe
+    assert safe
+    assert "NOT measured" in why
 
 
 def test_untrusted_toc_geometry_refuses_regardless_of_sessions() -> None:
-    """toc_trusted=0 (a self-contradicting lead-in, usually copy protection) makes
-    the track map unbelievable — refuse even though the disc claims one session."""
-    from cdda2img.accudisc_reader import parse_toc_output
-
-    geom = parse_toc_output(
-        "track 1 lba 0 sectors 100 audio\n"
-        "track 2 lba 100 sectors 200 audio\n"
-        "leadout lba 300\n"
-        "source=fulltoc degrade=none sessions=1..1 session_count=1 "
-        "anomalies=lba_order,overlap toc_trusted=0\n"
-    )
-    assert geom.anomalies == ["lba_order", "overlap"]
-    assert not geom.toc_trusted
-    safe, why = geom.session_safe
+    """`toc_trusted=0` outranks everything: the track map contradicts itself, so
+    a session count derived from it is not evidence of anything."""
+    safe, why = _geom(
+        session_count=1, anomalies=["lba_order"], toc_trusted=False
+    ).session_safe
     assert not safe
     assert "untrusted" in why
     assert "lba_order" in why
 
 
 def test_clean_disc_reports_trusted_geometry_and_no_anomalies() -> None:
-    from cdda2img.accudisc_reader import parse_toc_output
-
-    geom = parse_toc_output(_HEALTHY)
+    geom = _geom()
     assert geom.toc_trusted
     assert geom.anomalies == []
 
 
 def test_report_only_anomalies_do_not_make_the_toc_untrusted() -> None:
-    """The six report-only slugs (e.g. empty_track) are recorded but the disc still
-    rips — only lba_order/overlap/leadout_before set toc_trusted=0, and AccuDisc
-    signals that separately with the token. We key on the token, not the slugs."""
-    from cdda2img.accudisc_reader import parse_toc_output
-
-    geom = parse_toc_output(
-        "track 1 lba 0 sectors 100 audio\nleadout lba 100\n"
-        "source=fulltoc degrade=none sessions=1..1 session_count=1 "
-        "anomalies=empty_track\n"
-    )
+    """The six report-only slugs (e.g. empty_track) are recorded but the disc
+    still rips — only lba_order/overlap/leadout_before clear `toc_trusted`, and
+    AccuDisc signals that separately. We key on the flag, not the slugs."""
+    geom = _geom(session_count=1, anomalies=["empty_track"])
     assert geom.anomalies == ["empty_track"]
-    assert geom.toc_trusted  # no toc_trusted=0 token → still trusted
+    assert geom.toc_trusted
     safe, _why = geom.session_safe
     assert safe
-
-
-# ── speed probes (moved here with the parsing, from test_drive_speed.py) ──────
-
-# Real `accudisc --device /dev/sr0 speed` output (PLEXTOR PX-716A), throttled to 8x.
-_SPEED_OUT = """\
-page2A     max 40x (7056 kB/s)  current 8x (1411 kB/s)
-rotation   CAV (constant angular velocity)
-  curve[0] lba 0..359999  17.0x..40.0x (nominal)
-"""
-
-
-class _TextResult:
-    """subprocess.run(text=True) result — str stderr, unlike the bytes _Result."""
-
-    def __init__(self, stdout: str = "", stderr: str = "", returncode: int = 0) -> None:
-        self.stdout = stdout
-        self.stderr = stderr
-        self.returncode = returncode
-
-
-def test_read_speed_parses_current_and_max(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(
-        ar.subprocess, "run", lambda *a, **k: _TextResult(stdout=_SPEED_OUT)
-    )
-    assert ar.read_speed("/dev/sr0") == (1411, 7056)
-
-
-def test_read_speed_calls_the_speed_subcommand_only(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """One command, and it is `speed`.
-
-    The name matters: this used to call `speed-report`, which AccuDisc removed —
-    so it failed on every invocation and silently fell through to cdrdao. There
-    is no fallback now, which is exactly why the subcommand name is asserted.
-    """
-    calls: list[list[str]] = []
-
-    def _run(cmd: list[str], **k: object) -> _TextResult:
-        calls.append(cmd)
-        return _TextResult(stdout=_SPEED_OUT)
-
-    monkeypatch.setattr(ar.subprocess, "run", _run)
-    assert ar.read_speed("/dev/sr0") == (1411, 7056)
-    assert len(calls) == 1
-    assert calls[0][0].endswith("accudisc")
-    assert calls[0][-1] == "speed"
-
-
-def test_read_speed_scans_stderr_too(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(
-        ar.subprocess, "run", lambda *a, **k: _TextResult(stderr=_SPEED_OUT)
-    )
-    assert ar.read_speed("/dev/sr0") == (1411, 7056)
-
-
-def test_read_speed_max_without_current(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A max with no current line still yields the max — callers need only that."""
-    monkeypatch.setattr(
-        ar.subprocess,
-        "run",
-        lambda *a, **k: _TextResult(stdout="page2A     max 40x (7056 kB/s)\n"),
-    )
-    assert ar.read_speed("/dev/sr0") == (None, 7056)
-
-
-def test_read_speed_missing_lines(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(
-        ar.subprocess, "run", lambda *a, **k: _TextResult(stdout="garbage")
-    )
-    assert ar.read_speed("/dev/sr0") == (None, None)
-
-
-def test_read_speed_nonzero_exit(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(
-        ar.subprocess,
-        "run",
-        lambda *a, **k: _TextResult(stdout=_SPEED_OUT, returncode=1),
-    )
-    assert ar.read_speed("/dev/sr0") == (None, None)
-
-
-def test_read_speed_binary_absent(monkeypatch: pytest.MonkeyPatch) -> None:
-    def boom(*a, **k):
-        raise FileNotFoundError
-
-    monkeypatch.setattr(ar.subprocess, "run", boom)
-    assert ar.read_speed("/dev/sr0") == (None, None)
-
-
-def test_speed_ladder_rows_parses_the_accudisc_format(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    out = "speed req=40 page2a=8 measured=8.01\nspeed req=4 page2a=4 measured=4.01\n"
-    monkeypatch.setattr(ar.subprocess, "run", lambda *a, **k: _TextResult(stdout=out))
-    assert ar.speed_ladder_rows("/dev/sr0") == [
-        ar.SpeedRow(40, 8, 8.01, None),
-        ar.SpeedRow(4, 4, 4.01, None),
-    ]
-
-
-def test_speed_ladder_rows_empty_on_failure(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(
-        ar.subprocess, "run", lambda *a, **k: _TextResult(returncode=2, stderr="boom")
-    )
-    assert ar.speed_ladder_rows("/dev/sr0") == []
-
-
-# ── engine_version ───────────────────────────────────────────────────────────
-
-
-def test_engine_version_takes_the_first_non_blank_line(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(
-        ar.subprocess,
-        "run",
-        lambda *a, **k: _TextResult(stdout="\naccudisc 0.2.0\nbuilt with foo\n"),
-    )
-    monkeypatch.setenv(ar.TRANSPORT_ENV, "subprocess")
-    assert ar.engine_version() == "accudisc 0.2.0 [transport: subprocess]"
-
-
-def test_engine_version_is_device_free(monkeypatch: pytest.MonkeyPatch) -> None:
-    """--version must not open a device: it is called while building the RLOG,
-    long after the drive work is done."""
-    calls: list[list[str]] = []
-
-    def _run(cmd: list[str], **k: object) -> _TextResult:
-        calls.append(cmd)
-        return _TextResult(stdout="accudisc 0.2.0\n")
-
-    monkeypatch.setattr(ar.subprocess, "run", _run)
-    ar.engine_version()
-    assert calls[0][1:] == ["--version"]
-
-
-def test_engine_version_never_raises(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A missing version must not fail a rip that has already succeeded."""
-
-    def boom(*a, **k):
-        raise OSError
-
-    monkeypatch.setattr(ar.subprocess, "run", boom)
-    monkeypatch.setenv(ar.TRANSPORT_ENV, "subprocess")
-    assert ar.engine_version() == "accudisc (version unknown) [transport: subprocess]"
-
-
-# ── write_disc / eject ───────────────────────────────────────────────────────
-
-
-class _FakeProc:
-    def __init__(self, stdout: str, returncode: int) -> None:
-        self.stdout = io.StringIO(stdout)
-        self.returncode = returncode
-
-    def wait(self) -> int:
-        return self.returncode
-
-
-def _patch_write_popen(monkeypatch, stdout: str = "", returncode: int = 0) -> dict:
-    captured: dict = {}
-
-    def _popen(cmd, **k):
-        captured["cmd"] = cmd
-        return _FakeProc(stdout, returncode)
-
-    monkeypatch.setattr(ar.subprocess, "Popen", _popen)
-    return captured
-
-
-def test_write_disc_builds_the_write_argv(monkeypatch: pytest.MonkeyPatch) -> None:
-    cap = _patch_write_popen(monkeypatch, "summary result=ok\n", 0)
-    rc, _err, outcome = ar.write_disc(
-        "/dev/sr0", Path("/burn/a.toc"), Path("/burn/a.pcm"), 8
-    )
-    cmd = cap["cmd"]
-    assert cmd[1:4] == ["--device", "/dev/sr0", "write"]
-    assert cmd[cmd.index("--toc") + 1] == "/burn/a.toc"
-    assert cmd[cmd.index("--bin") + 1] == "/burn/a.pcm"
-    assert cmd[cmd.index("--speed") + 1] == "8"
-    assert cmd[cmd.index("--progress-fd") + 1] == "1"
-    assert "--simulate" not in cmd
-    assert (rc, outcome) == (0, "ok")
-
-
-def test_write_disc_simulate_appends_the_flag(monkeypatch: pytest.MonkeyPatch) -> None:
-    cap = _patch_write_popen(monkeypatch, "", 0)
-    ar.write_disc("/dev/sr0", Path("a.toc"), Path("a.pcm"), 8, simulate=True)
-    assert "--simulate" in cap["cmd"]
-
-
-def test_write_disc_returns_the_code_rather_than_raising(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Exit 3 means the disc WAS written. Raising here would let a caller report a
-    successful burn as a failure, so the decision stays with the caller."""
-    _patch_write_popen(monkeypatch, "summary result=ok\n", 3)
-    rc, _err, outcome = ar.write_disc("/dev/sr0", Path("a.toc"), Path("a.pcm"), 8)
-    assert (rc, outcome) == (3, "ok")
-
-
-def test_write_disc_extracts_the_result_token(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Decisions key on result=, never on stderr wording."""
-    _patch_write_popen(monkeypatch, "summary written=0 result=not_blank\n", 2)
-    _rc, _err, outcome = ar.write_disc("/dev/sr0", Path("a.toc"), Path("a.pcm"), 8)
-    assert outcome == "not_blank"
-
-
-def test_write_disc_token_is_none_without_a_summary(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    _patch_write_popen(monkeypatch, "progress 1 2\n", 2)
-    _rc, _err, outcome = ar.write_disc("/dev/sr0", Path("a.toc"), Path("a.pcm"), 8)
-    assert outcome is None
-
-
-def test_write_disc_forwards_progress(monkeypatch: pytest.MonkeyPatch) -> None:
-    _patch_write_popen(monkeypatch, "progress 10 300\nprogress 300 300\n", 0)
-    seen: list[tuple[int, int]] = []
-    ar.write_disc(
-        "/dev/sr0",
-        Path("a.toc"),
-        Path("a.pcm"),
-        8,
-        progress_cb=lambda d, t: seen.append((d, t)),
-    )
-    assert seen == [(10, 300), (300, 300)]
-
-
-def test_eject_never_raises(monkeypatch: pytest.MonkeyPatch) -> None:
-    def boom(*a, **k):
-        raise FileNotFoundError
-
-    monkeypatch.setattr(ar.subprocess, "run", boom)
-    ar.eject("/dev/sr0")  # no exception
 
 
 # ── the seam invariant ───────────────────────────────────────────────────────
 
 
-def test_no_module_outside_the_seam_invokes_accudisc() -> None:
-    """Every AccuDisc invocation in ``src/`` lives in this module.
+def test_no_module_outside_the_seam_imports_accudisc() -> None:
+    """Every AccuDisc call in `src/` lives in `accudisc_reader`.
 
-    Not style — this is what makes the AccuDisc Python binding (their API_PLAN
-    phase 4) a one-module swap. Five modules once imported ``_ACCUDISC`` and built
-    their own argv (``drive_speed``, ``rip_log``, ``write_offset``, ``disc_writer``),
-    which would have made "change the transport" five scattered edits, each with
-    its own chance of being missed.
-
-    Scope is ``src/`` only. ``tools/recovery_bench.py`` deliberately resolves its
-    own binary and drives flags the seam does not expose (``features --stream``,
-    ``speed <n>``, engine hashing) — a bench harness is allowed closer to the
-    metal than the library is.
+    This used to grep for `_ACCUDISC`, the resolved binary path, because building
+    an argv was how a module talked to the engine. With the CLI gone the same
+    invariant has a new spelling: `import accudisc`. Both the old and the new
+    checks are one line, and the invariant is what made *this* change a
+    one-module edit — it has now paid for itself twice, which is the argument for
+    keeping a guard that has become trivially true rather than deleting it.
     """
     src = Path(__file__).resolve().parent.parent / "src" / "cdda2img"
     seam = src / "accudisc_reader.py"
@@ -785,86 +160,14 @@ def test_no_module_outside_the_seam_invokes_accudisc() -> None:
             continue
         for n, line in enumerate(path.read_text().splitlines(), 1):
             code = line.split("#", 1)[0]
-            if "_ACCUDISC" in code:
+            if "import accudisc" in code and "cdda2img" not in code:
                 offenders.append(f"{path.name}:{n}: {line.strip()}")
-    assert offenders == [], "AccuDisc invoked outside the seam:\n" + "\n".join(
+    assert offenders == [], "AccuDisc imported outside the seam:\n" + "\n".join(
         offenders
     )
 
 
-# ── read_span_bytes ──────────────────────────────────────────────────────────
-
-
-def test_read_span_bytes_returns_the_pcm_and_leaves_no_file(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    """The temp file is an implementation detail of the subprocess transport."""
-    seen: list[Path] = []
-
-    def _run(cmd, **k):
-        out = Path(cmd[cmd.index("--pcm") + 1])
-        out.write_bytes(b"\x01\x02" * 8)
-        seen.append(out)
-        return _Result(returncode=0)
-
-    monkeypatch.setattr(ar.subprocess, "run", _run)
-    monkeypatch.setattr("cdda2img.container.resolve_temp_dir", lambda need=0: tmp_path)
-    data = ar.read_span_bytes("/dev/sr0", 100, 4)
-    assert data == b"\x01\x02" * 8
-    assert seen and not seen[0].exists()  # scratch dir torn down
-    assert list(tmp_path.iterdir()) == []
-
-
-def test_read_span_bytes_passes_start_count_and_speed(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    calls: list[list[str]] = []
-
-    def _run(cmd, **k):
-        calls.append(cmd)
-        Path(cmd[cmd.index("--pcm") + 1]).write_bytes(b"")
-        return _Result(returncode=0)
-
-    monkeypatch.setattr(ar.subprocess, "run", _run)
-    monkeypatch.setattr("cdda2img.container.resolve_temp_dir", lambda need=0: tmp_path)
-    ar.read_span_bytes("/dev/sr0", 4500, 300, read_speed=8)
-    cmd = calls[0]
-    assert cmd[cmd.index("--start") + 1] == "4500"
-    assert cmd[cmd.index("--count") + 1] == "300"
-    assert cmd[cmd.index("--speed") + 1] == "8"
-
-
-def test_read_span_bytes_asks_for_room_for_the_span(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    """The free-space check must be sized to the read, not left at the default —
-    /tmp here is RAM-backed and the resolver is what steers scratch off it."""
-    asked: list[int] = []
-
-    def _run(cmd, **k):
-        Path(cmd[cmd.index("--pcm") + 1]).write_bytes(b"")
-        return _Result(returncode=0)
-
-    monkeypatch.setattr(ar.subprocess, "run", _run)
-    monkeypatch.setattr(
-        "cdda2img.container.resolve_temp_dir",
-        lambda need=0: (asked.append(need), tmp_path)[1],
-    )
-    ar.read_span_bytes("/dev/sr0", 0, 1000)
-    assert asked == [1000 * 2352]
-
-
-def test_read_span_bytes_propagates_a_fatal_exit(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    monkeypatch.setattr(ar.subprocess, "run", lambda *a, **k: _Result(returncode=2))
-    monkeypatch.setattr("cdda2img.container.resolve_temp_dir", lambda need=0: tmp_path)
-    with pytest.raises(RuntimeError, match="span read"):
-        ar.read_span_bytes("/dev/sr0", 0, 10)
-    assert list(tmp_path.iterdir()) == []  # cleaned up even on failure
-
-
-# ── transport selection (binding ⇄ subprocess) ───────────────────────────────
+# ── the binding: import identity and error translation ───────────────────────
 #
 # Every test here clears the _import_binding cache: it is a functools.cache on a
 # module global, so one test's fake binding would otherwise be the next test's
@@ -934,17 +237,15 @@ def _install(
 
 
 @pytest.fixture(autouse=True)
-def _reset_transport_warnings(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The warn-once flags are module globals; leaking them hides later warnings.
+def _reset_binding_import(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`_import_binding` is a `functools.cache` on a module global.
 
-    Depends on conftest's ``_pin_accudisc_transport`` having already set the
-    policy to ``subprocess`` — autouse fixtures run outer-scope first, then in
-    definition order, so the session-level conftest pin precedes this. A future
-    autouse fixture that touches the transport should be added to conftest, not
-    to a test module, or the ordering stops being obvious.
+    Without this, one test's fake binding is the next test's environment — and
+    the failure is order-dependent, so it shows up as a test that passes alone
+    and fails in the suite. The warn-once flags this fixture also used to reset
+    are gone: they belonged to the silent-fallback warning, which had nothing to
+    be silent about once there was one carrier.
     """
-    monkeypatch.setattr(ar, "_binding_warned", False)
-    monkeypatch.setattr(ar, "_abi_warned", False)
     ar._import_binding.cache_clear()
 
 
@@ -997,98 +298,72 @@ def test_import_rejects_a_module_missing_part_of_the_surface() -> None:
     assert [n for n in ar._BINDING_SURFACE if not hasattr(Partial, n)]
 
 
-def test_subprocess_mode_never_imports_the_binding(
+def test_a_missing_binding_is_fatal_and_names_the_operation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    def _boom() -> tuple[object | None, str]:
-        msg = "the binding was imported under transport=subprocess"
-        raise AssertionError(msg)
+    """There is no second carrier, so this can only raise.
 
-    monkeypatch.setattr(ar, "_import_binding", _boom)
-    monkeypatch.setenv(ar.TRANSPORT_ENV, "subprocess")
-    assert ar._binding("toc") is None
-    assert ar.active_transport() == "subprocess"
+    Four tests used to live here covering the `CDDA2IMG_ACCUDISC_TRANSPORT`
+    policy — auto/binding/subprocess, the warn-exactly-once fallback, and an
+    unknown value degrading to auto. They are deleted rather than ported: the
+    policy they described was a choice between two carriers, and there is one.
+
+    The operation name is asserted because the message arrives at the top of
+    whatever needed the engine, and "the binding is missing" is far more useful
+    attached to "disc read" than floating free.
+    """
+    _install(monkeypatch, None, why="No module named 'accudisc'")
+    with pytest.raises(RuntimeError, match="required for disc read"):
+        ar._binding("disc read")
 
 
-def test_auto_falls_back_and_warns_exactly_once(
-    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+def test_the_fatal_message_carries_the_import_reason_and_the_remedy(
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    _install(monkeypatch, None, why="no module named accudisc")
-    monkeypatch.setenv(ar.TRANSPORT_ENV, "auto")
-    with caplog.at_level("WARNING"):
-        assert ar._binding("toc") is None
-        assert ar._binding("span read") is None
-    warnings = [r for r in caplog.records if "binding unavailable" in r.message]
-    assert len(warnings) == 1, (
-        "the fallback must announce itself once, not never and not always"
-    )
-
-
-def test_binding_mode_refuses_to_fall_back(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Pinning the transport is how you know which one ran; falling back would
-    answer a question nobody asked."""
-    _install(monkeypatch, None, why="not built")
-    monkeypatch.setenv(ar.TRANSPORT_ENV, "binding")
-    with pytest.raises(RuntimeError, match="not importable"):
+    """A user hitting this has an unrunnable install and needs both halves: what
+    failed to import, and the command that fixes it."""
+    _install(monkeypatch, None, why="No module named 'accudisc'")
+    with pytest.raises(RuntimeError) as exc:
         ar._binding("toc")
+    assert "No module named 'accudisc'" in str(exc.value)
+    assert "pipx inject" in str(exc.value)
 
 
-def test_an_unknown_mode_degrades_to_auto(
-    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
-) -> None:
-    monkeypatch.setenv(ar.TRANSPORT_ENV, "libary")  # typo, deliberately
-    with caplog.at_level("WARNING"):
-        assert ar._transport_mode() == "auto"
-    assert any("not one of" in r.message for r in caplog.records)
-
-
-def test_active_transport_reports_binding_when_available(
+def test_an_abi_mismatch_raises_and_says_to_rebuild(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    _install(monkeypatch, _FakeBinding())
-    monkeypatch.setenv(ar.TRANSPORT_ENV, "auto")
-    assert ar.active_transport() == "binding"
+    """It used to degrade to the subprocess, and that reasoning was sound: a
+    skewed extension is broken while the binary is fine. What changed is not the
+    reasoning but the availability of the thing it fell back to.
 
-
-def test_active_transport_does_not_warn(
-    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
-) -> None:
-    """It is the reporting path: a report that changes the log it describes is
-    its own bug."""
-    _install(monkeypatch, None)
-    monkeypatch.setenv(ar.TRANSPORT_ENV, "auto")
-    with caplog.at_level("WARNING"):
-        assert ar.active_transport() == "subprocess"
-    assert not caplog.records
-
-
-def test_abi_mismatch_degrades_to_the_subprocess(
-    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
-) -> None:
-    """A skewed build breaks the binding but leaves the CLI binary good — exactly
-    the case the fallback exists for."""
+    Kept as its own arm rather than folded into the generic error, because the
+    remedy differs — a rebuild fixes this and would be wasted effort on a device
+    failure.
+    """
     fake = _FakeBinding()
 
     def _skew() -> None:
         msg = "compiled against 0.2 but loaded 0.3"
         raise _FakeAbiMismatch(msg)
 
-    with caplog.at_level("WARNING"):
-        assert ar._try_binding(fake, "toc", _skew) is None
-    assert any("ABI mismatch" in r.message for r in caplog.records)
+    with pytest.raises(RuntimeError, match="Rebuild the binding"):
+        ar._call(fake, "toc", _skew)
 
 
-def test_a_device_error_is_raised_not_retried(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Retrying a real device failure through the other transport would re-run the
-    same failing operation and report the second failure as if it were the first."""
+def test_a_device_error_says_what_failed_without_mentioning_a_rebuild(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The other arm. A rebuild will not fix unrecovered read errors, and
+    suggesting one sends the user to recompile a library over a scratched disc."""
     fake = _FakeBinding()
 
     def _sense() -> None:
         msg = "sense 3/11/00 unrecovered read error"
         raise _FakeBindingError(msg)
 
-    with pytest.raises(RuntimeError, match="binding transport"):
-        ar._try_binding(fake, "span read", _sense)
+    with pytest.raises(RuntimeError, match="span read failed") as exc:
+        ar._call(fake, "span read", _sense)
+    assert "Rebuild" not in str(exc.value)
 
 
 # ── the flipped paths, exercised device-free ─────────────────────────────────
@@ -1257,7 +532,7 @@ def test_read_span_binding_refuses_an_unexpected_sector_length() -> None:
         ar._read_span_binding(_binding_with(device), "/dev/sr0", 0, 1, None, None)
 
 
-def test_read_toc_prefers_the_binding_and_never_shells_out(
+def test_read_toc_builds_geometry_from_the_structs(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     device = _FakeDevice(
@@ -1269,21 +544,19 @@ def test_read_toc_prefers_the_binding_and_never_shells_out(
         )
     )
     _install(monkeypatch, _binding_with(device))
-    monkeypatch.setenv(ar.TRANSPORT_ENV, "auto")
-
-    def _boom(*a: object, **k: object) -> None:
-        msg = "read_toc shelled out while the binding was available"
-        raise AssertionError(msg)
-
-    monkeypatch.setattr(ar.subprocess, "run", _boom)
     assert ar.read_toc("/dev/sr0").track_lsns == [0]
 
 
-def test_read_span_bytes_falls_back_to_the_subprocess_on_abi_skew(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+def test_read_span_bytes_raises_on_abi_skew_rather_than_degrading(
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The end-to-end degrade: a skewed binding must not fail the read when a
-    perfectly good CLI binary is sitting right there."""
+    """End to end, at a public entry point rather than at `_call`.
+
+    This test asserted the opposite until 2026-08-01: a skewed binding used to
+    fall through to a perfectly good CLI binary sitting right there. The binary
+    is still there and is still good; it is simply not something this project
+    executes any more, so the honest outcome is a raise that names the rebuild.
+    """
     module = _FakeBinding()
 
     def _skewed(_path: str) -> None:
@@ -1292,15 +565,9 @@ def test_read_span_bytes_falls_back_to_the_subprocess_on_abi_skew(
 
     module.Device = _skewed  # type: ignore[assignment]
     _install(monkeypatch, module)
-    monkeypatch.setenv(ar.TRANSPORT_ENV, "auto")
 
-    def _run(cmd: list[str], **k: object) -> _Result:
-        Path(cmd[cmd.index("--pcm") + 1]).write_bytes(b"\x01" * 2352)
-        return _Result(returncode=0)
-
-    monkeypatch.setattr(ar.subprocess, "run", _run)
-    monkeypatch.setattr("cdda2img.container.resolve_temp_dir", lambda need=0: tmp_path)
-    assert ar.read_span_bytes("/dev/sr0", 0, 1) == b"\x01" * 2352
+    with pytest.raises(RuntimeError, match="Rebuild the binding"):
+        ar.read_span_bytes("/dev/sr0", 0, 1)
 
 
 def test_read_span_binding_refuses_a_short_span() -> None:
@@ -1589,27 +856,23 @@ def test_disc_binding_passes_the_requested_speed(tmp_path: Path) -> None:
     assert device.read_kwargs["speed_x"] == 0  # 0 = leave the drive alone
 
 
-def test_read_disc_c2_prefers_the_binding_and_never_spawns(
+def test_read_disc_c2_reads_the_lead_in_then_the_audio(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """The public entry point routes to the binding when policy allows it."""
+    """The public entry point reads the lead-in before the audio, on one device."""
     device = _FakeDiscDevice(chunks=(_FakeReadChunk(1),))
     _install(monkeypatch, _disc_binding(device))
-    monkeypatch.setenv(ar.TRANSPORT_ENV, "binding")
-
-    def _no_spawn(*a: object, **k: object) -> None:
-        pytest.fail("the binding path must not shell out")
-
-    monkeypatch.setattr(ar.subprocess, "run", _no_spawn)
     ar.read_disc_c2("/dev/sr0", output_pcm=tmp_path / "a.pcm")
 
     assert device.calls == ["toc", "read"]
 
 
-def test_read_disc_c2_falls_back_to_the_subprocess_on_abi_mismatch(
+def test_read_disc_c2_raises_on_abi_mismatch(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """A broken extension against a good binary is exactly what the fallback is for."""
+    """The whole-disc read is where a silent degrade would have cost the most —
+    it is the longest operation here, and it used to be the one most likely to
+    quietly run on the other carrier. Now it stops before the drive spins."""
     module = _disc_binding(_FakeDiscDevice())
 
     def _boom(_path: str) -> object:
@@ -1618,18 +881,11 @@ def test_read_disc_c2_falls_back_to_the_subprocess_on_abi_mismatch(
 
     module.Device = _boom  # type: ignore[assignment]
     _install(monkeypatch, module)
-    monkeypatch.setenv(ar.TRANSPORT_ENV, "auto")
 
-    spawned: list[list[str]] = []
+    with pytest.raises(RuntimeError, match="Rebuild the binding"):
+        ar.read_disc_c2("/dev/sr0", output_pcm=tmp_path / "a.pcm")
 
-    def _run(cmd: list[str], **_kw: object) -> object:
-        spawned.append(cmd)
-        return SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
-
-    monkeypatch.setattr(ar.subprocess, "run", _run)
-    ar.read_disc_c2("/dev/sr0", output_pcm=tmp_path / "a.pcm")
-
-    assert spawned and "read" in spawned[0]
+    assert not (tmp_path / "a.pcm").exists(), "a refused read must leave no output"
 
 
 @pytest.mark.parametrize(
@@ -1906,57 +1162,15 @@ class _FakeVerdict:
         self.name = name
 
 
-def test_verdict_is_parsed_from_the_subprocess_row(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The real `accudisc speeds --sweep` line shape, verdict token and all."""
-    out = (
-        "speed req=48 page2a=48 measured=22.96 min=16.18 max=27.62 verdict=duplicate:40\n"
-        "speed req=40 page2a=40 measured=23.69 min=18.05 max=28.22 verdict=admitted\n"
-        "speed req=16 page2a=8  measured=8.00  min=8.00  max=8.01  verdict=quantized:8\n"
-        "ladder admitted=40\n"
-    )
-    monkeypatch.setattr(
-        ar,
-        "_run_probe",
-        lambda *a, **k: (0, out, ""),
-    )
-    rows = ar.speed_ladder_rows("/dev/sr0")
-    # The `:40` / `:8` suffixes are stripped: the binding does not carry them
-    # (it has a separate equiv_x field), so keeping them here would make the
-    # two transports disagree on a string the policy compares.
-    assert [r.verdict for r in rows] == ["duplicate", "admitted", "quantized"]
-    assert rows[0].requested == 48
-    assert rows[0].measured == 22.96
+def test_the_verdict_enum_is_normalised_to_a_bare_class() -> None:
+    """`DUPLICATE:40` in, `duplicate` out.
 
-
-def test_a_row_without_a_verdict_reports_none_not_empty_string(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """An older engine emits no verdict= token, and that must stay distinguishable.
-
-    An empty string is falsy but present; None says "this engine did not judge".
-    drive_speed.admitted_ladder picks its rule on exactly that distinction.
-    """
-    monkeypatch.setattr(
-        ar,
-        "_run_probe",
-        lambda *a, **k: (0, "speed req=8 page2a=8 measured=8.01\n", ""),
-    )
-    rows = ar.speed_ladder_rows("/dev/sr0")
-    assert rows[0].verdict is None
-
-
-def test_both_transports_yield_the_same_verdict_string() -> None:
-    """Normalised, not merely equivalent — and this test was wrong once.
-
-    It originally asserted the binding emits "duplicate:40". It does not: the CLI
-    prints `verdict=duplicate:40` while the enum yields `duplicate` and carries
-    the collapsed-onto rung in a separate `equiv_x`. Live hardware said so.
-
-    The divergence was invisible because `admitted` — the only verdict the ladder
-    policy compares against — has no suffix on either side. A future branch on
-    `duplicate` would have matched one carrier and not the other.
+    This test was wrong once, in a way worth keeping the note for: it asserted
+    the binding emits "duplicate:40", which is the CLI's spelling. The enum
+    yields `duplicate` and carries the collapsed-onto rung separately, and live
+    hardware is what said so. The error was invisible because `admitted` — the
+    only verdict the ladder policy compares against — had no suffix on either
+    side, so a future branch on `duplicate` would have been the first casualty.
     """
     dev = _FakeLadderDevice((
         _FakeRung(48, 48, 22.96),
@@ -1969,14 +1183,19 @@ def test_both_transports_yield_the_same_verdict_string() -> None:
 
 
 def test_verdict_class_normalises_every_shape_to_one_string() -> None:
-    """The four inputs this has to survive, including the CLI's suffix form."""
+    """The four inputs this has to survive.
+
+    The suffixed form is kept even though the CLI that printed it is gone: it is
+    AccuDisc's own spelling for the same verdict and costs one branch to accept,
+    where guessing wrong costs a silently unmatched policy comparison.
+    """
 
     class _NameOnly:
         name = "ADMITTED"
 
     assert ar._verdict_class(_NameOnly()) == "admitted"  # no .token attribute
-    assert ar._verdict_class("duplicate:40") == "duplicate"  # CLI form
-    assert ar._verdict_class("DUPLICATE") == "duplicate"  # binding form
+    assert ar._verdict_class("duplicate:40") == "duplicate"  # suffixed form
+    assert ar._verdict_class("DUPLICATE") == "duplicate"  # enum token
     assert ar._verdict_class(None) is None  # engine did not judge
 
 
@@ -1997,35 +1216,11 @@ def test_write_passes_cdtext_path_when_given() -> None:
     assert dev.kwargs["cdtext_path"] is None
 
 
-def test_write_subprocess_carries_cdtext_and_simulate(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The argv half of the same contract."""
-    seen: list[list[str]] = []
-
-    def _fake(cmd: list[str], _cb: object) -> tuple[int, str, str | None]:
-        seen.append(cmd)
-        return 0, "", "ok"
-
-    monkeypatch.setattr(ar, "_run_write_subprocess", _fake)
-    monkeypatch.setenv(ar.TRANSPORT_ENV, "subprocess")
-    ar.write_disc(
-        "/dev/sr1",
-        Path("/x/a.toc"),
-        Path("/x/a.bin"),
-        speed=8,
-        simulate=True,
-        cdtext_path=Path("/x/a.cdtext"),
-    )
-    assert "--simulate" in seen[0]
-    assert seen[0][seen[0].index("--cdtext") + 1] == "/x/a.cdtext"
-
-
 # ---------------------------------------------------------------------------
-# Binding paths for the seven entry points that were subprocess-only until the
-# CLI retirement (TODO item 6). Each needs its own case because conftest pins
-# the suite to `subprocess`: the flip is invisible to every test above, which is
-# precisely why the pin exists and precisely why it is not enough on its own.
+# The seven entry points that were subprocess-only until the CLI retirement.
+# Written while the subprocess still existed and the suite was pinned to it, so
+# each had to install a fake binding explicitly; that scaffolding is now simply
+# how every test here works.
 # ---------------------------------------------------------------------------
 
 
@@ -2059,7 +1254,6 @@ def test_read_speed_swaps_the_bindings_pair_into_our_order(
     fake = _FakeBinding()
     monkeypatch.setattr(fake, "Device", lambda _p: _SpeedDevice((7056, 706)))
     _install(monkeypatch, fake)
-    monkeypatch.setenv(ar.TRANSPORT_ENV, "binding")
 
     assert ar.read_speed("/dev/sr0") == (706, 7056)
 
@@ -2076,7 +1270,6 @@ def test_read_speed_reports_unknown_rather_than_zero(
     fake = _FakeBinding()
     monkeypatch.setattr(fake, "Device", lambda _p: _SpeedDevice((0, 0)))
     _install(monkeypatch, fake)
-    monkeypatch.setenv(ar.TRANSPORT_ENV, "binding")
 
     assert ar.read_speed("/dev/sr0") == (None, None)
 
@@ -2092,7 +1285,6 @@ def test_read_speed_on_a_device_failure_is_unknown_not_a_raise(
 
     monkeypatch.setattr(fake, "Device", _boom)
     _install(monkeypatch, fake)
-    monkeypatch.setenv(ar.TRANSPORT_ENV, "binding")
 
     assert ar.read_speed("/dev/sr0") == (None, None)
 
@@ -2119,36 +1311,29 @@ class _RecordingDevice:
 @pytest.mark.parametrize(
     ("fn", "method"), [("eject", "eject"), ("park_spindle", "park_spindle")]
 )
-def test_tray_and_spindle_go_through_the_binding_and_never_spawn(
+def test_tray_and_spindle_call_the_matching_device_method(
     fn: str, method: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     calls: list[str] = []
     fake = _FakeBinding()
     monkeypatch.setattr(fake, "Device", lambda _p: _RecordingDevice(calls))
     _install(monkeypatch, fake)
-    monkeypatch.setenv(ar.TRANSPORT_ENV, "binding")
 
-    def _no_spawn(*a: object, **k: object) -> object:
-        msg = "the subprocess must not be reached"
-        raise AssertionError(msg)
-
-    monkeypatch.setattr(ar.subprocess, "run", _no_spawn)
     getattr(ar, fn)("/dev/sr0")
 
     assert calls == [method]
 
 
 @pytest.mark.parametrize("fn", ["eject", "park_spindle"])
-def test_a_device_that_will_not_open_does_not_retry_through_the_subprocess(
+def test_a_device_that_will_not_open_is_swallowed(
     fn: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """These two are the seam's only "never raises, including on open" calls.
+    """These two are the seam's only "never raises" calls, open included.
 
-    A drive that refuses to open will refuse for the subprocess too, so falling
-    back would run the same failing operation twice and report the second failure
-    as if it were the first. Swallowing and returning is the correct end state —
-    the operation is a courtesy, and a tray that will not open has not broken a
-    rip that already finished.
+    Everywhere else a device that will not open is the caller's problem. Here the
+    whole operation is a courtesy: a tray that will not open has not broken a rip
+    that already finished, so refusing to eject must not become an exception on
+    the way out.
     """
     fake = _FakeBinding()
 
@@ -2158,22 +1343,21 @@ def test_a_device_that_will_not_open_does_not_retry_through_the_subprocess(
 
     monkeypatch.setattr(fake, "Device", _boom)
     _install(monkeypatch, fake)
-    monkeypatch.setenv(ar.TRANSPORT_ENV, "binding")
 
-    def _no_spawn(*a: object, **k: object) -> object:
-        msg = "the subprocess must not be reached"
-        raise AssertionError(msg)
-
-    monkeypatch.setattr(ar.subprocess, "run", _no_spawn)
     getattr(ar, fn)("/dev/sr0")  # must return, not raise
 
 
 @pytest.mark.parametrize("fn", ["eject", "park_spindle"])
-def test_an_abi_mismatch_still_reaches_the_subprocess(
+def test_an_abi_mismatch_is_not_swallowed_by_the_courtesy_calls(
     fn: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The one condition where falling back is right: the library is fine, the
-    extension is not. Distinguished from the case above, which must NOT fall back."""
+    """The one thing these two must NOT hide.
+
+    A skewed extension is a build fault the user has to be told about, and it is
+    one line away from the swallowed case above. Letting the seam's only
+    best-effort calls absorb it would mean discovering it on the next operation
+    that matters — which, for `park_spindle`, is the rip after this one.
+    """
     fake = _FakeBinding()
 
     def _skew(_p: str) -> object:
@@ -2182,14 +1366,9 @@ def test_an_abi_mismatch_still_reaches_the_subprocess(
 
     monkeypatch.setattr(fake, "Device", _skew)
     _install(monkeypatch, fake)
-    monkeypatch.setenv(ar.TRANSPORT_ENV, "auto")
 
-    seen: list[list[str]] = []
-    monkeypatch.setattr(ar.subprocess, "run", lambda cmd, **k: seen.append(cmd))
-    getattr(ar, fn)("/dev/sr0")
-
-    assert seen, "an ABI mismatch must degrade, not swallow"
-    assert seen[0][-1] in {"eject", "stop"}
+    with pytest.raises(RuntimeError, match="Rebuild the binding"):
+        getattr(ar, fn)("/dev/sr0")
 
 
 def test_engine_version_comes_from_the_binding_without_a_device(
@@ -2210,11 +1389,13 @@ def test_engine_version_comes_from_the_binding_without_a_device(
 
     monkeypatch.setattr(fake, "Device", _boom)
     _install(monkeypatch, fake)
-    monkeypatch.setenv(ar.TRANSPORT_ENV, "binding")
 
     banner = ar.engine_version()
-    assert "0.4.0" in banner
-    assert "[transport: binding]" in banner
+    assert banner == "accudisc 0.4.0"
+    assert "transport" not in banner, (
+        "the [transport: ...] suffix went with the second carrier — a constant "
+        "in a provenance field is noise that reads like information"
+    )
 
 
 # ---- step 1b: lead-in, span-to-file, feature probe ---------------------------
@@ -2244,7 +1425,6 @@ def _bind(monkeypatch: pytest.MonkeyPatch, device: object) -> _FakeBinding:
     fake = _FakeBinding()
     monkeypatch.setattr(fake, "Device", lambda _p: device)
     _install(monkeypatch, fake)
-    monkeypatch.setenv(ar.TRANSPORT_ENV, "binding")
     return fake
 
 
@@ -2296,14 +1476,12 @@ def test_a_failed_lead_in_read_leaves_no_file_at_all(
     _bind(monkeypatch, _Boom(None, None))
     ft = tmp_path / "a.fulltoc"
 
-    def _no_spawn(*a: object, **k: object) -> object:
-        msg = "a device failure must not be retried through the subprocess"
-        raise AssertionError(msg)
+    ar.read_lead_in("/dev/sr0", ft)  # cosmetic caller: must not raise
 
-    monkeypatch.setattr(ar.subprocess, "run", _no_spawn)
-    ar.read_lead_in("/dev/sr0", ft)
-
-    assert not ft.exists()
+    assert not ft.exists(), (
+        "an empty sidecar reads as a successful capture of a disc with no TOC, "
+        "and every caller tests for the file rather than catching"
+    )
 
 
 def test_read_span_writes_the_bindings_bytes_to_the_file(
@@ -2317,7 +1495,6 @@ def test_read_span_writes_the_bindings_bytes_to_the_file(
     """
     fake = _FakeBinding()
     _install(monkeypatch, fake)
-    monkeypatch.setenv(ar.TRANSPORT_ENV, "binding")
     monkeypatch.setattr(ar, "_read_span_binding", lambda *a, **k: b"\x11\x22" * 8)
 
     out = tmp_path / "span.pcm"
@@ -2332,7 +1509,6 @@ def test_read_span_progress_callback_survives_the_flip(
     """A silent multi-minute stream reads as a hang, so the callback is the point."""
     fake = _FakeBinding()
     _install(monkeypatch, fake)
-    monkeypatch.setenv(ar.TRANSPORT_ENV, "binding")
     seen: list[object] = []
     monkeypatch.setattr(
         ar,

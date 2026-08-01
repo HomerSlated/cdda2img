@@ -1,6 +1,5 @@
 """Tests for disc_writer.py: TOC sanitization + the AccuDisc write invocation."""
 
-import io
 from pathlib import Path
 
 import pytest
@@ -71,47 +70,47 @@ def _tiny_rbi(tmp_path: Path) -> Path:
     return rbi
 
 
-class _FakeProc:
-    def __init__(self, stdout: str, returncode: int) -> None:
-        self.stdout = io.StringIO(stdout)
-        self.returncode = returncode
+def _patch_write_disc(monkeypatch) -> dict:
+    """Capture what `disc_writer` asks the seam to burn.
 
-    def wait(self) -> int:
-        return self.returncode
-
-
-def _patch_popen(monkeypatch, stdout: str = "", returncode: int = 0) -> dict:
+    These two tests used to assert on the `accudisc write` argv, which no longer
+    exists — the CLI was retired on 2026-08-01 and `write_disc` calls
+    `Device.write()`. What they were really pinning is unchanged and still worth
+    pinning: that the burn is handed the RAW s16le PCM, not a WAV and not a
+    byte-swapped BIN, and that speed and --simulate reach the engine. So they now
+    assert on the seam's arguments, which is the layer this module actually owns.
+    """
     captured: dict = {}
 
-    def _popen(cmd, **k):
-        captured["cmd"] = cmd
-        return _FakeProc(stdout, returncode)
+    def _fake(device, toc_path, bin_path, speed, **kwargs):
+        captured.update(
+            device=device, toc=toc_path, binp=bin_path, speed=speed, **kwargs
+        )
+        return 0, "", "ok"
 
-    monkeypatch.setattr(accudisc_reader.subprocess, "Popen", _popen)
+    monkeypatch.setattr(accudisc_reader, "write_disc", _fake)
     return captured
 
 
-def test_burn_invokes_accudisc_write_with_raw_s16le_bin(tmp_path, monkeypatch):
+def test_burn_hands_the_seam_raw_s16le_pcm(tmp_path, monkeypatch):
     rbi = _tiny_rbi(tmp_path)
-    cap = _patch_popen(monkeypatch, "progress 300 300\nsummary result=ok\n", 0)
+    cap = _patch_write_disc(monkeypatch)
     disc_writer.burn_disc(rbi, device="/dev/sr0", speed=8, yes=True)
-    cmd = cap["cmd"]
-    assert cmd[0].endswith("accudisc")
-    assert cmd[1:4] == ["--device", "/dev/sr0", "write"]
-    # Raw s16le BIN — not a WAV, and no byte-swap (the pipeline is swap-free).
-    assert cmd[cmd.index("--bin") + 1].endswith("disc.pcm")
-    assert not any(a.endswith(".wav") for a in cmd)
-    assert "--byteswap" not in cmd
-    assert cmd[cmd.index("--speed") + 1] == "8"
-    assert cmd[cmd.index("--progress-fd") + 1] == "1"
-    assert "--simulate" not in cmd
+
+    assert cap["device"] == "/dev/sr0"
+    assert cap["speed"] == 8
+    # Raw s16le PCM — not a WAV, and no byte-swap (the pipeline is swap-free).
+    assert str(cap["binp"]).endswith("disc.pcm")
+    assert not str(cap["binp"]).endswith(".wav")
+    assert cap["simulate"] is False
+    assert cap["progress_cb"] is not None, "the TUI's only burn progress source"
 
 
-def test_burn_simulate_appends_flag(tmp_path, monkeypatch):
+def test_burn_simulate_reaches_the_seam(tmp_path, monkeypatch):
     rbi = _tiny_rbi(tmp_path)
-    cap = _patch_popen(monkeypatch, "summary result=ok\n", 0)
+    cap = _patch_write_disc(monkeypatch)
     disc_writer.burn_disc(rbi, device="/dev/sr0", simulate=True, yes=True)
-    assert "--simulate" in cap["cmd"]
+    assert cap["simulate"] is True
 
 
 def test_burn_exit_2_not_blank_reports_disc_not_blank(tmp_path, monkeypatch):

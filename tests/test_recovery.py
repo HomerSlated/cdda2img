@@ -38,22 +38,32 @@ def _patch(
     match_speed: int | None,
     fill: bytes = b"\xaa",
 ) -> dict:
-    """Stub c2_reader.read_span (writes canned window bytes) + match_track_pcm
-    (matches at one speed). Returns a state dict recording the reads."""
+    """Stub `read_span_bytes` (returns canned window bytes) + `match_track_pcm`
+    (matches at one speed). Returns a state dict recording the reads.
+
+    Patches `read_span_bytes`, which is what `_read_track_window` actually calls.
+    These stubs patched `read_span` until 2026-08-01 and worked only because
+    `read_span_bytes` was then implemented *through* it, via a temp file the
+    subprocess needed. Retiring the CLI removed that indirection and the patch
+    silently stopped intercepting anything — every attempt raised "the binding is
+    required", the recovery loop counted each as a consumed attempt exactly as
+    designed, and the tests failed on an empty speed list rather than on an
+    error. Patch the function under test, not one it happens to delegate to.
+    """
     state: dict = {"speeds": [], "windows": [], "cur": None}
 
-    def fake_read_span(device, start, count, out, read_speed=None, progress_cb=None):
+    def fake_read_span(device, start, count, read_speed=None, progress_cb=None):
         state["speeds"].append(read_speed)
         state["windows"].append((start, count))
         state["cur"] = read_speed
-        Path(out).write_bytes(fill * (count * _FRAME))
+        return fill * (count * _FRAME)
 
     def fake_match(raw, track, n_tracks, responses):
         if match_speed is not None and state["cur"] == match_speed:
             return "aaaaaaaa", "bbbbbbbb", 50, None  # conf_v1=50 → match
         return "aaaaaaaa", "bbbbbbbb", None, None
 
-    monkeypatch.setattr(adr, "read_span", fake_read_span)
+    monkeypatch.setattr(adr, "read_span_bytes", fake_read_span)
     monkeypatch.setattr(ar, "match_track_pcm", fake_match)
     return state
 
@@ -133,17 +143,17 @@ def test_recovery_read_failure_consumes_attempt(
     """A c2read failure (RuntimeError) is one consumed attempt, not an abort."""
     state: dict = {"calls": 0}
 
-    def flaky_read_span(device, start, count, out, read_speed=None, progress_cb=None):
+    def flaky_read_span(device, start, count, read_speed=None, progress_cb=None):
         state["calls"] += 1
         if state["calls"] == 1:
-            msg = "c2read span read failed (exit 1): boom"
+            msg = "accudisc span read failed: boom"
             raise RuntimeError(msg)
-        Path(out).write_bytes(b"\xaa" * (count * _FRAME))
+        return b"\xaa" * (count * _FRAME)
 
     def fake_match(raw, track, n_tracks, responses):
         return "a", "b", 50, None  # match as soon as a read succeeds
 
-    monkeypatch.setattr(adr, "read_span", flaky_read_span)
+    monkeypatch.setattr(adr, "read_span_bytes", flaky_read_span)
     monkeypatch.setattr(ar, "match_track_pcm", fake_match)
     pcm = _disc_pcm(tmp_path)
 
@@ -243,15 +253,15 @@ def test_recovery_tui_status_is_per_attempt(
         ) -> None:
             statuses.append((text, progress))
 
-    def fake_read_span(device, start, count, out, read_speed=None, progress_cb=None):
+    def fake_read_span(device, start, count, read_speed=None, progress_cb=None):
         if progress_cb is not None:  # emit one mid-window progress event
             progress_cb(5, 10)
-        Path(out).write_bytes(b"\xaa" * (count * _FRAME))
+        return b"\xaa" * (count * _FRAME)
 
     def fake_match(raw, track, n_tracks, responses):
         return "a", "b", 50, None  # match on the first attempt (fastest speed)
 
-    monkeypatch.setattr(adr, "read_span", fake_read_span)
+    monkeypatch.setattr(adr, "read_span_bytes", fake_read_span)
     monkeypatch.setattr(ar, "match_track_pcm", fake_match)
 
     pcm = _disc_pcm(tmp_path)

@@ -13,8 +13,6 @@ import tempfile
 
 import pytest
 
-from cdda2img.accudisc_reader import TRANSPORT_ENV
-
 
 @pytest.fixture(autouse=True, scope="session")
 def _isolate_xdg_dirs():
@@ -40,20 +38,3 @@ def _isolate_xdg_dirs():
                 os.environ.pop("XDG_CONFIG_HOME", None)
             else:
                 os.environ["XDG_CONFIG_HOME"] = old_config
-
-
-@pytest.fixture(autouse=True)
-def _pin_accudisc_transport(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Pin the AccuDisc transport to the subprocess for every test.
-
-    The suite mocks ``accudisc_reader.subprocess.run`` in a few dozen places. Under
-    the default ``auto`` policy those mocks are only reached because the binding
-    happens not to be importable here — so on a machine where it *is* importable
-    the same assertions would silently exercise a different transport and still
-    pass, which is the shape of a test that has stopped testing anything.
-
-    Pinning makes the subprocess the *chosen* subject. A test that wants the
-    binding path overrides this with its own ``monkeypatch.setenv``; there is no
-    ambient default either way.
-    """
-    monkeypatch.setenv(TRANSPORT_ENV, "subprocess")

@@ -266,26 +266,6 @@ def _dev_shim_path(root: Path | None = None) -> Path | None:
     return shim if (shim / "accudisc" / "__init__.py").is_file() else None
 
 
-def _resolve_engine_binary() -> str:
-    """The ``accudisc`` the application will actually run.
-
-    A deliberate duplicate of ``accudisc_reader._resolve_accudisc``, which this
-    module cannot call: that one is on the far side of the heavy imports this
-    whole file exists to stay clear of. The copy is pinned to the original by
-    ``tests/test_depcheck.py::test_engine_resolution_matches_the_reader``,
-    because a report that silently stopped agreeing with the reader would be
-    the very defect this function was added to fix, wearing a new cause.
-
-    Reporting ``shutil.which`` instead was wrong, and measurably so on the
-    development box: ``which`` answered ``/usr/local/bin/accudisc`` while the
-    reader ran ``tools/accudisc/accudisc`` — different sha256, different
-    ``RUNPATH``, resolving different ``libaccudisc.so.0`` files. Both work, so
-    nothing failed; ``doctor`` simply named an artefact that never runs.
-    """
-    local = Path(__file__).parent.parent.parent / "tools" / "accudisc" / "accudisc"
-    return str(local) if local.is_file() else "accudisc"
-
-
 def _linked_library(origin: Path) -> str:
     """Which ``libaccudisc`` ``origin`` actually resolves to.
 
@@ -344,32 +324,18 @@ def _binding_library(package_dir: Path) -> str:
     return ""
 
 
-def _library_skew(binding_lib: str, cli_lib: str) -> str:
-    """A note when the binding and the CLI resolve different ``libaccudisc``es.
-
-    Deliberately not a ``WARN``. On a development box the two *should* differ the
-    moment a split install exists — an injected wheel is pinned to the install
-    prefix at build time, the symlinked CLI tracks a build tree that moves on
-    every compile — so warning would cry wolf at the normal state. What is not
-    acceptable is the report implying there is one library when there are two.
-
-    Silent when either side is unknown: an empty string means ``ldd`` could not
-    answer, and "unknown" must not be rendered as "differs".
-    """
-    if not binding_lib or not cli_lib or binding_lib == cli_lib:
-        return ""
-    return (
-        f"\n      NOTE: the CLI resolves a different libaccudisc ({cli_lib})."
-        "\n      Expected after a split install; `pipx inject --force` realigns them."
-    )
-
-
 def _check_accudisc() -> list[Result]:
-    """The AccuDisc engine: the binding, its cffi runtime, and the binary.
+    """The AccuDisc engine: the Python binding and its cffi runtime.
 
-    Reported as a group because the requirement is a *one-of* — a read needs
-    either the Python binding or the ``accudisc`` executable, and a report that
-    marked each individually required would fail a perfectly working install.
+    This was a *one-of* — binding **or** ``accudisc`` executable — until the CLI
+    was retired on 2026-08-01. The binding is now the only way to reach a disc, so
+    the group has one required member instead of two alternatives.
+
+    The ``accudisc`` binary is deliberately **not** reported at all, not even as
+    optional. It is very likely present (AccuDisc's own install puts it there) and
+    listing it would say "ok" about an artefact this application never executes —
+    which is the same defect the binary line was *added* to fix, only inverted:
+    it was added because ``doctor`` named an artefact that never ran.
     """
     results: list[Result] = []
 
@@ -385,18 +351,6 @@ def _check_accudisc() -> list[Result]:
         )
     )
 
-    # Resolved first, because the binding's line compares against it. The two
-    # routes to the engine can resolve two *different* libraries, and after a
-    # split install (AccuDisc §cp.4) they normally do: an injected wheel's
-    # RUNPATH is the install prefix, while the development symlink stays on the
-    # build tree — which moves on every compile, with no event marking the drift.
-    # Both are individually correct, which is why only reporting one of them is
-    # the failure mode rather than either being wrong.
-    resolved = _resolve_engine_binary()
-    on_path = shutil.which("accudisc")
-    binary = resolved if resolved != "accudisc" else on_path
-    cli_lib = _linked_library(Path(binary)) if binary is not None else ""
-
     spec = None
     try:
         spec = importlib.util.find_spec("accudisc")
@@ -410,75 +364,44 @@ def _check_accudisc() -> list[Result]:
         detail = f"{_version('accudisc')} at {origin.parent}"
         if binding_lib:
             detail += f"\n      libaccudisc -> {binding_lib}"
-        detail += _library_skew(binding_lib, cli_lib)
         results.append(Result("accudisc (binding)", OK, detail))
-    else:
-        shim = _dev_shim_path()
-        if shim is not None:
-            # Not clean. The binding works here only because accudisc_reader
-            # appends this path at import time; on any other machine it is
-            # simply absent. Rendering this as OK is the exact false pass that
-            # left the binding transport inert for two days.
-            binding_lib = _binding_library(shim / "accudisc")
-            detail = (
-                "not installed — resolved at runtime only via the development"
-                f"\n      shim {shim}. Not portable to another system."
-            )
-            if binding_lib:
-                detail += f"\n      libaccudisc -> {binding_lib}"
-            detail += _library_skew(binding_lib, cli_lib)
-            results.append(
-                Result(
-                    "accudisc (binding)",
-                    WARN,
-                    detail,
-                    remedy="install AccuDisc's Python binding (see its `make install`)",
-                )
-            )
-        else:
-            results.append(
-                Result(
-                    "accudisc (binding)",
-                    MISSING,
-                    "the preferred transport to the disc engine",
-                    remedy="install AccuDisc's Python binding (see its `make install`)",
-                )
-            )
+        return results
 
-    # Which one *runs*, not merely whether one exists. The reader prefers the
-    # `tools/accudisc/` symlink over `$PATH`, so `shutil.which` can name a
-    # perfectly good system install that is being bypassed — and did, here.
-    if binary is None:
+    shim = _dev_shim_path()
+    if shim is not None:
+        # Not clean. The binding works here only because accudisc_reader appends
+        # this path at import time; on any other machine it is simply absent.
+        # Rendering this as OK is the exact false pass that left the binding
+        # transport inert for two days.
+        binding_lib = _binding_library(shim / "accudisc")
+        detail = (
+            "not installed — resolved at runtime only via the development"
+            f"\n      shim {shim}. Not portable to another system."
+        )
+        if binding_lib:
+            detail += f"\n      libaccudisc -> {binding_lib}"
         results.append(
             Result(
-                "accudisc (binary)",
-                MISSING,
-                "fallback transport, used when the binding is unavailable",
-                remedy="install AccuDisc (https://github.com/HomerSlated/accudisc)",
+                "accudisc (binding)",
+                WARN,
+                detail,
+                remedy="install AccuDisc's Python binding (see its `make install`)",
             )
         )
-    else:
-        detail = binary
-        lib = cli_lib
-        if lib:
-            detail += f"\n      libaccudisc -> {lib}"
-        if on_path is not None and on_path != binary:
-            # Not an error — the symlink is the documented development
-            # arrangement — but invisible otherwise, and "an install exists and
-            # is not the one being used" is precisely the fact a dependency
-            # report is for.
-            detail += f"\n      shadows the $PATH install at {on_path}"
-        results.append(Result("accudisc (binary)", OK, detail))
+        return results
 
-    if not installed and binary is None and _dev_shim_path() is None:
-        results.append(
-            Result(
-                "disc engine",
-                MISSING,
-                "neither the binding nor the binary is present — no disc can be read",
-                required=True,
-            )
+    results.append(
+        Result(
+            "accudisc (binding)",
+            MISSING,
+            "the only route to the disc engine — no disc can be read without it",
+            remedy=(
+                "install AccuDisc (https://github.com/HomerSlated/accudisc), then "
+                "inject its wheel — cdda2img's install.sh does both"
+            ),
+            required=True,
         )
+    )
     return results
 
 

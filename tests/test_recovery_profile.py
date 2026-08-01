@@ -200,17 +200,22 @@ def test_the_probe_leaves_the_drive_throttled_so_the_binder_restores_it(
     assert restored == ["/dev/sr0"]
 
 
-def test_speed_rows_are_parsed_from_the_accudisc_format() -> None:
-    """The row format the ladder policy depends on. Parsing lives in the AccuDisc
-    seam (``accudisc_reader``); this asserts the shape the policy here consumes."""
-    from cdda2img.accudisc_reader import _SPEED_ROW_RE
+def test_speed_rows_expose_the_fields_the_ladder_policy_reads() -> None:
+    """The row shape the ladder policy depends on.
 
-    text = "speed req=40 page2a=8 measured=8.01\nspeed req=4 page2a=4 measured=4.01\n"
-    rows = [
-        (int(m.group(1)), int(m.group(2)), float(m.group(3)))
-        for m in _SPEED_ROW_RE.finditer(text)
-    ]
-    assert rows == [(40, 8, 8.01), (4, 4, 4.01)]
+    This used to assert against the CLI's `speed req=… page2a=… measured=…` text
+    via the seam's regex. With the CLI retired there is no text to parse — the
+    library returns structs — so what is worth pinning is the *shape the policy
+    consumes*, which is what the old test was really standing in for. Positional
+    reads are asserted alongside the names because `SpeedRow` is a NamedTuple and
+    existing call sites unpack it.
+    """
+    from cdda2img.accudisc_reader import SpeedRow
+
+    row = SpeedRow(requested=40, page2a=8, measured=8.01, verdict="quantized")
+    assert (row.requested, row.page2a, row.measured) == (40, 8, 8.01)
+    assert row[:3] == (40, 8, 8.01)
+    assert SpeedRow(4, 4, 4.01).verdict is None, "absent verdict is None, not a string"
 
 
 # ---- shipped profiles -------------------------------------------------------
