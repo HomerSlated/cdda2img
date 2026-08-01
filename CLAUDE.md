@@ -25,6 +25,18 @@ This is a prototype; a Rust reimplementation is planned once the design has stab
 
 Standalone utility scripts live in `tools/` (tracked, not part of the installed package).
 
+- **`tools/ctanalyse/` — DO NOT DELETE (AccuDisc §d.0, 2026-08-01).** The CTDB
+  Reed-Solomon repair binary is moving into AccuDisc as an API function, and their
+  acceptance test for the rewrite is an A/B against **this binary** on identical
+  inputs. Deleting it before they confirm a replacement is live and verified would
+  leave them verifying a clean-room rewrite against nothing but their own reasoning.
+  Also blocked on licensing: `rs16.c:9-127` (4 functions, ~120 lines) is a
+  derivative of Miyazaki's RS library via CUETools.Parity — the Japanese
+  identifiers survived the port (`jisu` = 次数, degree; `seki` = 積, product) — so
+  cdda2img's GPLv3 cannot be relicensed MIT by kgr alone. AccuDisc read the files
+  and found the taint is **narrower than our own headers claim**: `rs16.h:3` and
+  `main.c:10` describe more of our work as derivative than it is. Narrowing them is
+  kgr's call, not an agent's — a licence header is a claim that gets redistributed.
 - **`tools/recovery_bench.py`** — **the last CLI consumer in the tree** (2026-08-01). It
   resolves its own `tools/accudisc/accudisc` and drives eight subcommands, including
   `read --map-file` with the per-rung recovery flags that *are* the experiment. Not ported
@@ -33,8 +45,12 @@ Standalone utility scripts live in `tools/` (tracked, not part of the installed 
   behaviour change during the port silently invalidates every cross-run comparison, and
   re-validating needs a hardware bench run. Everything else it needs *is* in the API
   (`retries`, `c2_retries`, `verify_passes`, `overlap_sectors`, `speed_ladder`,
-  `status_map`, `probe_accurate_stream`, `set_speed`), so this is scheduling, not a
-  blocker — except for `c2lag`.
+  `status_map`, `probe_accurate_stream`, `set_speed`). **`c2lag` is no longer a
+  blocker either**: AccuDisc §d.1 confirmed it has been in the *library* all along
+  (`accudisc_probe_c2_lag`, `accudisc.h:1095`) and only missing from the Python
+  binding, which they are adding first. Our audit looked at the binding and
+  recorded what it saw — a reminder that "the API does not have it" and "the
+  binding does not expose it" are different claims.
 - **`tools/toc_parity.py`** — field-by-field parity gate: `cdrdao read-toc` (the independent
   *reference* implementation — the one place the cdrdao binary is still invoked) vs the AccuDisc
   subchannel assembly (`subq_toc.build_rip_info`), live or from saved captures. Green across
