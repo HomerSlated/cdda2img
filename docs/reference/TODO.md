@@ -31,13 +31,34 @@ every step assumes the binding resolves without our `tools/` shim.
    built-in `pc_path` excludes `/usr/local/lib64/pkgconfig`. So a build here today
    still takes the checkout branch, install or no install, and `ACCUDISC_REQUIRE_INSTALLED=1`
    would currently turn that into a hard failure with nothing to fall back to.
-   Sequencing consequence: **do not set the env var until either the search path is
-   supplied or AccuDisc's new discovery rung exists.** That rung is agreed in
-   principle (§co.2): `accudisc config` reports `pkgconfigdir`, we set
-   `PKG_CONFIG_PATH` from it and let `pkg-config --exists` validate — the binary
-   supplies a search hint, the `.pc` on disk supplies the answer. Not built on
-   their side; nothing here is blocked on it. AccuDisc confirmed the new rung
-   counts as "installed" for the env var (§co.3).
+   Sequencing consequence: **do not set the env var until the search path is
+   supplied.**
+   **Amended again 2026-08-02 (§l): the discovery rung this used to wait on is
+   withdrawn and will not be built.** The plan was `accudisc config` reporting
+   `pkgconfigdir`, us setting `PKG_CONFIG_PATH` from it, `pkg-config --exists`
+   validating — the binary supplying a search hint, the `.pc` supplying the
+   answer. Three things killed it, and the third is worth keeping after the
+   feature is gone. (a) Since our API migration the CLI is a development front
+   end, so bootstrapping the preferred interface by shelling out to the
+   deprecated one is backwards; it is also `option(ACCUDISC_BUILD_CLI ON)`, and a
+   discovery channel a supported build can omit is not a channel. (b) The gap it
+   filled is filled: `accudisc.pc.in` now carries `wheeldir`, which was the one
+   thing the `.pc` could not answer when §co was written. (c) **Its premise was
+   false at exactly the prefix that motivated it.** §126.2 rested on "`accudisc`
+   is on `$PATH`, and that is true at every prefix" — but `/usr/local/bin` on
+   `$PATH` while `/usr/local/lib64/pkgconfig` is off `pc_path` is an asymmetry
+   *unique to `/usr/local`*. At `/opt` or `~/.local` neither is on a default
+   search path, so the CLI would be exactly as unfindable as the `.pc` and the
+   rung buys nothing. It was never a general answer to "installed somewhere, find
+   it"; it was a workaround for one distro convention.
+   What survives is the finding, not the feature: **a binary cannot distinguish
+   "paths I will be installed to" from "paths I was installed to"** —
+   `build/cli/accudisc` and `/usr/local/bin/accudisc` come from the same
+   CMakeCache and would emit byte-identical output, and only one corresponds to an
+   install. That applies to any future self-description feature either side
+   proposes. So this item now needs `PKG_CONFIG_PATH` set explicitly (or the
+   `.pc` installed somewhere `pc_path` covers) before the env var goes on;
+   there is nothing left to wait for.
 3. **[C2I] Retire the shim.** Delete `tools/accudisc/accudisc` and
    `tools/accudisc/pybinding`, delete `_binding_search_path()`, and declare `accudisc`
    as a real dependency. `cffi` then arrives as *its* dependency and the stopgap line
