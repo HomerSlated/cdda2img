@@ -2,6 +2,89 @@
 
 ## Open
 
+### 🔴 NEXT SESSION — 2026-08-04
+
+Both raised by kgr at the close of 2026-08-03. Start here.
+
+#### N1. **[C2I] Tracy Chapman track 8 no longer reports a failure — is the repair
+now invisible, or did it not happen?**
+
+The concern as stated: with the analyse *and* repair both outsourced to AccuDisc,
+the whole operation may be running silently, so we never see the error or the
+repair. Investigate before assuming — some evidence was gathered at the close of
+the session and it points elsewhere, so **do not start from the hypothesis.**
+
+**What is already known** (three rips of the same disc, all `11/11 tracks OK`,
+min conf 200):
+
+| container | created | `ripper` | CTDB PROV keys |
+|---|---|---|---|
+| `Tracy Chapman.rbi` | 2026-08-01 10:19 | `accudisc+ctdb` | `ctdb_entry=67116`, `ctdb_offset=-639`, `ctdb_erasures=c2`, `recovery_track_8=ctdb_repaired@67116` |
+| `Tracy Chapman_1.rbi` | 2026-08-03 19:03 | `accudisc` | **none** |
+| `Tracy Chapman_2.rbi` | 2026-08-03 19:10 | `accudisc` | **none** |
+
+The 08-01 rip needed a repair, recorded it, and says so in `ripper`. The two 08-03
+rips carry **no `ctdb_*` keys at all** — and that is the load-bearing detail,
+because a *declined* attempt also writes `ctdb_declined=<reason>` (plus
+`ctdb_entry`/`ctdb_offset`), precisely so a failed repair leaves a trace. Absence
+of every key means the repair was **never attempted**, not that it ran silently.
+
+Which puts the question one level up: the attempt is gated on
+`_ar_has_partial_mismatch(ar_verify.tracks)` (`cdda2img.py:2929`), so if AR reported
+11/11 on the *first* pass there was nothing to repair. Two candidate explanations,
+and they need separating by evidence rather than argument:
+- **(a) The rips are genuinely clean.** The disc was read twice more on 08-03; a
+  read that succeeds where an earlier one failed is ordinary, and the recovery
+  bench's own finding is that read errors are stable per *speed*, not per defect.
+- **(b) Something upstream of the gate changed on 2026-08-02** — the migration
+  (`c070d1e`) is the obvious suspect by timing, but note it changed the **repair**,
+  not AR verification, and the gate sits *above* it. A defect there would have to be
+  in `verify_rip` or in what is passed to it, not in the CTDB path.
+
+Suggested first cuts, cheapest first: diff the stored PCM of `_1`/`_2` against the
+08-01 container over track 8's window (if the bytes differ, the reads differ and (a)
+is live); check whether `Tracy Chapman-old.rbi` under `rips/cdda2img/` is a
+pre-repair capture that can serve as a known-bad control; and re-read the disc once
+at the same speed to see whether the failure reproduces at all. **A rip that passes
+is not a bug** — the thing to establish is whether AR is still *able* to fail, which
+is the same "can this instrument still fail?" question that has caught us twice.
+
+Second, unrelated concern in the same PROV dump, and worth its own look:
+`lookup_status_discogs=empty` sits beside `discogs_barcode_corroborates=YES`. Those
+are not obviously contradictory — the corroboration path fetches the **MB** release's
+`inc=url-rels` and follows the link to a Discogs *release id*
+(`mb_lookup.discogs_link_and_barcode`), which is a different query from the Discogs
+*search* whose emptiness `lookup_status_discogs` reports (`_r12_status`: attempted,
+no error, no data → `empty`). So both can be true. But `catalog_number`, `label` and
+`country` are all populated, and if those came from Discogs then `empty` is wrong;
+if they came from MB then the Discogs search returning nothing for a disc whose
+barcode Discogs demonstrably knows is itself worth explaining. Establish which source
+filled those three fields before deciding whether anything is broken.
+
+#### N2. **[C2I] Build the Q + C2 map, and restore the per-track marker on the
+progress bar**
+
+Two halves of one design. The track-number status to the left of the progress bar
+was lost in the AccuDisc switch and never reimplemented. And per AccuDisc's preview,
+**the progress bar will *be* the Q and C2 map** — so this is not a bar with a map
+bolted on, it is one widget that has to be designed and tested as such.
+
+kgr's suggestion, and it is the right shape: **build a standalone tool that is just
+the progress bar**, for development. Rationale beyond convenience — a TUI element
+driven only by a live rip can be exercised once per disc, at 12 minutes a run, on
+whatever error pattern the disc happens to have. A tool that replays a captured or
+synthetic stream can be iterated in seconds and can present error patterns on
+demand. This is the `feedback_validate_timing_dependent_ui` rule applied before the
+fact rather than after: prefer a timing-independent design validated by instant
+replay, and capture the real stream *before* writing the renderer.
+
+Inputs already available: `read_disc_c2`'s chunk callback (the existing progress
+source), the C2 bitmap, and the raw P-W subchannel — `subchannel.scan_subcode`
+already decodes Q per sector with CRC validation, so "Q good / Q bad" is a per-sector
+signal we can already produce. AccuDisc's `--map-file` mmap status map was noted as
+"not yet consumed" back in July and is the other candidate input; check what the
+binding exposes now before designing around the CLI-era artefact.
+
 ### ⭐ LIVE — outstanding work as of 2026-07-30
 
 Consolidated from both projects. AccuDisc is a peer project with its own
