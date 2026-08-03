@@ -119,9 +119,9 @@
 # default_profile = "track-ladder"
 
 # C2-erasure-assisted CTDB recovery. The drive's C2 error pointers can be fed to the
-# ctanalyse Reed-Solomon repair as erasures, which roughly doubles how much damage it
-# can reconstruct. C2 is only a *modifier* to ctanalyse, so "off" never disables
-# recovery -- it just skips the erasure boost (error-only ctanalyse, then the speed
+# CTDB Reed-Solomon repair as erasures, which roughly doubles how much damage it
+# can reconstruct. C2 is only a *modifier* to that repair, so "off" never disables
+# recovery -- it just skips the erasure boost (error-only decoding, then the speed
 # ladder). "auto" uses C2 only when the drive both advertises and functionally
 # supports it; "on" forces it; "off" never uses it. Default: auto
 #

@@ -153,7 +153,8 @@ having the binary on `$PATH` is not a substitute. Creating, importing, extractin
 verifying RBI images need none of it.
 
 Audio transcoding does *not* need an ffmpeg installation — PyAV carries the FFmpeg
-libraries in its own wheel. The `ffplay` binary is used only for interactive audition.
+libraries in its own wheel. The `ffplay` binary is used only for the rip's track-1
+preview, which is cosmetic and never fails a rip.
 
 ```bash
 ./install.sh     # installed copy — see below
@@ -188,7 +189,7 @@ native libraries — plus the package's own data files, and for each missing one
 would have enabled and the command that would install it. It **checks only**: nothing there installs, downloads, or modifies
 anything, and it makes no network requests. Exit status is 1 if something *required* is
 missing, 0 otherwise; a missing optional dependency is reported without failing, since
-the absence of `ffplay` costs the audition preview and not the rip.
+the absence of `ffplay` costs the rip's track-1 preview and not the rip.
 
 A shorter form of the same check runs automatically before every other subcommand, so a
 missing package produces a list of everything that is absent rather than an `ImportError`

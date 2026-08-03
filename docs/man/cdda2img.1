@@ -94,7 +94,7 @@ If AccurateRip then reports a
 .I partial
 mismatch, two recovery exits are tried in cost order.
 First
-.BR ctanalyse :
+.IR "CTDB parity repair" :
 Reed\-Solomon repair against crowd\-sourced parity from the CUETools database,
 with zero extra reads, using the C2 bitmap as erasures where one was captured.
 A repair is committed only if a CTDB per\-track CRC
@@ -660,7 +660,7 @@ dependency is missing and
 otherwise.
 A missing optional dependency is reported without failing: the absence of
 .B ffplay
-costs the audition preview, not the rip.
+costs the rip\(cqs track\-1 preview, not the rip.
 .PP
 A shorter form of the same check runs automatically before every other
 subcommand and refuses to start when a required Python package is missing,
@@ -1138,13 +1138,8 @@ Not required for creating, extracting, or verifying RBI images.
 .SS Optional
 Each of these enables one feature and is skipped cleanly when absent.
 .TP
-.B ctanalyse
-CTDB parity repair of damaged rips (the first recovery exit, before the
-AccuDisc speed ladder). Part of the CUETools database tooling.
-Without it, a partial AccurateRip mismatch goes straight to the speed ladder.
-.TP
 .B ffplay
-Interactive audition and the rip\(cqs track\-1 preview.
+The rip\(cqs track\-1 preview, which is cosmetic and never fails a rip.
 Part of FFmpeg.
 Note that audio
 .I transcoding

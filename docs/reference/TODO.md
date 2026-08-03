@@ -2628,24 +2628,30 @@ else:                     apply standard silence-threshold trim as normal
 
 ## Audio Processing (deferred)
 
-### Delivery mode audition (WIP — `src/cdda2img/audition.py`)
+### Delivery mode audition — ❌ RETIRED 2026-08-03, module deleted
 
-The loudness processing level is not user-selectable. The standard is fixed at −18 LUFS
-(ReplayGain 2.0 / ITU-R BS.1770-3) and the only delivery choices are:
+`src/cdda2img/audition.py` is gone. It let a user A/B three delivery variants —
+unprocessed, EBU R128 normalised, and ReplayGain-tagged — on the loudest 10-second
+passage before committing, as a standalone `python -m cdda2img.audition <file>`.
 
-- **Unprocessed** — no loudness adjustment; clean archival audio
-- **Normalised** — EBU R128 at −18 LUFS, audio modified, no tags
-- **ReplayGain** — unmodified audio with REPLAYGAIN_* Vorbis tags; player applies gain
+**It was answering a question the project had already closed.** The loudness
+processing level is not user-selectable: the standard is fixed at −18 LUFS
+(ReplayGain 2.0 / ITU-R BS.1770-3), `--normalize` is extract-time only, and
+`--loudness rg` measures without touching the PCM. A tool for choosing between
+delivery modes should have been retired when adherence to the standard was settled;
+instead it survived as 347 lines that nothing imported, shipped in every wheel and
+tarball because `src/cdda2img/` is an allow-listed `DIST_PATHS` entry.
 
-The audition tool allows the user to compare all three on the loudest 10-second passage
-before committing. It is implemented as `src/cdda2img/audition.py` (run with
-`uv run python -m cdda2img.audition <file>`). TUI integration is not planned — the
-standalone CLI module is the intended form.
+Worth recording *how* it stayed: it was never dead by the usual signal. It has a
+`__main__` block, so it ran; it had passing lint entries and its own `LINT.md`
+sections; `doctor` and the man page both advertised "interactive audition" as a
+capability `ffplay` was required for. Every one of those made it look wired. The
+only check that would have caught it is the one nobody ran — *does anything import
+this?* — and the answer had been "no" since it was written.
 
-- [x] Find loudest 10-second window (peak-frame centring via PyAV + numpy)
-- [x] Extract clip and prepare all three variants (PyAV + FFmpegNormalize + pyebur128)
-- [x] Embed REPLAYGAIN_* tags in the RG variant (mutagen in-place patch via `replaygain.embed_rg_tags()`)
-- [x] Interruptible looping playback (ffplay subprocess, SIGSTOP/SIGCONT for pause)
+The salvageable parts, if the question ever reopens: `find_loudest_start`
+(peak-frame centring via PyAV + numpy), `extract_clip`, `normalize_clip`. See
+`e6cd88e~`..`git log -- src/cdda2img/audition.py` for the deleted source.
 
 ### Master / Remaster modes
 - [x] `--mode master` — silence trim disabled; transcode to Red Book spec only
@@ -2785,8 +2791,9 @@ Planned elements:
 - Current processing stage (transcode → trim → RG compute → pack)
 - Album/artist, disc N/M, output target type
 - Strategy and mode display
-- Delivery mode audition panel (compare unprocessed / normalised / ReplayGain before
-  committing to extract; see `src/cdda2img/audition.py` for the standalone prototype)
+  (A delivery-mode audition panel was listed here; dropped 2026-08-03 with the
+  prototype it referenced — the loudness standard is fixed, so there is nothing to
+  choose between.)
 
 
 ---

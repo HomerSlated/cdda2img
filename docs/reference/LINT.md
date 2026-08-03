@@ -42,8 +42,8 @@ Format per entry:
 
 - **Rule:** `ty: invalid-argument-type` / `arg-type`
 - **Locations:**
-  - `audition.py:55` — `resampler.resample(frame)` in `_find_peak_window()`
   - `replaygain.py:110` — `resampler.resample(frame)` in `_decode_interleaved()`
+  - (`audition.py:55` was the second site; module deleted 2026-08-03)
 - **Rationale:** `packet.decode()` is typed in the PyAV stubs to yield the broad union
   `AudioFrame | VideoFrame | SubtitleSet`. `AudioResampler.resample()` only accepts
   `AudioFrame | None`. In both call sites the stream being demuxed is an audio stream
@@ -170,27 +170,28 @@ Format per entry:
 
 ---
 
-## LINT-008 — Trusted internal subprocess call for `ffplay` (`audition.py`, `track_preview.py`)
+## LINT-008 — Trusted internal subprocess call for `ffplay` (`track_preview.py`)
 
 - **Rule:** `ruff: S603` (subprocess without `shell=True` check)
-- **Locations:**
-  - `audition.py:186` — `subprocess.Popen(cmd, stdin=subprocess.DEVNULL)` in `Player.play()`
-  - `track_preview.py:89` — `subprocess.Popen(cmd, ...)` (looping `ffplay`) in `_grab_and_play()`
+- **Location:** `track_preview.py:90` — `subprocess.Popen(cmd, ...)` (looping `ffplay`)
 - **Rationale:** S603 warns that subprocess calls may execute untrusted input. Here `cmd`
   is constructed entirely from hardcoded constants and resolved `Path` objects inside the
-  module — no user-supplied string ever reaches subprocess arguments. The `ffplay`
-  invocation is for the `audition.py` looping audio playback feature, where `ffplay` is
-  a trusted binary on the user's `PATH`.
+  module — no user-supplied string ever reaches subprocess arguments. `ffplay` is a
+  trusted binary on the user's `PATH`, gated by `shutil.which` and best-effort: the
+  preview is cosmetic and its failure never fails a rip.
 - **Alternatives:**
-  - *Replace `ffplay` subprocess with `sounddevice` + `soundfile`* — this is the correct
-    long-term fix, tracked in the TODO as call 6 of the subprocess elimination plan.
-    A `sounddevice` callback player would remove this subprocess entirely, eliminating
-    the S603 concern and the `ffplay` binary dependency. Deferred until the TUI
-    integration phase.
+  - *Replace the `ffplay` subprocess with `sounddevice` + `soundfile`* — was tracked as
+    call 6 of the subprocess-elimination plan, whose stated payoff was removing this
+    subprocess **and** the one in `audition.py`. `audition.py` was deleted on 2026-08-03,
+    so the remaining half buys a new dependency to displace one gated, best-effort
+    spawn on a cosmetic path. Not worth it on its own; reopen only if `ffplay` becomes
+    a problem for a real user.
   - *Validate each element of `cmd`* — unnecessary; all elements are internal constants.
     Validation would be security theatre with no benefit.
-- **Decision:** `# noqa: S603` is correct for now. Will be eliminated when `Player` is
-  ported to `sounddevice`.
+- **Decision:** `# noqa: S603` is correct and is now expected to stay.
+- **Amended 2026-08-03:** this entry listed `audition.py:186` as the first of two sites.
+  That module was never imported by anything and has been removed; the entry now covers
+  the one live spawn.
 
 ---
 

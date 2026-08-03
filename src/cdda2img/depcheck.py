@@ -113,7 +113,7 @@ _TOMLI = PyDep("tomli", "tomli", "TOML config parsing before 3.11's tomllib")
 #: capability it stood for is covered by the AccuDisc binding, which is already a
 #: required item.
 EXTERNAL_BINARIES: tuple[Binary, ...] = (
-    Binary("ffplay", "audition playback and the rip's track-1 preview", "FFmpeg"),
+    Binary("ffplay", "the rip's track-1 preview", "FFmpeg"),
     Binary("cdemu", "the `mount` subcommand", "cdemu-daemon"),
     Binary("fpcalc", "AcoustID fingerprinting", "Chromaprint"),
 )
@@ -570,7 +570,7 @@ def run_doctor(stream: TextIO | None = None) -> int:
     """Report every dependency and return the exit code.
 
     Exit 1 iff something **required** is missing. A missing optional dependency
-    is reported and does not fail: ``ffplay``'s absence costs the audition
+    is reported and does not fail: ``ffplay``'s absence costs the rip's track-1
     preview, not the rip. The development-shim warning does not fail either —
     it describes a working machine — but it must never render as clean, or the
     report would certify a system that cannot be reproduced anywhere else.
