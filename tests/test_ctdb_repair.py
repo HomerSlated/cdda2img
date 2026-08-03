@@ -456,3 +456,66 @@ def test_an_unverified_repair_is_still_refused_by_the_crc_gate(
     assert not result.repaired
     assert "CTDB CRC gate failed" in result.reason
     assert h["pcm_path"].read_bytes() == before
+
+
+# ---- D4: the at-capacity path, against the real decoder ---------------------
+
+
+def test_a_column_at_full_erasure_capacity_returns_the_weaker_buffer() -> None:
+    """The one arm our disc fixtures cannot reach, built arithmetically instead.
+
+    Every fixture we hold reports ``unverified_columns == 0``, so the acceptance of
+    ``audio_unverified`` in ``_repair_and_verify`` was reasoned about and never
+    executed. Real C2 data rarely produces it: C2 over-flags, and one spare flag in
+    the column puts it *over* capacity rather than exactly at it.
+
+    Constructing it needs no disc and no fixture, only the identity that an all-zero
+    image has all-zero syndromes, so an all-zero parity blob is *valid* parity for
+    it. Damage exactly ``npar`` words in one column and flag every one: the erasures
+    consume every check equation, the errata are determined, and re-deriving the
+    syndromes from them cannot disagree. Recipe from AccuDisc's 2026-08-03b §147.1.
+
+    The assertion that matters is ``r.audio is None``. A gate spelled ``if r.audio:``
+    reads as correct and silently declines every at-capacity repair; one spelled
+    ``audio or audio_unverified`` commits the weaker claim without recording it. This
+    pins the middle path — and that the weaker buffer is a *repair*, not a refusal in
+    disguise.
+
+    The skip is evaluated **inside** the test, not as a module-level ``skipif``.
+    ``_import_binding`` is a ``functools.cache`` on a module global that
+    ``test_accudisc_reader`` fakes and clears per test; a decorator argument runs at
+    *collection* time, which primed that cache before those tests could set it up and
+    broke ``test_a_namespace_package_is_not_the_binding`` — passing alone, failing in
+    the suite. Exactly the order-dependence that file's own fixture exists to prevent.
+    """
+    if C.accudisc_reader._import_binding()[0] is None:
+        pytest.skip("AccuDisc binding not importable")
+
+    npar, stride, frames = 2, 3, 40
+    s, w = stride * 2, frames * 1176
+    pcm, parity = bytearray(w * 2), bytes(s * npar * 2)
+    original = bytes(pcm)
+
+    bitmap = bytearray((w + 7) // 8)
+    for row in (4, 6):  # exactly npar rows, all in column 0
+        word = s + row * s
+        pcm[word * 2 : word * 2 + 2] = (0x1234).to_bytes(2, "little")
+        bitmap[word // 8] |= 1 << (word % 8)
+
+    r = C.accudisc_reader.ctdb_repair(
+        pcm=bytes(pcm),
+        parity=parity,
+        npar=npar,
+        wire_stride=stride,
+        image_first_frame=0,
+        image_frames=frames,
+        offset_pairs=0,
+        erasures=bytes(bitmap),
+    )
+
+    assert r.audio is None, "an at-capacity repair must not claim to be verified"
+    assert r.audio_unverified is not None, "it is a repair, not a refusal"
+    assert not r.refused
+    assert r.unverified_columns == 1
+    assert r.unverified_columns <= r.repaired_columns, "a subset, not a parallel count"
+    assert bytes(r.audio_unverified) == original, "the damage is undone exactly"

@@ -167,7 +167,90 @@ every step assumes the binding resolves without our `tools/` shim.
     whether or not they ever pick that strategy. Making it an extra means making the
     import lazy first; `depcheck.RUNTIME_PYTHON` would then need a notion of
     "declared optional" rather than the flat required list it has now.
-12. **[AD, we supply evidence] Their task 0 — RECOVERED sectors returned wrong, 9/9.**
+13. **[K] What does `FLAG_MASTER_MODE` mean? — OPEN DISCUSSION, no code pending.**
+    Raised 2026-08-03, parked for thinking time. The bit's current meaning is
+    "`create` was run with `--silence notrim`", and the discussion is about whether
+    that is the right thing for it to mean. **Nothing has been removed and no code
+    is queued** — the aim is to clean up redundancy and tighten definitions.
+
+    **`--silence` stays.** Retiring it was proposed and withdrawn the same day, on a
+    point that is worth keeping written down: a disc **rip** has native pre-gaps, so
+    trimming and re-padding one is destructive and breaks AccurateRip — but a
+    `create` from loose audio files has **no pre-gaps at all**, so the tool has to
+    synthesise them, and trimming the source waveform is how the resulting gap is
+    controlled. The feature is not "alter the audio", it is "author a gap structure
+    that does not otherwise exist". It never applied to `rip` or `import` in the
+    first place (`create_image` is its only caller, `cdda2img.py:745`), which is
+    exactly why it is safe. The redundancy to clean up is in what the *flag* claims,
+    not in the feature.
+
+    **Where the discussion got to.**
+    - The first redefinition proposed was REMASTER = `create` **or** destructive
+      normalisation; MASTER = rip/import without it. The second clause turned out to
+      be unreachable: `--normalize` is **extract-time only** (`container.py:802`) —
+      it derives a gain factor and applies it to the FLACs on the way out, leaving
+      the stored PCM untouched and the container's flags word already written. kgr's
+      call on learning this was to leave `--normalize` where it is, which is right:
+      nothing in the pipeline alters stored audio, and that is the guarantee worth
+      keeping. So the clause was dropped rather than wired.
+    - That collapses the definition to **REMASTER = `create`, MASTER = `rip` |
+      `import`** — which is a pure function of the PROV `mode` key, already in every
+      container. The bit then has **two writers for one fact**, and two writers that
+      can disagree is a defect waiting for a refactor. If this is the answer, derive
+      the bit from `mode` in one place.
+    - Note this is where the redundancy actually sits. With `--silence` retained, the
+      bit today distinguishes two *kinds of `create`* — trimmed vs not — while PROV
+      `mode` already distinguishes `create` from `rip`/`import`. So a reader has one
+      field that answers "was this authored?" and a second that answers "and if so,
+      were its gaps synthesised?", but the second is spelled as though it answered
+      the first. Whatever the bit is redefined to mean, the `--silence` choice is
+      still worth recording somewhere — it is a real fact about how the audio was
+      assembled — and PROV is the cheaper home for it than a header bit.
+    - kgr then observed that an import cannot be *guaranteed* a master either — we
+      did not make the image, do not know what tool did, and cannot see whether it
+      was processed — and proposed gating import's MASTER claim on passing
+      AccurateRip. Also that the states should stay **binary**: not recognised
+      implies remaster, so no `UNKNOWN`.
+
+    **The unresolved objection** (mine, recorded so the discussion does not restart
+    from zero). Absence from AccurateRip is not evidence of alteration: AR is a
+    database of pressings *other people have submitted*, so silence from it means
+    obscure pressing, promo, limited run, CD-R, or simply nobody got there first.
+    None of those is an alteration of the audio. Three consequences:
+    - the label would depend on **the network** — the same disc imported offline
+      reads REMASTER, online reads MASTER — and it is frozen at build time, so a
+      disc that enters AR next year stays REMASTER forever;
+    - one bit cannot carry both *did we alter it* (always knowable, our own action)
+      and *does it match a known pressing* (sometimes knowable, someone else's
+      database). Collapsing them makes a `create` container and an unverifiable rip
+      read identically, and those are very different provenances;
+    - confirmation is **already recorded, and better**: the ARIP block carries
+      per-track v1/v2 CRCs, confidence and status, and PROV carries
+      `arip_transport` / `arip_dbar_b3sum`. That distinguishes "12/12 at confidence
+      200" from "2 tracks not in the DB" from "verified and failed" — all of which a
+      single bit collapses to one word.
+
+    Note also that import does **not** run AccurateRip today (`verify_rip` is called
+    only from `rip_image`; `_finalize_import` takes `arip_block=None` unless the rip
+    path supplies it), and a foreign image has **no known offset**, so the gate would
+    need an offset *sweep* to find where AR matches — the same machinery as CTDB's
+    `select_entry`. Feasible, but real work, and cheap for `rip` while expensive for
+    `import` — the opposite asymmetry to where the gate was proposed.
+
+    **The alternative on the table**: keep the bit for alteration only (REMASTER =
+    `create`, always knowable, no network, no `UNKNOWN`), and if imports deserve
+    suspicion say so as provenance rather than as a fidelity claim — `mode=import`
+    already means "this capture is asserted by the source image, not observed by
+    us". If AR is to gate anything, gate a separately-named claim
+    (`ar_verified=yes|no|unavailable`) where `unavailable` stays honest instead of
+    being folded into a negative.
+
+    Whatever is decided: `rbi_spec.md` defines bit 2, so **spec before code**. The
+    bit's *value* does not change, only its meaning, so this is a spec-doc edit and
+    not a format bump. Worth settling at the same time whether "master/remaster" is
+    still the right vocabulary — under every proposal above the bit is closer to
+    *"the stored PCM is not a verbatim capture"*.
+14. **[AD, we supply evidence] Their task 0 — RECOVERED sectors returned wrong, 9/9.**
     Our report, their `[P1]`, still undiagnosed. H3 (coordinate-system mismatch) was
     eliminated 2026-07-29 from artefacts we hold: the shift is exactly one sector, the
     read offset is +30 samples = 0.051 sectors, and the CTDB image-domain shift is zero
