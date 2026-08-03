@@ -106,8 +106,13 @@ RUNTIME_PYTHON: tuple[PyDep, ...] = (
 
 _TOMLI = PyDep("tomli", "tomli", "TOML config parsing before 3.11's tomllib")
 
+#: Optional external binaries. ``ctanalyse`` was here until 2026-08-02, when CTDB
+#: parity repair moved into AccuDisc's API; nothing under ``src/`` spawns it now,
+#: and a line reporting ``ok`` about an artefact this application never executes is
+#: the same defect the AccuDisc binary line was removed for, inverted. The
+#: capability it stood for is covered by the AccuDisc binding, which is already a
+#: required item.
 EXTERNAL_BINARIES: tuple[Binary, ...] = (
-    Binary("ctanalyse", "CTDB parity repair of damaged rips", "CUETools / ctdb"),
     Binary("ffplay", "audition playback and the rip's track-1 preview", "FFmpeg"),
     Binary("cdemu", "the `mount` subcommand", "cdemu-daemon"),
     Binary("fpcalc", "AcoustID fingerprinting", "Chromaprint"),

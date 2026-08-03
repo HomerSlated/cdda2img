@@ -66,6 +66,22 @@ Relative methods are therefore quarantined to the **DB-gap niche** and must neve
 be presented as verification. Their output is a relative claim, recorded as such
 in provenance. `exit 0 ≠ verified`.
 
+**AccuDisc now performs the parity arithmetic, and the gate has not moved.**
+As of 2026-08-02 `accudisc_ctdb_repair` does the Reed-Solomon decode against a
+CTDB parity blob, so the *computation* named in 2.1 lives in the library. The
+*decision* does not. AccuDisc is handed a blob and an alignment and returns
+repaired samples; it never queries CTDB, never chooses an entry, and cannot
+verify its own output — CTDB publishes **per-track** CRCs, so there is no
+whole-image value for the library to check against, and the CRC in its report is
+one it computed itself. A successful return means every column whose syndromes
+disagreed was corrected and the corrections re-verified. It does not mean the
+audio is right, and the API says so in those words.
+
+The absolute gate is therefore still the caller's, unchanged: CTDB per-track CRC
+and AccurateRip, applied to the repaired image afterwards. A library that
+repaired *and* pronounced would be a relative check wearing an absolute gate's
+clothes, which is exactly what §1.1 forbids.
+
 ### 1.2 Design philosophy
 
 1. **The PCM is the artifact; everything else is a claim about it.** All trust

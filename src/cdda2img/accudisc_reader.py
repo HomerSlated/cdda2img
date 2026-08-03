@@ -1186,6 +1186,131 @@ def write_disc(
     )
 
 
+# ── CTDB parity repair (the one device-free operation in the seam) ────────────
+
+
+@dataclass(frozen=True)
+class CtdbRepairReport:
+    """What AccuDisc's Reed-Solomon decode did to a rip, and which claim it supports.
+
+    **Two audio buffers, not one, and the split is the whole point.** ``audio`` is
+    populated only when every repaired column *re-verified*; ``audio_unverified``
+    only when some column was ``determined`` instead. Both are ``None`` on a
+    refusal. Collapsing them to one field — ``audio or audio_unverified`` — would
+    type-check, run, and quietly destroy the distinction AccuDisc built the second
+    return code to carry, so this mirrors their shape rather than simplifying it.
+
+    A column carrying exactly ``npar`` erasures consumes every check equation the
+    parity has: its errata are then exactly determined, and re-deriving the
+    syndromes from them is an *identity* that cannot disagree. The re-verification
+    that makes every other column trustworthy is therefore vacuous at exactly full
+    erasure capacity, and such a column is right iff its erasure list was complete
+    — which a C2-derived list is not guaranteed to be, since C2 under-flags as
+    well as over-flags. This is a property of correct errata decoding rather than
+    a defect in anyone's implementation, which is also why no A/B against a second
+    decoder can surface it (AccuDisc §m.1/§n.3, 2026-08-02).
+
+    ``erasure_columns`` is documented by AccuDisc as dirty columns carrying at
+    least one erasure. ``ctanalyse``'s field of the same name counted columns
+    where erasures were used *and changed the outcome*. Whether those are the
+    same number is **open**: they agree exactly on both fixture arms we can run,
+    including the misaligned control, and no arm we have separates them. Nothing
+    here consumes it, so the ambiguity is recorded rather than resolved.
+
+    Nothing here is an absolute gate. CTDB publishes per-track CRCs, so there is
+    no whole-image value for the library to check against and ``crc32_after`` is
+    one AccuDisc computed itself. The caller gates.
+    """
+
+    audio: bytes | bytearray | None
+    audio_unverified: bytes | bytearray | None
+    offset_pairs: int
+    dirty_columns: int
+    repaired_columns: int
+    refused_columns: int
+    erasure_columns: int
+    unverified_columns: int
+    corrections: int
+    crc32_before: int
+    crc32_after: int
+
+    @property
+    def refused(self) -> bool:
+        """Beyond the parity's capacity. Nothing was written — a normal outcome."""
+        return self.audio is None and self.audio_unverified is None
+
+
+def ctdb_repair(
+    *,
+    pcm: bytes | bytearray,
+    parity: bytes,
+    npar: int,
+    wire_stride: int,
+    image_first_frame: int,
+    image_frames: int,
+    offset_pairs: int,
+    erasures: bytes | None = None,
+) -> CtdbRepairReport:
+    """Reed-Solomon repair of *pcm* against a CTDB parity blob.
+
+    The only operation in this seam that touches no device: arithmetic on buffers
+    the caller already holds. It replaced a subprocess to the ``ctanalyse`` binary
+    on 2026-08-02, after an eight-arm element-wise A/B against that binary agreed
+    correction-for-correction on 1.6 GB of fixtures (AccuDisc §k).
+
+    **The offset is an input.** AccuDisc does not search; it reconciles at the
+    alignment given or declines. Our own sweep in ``ctdb_repair.select_entry``
+    has always been the source of that number — we never consumed the binary's
+    reported offset — so this is the same arrangement with the dead field gone.
+    One behavioural change comes with it: ``ctanalyse``'s ``offset_found`` meant
+    *some* offset within ±``stride/2 - 1`` reconciled, which is not the same
+    number as the one erasures were then bucketed at. Those two have always
+    agreed in practice; here only the offset actually passed is tested, so a
+    wrong sweep result now refuses where the binary would have said "found".
+
+    *erasures* is a C2 bitmap, one bit per 16-bit word, **absolute over pcm** —
+    the ``[0, lead-out)`` domain, never CTDB's image window. AccuDisc performs the
+    domain shift itself; pre-shifting applies it twice. ``None`` is error-only
+    decoding, a normal mode rather than a degraded one.
+
+    *pcm* is never mutated: the repaired audio comes back as a fresh buffer. (The
+    binding's ``out=`` can alias the input to halve peak memory, deliberately not
+    used here — a failed attempt must leave the buffer clean for the next one.)
+
+    Raises ``RuntimeError`` on bad geometry, a mismatched buffer size, or an ABI
+    skew. A **refusal is not an error** — it comes back as a report with both
+    audio buffers ``None``.
+    """
+    module = _binding("CTDB parity repair")
+
+    def _run() -> CtdbRepairReport:
+        r = module.ctdb_repair(
+            pcm=pcm,
+            parity=parity,
+            npar=npar,
+            wire_stride=wire_stride,
+            image_first_frame=image_first_frame,
+            image_frames=image_frames,
+            offset_pairs=offset_pairs,
+            erasures=erasures,
+        )
+        return CtdbRepairReport(
+            audio=r.audio,
+            audio_unverified=r.audio_unverified,
+            offset_pairs=r.offset_pairs,
+            dirty_columns=r.dirty_columns,
+            repaired_columns=r.repaired_columns,
+            refused_columns=r.refused_columns,
+            erasure_columns=r.erasure_columns,
+            unverified_columns=r.unverified_columns,
+            corrections=r.corrections,
+            crc32_before=r.crc32_before,
+            crc32_after=r.crc32_after,
+        )
+
+    return _call(module, "CTDB parity repair", _run)
+
+
 def _best_effort_device_op(device: str, what: str, method: str) -> None:
     """Run ``Device.<method>()``, swallowing a device that will not cooperate.
 

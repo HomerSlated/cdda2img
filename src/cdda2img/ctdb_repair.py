@@ -1,28 +1,52 @@
 """CTDB (CUETools Database) Reed-Solomon parity repair of whole-disc CD-DA PCM.
 
-This is the canonical CTDB-repair logic used by both the rip pipeline
-(:func:`repair_whole_disc`) and the standalone ``tools/ctdb_repair.py`` CLI. It
-owns the network (CTDB lookup + parity fetch) and policy (entry selection,
-double-gate verification), and delegates the Reed-Solomon math to the ``ctanalyse``
-binary (on ``$PATH``).
+This is the canonical CTDB-repair logic for the rip pipeline
+(:func:`repair_whole_disc`). It owns the network (CTDB lookup + parity fetch) and
+policy (entry selection, double-gate verification), and delegates the Reed-Solomon
+math to AccuDisc through the seam (``accudisc_reader.ctdb_repair``).
 
-The drive's C2 error pointers, when available, are fed to ctanalyse as *erasures*,
-which roughly doubles the damage it can reconstruct (correction holds when
+The drive's C2 error pointers, when available, are fed in as *erasures*, which
+roughly doubles the damage that can be reconstructed (correction holds when
 ``e + 2t <= npar`` vs ``2t <= npar`` error-only). C2 is only a modifier: with it
-absent/disabled, error-only ctanalyse still repairs, so recovery is never disabled —
+absent/disabled, error-only decoding still repairs, so recovery is never disabled —
 only the erasure boost.
 
-Repair is safe by construction: corrections are applied to a copy, old-byte-checked,
-and only committed if BOTH gates pass — CTDB per-track CRC (at the entry's consensus
-offset) AND AccurateRip (at the drive read-offset). A miscorrection fails a gate and
-is discarded, leaving the original PCM untouched.
+Repair is safe by construction: the decode writes to a fresh buffer and is only
+committed if BOTH gates pass — CTDB per-track CRC (at the entry's consensus offset)
+AND AccurateRip (at the drive read-offset). A miscorrection fails a gate and is
+discarded, leaving the original PCM untouched.
+
+**Two things changed when this moved off the ``ctanalyse`` binary (2026-08-02),
+and neither is visible in the call signature.**
+
+*The old-byte splice check is gone.* The binary returned a correction list, and
+:func:`apply_corrections` refused the whole splice if any correction's ``old``
+value disagreed with the stored word — a cheap check that caught a mis-aligned or
+stale correction list before it touched audio. The API returns repaired audio
+instead of corrections, deliberately (a caller able to read corrections without
+the verdict can commit them past a refusal), so that check now lives inside
+AccuDisc as its per-column re-verification. The outcome is no less safe — both
+gates below still close over the result — but a failure that once said
+``old-byte mismatch (splice aborted)`` now arrives as the less specific
+``CTDB CRC gate failed``.
+
+*``erasure_columns`` may answer a different question, and we could not tell.*
+``ctanalyse`` counted columns where erasures were used **and changed the
+outcome** — it retries error-only on failure without incrementing. AccuDisc
+documents its field as dirty columns **carrying at least one erasure**, which is
+the larger quantity. Measured on the Tracy fixture the two agree exactly on both
+arms available to us: 533 and 533 with the aligned bitmap, 30 and 30 with the
+deliberately misaligned one. That is not evidence they mean the same thing —
+separating them needs a column that carries an erasure and decodes error-only
+anyway, which neither arm contains. Treat the number as unresolved rather than
+migrated; it reaches no gate and no provenance key, so nothing depends on the
+answer today. (The PROV key ``ctdb_erasures`` is the marker ``"c2"``, not this
+count — do not confuse them.)
 """
 
 from __future__ import annotations
 
 import logging
-import struct
-import subprocess
 import urllib.request
 import xml.etree.ElementTree as ET
 import zlib
@@ -30,6 +54,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
+
+from cdda2img import accudisc_reader
+from cdda2img.accudisc_reader import CtdbRepairReport
 
 log = logging.getLogger(__name__)
 
@@ -70,6 +97,14 @@ class CtdbRepairResult:
     erasure_columns: int = 0
     damaged_tracks: list[int] = field(default_factory=list)
     used_c2: bool = False
+    unverified_columns: int = 0
+    """Columns AccuDisc *determined* rather than verified — see
+    :class:`cdda2img.accudisc_reader.CtdbRepairReport`. Non-zero means the
+    committed audio came from the weaker of AccuDisc's two success claims, which
+    both gates below still had to pass. Recorded rather than folded away so a
+    rip that took that path stays identifiable afterwards; a repair that hides
+    which claim it rests on is exactly what AccuDisc's two-buffer return exists
+    to prevent."""
 
 
 def _lookup_url(bounds: list[int]) -> str:
@@ -214,7 +249,7 @@ def fetch_parity(entry: Entry, cache: Path) -> Path:
 
 def build_erasure_bitmap(c2_path: Path, nwords: int, align_pairs: int = -2) -> bytes:
     """C2 capture (294 B/sector, MSB-first per byte) -> per-word LSB-first erasure
-    bitmap in ctanalyse's PCM word domain.
+    bitmap in the decoder's PCM word domain.
 
     Collapse per-byte -> per-sample-pair (any of 4 bytes flagged), shift by the drive's
     C2/audio offset (align_pairs, -2 on the PX-716A -- **re-measured 2026-08-01**
@@ -232,9 +267,11 @@ def build_erasure_bitmap(c2_path: Path, nwords: int, align_pairs: int = -2) -> b
     precision 0.993 / recall 0.990, 2026-07-05). Do not "fix" either sign.
 
     **Domain: this bitmap spans our PCM, ``[0, lead-out)`` — deliberately, not by
-    oversight.** ctanalyse works in CTDB's image domain and does the conversion on its
-    side, skipping ``word_base / 8`` bytes (``word_base = bounds[0] * 1176``) before
-    bucketing bits into grid cells (tools/ctanalyse/main.c, ``bits + skip``). Narrowing
+    oversight.** The decoder works in CTDB's image domain and does the conversion on
+    its side, skipping ``word_base / 8`` bytes (``word_base = bounds[0] * 1176``)
+    before bucketing bits into grid cells — true of ``ctanalyse``
+    (tools/ctanalyse/main.c, ``bits + skip``) and stated as a contract by AccuDisc's
+    ``ctdb_repair``, whose ``erasures`` parameter is documented PCM-absolute. Narrowing
     this function to the image domain would apply the shift twice and silently displace
     every erasure by the length of the track-1 pre-gap. Given that domain confusion is
     exactly what caused the 2026-07-25 ABBA *Gold* failure, treat the asymmetry as
@@ -264,66 +301,41 @@ def build_erasure_bitmap(c2_path: Path, nwords: int, align_pairs: int = -2) -> b
     return np.packbits(word_flag, bitorder="little").tobytes()
 
 
-def run_ctanalyse(
-    pcm_path: Path,
+def run_repair(
+    pcm: bytes,
     parity: Path,
     entry: Entry,
     bounds: list[int],
-    erasures: Path | None,
-    binary: str = "ctanalyse",
-) -> dict:
-    """Invoke the ctanalyse binary; return its parsed JSON. Raises on non-zero exit."""
-    toc = ":".join(str(x) for x in bounds)
-    argv = [
-        binary,
-        "--pcm",
-        str(pcm_path),
-        "--parity",
-        str(parity),
-        "--npar",
-        str(entry.npar),
-        "--stride",
-        str(entry.stride),
-        "--toc",
-        toc,
-    ]
-    if erasures is not None:
-        argv += ["--erasures", str(erasures)]
-    proc = subprocess.run(  # noqa: S603 — fixed binary on $PATH; args are numeric/paths
-        argv, capture_output=True, text=True, timeout=600, check=False
+    offset: int,
+    erasures: bytes | None,
+) -> CtdbRepairReport:
+    """Decode *pcm* against the entry's parity blob at *offset*. Raises on failure.
+
+    The domain conversion the caller must not do: *pcm* and *erasures* both span
+    ``[0, lead-out)``, while CTDB's parity covers ``[bounds[0], bounds[-1])``.
+    AccuDisc is told the window (``image_first_frame`` / ``image_frames``) and does
+    the shift on both buffers itself. Narrowing either one here would apply it
+    twice and silently displace every word by the length of track 1's pre-gap —
+    the 2026-07-25 ABBA *Gold* failure.
+
+    This is also where the binary's staleness guard used to live. ``ctanalyse``
+    took the window as a ``--toc`` string that an older build parsed and ignored,
+    analysing ``[0, lead-out)`` and returning confident nonsense, so the reported
+    ``image_first_frame`` had to be checked against what we asked for. The window
+    is now a pair of integer arguments to a linked library: there is no build that
+    accepts them and analyses something else, and an extension skewed against
+    ``libaccudisc`` raises ``AbiMismatch`` through the seam instead.
+    """
+    return accudisc_reader.ctdb_repair(
+        pcm=pcm,
+        parity=parity.read_bytes(),
+        npar=entry.npar,
+        wire_stride=entry.stride,
+        image_first_frame=bounds[0],
+        image_frames=bounds[-1] - bounds[0],
+        offset_pairs=offset,
+        erasures=erasures,
     )
-    if proc.returncode != 0:
-        msg = f"ctanalyse exited {proc.returncode}: {proc.stderr.strip()}"
-        raise RuntimeError(msg)
-    import json
-
-    result = json.loads(proc.stdout)
-    # The binary is built from tracked source but is itself git-ignored, so a stale
-    # local build is easy to end up with. One from before 2026-07-25 accepts --toc and
-    # ignores it, analysing [0, lead-out) instead of CTDB's image — which does not
-    # fail, it returns confident nonsense. Refuse rather than trust it.
-    if result.get("image_first_frame") != bounds[0]:
-        msg = (
-            "ctanalyse ignored --toc (analysed frame "
-            f"{result.get('image_first_frame')!r}, expected {bounds[0]}) — the binary "
-            "predates the CTDB image-domain fix; rebuild it (make -C tools/ctanalyse)"
-        )
-        raise RuntimeError(msg)
-    return result
-
-
-def apply_corrections(pcm: bytearray, corrections: list[dict]) -> int | None:
-    """Splice corrections in place. Returns the index of the first old-byte mismatch
-    (caller discards the buffer), or None on full success."""
-    for i, c in enumerate(corrections):
-        byte, old, new = c["byte"], c["old"], c["new"]
-        if byte < 0 or byte + 2 > len(pcm) or byte % 2:
-            return i
-        (cur,) = struct.unpack_from("<H", pcm, byte)
-        if cur != old:
-            return i
-        struct.pack_into("<H", pcm, byte, new)
-    return None
 
 
 @dataclass
@@ -397,8 +409,8 @@ def verify_ar(
     return ok
 
 
-def _ctanalyse_and_verify(
-    pcm: bytearray,
+def _repair_and_verify(
+    pcm: bytes,
     pcm_path: Path,
     sel: Selection,
     parity: Path,
@@ -408,29 +420,35 @@ def _ctanalyse_and_verify(
     disc_last_lsn: int,
     cddb_id: int,
     read_offset: int,
-    eras_path: Path | None,
+    erasures: bytes | None,
     used_c2: bool,
-    ctanalyse_bin: str,
     verify_ar_gate: bool,
 ) -> CtdbRepairResult:
-    """Run ctanalyse, apply corrections to *pcm*, run both gates, and on success write
-    the repaired PCM back to *pcm_path*. Any failure leaves the file untouched."""
+    """Decode, run both gates on the *repaired* buffer, and on success write it back
+    to *pcm_path*. Any failure leaves the file — and *pcm* — untouched."""
     try:
-        result = run_ctanalyse(
-            pcm_path, parity, sel.entry, bounds, eras_path, ctanalyse_bin
-        )
+        report = run_repair(pcm, parity, sel.entry, bounds, sel.offset, erasures)
     except (OSError, RuntimeError, ValueError) as exc:
-        log.warning("ctanalyse failed: %s", exc)
+        # A missing binding raises RuntimeError out of the seam, where it is
+        # normally fatal. Here it must not be: a CTDB repair that cannot run is
+        # one exit of the recovery ladder declining, and the AR re-read ladder
+        # below it is still worth trying. "The engine is absent" is an outcome
+        # about this disc's recovery, not a reason to abandon the rip.
+        log.warning("CTDB parity repair failed: %s", exc)
         return CtdbRepairResult(
             False,
-            "ctanalyse failed",
+            "parity repair failed",
             entry_id=sel.entry.id,
             ctdb_offset=sel.offset,
             damaged_tracks=sel.damaged,
             used_c2=used_c2,
         )
 
-    if not result.get("can_recover"):
+    # Three outcomes, and the weaker success is kept distinct all the way to the
+    # commit. `audio or audio_unverified` would be shorter, run, and lose the one
+    # bit that says which claim the audio rests on.
+    repaired = report.audio if report.audio is not None else report.audio_unverified
+    if repaired is None:
         return CtdbRepairResult(
             False,
             "damage exceeds RS capacity",
@@ -439,19 +457,20 @@ def _ctanalyse_and_verify(
             damaged_tracks=sel.damaged,
             used_c2=used_c2,
         )
-
-    corrections = result.get("corrections", [])
-    if apply_corrections(pcm, corrections) is not None:
-        return CtdbRepairResult(
-            False,
-            "old-byte mismatch (splice aborted)",
-            entry_id=sel.entry.id,
-            ctdb_offset=sel.offset,
-            damaged_tracks=sel.damaged,
-            used_c2=used_c2,
+    if report.audio is None:
+        # Accepting the weaker claim is sound *only* because of the gate below.
+        # Every word an at-capacity repair can touch lies inside
+        # [bounds[0], bounds[-1]) — precisely the window CTDB's per-track CRCs
+        # cover — so verify_ctdb closes over it absolutely. Committing this
+        # without that gate is the one thing AccuDisc's split exists to stop.
+        log.info(
+            "CTDB repair: %d column(s) determined but not verified — "
+            "committing only if the per-track CRC gate passes",
+            report.unverified_columns,
         )
+    out = bytes(repaired)
 
-    verdict = verify_ctdb(bytes(pcm), sel, bounds, n_tracks)
+    verdict = verify_ctdb(out, sel, bounds, n_tracks)
     if not verdict.ok:
         return CtdbRepairResult(
             False,
@@ -462,7 +481,7 @@ def _ctanalyse_and_verify(
             used_c2=used_c2,
         )
     if verify_ar_gate and not verify_ar(
-        bytes(pcm), sel.damaged, track_lsns, disc_last_lsn, cddb_id, read_offset
+        out, sel.damaged, track_lsns, disc_last_lsn, cddb_id, read_offset
     ):
         return CtdbRepairResult(
             False,
@@ -473,16 +492,17 @@ def _ctanalyse_and_verify(
             used_c2=used_c2,
         )
 
-    pcm_path.write_bytes(pcm)
+    pcm_path.write_bytes(out)
     return CtdbRepairResult(
         True,
         "repaired",
         entry_id=sel.entry.id,
         ctdb_offset=sel.offset,
-        corrections=len(corrections),
-        erasure_columns=int(result.get("erasure_columns", 0)),
+        corrections=report.corrections,
+        erasure_columns=report.erasure_columns,
         damaged_tracks=sel.damaged,
         used_c2=used_c2,
+        unverified_columns=report.unverified_columns,
     )
 
 
@@ -495,7 +515,6 @@ def repair_whole_disc(
     *,
     c2_path: Path | None = None,
     c2_align: int = -2,
-    ctanalyse_bin: str = "ctanalyse",
     cache_dir: Path | None = None,
     verify_ar_gate: bool = True,
 ) -> CtdbRepairResult:
@@ -517,8 +536,8 @@ def repair_whole_disc(
     if not entries:
         return CtdbRepairResult(False, "disc not in CTDB")
 
-    pcm = bytearray(pcm_path.read_bytes())
-    sel = select_entry(bytes(pcm), entries, bounds, n_tracks)
+    pcm = pcm_path.read_bytes()
+    sel = select_entry(pcm, entries, bounds, n_tracks)
     if sel is None:
         return CtdbRepairResult(False, "no CTDB entry reconciles with this rip")
     if not sel.damaged:
@@ -542,16 +561,22 @@ def repair_whole_disc(
     # over-flagging C2 bitmap can spend erasure budget on clean words and turn a
     # decodable stride undecodable, so a failed erasure run says nothing about
     # whether error-only would have worked.
-    attempts: list[tuple[Path | None, bool]] = [(None, False)]
+    #
+    # *pcm* is passed straight in on every attempt, with no defensive copy. That
+    # used to be mandatory — corrections were spliced in place, so a failed
+    # attempt left a half-modified buffer for the next one to build on. AccuDisc
+    # never mutates its input and returns the repaired audio as a fresh buffer,
+    # so the hazard the copy defended against no longer exists.
+    attempts: list[tuple[bytes | None, bool]] = [(None, False)]
     if c2_path and c2_path.exists():
-        eras_path = cache / "ctdb_erasures.bin"
-        eras_path.write_bytes(build_erasure_bitmap(c2_path, len(pcm) // 2, c2_align))
-        attempts.insert(0, (eras_path, True))
+        attempts.insert(
+            0, (build_erasure_bitmap(c2_path, len(pcm) // 2, c2_align), True)
+        )
 
     result = CtdbRepairResult(False, "no repair attempted")
     for eras, used_c2 in attempts:
-        result = _ctanalyse_and_verify(
-            bytearray(pcm),  # fresh copy: a failed attempt must not poison the next
+        result = _repair_and_verify(
+            pcm,
             pcm_path,
             sel,
             parity,
@@ -561,9 +586,8 @@ def repair_whole_disc(
             disc_last_lsn,
             cddb_id,
             read_offset,
-            eras_path=eras,
+            erasures=eras,
             used_c2=used_c2,
-            ctanalyse_bin=ctanalyse_bin,
             verify_ar_gate=verify_ar_gate,
         )
         if result.repaired:

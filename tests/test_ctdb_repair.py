@@ -40,6 +40,27 @@ def _entry(trackcrcs: list[int], stride: int = 10) -> C.Entry:
     )
 
 
+def _report(
+    audio: bytes | None = None,
+    audio_unverified: bytes | None = None,
+    **kw: int,
+) -> C.CtdbRepairReport:
+    """An AccuDisc repair report. Both buffers default to None — a refusal."""
+    fields: dict = {
+        "offset_pairs": 0,
+        "dirty_columns": 1,
+        "repaired_columns": 1,
+        "refused_columns": 0,
+        "erasure_columns": 0,
+        "unverified_columns": 0,
+        "corrections": 1,
+        "crc32_before": 0,
+        "crc32_after": 0,
+    }
+    fields.update(kw)
+    return C.CtdbRepairReport(audio=audio, audio_unverified=audio_unverified, **fields)
+
+
 def _all_crcs(pcm: bytes, bounds: list[int], n: int, stride: int) -> list[int]:
     crcs = [C.track_crc_at(pcm, t, 0, stride, bounds, n) for t in range(1, n + 1)]
     assert None not in crcs
@@ -109,7 +130,7 @@ def _c2_flagging(nsec: int, sector: int) -> bytes:
 def test_the_erasure_bitmap_is_built_over_the_whole_pcm_not_the_ctdb_image(
     tmp_path: Path,
 ) -> None:
-    """ctanalyse converts to CTDB's image domain itself, skipping word_base/8 bytes.
+    """The decoder converts to CTDB's image domain itself, skipping word_base/8 bytes.
     If this function were "fixed" to emit image-relative bits the shift would be
     applied twice and every erasure would land a pre-gap away from its damage."""
     nsec, sector = 100, 40
@@ -136,47 +157,41 @@ def test_repair_whole_disc_sizes_the_bitmap_from_the_pcm_buffer(
         "build_erasure_bitmap",
         lambda p, nwords, align: seen.append(nwords) or b"\x00",
     )
-    h["monkeypatch"].setattr(C, "_ctanalyse_and_verify", h["record"]([True]))
+    h["monkeypatch"].setattr(C, "_repair_and_verify", h["record"]([True]))
     _run(h, c2=True)
     assert seen == [h["pcm_path"].stat().st_size // 2]
 
 
-# ---- B2: stale-binary guard -------------------------------------------------
+# ---- B2: the image window is an argument, not a parsed string ---------------
 
 
-def _fake_proc(stdout: str):
-    class _P:
-        returncode = 0
-        stderr = ""
-
-    _P.stdout = stdout  # type: ignore[attr-defined]
-    return _P()
-
-
-@pytest.mark.parametrize(
-    ("payload", "why"),
-    [
-        ('{"can_recover": true}', "pre-fix binary emits no image_* keys"),
-        ('{"can_recover": true, "image_first_frame": 0}', "analysed the wrong window"),
-    ],
-)
-def test_a_ctanalyse_that_ignored_toc_is_refused(
-    payload: str, why: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+def test_the_ctdb_image_window_is_passed_as_integers_not_a_toc_string(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """The binary is git-ignored but built from tracked source, so a stale local
-    build is easy to end up with — and it fails by returning confident nonsense,
-    not by erroring. Refusing is the only safe response."""
+    """This replaces the stale-binary guard, and the reason it can is the point.
+
+    ``ctanalyse`` took the window as a ``--toc`` string; a build predating
+    2026-07-25 parsed it, ignored it, analysed ``[0, lead-out)`` and returned
+    confident nonsense, so the old test asserted that a reported
+    ``image_first_frame`` disagreeing with ``bounds[0]`` was refused. There is no
+    equivalent failure now — the window is two integers handed to a linked
+    library, and a build that disagrees about the struct raises ``AbiMismatch``
+    instead. What is left worth pinning is that the arithmetic reaching the seam
+    is right, above all ``image_frames``, which is a *length* and not a bound.
+    """
+    seen: dict = {}
     monkeypatch.setattr(
-        "subprocess.run", lambda *a, **k: _fake_proc(payload), raising=True
+        C.accudisc_reader, "ctdb_repair", lambda **kw: seen.update(kw) or _report()
     )
-    with pytest.raises(RuntimeError, match="ignored --toc"):
-        C.run_ctanalyse(
-            tmp_path / "p.pcm",
-            tmp_path / "par.bin",
-            _entry([0, 0]),
-            [33, 100, 200],
-            None,
-        )
+    parity = tmp_path / "par.bin"
+    parity.write_bytes(b"\x00" * 8)
+
+    C.run_repair(b"\x00" * 16, parity, _entry([0, 0]), [33, 100, 200], -639, None)
+
+    assert seen["image_first_frame"] == 33
+    assert seen["image_frames"] == 200 - 33, "a length, not bounds[-1]"
+    assert seen["offset_pairs"] == -639, "our sweep's offset, passed through"
+    assert seen["erasures"] is None, "error-only is a mode, not a degrade"
 
 
 # ---- C2: role-split verdict -------------------------------------------------
@@ -285,7 +300,7 @@ def test_error_only_is_retried_when_the_erasure_attempt_fails(
     _repair_harness: dict,
 ) -> None:
     h = _repair_harness
-    h["monkeypatch"].setattr(C, "_ctanalyse_and_verify", h["record"]([False, False]))
+    h["monkeypatch"].setattr(C, "_repair_and_verify", h["record"]([False, False]))
     result = _run(h, c2=True)
     assert h["calls"] == [True, False], "erasure-assisted first, then error-only"
     assert not result.repaired
@@ -293,7 +308,7 @@ def test_error_only_is_retried_when_the_erasure_attempt_fails(
 
 def test_error_only_is_not_reached_when_erasures_succeed(_repair_harness: dict) -> None:
     h = _repair_harness
-    h["monkeypatch"].setattr(C, "_ctanalyse_and_verify", h["record"]([True]))
+    h["monkeypatch"].setattr(C, "_repair_and_verify", h["record"]([True]))
     result = _run(h, c2=True)
     assert h["calls"] == [True]
     assert result.repaired
@@ -301,38 +316,143 @@ def test_error_only_is_not_reached_when_erasures_succeed(_repair_harness: dict) 
 
 def test_without_a_c2_capture_only_error_only_runs(_repair_harness: dict) -> None:
     h = _repair_harness
-    h["monkeypatch"].setattr(C, "_ctanalyse_and_verify", h["record"]([False]))
+    h["monkeypatch"].setattr(C, "_repair_and_verify", h["record"]([False]))
     _run(h, c2=False)
     assert h["calls"] == [False]
 
 
-# ---- D2: the binary is optional ---------------------------------------------
+# ---- D2: an unavailable engine is an outcome, not a crash -------------------
 
 
-def test_an_absent_ctanalyse_declines_the_repair_instead_of_raising(
-    _repair_harness: dict,
+def test_an_unimportable_binding_declines_the_repair_instead_of_raising(
+    _repair_harness: dict, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """ctanalyse is not shipped, so its absence must be an outcome, not a crash.
+    """A missing engine must decline, and this is the one place in the seam where
+    that is true.
 
-    Deliberately runs the *real* ``_ctanalyse_and_verify`` — the harness stubs it
-    for the attempt-policy tests above, and a stub cannot tell you what the
-    subprocess layer does with a `FileNotFoundError`. This is the case a
-    developer machine can never check, because it has the binary.
+    Everywhere else a missing binding is deliberately **fatal** (kgr's 2026-08-01
+    ruling: there is no second carrier, so a rip that cannot reach the engine must
+    stop rather than quietly do something else). CTDB repair is the exception,
+    because it is one exit of the recovery ladder and the AR re-read ladder below
+    it is still worth trying — "the decoder is absent" is a fact about this
+    disc's recovery, not a reason to abandon the rip.
+
+    Deliberately runs the *real* ``_repair_and_verify`` and the *real* seam,
+    faulting only the binding import, so the ``RuntimeError`` that must be caught
+    is the one ``_binding()`` actually raises. This used to fault an absent
+    ``ctanalyse`` binary; the invariant survived the migration, its spelling did
+    not. A developer machine can never reach this state on its own — it has the
+    binding installed.
     """
     h = _repair_harness
     before = h["pcm_path"].read_bytes()
-
-    result = C.repair_whole_disc(
-        h["pcm_path"],
-        [33, 100],
-        199,
-        0x1234,
-        30,
-        ctanalyse_bin="/nonexistent/ctanalyse",
+    monkeypatch.setattr(
+        C.accudisc_reader, "_import_binding", lambda: (None, "no module named accudisc")
     )
 
+    result = C.repair_whole_disc(h["pcm_path"], [33, 100], 199, 0x1234, 30)
+
     assert not result.repaired
-    assert result.reason == "ctanalyse failed"
+    assert result.reason == "parity repair failed"
     assert h["pcm_path"].read_bytes() == before, (
         "a failed repair must not touch the PCM"
     )
+
+
+# ---- D3: three outcomes, and the weaker success stays distinct --------------
+
+
+@pytest.fixture
+def _gated_harness(_repair_harness: dict) -> dict:
+    """`_repair_harness` with both gates forced open, so only the outcome triage runs."""
+    h = _repair_harness
+    h["monkeypatch"].setattr(C, "verify_ctdb", lambda *a, **k: C.CtdbVerdict())
+    h["monkeypatch"].setattr(C, "verify_ar", lambda *a, **k: True)
+    return h
+
+
+def _repaired_pcm(h: dict) -> bytes:
+    return b"\xa5" * h["pcm_path"].stat().st_size
+
+
+def test_a_refusal_commits_nothing_and_leaves_the_pcm_alone(
+    _gated_harness: dict,
+) -> None:
+    """Both buffers None. A refusal is a normal answer about a damaged disc."""
+    h = _gated_harness
+    before = h["pcm_path"].read_bytes()
+    h["monkeypatch"].setattr(C, "run_repair", lambda *a, **k: _report())
+
+    result = C.repair_whole_disc(h["pcm_path"], [33, 100], 199, 0x1234, 30)
+
+    assert not result.repaired
+    assert result.reason == "damage exceeds RS capacity"
+    assert h["pcm_path"].read_bytes() == before
+
+
+def test_a_verified_repair_commits_and_records_no_unverified_columns(
+    _gated_harness: dict,
+) -> None:
+    h = _gated_harness
+    out = _repaired_pcm(h)
+    h["monkeypatch"].setattr(
+        C, "run_repair", lambda *a, **k: _report(audio=out, erasure_columns=7)
+    )
+
+    result = C.repair_whole_disc(h["pcm_path"], [33, 100], 199, 0x1234, 30)
+
+    assert result.repaired
+    assert result.unverified_columns == 0
+    assert result.erasure_columns == 7
+    assert h["pcm_path"].read_bytes() == out
+
+
+def test_an_unverified_repair_commits_but_stays_identifiable(
+    _gated_harness: dict,
+) -> None:
+    """The weaker of AccuDisc's two success claims is accepted — its columns were
+    *determined* rather than verified — but the result must still say so.
+
+    Accepting it is sound only because the CTDB per-track CRC gate covers
+    ``[bounds[0], bounds[-1])``, which is every word an at-capacity repair can
+    touch. Folding the two buffers together (``audio or audio_unverified``) would
+    commit the same bytes and lose the record of which claim they rest on, which
+    is exactly what AccuDisc's two-buffer return exists to prevent.
+    """
+    h = _gated_harness
+    out = _repaired_pcm(h)
+    h["monkeypatch"].setattr(
+        C,
+        "run_repair",
+        lambda *a, **k: _report(audio_unverified=out, unverified_columns=3),
+    )
+
+    result = C.repair_whole_disc(h["pcm_path"], [33, 100], 199, 0x1234, 30)
+
+    assert result.repaired
+    assert result.unverified_columns == 3, "the weaker claim must not vanish"
+    assert h["pcm_path"].read_bytes() == out
+
+
+def test_an_unverified_repair_is_still_refused_by_the_crc_gate(
+    _gated_harness: dict,
+) -> None:
+    """The gate is what makes accepting the weaker claim safe, so it must bite."""
+    h = _gated_harness
+    before = h["pcm_path"].read_bytes()
+    h["monkeypatch"].setattr(
+        C, "verify_ctdb", lambda *a, **k: C.CtdbVerdict(unfixed=[1])
+    )
+    h["monkeypatch"].setattr(
+        C,
+        "run_repair",
+        lambda *a, **k: _report(
+            audio_unverified=_repaired_pcm(h), unverified_columns=3
+        ),
+    )
+
+    result = C.repair_whole_disc(h["pcm_path"], [33, 100], 199, 0x1234, 30)
+
+    assert not result.repaired
+    assert "CTDB CRC gate failed" in result.reason
+    assert h["pcm_path"].read_bytes() == before

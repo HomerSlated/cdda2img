@@ -3098,6 +3098,16 @@ def rip_image(  # noqa: C901
                 provenance["ctdb_offset"] = f"{ctdb_result.ctdb_offset:+d}"
             if ctdb_result.used_c2:
                 provenance["ctdb_erasures"] = "c2"
+            # A repair that rested on AccuDisc's weaker success claim: some column
+            # carried exactly npar erasures, so its errata were *determined* and
+            # the re-verification that vouches for every other column was an
+            # identity there. Both gates still passed, which is what makes it
+            # committable — but "which claim did this audio rest on" is not
+            # recoverable from the finished RBI, so it is recorded here or nowhere.
+            if ctdb_result.unverified_columns:
+                provenance["ctdb_unverified_columns"] = str(
+                    ctdb_result.unverified_columns
+                )
             if not ctdb_result.repaired:
                 provenance["ctdb_declined"] = ctdb_result.reason
         # Speed-laddered recovery provenance: what was tried and the per-track outcome.

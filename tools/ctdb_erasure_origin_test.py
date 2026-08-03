@@ -4,10 +4,16 @@
 The claim under test
 --------------------
 ``ctdb_repair.build_erasure_bitmap`` builds one bit per word over **our** PCM domain,
-``[0, lead-out)``. ``ctanalyse`` consumes it over **CTDB's** image domain,
+``[0, lead-out)``. The decoder consumes it over **CTDB's** image domain,
 ``[bounds[0], bounds[-1])``, by skipping the first ``word_base = bounds[0] * 1176``
 bits (``word_base / 8`` bytes) before mapping bits to grid cells. Those two domains
 differ by a whole program-area pre-gap on any disc with track 1 INDEX 01 > 0.
+
+Since 2026-08-02 the decoder is AccuDisc's ``ctdb_repair`` rather than the
+``ctanalyse`` binary, reached through the seam. The claim is unchanged and so is
+this test — AccuDisc documents the same PCM-absolute contract for its ``erasures``
+argument — but note the test now exercises the code that actually ships, where
+before it exercised a binary that ships with nothing.
 
 Until now that shift was only ever checked by arithmetic. Every CTDB fixture and every
 disc we had repaired had ``bounds[0] == 0``, where the shift is a no-op — so the code
@@ -144,7 +150,6 @@ def _run(
         0,  # cddb_id: only the AR gate uses it, and that gate is off here
         0,
         c2_path=c2,
-        ctanalyse_bin=str(Path(__file__).resolve().parent / "ctanalyse" / "ctanalyse"),
         cache_dir=work,
         verify_ar_gate=False,  # AR is a second opinion; the CTDB CRC gate is the subject
     )
