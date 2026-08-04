@@ -2,54 +2,53 @@
 
 ## Open
 
-### 🔴 NEXT SESSION — 2026-08-04
+### 🔴 NEXT SESSION
 
-Both raised by kgr at the close of 2026-08-03. Start here.
+Both raised by kgr at the close of 2026-08-03. Worked on 2026-08-04: **N1a is
+resolved**, N1b and N2 remain. Start with N1b or N2.
 
-#### N1. **[C2I] Tracy Chapman track 8 no longer reports a failure — is the repair
-now invisible, or did it not happen?**
+#### ~~N1a. Tracy Chapman track 8 no longer reports a failure — is the repair now
+invisible, or did it not happen?~~ — **RESOLVED 2026-08-04. It did not happen.**
 
-The concern as stated: with the analyse *and* repair both outsourced to AccuDisc,
-the whole operation may be running silently, so we never see the error or the
-repair. Investigate before assuming — some evidence was gathered at the close of
-the session and it points elsewhere, so **do not start from the hypothesis.**
+The hypothesis was that with analysis *and* repair both outsourced to AccuDisc the
+operation runs silently, so we never see the error or the repair. Two further rips
+on 2026-08-04 refute it, and they do so on **both** exit paths of the recovery
+ladder — track 8 failed AccurateRip on each, and each left a complete trace:
 
-**What is already known** (three rips of the same disc, all `11/11 tracks OK`,
-min conf 200):
-
-| container | created | `ripper` | CTDB PROV keys |
+| container | created | `ripper` | track 8 |
 |---|---|---|---|
-| `Tracy Chapman.rbi` | 2026-08-01 10:19 | `accudisc+ctdb` | `ctdb_entry=67116`, `ctdb_offset=-639`, `ctdb_erasures=c2`, `recovery_track_8=ctdb_repaired@67116` |
-| `Tracy Chapman_1.rbi` | 2026-08-03 19:03 | `accudisc` | **none** |
-| `Tracy Chapman_2.rbi` | 2026-08-03 19:10 | `accudisc` | **none** |
+| `Tracy Chapman.rbi` | 08-01 10:19 | `accudisc+ctdb` | `ctdb_repaired@67116` |
+| `Tracy Chapman_1.rbi` | 08-03 19:03 | `accudisc` | no failure, no `ctdb_*` keys |
+| `Tracy Chapman_2.rbi` | 08-03 19:10 | `accudisc` | no failure, no `ctdb_*` keys |
+| `Tracy Chapman_3.rbi` | 08-04 15:37 | `accudisc+c2rec` | `ctdb_declined=CTDB parity fetch failed` → `matched@24X` |
+| `Tracy Chapman_4.rbi` | 08-04 15:44 | `accudisc+ctdb` | `ctdb_entry=67116`, `ctdb_offset=-639`, `ctdb_erasures=c2` → `ctdb_repaired@67116` |
 
-The 08-01 rip needed a repair, recorded it, and says so in `ripper`. The two 08-03
-rips carry **no `ctdb_*` keys at all** — and that is the load-bearing detail,
-because a *declined* attempt also writes `ctdb_declined=<reason>` (plus
-`ctdb_entry`/`ctdb_offset`), precisely so a failed repair leaves a trace. Absence
-of every key means the repair was **never attempted**, not that it ran silently.
+So **AR is still able to fail**, the gate still fires, and neither exit is silent.
+The 08-03 pair were genuinely clean reads — candidate (a), which the recovery
+bench's own finding (read errors are stable per *speed*, not per defect) already
+made unremarkable. Candidate (b), a defect upstream of the gate introduced by the
+migration, is dead: the gate fired twice on 08-04 against migrated code.
 
-Which puts the question one level up: the attempt is gated on
-`_ar_has_partial_mismatch(ar_verify.tracks)` (`cdda2img.py:2929`), so if AR reported
-11/11 on the *first* pass there was nothing to repair. Two candidate explanations,
-and they need separating by evidence rather than argument:
-- **(a) The rips are genuinely clean.** The disc was read twice more on 08-03; a
-  read that succeeds where an earlier one failed is ordinary, and the recovery
-  bench's own finding is that read errors are stable per *speed*, not per defect.
-- **(b) Something upstream of the gate changed on 2026-08-02** — the migration
-  (`c070d1e`) is the obvious suspect by timing, but note it changed the **repair**,
-  not AR verification, and the gate sits *above* it. A defect there would have to be
-  in `verify_rip` or in what is passed to it, not in the CTDB path.
+Rip 3 is the more valuable of the two, because it exercised a path nothing had yet
+covered end to end: CTDB unreachable → decline recorded → speed ladder → match at
+24×. Worth keeping in mind as a known-good reference for that arm.
 
-Suggested first cuts, cheapest first: diff the stored PCM of `_1`/`_2` against the
-08-01 container over track 8's window (if the bytes differ, the reads differ and (a)
-is live); check whether `Tracy Chapman-old.rbi` under `rips/cdda2img/` is a
-pre-repair capture that can serve as a known-bad control; and re-read the disc once
-at the same speed to see whether the failure reproduces at all. **A rip that passes
-is not a bug** — the thing to establish is whether AR is still *able* to fail, which
-is the same "can this instrument still fail?" question that has caught us twice.
+The reasoning that got here is worth keeping: absence of *every* `ctdb_*` key means
+no attempt, because a declined attempt writes `ctdb_declined` plus the entry and
+offset. That asymmetry is what let a negative result be read off a container
+without a rerun — it is only as good as the discipline of always recording the
+decline, so do not let that emission get "tidied up".
 
-Second, unrelated concern in the same PROV dump, and worth its own look:
+**Loose thread, not chased:** `ctdb_offset=-639` on 08-04 against the `-669`
+recorded earlier, differing by exactly the +30 read offset. Consistent with the
+repair now running in the raw domain, but that is a hypothesis, not a measurement,
+and conflating those two offset domains is a trap already fallen into once
+(`project_ctdb_offset_domains`). Measure before believing it.
+
+#### N1b. **[C2I] `lookup_status_discogs=empty` beside `discogs_barcode_corroborates=YES`** — still open
+
+Present in all four Tracy Chapman rips, including both from 2026-08-04. The
+concern:
 `lookup_status_discogs=empty` sits beside `discogs_barcode_corroborates=YES`. Those
 are not obviously contradictory — the corroboration path fetches the **MB** release's
 `inc=url-rels` and follows the link to a Discogs *release id*
