@@ -96,12 +96,26 @@ only when MB has no Discogs relation.
   *filter* and a poor *key* — the same conclusion §1a reached about the on-disc
   MCN, arrived at from the service side.
 
+- **A barcode can be forged, not merely shared.** Of the 68, **one is a different
+  artist entirely**: Discogs 18528415, Jamiroquai *The Best 2000*, UK 1994,
+  carrying `075596077422` on its printed sleeve. It is not a submission error —
+  and it is not Sony reusing Elektra's UPC either. Discogs classifies it
+  `formats[].descriptions = ['Compilation', 'Unofficial Release']` with no
+  catalogue number: a bootleg that copied a real barcode. This is a *different*
+  failure from the other 67. Breadth is sloppiness and leaves every hit the right
+  album; forgery is adversarial, and a trust model can price in "this key is
+  coarse" but not "this key can be faked" without an independent second check.
+
 **Open questions.** (a) For the fallback branch, `cddb.consensus_from_candidates`
 is the shape that fits — merge only the fields a tied set agrees on, rather than
 picking one arbitrarily. (b) `_albums_match` must still gate the *linked*
-release; a mis-linked relation is exactly what it catches, and "MB pointed at it"
-is not a reason to drop the check. (c) Resolve the link once and pass it to both
-consumers rather than fetching url-rels twice.
+release. **Settled by the bootleg above**: a mis-linked relation and a forged
+barcode deliver the same wrong object, and "MB pointed at it" is not a substitute
+for checking what arrived. (c) Resolve the link once and pass it to both
+consumers rather than fetching url-rels twice. (d) **Drop unofficial releases**
+from barcode results — Discogs marks them in `formats[].descriptions`, which
+`_parse_result` currently discards (`DiscMeta` has no format field). Cheap, and
+it removes the one adversarial candidate before any scoring runs.
 
 **Caveat**: the disambiguation numbers are n=1, on a heavily-reissued album. The
 structural argument does not depend on the sample; the *rate* does.
