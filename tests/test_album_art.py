@@ -231,3 +231,86 @@ def test_fetch_cover_does_not_cache_miss(monkeypatch) -> None:
     assert album_art.fetch_cover(disc) is None
     assert album_art.fetch_cover(disc) is None
     assert calls["n"] == 2  # miss not cached
+
+
+# ---------------------------------------------------------------------------
+# Chain order — release before release-group (2026-08-04)
+# ---------------------------------------------------------------------------
+#
+# CAA's release-group endpoint serves the front cover of ONE release in the
+# group, picked by CAA, and it need not be the release we identified: measured
+# on Tracy Chapman, release-group a738bdf1 serves release b0760dd1's art while
+# the disc in the drive is 65e67d39. Group-first embedded another pressing's
+# cover on every disc whose group had art. These tests pin the order itself,
+# not just the returned object — a chain that consults the right rung second
+# still returns the wrong art whenever the first rung answers.
+
+
+def _record_caa_calls(monkeypatch, answers: dict[str, CoverArt | None]) -> list[str]:
+    """Patch _try_caa to answer per entity and record the order of consultation."""
+    from cdda2img import album_art
+
+    album_art._COVER_CACHE.clear()
+    seen: list[str] = []
+
+    def _fake_try(entity, _mbid):
+        seen.append(entity)
+        return answers.get(entity)
+
+    monkeypatch.setattr(album_art, "_try_caa", _fake_try)
+    return seen
+
+
+def test_fetch_cover_prefers_the_release_over_its_group(monkeypatch) -> None:
+    # Both rungs would answer. The release's own art must win, and the
+    # release-group must not be consulted at all.
+    from cdda2img import album_art
+
+    rel = CoverArt(data=b"r", fmt="jpeg", width=2, height=2, source="caa:release:rel-x")
+    grp = CoverArt(
+        data=b"g", fmt="jpeg", width=1, height=1, source="caa:release-group:rg-x"
+    )
+    seen = _record_caa_calls(monkeypatch, {"release": rel, "release-group": grp})
+
+    disc = RBIDisc(
+        album="a", artist="b", mb_release_id="rel-x", mb_release_group_id="rg-x"
+    )
+    assert album_art.fetch_cover(disc) is rel
+    assert seen == ["release"]
+
+
+def test_fetch_cover_falls_back_to_the_group_when_the_release_has_no_art(
+    monkeypatch,
+) -> None:
+    # The release rung is preferred, not required: a release with no uploaded
+    # front still gets the group's representative image.
+    from cdda2img import album_art
+
+    grp = CoverArt(
+        data=b"g", fmt="jpeg", width=1, height=1, source="caa:release-group:rg-x"
+    )
+    seen = _record_caa_calls(monkeypatch, {"release": None, "release-group": grp})
+
+    disc = RBIDisc(
+        album="a", artist="b", mb_release_id="rel-x", mb_release_group_id="rg-x"
+    )
+    assert album_art.fetch_cover(disc) is grp
+    assert seen == ["release", "release-group"]
+
+
+def test_fetch_cover_uses_the_group_when_no_release_was_identified(
+    monkeypatch,
+) -> None:
+    # Why the release-group rung is kept at all: field_resolver enforces C2 —
+    # recording-level sources (AcoustID) may not propose an mb_release_id — so
+    # an AcoustID-only identification arrives here with a group and nothing else.
+    from cdda2img import album_art
+
+    grp = CoverArt(
+        data=b"g", fmt="jpeg", width=1, height=1, source="caa:release-group:rg-x"
+    )
+    seen = _record_caa_calls(monkeypatch, {"release-group": grp})
+
+    disc = RBIDisc(album="a", artist="b", mb_release_group_id="rg-x")
+    assert album_art.fetch_cover(disc) is grp
+    assert seen == ["release-group"]

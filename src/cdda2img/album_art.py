@@ -242,16 +242,30 @@ def _discogs_cached(release_id: int) -> CoverArt | None:
 def fetch_cover(disc: RBIDisc) -> CoverArt | None:
     """Fetch the best available front cover for disc.
 
-    Chain: CAA release-group → CAA release → Discogs. Best-effort — returns
+    Chain: CAA release → CAA release-group → Discogs. Best-effort — returns
     None on network failure. Successful fetches are memoised per source (OPT-2).
+
+    **The release rung comes first, and the order is the point.** CAA's
+    release-group endpoint serves the front cover of *one* release in the group,
+    chosen by CAA, and it need not be the release we identified: measured on
+    Tracy Chapman, release-group ``a738bdf1`` serves release ``b0760dd1``'s art
+    while the disc in the drive is ``65e67d39`` (2026-08-04). Group-first
+    therefore embedded another pressing's cover on every disc whose group had
+    any art, discarding the pressing the §10.3 selection ladder, the barcode
+    corroboration and ``preferred_country`` had all just worked to pin.
+
+    The release-group rung is kept, second, because a disc can legitimately
+    arrive here with a group and no release: ``field_resolver`` enforces C2 —
+    recording-level sources (AcoustID) may not propose an ``mb_release_id`` —
+    so an AcoustID-only identification has nothing else to fetch against.
     """
-    if disc.mb_release_group_id:
-        art = _caa_cached("release-group", disc.mb_release_group_id)
+    if disc.mb_release_id:
+        art = _caa_cached("release", disc.mb_release_id)
         if art is not None:
             return art
 
-    if disc.mb_release_id:
-        art = _caa_cached("release", disc.mb_release_id)
+    if disc.mb_release_group_id:
+        art = _caa_cached("release-group", disc.mb_release_group_id)
         if art is not None:
             return art
 
