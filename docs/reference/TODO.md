@@ -120,6 +120,79 @@ it removes the one adversarial candidate before any scoring runs.
 **Caveat**: the disambiguation numbers are n=1, on a heavily-reissued album. The
 structural argument does not depend on the sample; the *rate* does.
 
+**N1c may be overtaken by N1d below — read that first.** kgr's position at the
+close of 2026-08-04 questions whether Discogs should be a corroboration source at
+all, which changes what the reorder is *for*.
+
+#### N1d. **[DESIGN, kgr thinking] What is Discogs actually for? — parked**
+
+kgr's position, 2026-08-04, recorded rather than actioned. **No code until this
+settles**; it governs N1c.
+
+**The argument.** Discogs is user-submitted and, as measured above, riddled with
+errors, missing data, inconsistencies and unexpectedly with pirate CD-Rs. It is
+genuinely useful for a large class of facts we never record in PROV — sleeve
+variants, pressing plant, matrix/runout, jewel-case detail — but *none of those
+exist in the disc data*. They live on the outside of the disc and on the insert,
+so they can only be read by a human holding the case, and therefore **none of
+them can disambiguate anything programmatically**.
+
+That makes Discogs a poor corroboration source. The only thing we can actually
+lean on is the Discogs link presented on the MB release, and that confirms
+exactly one thing: a human edited that MB page and chose to associate it with one
+of many Discogs pages. **That is not independent corroboration.** And a
+reciprocal Discogs→MB link would not fix it — independence is not about which
+page holds the pointer, it is about whether the two records come from different
+populations. They do not: same community, often the same editor. So
+`discogs_link_barcode_agrees` still overstates even after today's rename; the
+honest reading is "two user-submitted records that a human deliberately
+associated do not contradict each other". Better characterised as *additional
+info that may or may not be accurate* than as corroboration.
+
+kgr's conclusion: the only real corroborator and disambiguator in this pipeline
+is **the user**, who has the physical disc in hand and can see the many
+identifiers that were never baked into the disc data.
+
+**One distinction worth keeping when this is picked up** (agent's contribution,
+not kgr's): "user-submitted" is not one category. The MB disc ID, AccurateRip and
+CTDB are all crowd-contributed, yet nobody can submit a wrong disc ID that still
+matches, because the TOC recomputes it — and a wrong AR checksum does not survive
+contact with 200 independent rippers, because agreement there is arithmetic
+rather than opinion. A typed catalogue number has no such property: nothing
+recomputes it, an error propagates forever, and a bootlegger can forge it. The
+axis that matters is therefore **derived from the artefact vs asserted about it**,
+not user-submitted vs authoritative. By that split the pipeline already holds
+real authority — disc ID, AR, CTDB, pressed ISRC/MCN — just not anywhere Discogs
+operates.
+
+**Candidate directions, none chosen.**
+- **Keep the link as a *destination*, not as evidence.** `discogs_release_id` is
+  already in PROV; its durable value is that it takes the user one click from the
+  container to the page with sleeve photographs they can hold the disc against.
+  Under that reading the barcode comparison is only interesting when it *fails*,
+  as a hint the pointer is bad.
+- **PROV should record provenance, not verdicts.** `..._agrees=YES` still reads
+  as a confidence claim. Recording the fact (the link id, and both barcodes when
+  they differ) and letting a reader conclude is more honest and ages better —
+  the same reason `ctdb_declined` records what happened rather than whether it
+  was acceptable.
+- **Or retire §10.3.1.** If the output is "may or may not be accurate", it should
+  either be a recorded fact or not cost two network round-trips. Today's rename
+  was the minimum honest change, not necessarily the right one.
+- **The product work may be in the menu, not the lookups.** Presenting ambiguity
+  well — "13 candidate pressings, here is the Discogs link, you have the disc" —
+  rather than trying to auto-resolve what only a human with the jewel case can
+  settle.
+
+Relates to [[project_metadata_authority_model]] ("Guess the Album": no
+authoritative ground truth, every field a best guess, the user is final arbiter,
+PCM verbatim is the real guarantee) — this is that position re-derived from the
+Discogs side, which suggests the architecture is already right and only the
+labelling overclaimed. Also feeds OPT-4 and
+`docs/reference/identifier_trust_model.md` §1a, whose justification for keeping
+the service barcode as *the* disambiguation key rests on a cleaner-namespace
+argument that today's measurements do not support.
+
 #### N2. **[C2I] Build the Q + C2 map, and restore the per-track marker on the
 progress bar**
 
