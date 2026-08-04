@@ -3,7 +3,7 @@
 Public API
 ----------
 CoverArt              dataclass: raw image bytes + provenance
-fetch_cover(disc)     → CoverArt | None   CAA rg → CAA release → Discogs
+fetch_cover(disc)     → CoverArt | None   CAA release → CAA rg → Discogs
 cover_from_file_tags  → CoverArt | None   mutagen; for the create pipeline
 transcode_to_jpeg     → bytes             PyAV; no-op when already JPEG
 downscale_jpeg        → bytes             PyAV; for FLAC embed (~600 px)
@@ -23,6 +23,7 @@ import os
 import shutil
 import subprocess
 import tempfile
+import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
@@ -142,6 +143,55 @@ def _http_get(url: str, max_bytes: int, headers: dict[str, str] | None = None) -
 # ---------------------------------------------------------------------------
 
 
+# CAA 5xx retry (2026-08-04). CAA is a *redirector*: its 307 hands off to
+# archive.org, whose 302 lands on one of many storage nodes, and a single
+# unhealthy node returns 500 for a file its siblings serve perfectly. Measured
+# on release 928588a5 in one 8-request run: every `.us` node answered 200,
+# while `dn710607.ca` answered 200 once and then 500 three times running. So a
+# retry here **re-rolls the node**, which is a different and much better bet
+# than re-asking a sick server — and the reason this lives in the CAA path and
+# not in `_http_get`, where Discogs would inherit it without the same rationale.
+#
+# The delay is not backoff. We are not waiting for a server to heal; it exists
+# because consecutive requests can stick to the same node (attempts 6-8 above
+# all drew the bad one), so a zero-delay retry risks re-drawing it.
+#
+# Why this is worth the code: the retry protects the release→release-group
+# ordering fix committed earlier the same day. A spurious 500 on the release
+# rung silently demotes the fetch to the release-group rung, which serves a
+# *different* pressing's cover — so an unretried transient failure does not
+# cost an image, it records a wrong one. Confirmed on Tracy Chapman_5.rbi:
+# mb_release_id=65e67d39 with art_source=caa:release-group:a738bdf1.
+_CAA_RETRY_ATTEMPTS = 3
+_CAA_RETRY_DELAY = 0.5
+
+
+def _caa_get(url: str, entity: str, mbid: str) -> bytes:
+    """GET a CAA image, re-rolling the archive.org node on a 5xx.
+
+    Only 5xx is retried. A 404 is a real "this entity has no front cover" and
+    one attempt is the correct cost — retrying it would triple the latency of
+    the commonest negative answer to buy nothing.
+    """
+    for attempt in range(1, _CAA_RETRY_ATTEMPTS + 1):
+        try:
+            return _http_get(url, _MAX_BYTES)
+        except urllib.error.HTTPError as exc:
+            if exc.code < 500 or attempt == _CAA_RETRY_ATTEMPTS:
+                raise
+            log.debug(
+                "CAA %s %s: HTTP %s on attempt %d/%d — re-rolling the node",
+                entity,
+                mbid,
+                exc.code,
+                attempt,
+                _CAA_RETRY_ATTEMPTS,
+            )
+            time.sleep(_CAA_RETRY_DELAY)
+    msg = "unreachable: CAA retry loop exited without returning or raising"
+    raise RuntimeError(msg)
+
+
 def _try_caa(entity: str, mbid: str) -> CoverArt | None:
     """Try CAA original, then 1200 on size-cap; return None on any real failure."""
     source = f"caa:{entity}:{mbid}"
@@ -149,7 +199,7 @@ def _try_caa(entity: str, mbid: str) -> CoverArt | None:
         suffix = "front" if size == "original" else "front-1200"
         url = f"{_CAA_BASE}/{entity}/{mbid}/{suffix}"
         try:
-            data = _http_get(url, _MAX_BYTES)
+            data = _caa_get(url, entity, mbid)
             fmt, w, h = sniff(data)
             return CoverArt(data=data, fmt=fmt, width=w, height=h, source=source)
         except ValueError:
@@ -162,6 +212,16 @@ def _try_caa(entity: str, mbid: str) -> CoverArt | None:
         except urllib.error.HTTPError as exc:
             if exc.code == 404:
                 log.debug("CAA %s %s: no front cover (404)", entity, mbid)
+            elif exc.code >= 500:
+                # Say how hard we tried: the visible symptom of a bad node is
+                # this line, and "HTTP 500" alone reads as one unlucky request.
+                log.warning(
+                    "CAA %s %s: HTTP %s after %d attempts",
+                    entity,
+                    mbid,
+                    exc.code,
+                    _CAA_RETRY_ATTEMPTS,
+                )
             else:
                 log.warning("CAA %s %s: HTTP %s", entity, mbid, exc.code)
             break

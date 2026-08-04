@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import urllib.error
 from pathlib import Path
 from typing import cast
 from unittest.mock import MagicMock, patch
@@ -314,3 +315,83 @@ def test_fetch_cover_uses_the_group_when_no_release_was_identified(
     disc = RBIDisc(album="a", artist="b", mb_release_group_id="rg-x")
     assert album_art.fetch_cover(disc) is grp
     assert seen == ["release-group"]
+
+
+# ---------------------------------------------------------------------------
+# CAA 5xx retry — re-rolling the archive.org node (2026-08-04)
+# ---------------------------------------------------------------------------
+#
+# CAA redirects to one of archive.org's storage nodes and a single unhealthy
+# node 500s on files its siblings serve fine (measured: every .us node 200,
+# one .ca node 500 three times running). The retry re-rolls the node. It is
+# load-bearing rather than cosmetic because a spurious 500 on the release rung
+# demotes the fetch to the release-group rung, which serves a DIFFERENT
+# pressing's cover — so the failure records a wrong answer, not a missing one.
+
+
+def _http_error(code: int) -> urllib.error.HTTPError:
+    return urllib.error.HTTPError("https://x/y", code, "boom", {}, None)  # type: ignore[arg-type]
+
+
+def _patch_http(monkeypatch, outcomes: list[object]) -> dict[str, int]:
+    """Serve `outcomes` in order from _http_get; raise the ones that are errors."""
+    from cdda2img import album_art
+
+    album_art._COVER_CACHE.clear()
+    monkeypatch.setattr(album_art.time, "sleep", lambda _s: None)
+    state = {"n": 0}
+
+    def _fake_get(_url, _max_bytes, headers=None):
+        item = outcomes[state["n"]]
+        state["n"] += 1
+        if isinstance(item, Exception):
+            raise item
+        return cast(bytes, item)
+
+    monkeypatch.setattr(album_art, "_http_get", _fake_get)
+    return state
+
+
+def test_caa_retries_a_5xx_and_succeeds_on_a_healthy_node(monkeypatch) -> None:
+    from cdda2img import album_art
+
+    jpeg = _make_jpeg(8, 8)
+    state = _patch_http(monkeypatch, [_http_error(500), _http_error(500), jpeg])
+
+    art = album_art._try_caa("release", "rel-x")
+    assert art is not None
+    assert art.source == "caa:release:rel-x"
+    assert state["n"] == 3  # two bad nodes, then a good one
+
+
+def test_caa_does_not_retry_a_404(monkeypatch) -> None:
+    # A 404 is a real "no front cover for this entity". Retrying it would
+    # triple the latency of the commonest negative answer to buy nothing.
+    from cdda2img import album_art
+
+    state = _patch_http(monkeypatch, [_http_error(404), _make_jpeg(8, 8)])
+
+    assert album_art._try_caa("release", "rel-x") is None
+    assert state["n"] == 1
+
+
+def test_caa_does_not_retry_a_non_404_client_error(monkeypatch) -> None:
+    # 4xx is the server telling us something about the request; re-rolling the
+    # storage node cannot change it. Only 5xx is node-dependent.
+    from cdda2img import album_art
+
+    state = _patch_http(monkeypatch, [_http_error(403), _make_jpeg(8, 8)])
+
+    assert album_art._try_caa("release", "rel-x") is None
+    assert state["n"] == 1
+
+
+def test_caa_gives_up_after_the_attempt_cap(monkeypatch) -> None:
+    # Exhausting the cap must fall through to the caller's chain, not loop on
+    # into the size ladder: the 1200 derivative lives on the same sick node.
+    from cdda2img import album_art
+
+    state = _patch_http(monkeypatch, [_http_error(500)] * 6)
+
+    assert album_art._try_caa("release", "rel-x") is None
+    assert state["n"] == album_art._CAA_RETRY_ATTEMPTS
