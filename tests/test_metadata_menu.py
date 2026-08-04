@@ -464,6 +464,65 @@ def test_prepopulate_discogs_hint_fires_from_mb_barcode_hint():
     assert result.catalog is None  # on-disc MCN untouched (none here)
 
 
+def test_prepopulate_discogs_reports_a_hit_even_when_the_barcode_did_not_change():
+    """applied_hit is the lookup_status_discogs signal, and it must not be a
+    barcode delta.
+
+    Phase A writes disc.barcode from MusicBrainz's hint *before* Discogs is
+    queried, so on any disc where MB already supplied the barcode there is no
+    delta to observe — yet Discogs merged a full result. The old status proxy
+    (`disc.barcode != pre_discogs_barcode`) read `empty` here, which is what
+    made a successful Discogs lookup indistinguishable from no lookup at all.
+    """
+    from cdda2img.cdda2img import _prepopulate_from_discogs
+
+    disc = _disc(album="Eliminator", artist="ZZ Top")
+    hit = DiscMeta(
+        album="Eliminator",
+        artist="ZZ Top",
+        barcode="0075992377423",
+        label="Warner Bros.",
+        tracks=[],
+    )
+    with (
+        patch("cdda2img.discogs_lookup.is_available", return_value=True),
+        patch("cdda2img.discogs_lookup.search_by_barcode", return_value=[hit]),
+    ):
+        result, chosen, applied_hit = _prepopulate_from_discogs(
+            disc, ui=None, barcode_hints=[("", "0075992377423")]
+        )
+    # The barcode is identical before and after the Discogs call ...
+    assert chosen == "0075992377423"
+    assert result.barcode == "0075992377423"
+    # ... but Discogs did return and merge data, and the hit must say so.
+    assert applied_hit is hit
+
+
+def test_prepopulate_discogs_reports_no_hit_when_results_are_ambiguous():
+    """An ambiguous result set merges nothing, so applied_hit is None.
+
+    Measured on Tracy Chapman: barcode 0075596077422 returns 25 Discogs rows,
+    the `len(results) != 1` gate discards all of them, and nothing is merged.
+    `empty` is a defensible label for that outcome; the defect was reaching it
+    by a route that also fired when Discogs HAD merged (see the test above).
+    """
+    from cdda2img.cdda2img import _prepopulate_from_discogs
+
+    disc = _disc(album="Tracy Chapman", artist="Tracy Chapman")
+    rows = [
+        DiscMeta(album="Tracy Chapman", artist="Tracy Chapman", tracks=[])
+        for _ in range(25)
+    ]
+    with (
+        patch("cdda2img.discogs_lookup.is_available", return_value=True),
+        patch("cdda2img.discogs_lookup.search_by_barcode", return_value=rows),
+    ):
+        _result, _chosen, applied_hit = _prepopulate_from_discogs(
+            disc, ui=None, barcode_hints=[("", "0075596077422")]
+        )
+    assert applied_hit is None
+
+
 def test_prepopulate_discogs_ignores_ondisc_mcn():
     """An on-disc MCN does NOT seed the Discogs query (§1a). With no MB hint and
     only a readable MCN, there is no candidate, no query, and disc.barcode stays

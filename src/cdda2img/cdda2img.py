@@ -1865,13 +1865,19 @@ def _run_metadata_lookups(
     from cdda2img import discogs_lookup as _discogs
 
     discogs_attempted = _discogs.is_available()
-    pre_discogs_barcode = disc.barcode
     disc, chosen_barcode, discogs_hit = _prepopulate_from_discogs(
         disc, ui, barcode_hints=mb_result.barcode_hints
     )
+    # has_data is the hit _prepopulate_from_discogs actually merged, which is what
+    # it returns `applied_hit` for. It used to be `disc.barcode changed during the
+    # call`, and that proxy answered a different question: phase A writes the
+    # barcode from **MusicBrainz's** hints *before* Discogs is queried, so on any
+    # disc where MB already supplied it — the normal case — there was no delta and
+    # the status read `empty` however much Discogs had returned. Measured on Tracy
+    # Chapman: search_by_barcode('0075596077422') yields 25 rows, PROV said empty.
     provenance["lookup_status_discogs"] = _r12_status(
         attempted=discogs_attempted,
-        has_data=bool(disc.barcode) and disc.barcode != pre_discogs_barcode,
+        has_data=discogs_hit is not None,
         errored=False,
     )
     # §10.3.1: cross-source barcode corroboration on the rung-selected release.
