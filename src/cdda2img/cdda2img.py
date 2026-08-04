@@ -1351,12 +1351,22 @@ def _r11_corroborate_with_discogs_master(
 def _discogs_barcode_corroborate(
     disc: RBIDisc, provenance: dict[str, str], *, selected_release_id: str | None
 ) -> None:
-    """§10.3.1 Discogs barcode corroboration — cross-source, light, PROV-only.
+    """§10.3.1 MB→Discogs link check — barcode agreement across the relation.
 
     On the **selected** release only: follow the MB→Discogs url-relation, fetch
     the linked Discogs release, and compare its barcode to MusicBrainz's.
-    Agreement → ``discogs_barcode_corroborates=YES``; disagreement →
-    ``discogs_barcode_conflict=mb:<bc>|discogs:<bc>``.
+    Agreement → ``discogs_link_barcode_agrees=YES``; disagreement →
+    ``discogs_link_barcode_conflict=mb:<bc>|discogs:<bc>``.
+
+    **What this does and does not claim** (renamed from
+    ``discogs_barcode_corroborates`` 2026-08-04). The two sides are not
+    independent: an MB editor chose both the barcode and the relation, so
+    agreement validates *the link*, not the pressing. It catches a mis-linked
+    relation — a real and useful thing — but it is not a second source
+    confirming which pressing this is, and the old name said it was. The
+    distinction gets sharper if the linked release is ever promoted to a
+    metadata *source*, at which point the check would be comparing a record
+    against itself.
 
     Deliberately does **not** feed release selection (the rung has already
     chosen) and skips cleanly — no fetch, no PROV key — when there is no MB
@@ -1385,9 +1395,9 @@ def _discogs_barcode_corroborate(
     if d_meta is None or not d_meta.barcode:
         return
     if d_meta.barcode == mb_barcode:
-        provenance["discogs_barcode_corroborates"] = "YES"
+        provenance["discogs_link_barcode_agrees"] = "YES"
     else:
-        provenance["discogs_barcode_conflict"] = (
+        provenance["discogs_link_barcode_conflict"] = (
             f"mb:{mb_barcode}|discogs:{d_meta.barcode}"
         )
 

@@ -276,15 +276,37 @@ def search_releases(
         return []
 
 
+# Discogs paginates at 50 per page. The cap bounds a pathological barcode (a
+# compilation series sharing one EAN across dozens of pressings) rather than any
+# realistic disc; 4 pages is 200 candidates against the 68 that the worst disc
+# measured here produces.
+_BARCODE_SEARCH_MAX_PAGES = 4
+
+
 def search_by_barcode(barcode: str) -> list[DiscMeta]:
-    """Lookup by barcode (EAN-13 / UPC). Returns [] if token not set or on error."""
+    """Lookup by barcode (EAN-13 / UPC). Returns [] if token not set or on error.
+
+    Reads up to ``_BARCODE_SEARCH_MAX_PAGES`` pages, not just the first. It used
+    to return ``page(1)[:25]``, which was **not** "the 25 best matches" — Discogs
+    does not rank a barcode search, so it was an arbitrary 25 of however many
+    exist, and the rest were invisible. Measured on Tracy Chapman: the barcode
+    yields 68 releases, and the one MusicBrainz's url-relation points at is not
+    among the first 25.
+
+    Note the caller's ``len(results) != 1`` uniqueness gate now sees the true
+    count, so a barcode that looked unique only because its siblings sat past the
+    cut-off will correctly stop merging. That is fewer merges and more honest
+    ones: the previous behaviour could merge a pressing chosen by nothing better
+    than result order.
+    """
     client = _get_client()
     if not client:
         return []
     try:
         results = client.search(barcode, type="release")
-        page1 = results.page(1)
-        parsed = [_parse_result(r) for r in page1[:25]]
+        parsed: list[DiscMeta] = []
+        for page_no in range(1, min(results.pages, _BARCODE_SEARCH_MAX_PAGES) + 1):
+            parsed.extend(_parse_result(r) for r in results.page(page_no))
     except Exception as exc:
         log.debug("Discogs barcode search failed: %s", exc)
         return []

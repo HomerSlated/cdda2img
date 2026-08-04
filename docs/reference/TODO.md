@@ -45,20 +45,66 @@ repair now running in the raw domain, but that is a hypothesis, not a measuremen
 and conflating those two offset domains is a trap already fallen into once
 (`project_ctdb_offset_domains`). Measure before believing it.
 
-#### N1b. **[C2I] `lookup_status_discogs=empty` beside `discogs_barcode_corroborates=YES`** — still open
+#### ~~N1b. `lookup_status_discogs=empty` beside `discogs_barcode_corroborates=YES`~~ — **EXPLAINED 2026-08-04; one design item remains (N1c)**
 
-Present in all four Tracy Chapman rips, including both from 2026-08-04. The
-concern:
-`lookup_status_discogs=empty` sits beside `discogs_barcode_corroborates=YES`. Those
-are not obviously contradictory — the corroboration path fetches the **MB** release's
-`inc=url-rels` and follows the link to a Discogs *release id*
-(`mb_lookup.discogs_link_and_barcode`), which is a different query from the Discogs
-*search* whose emptiness `lookup_status_discogs` reports (`_r12_status`: attempted,
-no error, no data → `empty`). So both can be true. But `catalog_number`, `label` and
-`country` are all populated, and if those came from Discogs then `empty` is wrong;
-if they came from MB then the Discogs search returning nothing for a disc whose
-barcode Discogs demonstrably knows is itself worth explaining. Establish which source
-filled those three fields before deciding whether anything is broken.
+The two keys were never contradictory: they come from different queries. The
+corroboration path follows the **MB** release's `inc=url-rels` to a Discogs
+*release id* and fetches that release; `lookup_status_discogs` reports a Discogs
+barcode *search*. Both can be true at once. Three defects were found behind the
+appearance, all fixed:
+
+1. **`lookup_status_discogs` was reporting on MusicBrainz.** `has_data` was
+   `disc.barcode != pre_discogs_barcode`, but phase A of
+   `_prepopulate_from_discogs` writes the barcode from **MB's** hints *before*
+   Discogs is queried, so on any disc where MB supplied it there was no delta and
+   the key read `empty` whatever Discogs returned. Now `discogs_hit is not None`,
+   the signal the function already returned and was discarding.
+2. **`search_by_barcode` truncated to `page(1)[:25]`.** A barcode search is not
+   ranked, so that was an arbitrary 25 of however many exist. Tracy Chapman's
+   barcode yields **68** releases and the one MB links to was not among the 25.
+   Now paginated to a 4-page cap.
+3. **The corroboration key overstated its claim** and is renamed
+   `discogs_link_barcode_agrees` / `discogs_link_barcode_conflict`. An MB editor
+   supplies both the barcode and the relation, so agreement validates *the link*,
+   not the pressing. Disagreement is the useful direction.
+
+#### N1c. **[C2I] Make the MB→Discogs link the primary Discogs path, search the fallback**
+
+kgr's design, 2026-08-04: we already hold a url-relation to exactly one Discogs
+release and use it only for a barcode check, while the metadata path runs a
+search that cannot resolve one. Invert that — link first, `search_by_barcode`
+only when MB has no Discogs relation.
+
+**Evidence gathered, do not re-derive.**
+- **Link coverage**: 19/24 (79%) on a random GB official-CD sample; near 100% on
+  a commercial-album shelf, per kgr's experience. Both readings agree the link is
+  the primary path and the search is a real fallback, not dead weight.
+- **Search cannot substitute for the link.** Ground truth is the MB-linked
+  release (Discogs 6646745 for MB 65e67d39). Scoring the 68 candidates on
+  title/artist/year/barcode/country ranks the truth **28th**, with five *wrong*
+  candidates tied above it. Adding catalogue number and dropping year lifts it
+  into the top tier but leaves an **8-way tie**. 16 of the 68 share the exact
+  catalogue number.
+- **Why, structurally**: you cannot disambiguate on the field you searched by,
+  nor on fields near-constant within its results. Barcode *is* the query; album
+  and artist follow from it; country and cat# vary only coarsely. What separates
+  these pressings on Discogs — matrix/runout, plant, sleeve variant — is not in
+  the search stub. Also **44 of 68 carry no year**, so a year test scores absent
+  data as disagreement and penalises the correct answer.
+- **One barcode, 68 releases, 12 countries, 12 catalogue numbers.** A UPC
+  identifies a retail product line, not a manufacturing run. It is a good
+  *filter* and a poor *key* — the same conclusion §1a reached about the on-disc
+  MCN, arrived at from the service side.
+
+**Open questions.** (a) For the fallback branch, `cddb.consensus_from_candidates`
+is the shape that fits — merge only the fields a tied set agrees on, rather than
+picking one arbitrarily. (b) `_albums_match` must still gate the *linked*
+release; a mis-linked relation is exactly what it catches, and "MB pointed at it"
+is not a reason to drop the check. (c) Resolve the link once and pass it to both
+consumers rather than fetching url-rels twice.
+
+**Caveat**: the disambiguation numbers are n=1, on a heavily-reissued album. The
+structural argument does not depend on the sample; the *rate* does.
 
 #### N2. **[C2I] Build the Q + C2 map, and restore the per-track marker on the
 progress bar**

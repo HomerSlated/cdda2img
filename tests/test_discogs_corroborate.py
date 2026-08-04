@@ -42,8 +42,8 @@ def test_agreement_sets_corroborates():
         mb_barcode="042284229821",
         discogs_meta=DiscMeta(barcode="042284229821", source="discogs"),
     )
-    assert prov["discogs_barcode_corroborates"] == "YES"
-    assert "discogs_barcode_conflict" not in prov
+    assert prov["discogs_link_barcode_agrees"] == "YES"
+    assert "discogs_link_barcode_conflict" not in prov
 
 
 def test_conflict_sets_conflict_with_both_barcodes():
@@ -52,8 +52,10 @@ def test_conflict_sets_conflict_with_both_barcodes():
         mb_barcode="042284229821",
         discogs_meta=DiscMeta(barcode="999999999999", source="discogs"),
     )
-    assert prov["discogs_barcode_conflict"] == "mb:042284229821|discogs:999999999999"
-    assert "discogs_barcode_corroborates" not in prov
+    assert (
+        prov["discogs_link_barcode_conflict"] == "mb:042284229821|discogs:999999999999"
+    )
+    assert "discogs_link_barcode_agrees" not in prov
 
 
 def test_skips_without_mb_release_id():

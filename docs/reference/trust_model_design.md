@@ -686,7 +686,7 @@ AcoustID/duration paths that must null it).
 
 Per §9.5(a) (closed: barcode 0/63; label/country/catalog_number unreliable). On the **selected**
 release only, follow the MB→Discogs url-rel and compare `barcode`; on agreement raise a confidence
-note, on conflict surface it (PROV `discogs_barcode_conflict`). This feeds cross-source barcode
+note, on conflict surface it (PROV `discogs_link_barcode_conflict`). This feeds cross-source barcode
 plurality only if a worked example shows MB-internal plurality *tying* where cross-source breaks it
 — otherwise MB-internal plurality stands alone (≈0 extra network; `metadata_over_engineered`).
 
