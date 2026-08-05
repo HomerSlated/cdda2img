@@ -367,6 +367,17 @@ kgr's proposal: feed the per-candidate MB `disambiguation` strings into the
 alternatives menu, since that is the only field distinguishing otherwise-identical
 pressings, and paginate when the list is long. Three measurements bear on it.
 
+0. **Use MB's `annotation`, not `disambiguation` — decided by measurement 2026-08-05.**
+   `disambiguation` is a **lossy summary**. For `b63ffa5b` it reads *"WE 835, newer 'e
+   above E' Elektra logo on disc"* — it **drops the word "France"**, which is the single
+   token that identified kgr's disc. The annotation carries it: *"price code '''France
+   WE 835''' on back"*. Annotations also carry matrix codes, Mastering/Mould SID codes,
+   the manufacturing plant and glass-master dates — a far stronger discriminator than a
+   logo variant, and all of it readable off the disc and inlay by hand. Coverage is
+   **6/7** here, and it is a separate MB include (`includes=["annotation"]`) that
+   nothing in the codebase fetches today. Practical note: annotations are **wiki
+   markup** (`'''bold'''`, `[url|label]`, `== headings ==`) and need stripping or
+   rendering before a TUI can show them.
 1. **Coverage is good but not total — 6/7 carry a disambiguation string, 1 is
    blank.** The blank row (`e9b905e6`, AU) is unpickable as designed: every other
    column is identical across candidates. It is also, usefully, **the only
@@ -508,29 +519,32 @@ disc. It is not a Discogs-quality problem, it is a property of pressings. Note
 this cuts *both* ways for N1e — it weakens "Discogs is uniquely unreliable", and
 strengthens "no service can disambiguate this, so the user must".
 
-**FALSIFIED AGAINST THE PHYSICAL DISC, 2026-08-05.** kgr read the mark on his copy:
-**`FRANCE WE 835`**. The pinned release `65e67d39` is described by MB as
-**`EW 835, upper-case "MADE IN GERMANY", 1999+`** — wrong on *two independent
-marks*, the matrix prefix (`EW` vs `WE`) and the country of pressing (Germany vs
-France). Its Discogs record (6646745) carries twelve mould variants, every matrix
-reading `755960774-2.3 06/99` — a June 1999 German run.
+**FALSIFIED AGAINST THE PHYSICAL DISC, AND RESOLVED, 2026-08-05.** kgr read the mark
+on his copy — **`FRANCE WE 835`** — and then found the matching MB annotation. The
+disc is **`b63ffa5b`**: *"This release has price code '''France WE 835''' on back and
+a '''newer 'e over E' Elektra logo''' on disc."*
 
-So the alphabetical `mbid` tiebreak picked wrong, and has been recording the wrong
-pressing in **seven containers**. This is no longer a 1-in-5 argument; it is a
-measured miss. The two candidates whose disambiguation says `WE 835` are
-`b63ffa5b` (Discogs 592306, matrix `[Warner Logo] CD 755960774-2.5 V01`) and
-`e6676f25` (Discogs 15382069, matrix `755960774-2.2 WME`); they are separated by
-the Elektra logo style and the catalogue number printed on the disc face.
-`928588a5` is *MB country=FR* but its disambiguation reads `EW 835, mixed-case
-"Made in Germany"` — so MB's `country` is the release territory, not the pressing
-plant, and the two must never be conflated.
+The pinned release `65e67d39` carries price code **`EW 835`**. Wrong. So the
+alphabetical `mbid` tiebreak picked wrong and has been recording the wrong pressing
+in **seven containers** — no longer a 1-in-5 argument but a measured miss, with the
+true answer known.
 
-**Unresolved, and important: the right answer may not be in MB's seven at all.**
-Neither `WE 835` candidate's Discogs matrix mentions France. Matrix and mould/plant
-text sit in different rings and Discogs records them inconsistently, so that is not
-decisive either way — but the possibility that MB has no separate release for this
-French pressing is live. If so the disc-ID candidate list is **incomplete**, not
-merely ambiguous.
+**Two corrections to the agent's own reasoning, recorded because both are traps:**
+1. **`WE 835` is a *price code* printed on the back of the inlay — not a matrix or
+   mould code.** The agent read it as a matrix prefix. It is a Warner pricing
+   marking, and it is not in the runout at all.
+2. **The claim "wrong on two independent marks, including country of pressing" was
+   itself wrong.** `b63ffa5b` was *also* manufactured in Germany (Cinram, Alsdorf,
+   glass masters 2004–2007). `FRANCE` denotes the **pricing territory**, not the
+   plant. The refutation rests on **one** mark, the price code — which is sufficient,
+   but the second "independent" mark did not exist. This is the same
+   territory-vs-plant conflation flagged for `928588a5` one paragraph later, made by
+   the agent in the very act of flagging it.
+
+**The right answer was in MB's seven after all**, so the "incomplete candidate list"
+worry raised here is not evidenced on this disc. The `rejected` menu state remains
+justified on its own terms (a user must never be forced to endorse a wrong row), but
+it is a safeguard, not a demonstrated need.
 
 **Design consequence for N5 — the alternatives menu needs a "none of these"
 option.** Without one, a menu presented to a user whose pressing is absent forces
