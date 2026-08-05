@@ -508,6 +508,36 @@ disc. It is not a Discogs-quality problem, it is a property of pressings. Note
 this cuts *both* ways for N1e — it weakens "Discogs is uniquely unreliable", and
 strengthens "no service can disambiguate this, so the user must".
 
+**FALSIFIED AGAINST THE PHYSICAL DISC, 2026-08-05.** kgr read the mark on his copy:
+**`FRANCE WE 835`**. The pinned release `65e67d39` is described by MB as
+**`EW 835, upper-case "MADE IN GERMANY", 1999+`** — wrong on *two independent
+marks*, the matrix prefix (`EW` vs `WE`) and the country of pressing (Germany vs
+France). Its Discogs record (6646745) carries twelve mould variants, every matrix
+reading `755960774-2.3 06/99` — a June 1999 German run.
+
+So the alphabetical `mbid` tiebreak picked wrong, and has been recording the wrong
+pressing in **seven containers**. This is no longer a 1-in-5 argument; it is a
+measured miss. The two candidates whose disambiguation says `WE 835` are
+`b63ffa5b` (Discogs 592306, matrix `[Warner Logo] CD 755960774-2.5 V01`) and
+`e6676f25` (Discogs 15382069, matrix `755960774-2.2 WME`); they are separated by
+the Elektra logo style and the catalogue number printed on the disc face.
+`928588a5` is *MB country=FR* but its disambiguation reads `EW 835, mixed-case
+"Made in Germany"` — so MB's `country` is the release territory, not the pressing
+plant, and the two must never be conflated.
+
+**Unresolved, and important: the right answer may not be in MB's seven at all.**
+Neither `WE 835` candidate's Discogs matrix mentions France. Matrix and mould/plant
+text sit in different rings and Discogs records them inconsistently, so that is not
+decisive either way — but the possibility that MB has no separate release for this
+French pressing is live. If so the disc-ID candidate list is **incomplete**, not
+merely ambiguous.
+
+**Design consequence for N5 — the alternatives menu needs a "none of these"
+option.** Without one, a menu presented to a user whose pressing is absent forces
+them to endorse a row that is wrong, converting an honest `auto_tiebreak` guess into
+a false `manual` confirmation — strictly worse provenance than not asking. That
+outcome needs its own PROV state alongside the three in (b) below.
+
 **Scope of the defect — the confidence score is already honest.**
 `match_distance` only tests `prov.get("release_selected_via")` for *presence*, and
 awards `mb_disc_id_multi = 0.30` (not `mb_disc_id = 0.50`), correctly recording
@@ -596,6 +626,11 @@ made, and those are opposite provenance claims:
   - `unique` — one candidate; nothing was chosen, so nothing can be wrong
   - `auto_tiebreak` — N candidates; the alphabetical `mbid` sort picked
   - `manual` — N candidates; the user picked, holding the disc
+  - `rejected` — **added 2026-08-05**; the user was shown N candidates and said
+    **none of these**. Required by the falsification recorded in N4: kgr's disc
+    reads `FRANCE WE 835` and may not correspond to any of MB's seven. Without this
+    state a menu forces a wrong endorsement, turning an honest guess into a false
+    confirmation — worse provenance than never asking.
 Only the middle state is a guess, and it is the one an archivist must be able to
 find. Same shape as the CD-R offset-rescue finding (a gate needs three outcomes,
 not two) and the `ctdb_declined` precedent. Note `_gate_adjusted_auto` can already
