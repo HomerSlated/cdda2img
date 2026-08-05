@@ -4,8 +4,8 @@
 
 ### 🔴 NEXT SESSION
 
-Both raised by kgr at the close of 2026-08-03. Worked on 2026-08-04: **N1a is
-resolved**, N1b and N2 remain. Start with N1b or N2.
+Both raised by kgr at the close of 2026-08-03. N1a and N1b resolved 2026-08-04;
+N1d settled and N1c superseded 2026-08-05. **Open: N1e (queued, agreed) and N2.**
 
 #### ~~N1a. Tracy Chapman track 8 no longer reports a failure — is the repair now
 invisible, or did it not happen?~~ — **RESOLVED 2026-08-04. It did not happen.**
@@ -68,7 +68,7 @@ appearance, all fixed:
    supplies both the barcode and the relation, so agreement validates *the link*,
    not the pressing. Disagreement is the useful direction.
 
-#### N1c. **[C2I] Make the MB→Discogs link the primary Discogs path, search the fallback**
+#### ~~N1c. **[C2I] Make the MB→Discogs link the primary Discogs path, search the fallback**~~ — **SUPERSEDED by N1e 2026-08-05.** Both consumers of the reorder are being deleted. The measurements below stand as evidence and are cited by N1e; do not re-derive them.
 
 kgr's design, 2026-08-04: we already hold a url-relation to exactly one Discogs
 release and use it only for a barcode check, while the metadata path runs a
@@ -124,7 +124,7 @@ structural argument does not depend on the sample; the *rate* does.
 close of 2026-08-04 questions whether Discogs should be a corroboration source at
 all, which changes what the reorder is *for*.
 
-#### N1d. **[DESIGN, kgr thinking] What is Discogs actually for? — parked**
+#### ~~N1d. **[DESIGN, kgr thinking] What is Discogs actually for?**~~ — **SETTLED 2026-08-05. Delete the automatic paths, keep the interactive one. See N1e.**
 
 kgr's position, 2026-08-04, recorded rather than actioned. **No code until this
 settles**; it governs N1c.
@@ -192,6 +192,462 @@ labelling overclaimed. Also feeds OPT-4 and
 `docs/reference/identifier_trust_model.md` §1a, whose justification for keeping
 the service barcode as *the* disambiguation key rests on a cleaner-namespace
 argument that today's measurements do not support.
+
+#### N1e. **[C2I] Demote Discogs to an interactive-only source** — **STAY OF EXECUTION 2026-08-05, superseded in scope by N5**
+
+> **DO NOT ACTION. The deletion list below is WITHDRAWN IN FULL** (kgr, later the
+> same day). Both AcoustID and Discogs **stay**, entirely unchanged — "the rest of
+> the behaviour remains unchanged". Nothing in `discogs_lookup.py`,
+> `_prepopulate_from_discogs`, R11 or §10.3.1 is to be removed. **Read N5**, which
+> supersedes this item and is additive only.
+>
+> This entry is retained **as evidence, not as a plan**. Its measurements bound
+> what the retained code contributes (Discogs supplied 0/18 values MB lacked; R11
+> differed 0/8) and they remain the reason nobody should later cite the retention
+> as proof the merge was validated. They are not a reason to delete anything.
+
+Settles N1d and **supersedes N1c** (there is nothing to reorder once no automatic
+consumer remains). kgr proposed deleting Discogs outright; the agent was asked to
+argue against, went looking for a defence, and found the measurements went the
+other way except on one point. Agreed split: **delete every automatic path, keep
+the interactive screen.**
+
+**The measurement that decided it** (2026-08-05, 10 albums → 20 MB releases,
+18 with a Discogs link; each release compared field-by-field against the release
+its own MB→Discogs url-relation points at). B-6's premise was that Discogs
+outranks MB on the catalogue fields; it does not.
+
+| field | both populated | agree | **Discogs supplied a value MB lacked** |
+|---|---|---|---|
+| `catalog_number` | 18/18 | 16 | **0** |
+| `label` | 18/18 | 14 | **0** |
+| `country` | 18/18 | 2 | **0** |
+
+The disagreements are naming convention, not correction: `Polar` vs `Polydor`
+(imprint vs distributor, both true), `EMI Music Canada` vs `Parlophone`,
+`DGC Records` vs `DGC`, `422 828 553-2` vs `P2 28553` (label number vs disc
+number). The `country` column looks catastrophic only because MB returns ISO
+alpha-2 and Discogs returns free text — and that is a **defect on the keep side**:
+`discogs_lookup._parse_result` does `country=str(country)` with no ISO mapping, so
+`"Europe"` / `"Australasia"` / `"UK"` can reach `RBIDisc.country`, which the spec
+documents as alpha-2. Narrow (the merge is fill-blank, so MB wins whenever MB has
+a value, and phase B needs `len(results)==1`) but real.
+
+**R11 likewise**: `lookup_master_year` is the only automatic Discogs path that can
+*change* a stored value (on disagreement it prefers the earlier year and writes
+it). Over 8 comparable albums: **8 same, 0 different, 2 no-data.** Caveat, stated
+so nobody over-reads it: 0/8 puts the upper bound on the disagreement rate near
+30%, and the sample never exercised the case R11 exists for — MB returned a
+visibly wrong `first-release-date=2003` for *Dark Side of the Moon* and Discogs
+returned `None` there. "No observed benefit", not "no benefit".
+
+**Sample caveat**: ten famous Western releases is MB's strongest ground, so
+"Discogs fills no gaps" is weakest on obscure or regional pressings. The structural
+counter is that the gap-filling case is **unreachable by construction** — no MB
+release means no `mb_release_id` and no barcode hint, phase A picks nothing, and
+phase B never runs. Discogs is only ever asked about discs MB already answered.
+
+**What survives, and why.** Not corroboration — *addressing*, for the only
+verifier in the pipeline. N1d concluded the user holding the disc is the sole real
+disambiguator; a disambiguator needs candidates and needs evidence printed **on
+the object** (matrix/runout, sleeve variant, plant, catalogue number). That is the
+class kgr dismissed as trivia, and he is right that we do not store it and no
+machine can check it — but it is the only data anywhere in this system that a
+human can hold against a jewel case. Everything else we trust (MB disc ID, AR,
+CTDB) is checkable only against the *data*, which is exactly why it cannot settle
+which of 68 pressings is in your hand. `DiscogsSearchScreen` weighs nothing,
+asserts nothing, and writes nothing the user did not pick.
+
+**Delete** (automatic, machine-weighed):
+- `_discogs_barcode_corroborate` (§10.3.1) and both PROV keys
+  (`discogs_link_barcode_agrees` / `_conflict`).
+- `_prepopulate_from_discogs` **phase B only** — the barcode search + merge.
+  **Phase A survives untouched**: the canonical-barcode pick is MB-hint driven and
+  never calls Discogs. Its return signature loses `applied_hit`.
+- `lookup_master_year` (R11) and `_r11_corroborate_with_discogs_master`.
+- The B-6 catalogue trust override (`_FIELD_TRUST_OVERRIDE`, `_CATALOGUE_FIELDS`)
+  and `Source.DISCOGS` / `Trust.DISCOGS` from the resolver. The descending-trust
+  invariant survives deleting one level intact — it is a total order either way.
+- `lookup_status_discogs`.
+
+**Keep**: `DiscogsSearchScreen`, `search_releases`, `search_by_barcode`,
+`fetch_release`, `is_available`, `normalize_barcode` (already lives in
+`barcode.py`), and `discogs_release_id` in PROV — the one-click route from
+container to sleeve photographs. Roughly 150 of `discogs_lookup.py`'s 313 lines.
+Note `primary_type` was already interactive-only: its sole consumer is the results
+table at `metadata_menu.py:237`.
+
+**Do not lose on the way through**: `_albums_match` is what stopped the forged
+barcode (Discogs 18528415, a bootleg carrying a real UPC) reaching metadata. If
+phase B goes, the guard goes with it — but if any future path re-merges a Discogs
+release automatically, it needs that check back.
+
+If kgr later prefers cutting the menu screen too, the deletion commit must record
+that it removes the user's only route to sleeve evidence, so a future session does
+not rebuild it believing it is new.
+
+**Decisive addendum, measured 2026-08-05.** kgr asked whether MB's §10.3 cascade,
+applied to a Discogs barcode search, could reach one candidate. **It can — and
+that is the argument against it, not for it.** Run verbatim over the 68 results:
+
+| rung | survivors | why |
+|---|---|---|
+| `search_by_barcode` | 68 | — |
+| `_is_consistent` (MCN/ISRC) | 68 | **inert** — 0/68 carry any ISRC |
+| R1 ISRC tally | 68 | **inert** — nothing to tally |
+| plurality release-group | 68 | **inert** — search stubs carry no master id |
+| `barcode_plurality` | 68 | **structurally inert** — the barcode *is* the query |
+| `preferred_country` GB,XE,US | **1** | exactly one row is country `UK` |
+| `date`, `id` | 1 | already unique |
+
+**The single survivor is Discogs 18528415 — the Jamiroquai bootleg.** It wins
+because `GB` outranks `XE`, and of 68 rows exactly one is `UK`. The cascade
+converges on a different album by a different artist, with **no tie**, so every
+confidence signal reads maximally decisive. Country histogram for the record:
+Europe 24, US 22, Brazil 6, Canada 5, Mexico 3, Australasia 2, Israel/Chile/
+Venezuela/Netherlands/UK 1 each.
+
+**Root cause — a precondition Discogs cannot meet.** `_select_release_lexicographic`'s
+docstring states it: *"candidates must already be the album-consistent set (the
+plurality release-group), so this only chooses the pressing, never the album."*
+MB satisfies that one rung earlier (all 7 candidates shared one RG). On Discogs
+that rung is inert, so a **preference** rung runs on a population whose album
+identity was never established. `preferred_country` was never an identifier; it
+is only safe downstream of an identity gate.
+
+**With the album gate restored** (`_albums_match`, the guard N1c open question (b)
+was about): 68 → 67 (bootleg dropped) → 24 (Europe) → **5** (year 1988) → 1 by the
+terminal id tiebreak. Winner Discogs **770495**, cat `960 774-2`. Ground truth is
+**6646745**, cat `7559-60774-2` — **eliminated at the `date` rung**, because it
+carries no year and 19 of those 24 candidates carry none either. The rung converts
+*missing data* into *elimination*, and the truth is among the missing. This closes
+N1c open question (d) harder than filtering unofficial releases would: the bootleg
+is stopped by `_albums_match`, not by a format filter.
+
+**Three conclusions.**
+1. Reaching one candidate is **not** evidence of having identified it. Both
+   services end at an arbitrary tiebreak — MB 5→1 on `mbid`, Discogs 5→1 on `id`.
+2. Discogs is strictly worse only because it lacks the album gate, not because its
+   data is dirtier. Restore the gate and it fails the same way MB does.
+3. The two cascades **disagree** even when both succeed: Discogs 770495 carries
+   cat `960 774-2`, which matches MB candidate `7531d07c` — *not* the `65e67d39`
+   MB picked. Two arbitrary tiebreaks over two indistinguishable pools have no
+   reason to agree, and here they do not.
+
+**kgr's reframe, 2026-08-05 — don't search at all; the disc ID already bounded it.**
+This supersedes the whole cascade question and reshapes the keep half of N1e.
+Measured on the same disc:
+
+- The barcode search population is **68**; the disc-ID candidate set is **7**. The
+  barcode was always the wrong population — *everything sharing this UPC* rather
+  than *everything matching this TOC*. An order of magnitude, obtained by using a
+  key **derived from the artefact** instead of one **asserted about it**.
+- **The bootleg cannot appear.** Discogs 18528415 does not share the TOC. The
+  disc-ID population is intrinsically album-consistent, so it satisfies
+  `_select_release_lexicographic`'s stated precondition *by construction* — no
+  `_albums_match` guard needed, because the fingerprint already guarantees it.
+- **7/7 of the disc-ID candidates carry an MB→Discogs link** on this disc (against
+  the 79% general sample in N1c). All five XE pressings resolve into the 68, so the
+  links are real and mutually consistent: `592306`, `11630069`, `15382069`,
+  `6646745`, `21719110`.
+
+**Consequence for the keep/delete split**: the primary Discogs path is
+`mb_lookup.discogs_link_and_barcode` — which lives in **`mb_lookup.py`, not
+`discogs_lookup.py`**. So the link route needs no part of `discogs_lookup` at all.
+What that module would still add is optional per-row enrichment (thumbnail, format,
+`fetch_release`) and the user-driven menu searches. `search_by_barcode` loses its
+last automatic justification entirely.
+
+**Cost**: one url-rel call per candidate at MB's pinned 1 req/s (R15) — ~7 s here,
+and only on a multi-match. Fetch lazily per row and pagination becomes free.
+
+#### B-7 design input, measured 2026-08-05
+
+kgr's proposal: feed the per-candidate MB `disambiguation` strings into the
+alternatives menu, since that is the only field distinguishing otherwise-identical
+pressings, and paginate when the list is long. Three measurements bear on it.
+
+1. **Coverage is good but not total — 6/7 carry a disambiguation string, 1 is
+   blank.** The blank row (`e9b905e6`, AU) is unpickable as designed: every other
+   column is identical across candidates. It is also, usefully, **the only
+   candidate carrying a date** (`1988-04`). So the row template needs a fallback
+   chain — `disambiguation` → date / country / catalogue number → bare MBID —
+   rather than a single field. A blank row must never render as an empty line.
+2. **List size is bounded by TOC-sharing, not barcode-sharing** — 7 here, not 68.
+   That is the reason to expect the list to stay tractable, but it is **n=1**: a
+   heavily-reissued album should be measured before paging is designed around an
+   assumption. Do not generalise from this disc.
+3. **The rows are one click from sleeve photographs.** Pairing the MB
+   disambiguation text (what is printed on the disc) with the Discogs link (photos
+   of exactly that) gives the user both halves of the comparison against the object
+   in their hand. This is the concrete form of N1d's "the only real corroborator is
+   the user" — the menu stops trying to decide and starts equipping the person who
+   can.
+
+#### N3. **[BUG, measured live 2026-08-05] AcoustID corroboration is broken by a 25-result truncation, and the §10.4 gate can never fire**
+
+Two defects, one root cause, one fix. Found by tracing R6 end-to-end against
+`Tracy Chapman_6.rbi`. **The same 25-result truncation shape as the Discogs
+`search_by_barcode` bug fixed 2026-08-04 — a different service, the same failure.**
+
+**Symptom.** Every container on the shelf records `acoustid_corroborates=NO` with
+`lookup_status_acoustid=OK`, `match_confidence=0.300`, `match_recommendation=low`.
+The `NO` is a **false negative**.
+
+**What actually happens** (all hops verified live, not inferred):
+1. Fingerprinting is healthy. Track 1 scores **0.978**, track 6 **0.974**.
+   `/bin/fpcalc` *is* broken on this machine (`Could not create an audio converter
+   instance`, exit 2, empty stdout — FFmpeg 6.x SwR bug) but **pyacoustid never
+   calls it**; it goes through libchromaprint directly. The old "fpcalc breaks the
+   live AcoustID step" note is **wrong** and has been corrected in memory.
+2. AcoustID returns the **correct** recording for both tracks — our release's own
+   track-1 recording `fd3158d6` is in the returned set.
+3. `_chain_to_mb` then calls `get_recording_by_id(..., includes=[... "releases" ...])`.
+   **MB returns 25 releases while `release-count` says 43.** Our release
+   `65e67d39` is in the 18 that were cut.
+4. So track 1's fan-out (32 distinct release ids over 4 duplicate recording
+   entities) does not contain the disc's own release, track 6's 21 does, and
+   `selected_release_id in consistent_rids` is False → `NO`.
+
+**Second defect, same call.** `_acoustid_gate` matches at release-group level, but
+under `inc=releases` the release dicts have **no `release-group` key at all** —
+measured 0/32 and 0/21 populated. `rg_seen` is therefore always empty, the
+`if rg_seen and ...` guard always short-circuits, and **the gate has never fired
+on any disc.** The comment at `acoustid_lookup.py:160-168` calls this an "empty
+stub"; it is actually an absent key, and it says a per-release follow-up is "one
+extra request per row" — the browse endpoint below makes that cost wrong too.
+
+**The fix — one endpoint change resolves both.** Replace the recording endpoint's
+`inc=releases` with a paged `browse_releases(recording=..., includes=["release-groups","media"], limit=100)`:
+
+| | `inc=releases` | paged `browse_releases` |
+|---|---|---|
+| releases returned | **25 of 43** | **43 of 43** |
+| disc's own release present | **NO** | **YES** |
+| `release-group` populated | **0/43** | **43/43**, and it matches the disc's RG |
+| `medium-list` (Trk column) | present | **43/43** |
+
+So corroboration becomes possible, the gate becomes able to fire, and the Trk
+column survives. Cost is one request per *recording* plus one per extra page,
+against today's single request — MB is rate-limited to 1 req/s (R15), and R6
+fingerprints only 2 tracks with `_MAX_RECORDINGS=5`, so the worst case is bounded.
+
+**Impact on scoring.** `acoustid` contributes `+0.25`. Today this disc scores
+0.300 (`mb_disc_id_multi` alone) → **LOW**. With the corroboration it would score
+0.550 → **MEDIUM** (`_MEDIUM_THRESH=0.40`). The truncation is costing a confidence
+bucket on every rip.
+
+**Do not "fix" this by widening `_MAX_RECORDINGS`** — the cap is on *recordings*,
+and the truncation is on *releases per recording*. They are different axes; raising
+the cap costs requests and moves nothing.
+
+**Watch for a false pass when validating.** `acoustid_gate` is a fail-only key, so
+its absence means "pass **or** not-evaluated". Before the fix it was structurally
+always the latter. A test that asserts the key is absent therefore passes today for
+the wrong reason and will keep passing after the fix — assert `rg_seen` is
+non-empty, not that the gate stayed quiet.
+
+**Fix the stale docstring in the same pass.** `_r6_acoustid_corroborate`
+(`cdda2img.py:1573-1577`) still claims *"When the disc has no MB release MBID yet
+AND AcoustID converges consistently … merge that release into the disc via
+`_merge_into_disc`."* **That merge does not exist.** `_r6_tally_and_merge` has three
+`return disc` and zero merge calls; the merge was deliberately removed, and the code
+comment one line below records why ("merging album-level metadata here routinely
+picks the wrong compilation when MB disc-ID found nothing"). `resolver_adapter.py`
+depends on AcoustID contributing no proposals and asserts it by test. So the
+docstring describes behaviour the code deliberately does not have — and it is the
+first thing a reader consults when deciding whether AcoustID can write metadata.
+
+#### N4. **[BUG, measured live 2026-08-05] `release_selected_via` names the first rung that *varies*, not the rung that *decides***
+
+Found while walking the MB disc-ID path end to end on `Tracy Chapman_6.rbi` at
+kgr's request. The container records `release_selected_via=preferred_country`.
+**Preferred-country did not select the winner** — it narrowed 7 candidates to 5
+and left a 5-way tie that the terminal `mbid` tiebreak broke alphabetically.
+
+Full trace, live:
+
+| stage | candidates | what it did |
+|---|---|---|
+| `lookup_disc_id` (one GET, exact TOC fingerprint) | **7** | — |
+| `_is_consistent` (Unit G, MCN/ISRC gospel) | 7 | **0 rejected** — nothing to contradict |
+| `_resolve_multimatch` (R1 ISRC tally) | 7 | **no winner** — every candidate scores 11/11 |
+| `_plurality_release_group` | 7 | **unanimous** (7/7 share one RG) — no narrowing |
+| ladder: `barcode_plurality` | 7 | **unanimous** (7/7 share `0075596077422`) — no narrowing |
+| ladder: `preferred_country` GB,XE,US | **7 → 5** | drops FR and AU; **5-way tie remains** |
+| ladder: `date` | 5 | all five have **no date** (`9999`) — no narrowing |
+| ladder: `mbid` | **5 → 1** | `65e67d39` wins because `6` < `7` < `8` < `b` < `e` |
+
+`_select_release_lexicographic`'s docstring claims *via* is "the key that put the
+winner ahead of the runner-up… that key is what decided the ranking". It is
+actually the first key with **any** variation across the whole candidate set.
+Those coincide only when the first varying key is also uniquely determining, which
+is not this disc. Verified by counterfactual — the winner is stable under
+`['GB','XE','US']` and moves to `e9b905e6 [AU] via='date'` under `[]` or
+`['GB','US']` — so the country rung *is* load-bearing (it eliminates AU, which
+would otherwise win on date). It eliminates; it does not select.
+
+**The honest answer to "how did we get down to one candidate" is that we never
+did.** We got to five and took the alphabetically-first MBID.
+
+**Why the five cannot be separated** — MB's own `disambiguation` field is the only
+thing that differs, and it is free text describing print on the physical object:
+
+```
+b63ffa5b  WE 835, newer 'e above E' Elektra logo on disc
+8e5e097d  WE 851, no red circle around CD rim, newer "e above E" Elektra logo
+e6676f25  WE 835, old Elektra logo and new cat# on disc, approx. 1994/95
+65e67d39  EW 835, upper-case "MADE IN GERMANY" on disc, 1999+     <-- picked
+7531d07c  WE 851, old Elektra logo, short cat# on disc and inlay, WME matrix
+```
+
+Same barcode, same catalogue number (bar `7531d07c`), same label, same country,
+same status, no dates. **This is N1d's Discogs conclusion holding for
+MusicBrainz**: what separates pressings is readable only by a human holding the
+disc. It is not a Discogs-quality problem, it is a property of pressings. Note
+this cuts *both* ways for N1e — it weakens "Discogs is uniquely unreliable", and
+strengthens "no service can disambiguate this, so the user must".
+
+**Scope of the defect — the confidence score is already honest.**
+`match_distance` only tests `prov.get("release_selected_via")` for *presence*, and
+awards `mb_disc_id_multi = 0.30` (not `mb_disc_id = 0.50`), correctly recording
+that the pressing is a best guess. The value is display/audit-only. So this is a
+**labelling** bug, not a scoring bug — but the label is exactly what a reader
+consults when auditing why a pressing was chosen.
+
+**Fix options** (not chosen): (a) report the rung that reduced the set to one —
+the *last* discriminating key, which would read `mbid` here and be honest about
+arbitrariness; (b) emit both, e.g. `release_selected_via=preferred_country`
+plus `release_tied_after=preferred_country:5`, so the tie size is visible; (c)
+keep *via* and add `release_candidates=7`. Option (b) carries the most
+information for an auditor and matches the `ctdb_declined` precedent of recording
+what happened rather than a verdict.
+
+#### N5. **[DESIGN, kgr 2026-08-05] Pressing selection: auto keeps the tiebreak, no-auto opens the alternatives menu**
+
+kgr's design, stated at the close of the 2026-08-05 investigation. Governs N1e,
+N3, N4 and B-7 — read those for the measurements this rests on.
+
+**The design.**
+1. **Auto path unchanged.** The §10.3 cascade runs as today and the terminal
+   `mbid` sort picks the winner. No behaviour change for `--auto`.
+2. **No-auto opens the alternatives menu** — but *only* when the cascade reaches
+   the terminal tiebreak with more than one candidate still tied.
+3. **N1e gets a stay of execution.** Both AcoustID (once N3 is fixed) and Discogs
+   stay in the pipeline.
+4. The chosen release is the final disambiguation from whichever path ran.
+5. **AcoustID and Discogs are reduced to a YES/NO existence check** on the
+   *selected* release — not a corroboration verdict.
+6. **Record MB's `disambiguation` free text** for the final candidate in PROV.
+7. **Record whether the release was chosen automatically or manually**, so a
+   future archivist can judge the provenance accuracy of the RBI.
+8. Verify across several CDs before trusting it.
+
+**Refinement, kgr 2026-08-05: the ladder splits by rung *kind*.** `preferred_country`
+and the terminal `mbid` sort apply on the **auto path only**. The menu receives the
+candidate set as it stands *before* those rungs run. The principle underneath it is
+worth stating because it generalises: **a preference rung must never eliminate a
+candidate from a menu a human is looking at.** Preference exists to break ties in
+the absence of a human; with a human present it is exactly the wrong filter, because
+it hides options on the basis of a config setting rather than evidence about the
+disc.
+
+| rung | kind | auto | no-auto (menu) |
+|---|---|---|---|
+| `_is_consistent` (MCN/ISRC) | evidence | ✓ | ✓ |
+| R1 ISRC tally | evidence | ✓ | ✓ |
+| plurality release-group | evidence | ✓ | ✓ |
+| `barcode_plurality` | evidence | ✓ | ✓ |
+| `preferred_country` | preference | ✓ | **✗** |
+| `date` (earliest wins) | preference — **decided auto-only** | ✓ | **✗** |
+| `mbid` (alphanumeric first) | arbitrary | ✓ | **✗** |
+
+On this disc the menu would therefore show **7** candidates, not 5 — FR and AU
+return to the list. That is *more* information, not noise: country and pressing date
+are real distinguishing fields a user can check against the sleeve, and the AU row
+is the only one carrying a date at all.
+
+**`date` — DECIDED auto-only (kgr, 2026-08-05).** It sits *between* `preferred_country`
+and `mbid` in the key tuple (`k_plur, k_country, k_date, k_mbid`), so naming the other
+two auto-only had left it undecided. It is a preference: "earliest wins" is a rule
+about which pressing to *prefer*, not evidence about which is in the drive — and it is
+measurably destructive on sparse data. In the Discogs cascade it eliminated the ground
+truth outright, because the truth carries no year and 19 of 24 candidates carry none
+either. A rung that converts *missing data* into *elimination* must not run while a
+human is choosing.
+
+So all three of `preferred_country`, `date` and `mbid` are auto-only, and the menu
+receives the set after `barcode_plurality` — the last evidence rung.
+
+**Three things the design depends on, or needs sharpening.**
+
+**(a) N4 is a prerequisite, not a neighbour.** "Ends with more than one candidate"
+is not observable today. The cascade *always* ends with exactly one, because
+`mbid` is terminal — the quantity the menu trigger needs is the **tie size at the
+last discriminating rung**, which is precisely what N4 found is not recorded.
+`release_selected_via` reports the first rung that *varies*, so on this disc it
+says `preferred_country` while five candidates were still tied. Implement N4's
+option (b) (`release_tied_after=<rung>:<n>`) first; the menu trigger is then
+`n > 1` and the same key serves the archivist.
+
+**(b) The auto/manual key wants three states, not two.** Two states cannot
+separate the case where no choice existed from the case where an arbitrary one was
+made, and those are opposite provenance claims:
+  - `unique` — one candidate; nothing was chosen, so nothing can be wrong
+  - `auto_tiebreak` — N candidates; the alphabetical `mbid` sort picked
+  - `manual` — N candidates; the user picked, holding the disc
+Only the middle state is a guess, and it is the one an archivist must be able to
+find. Same shape as the CD-R offset-rescue finding (a gate needs three outcomes,
+not two) and the `ctdb_declined` precedent. Note `_gate_adjusted_auto` can already
+demote a run from auto to manual mid-disc, so the key must be written at the point
+of selection, not inferred from the `--auto` flag.
+
+**(c) What the YES/NO existence check actually means differs per source** — worth
+writing down, because the two are not symmetric.
+  - **Discogs**: "does the selected MB release carry a Discogs url-relation?" One
+    call, no ambiguity, and 7/7 on this disc. Honest and cheap. This is *addressing*
+    — it says a destination exists, nothing about whether the pressing is right.
+  - **AcoustID**: "is the selected release among those MB says carry the
+    fingerprinted recordings?" This is `acoustid_corroborates` re-framed honestly
+    as membership. It is **weak but not vacuous**: the disc ID matched on TOC,
+    whereas the recording→release linkage is a separate MB assertion, so a NO means
+    the two disagree (wrong release pinned, or an MB tracklist error). Its **failure
+    is more informative than its success**, which is why the existing
+    `acoustid_gate` is already a fail-only key. Do not let the YES be read as
+    pressing confirmation — AcoustID is edition-blind by construction.
+
+**Fork SETTLED (kgr, 2026-08-05): nothing is deleted. "The rest of the behaviour
+remains unchanged."** `_prepopulate_from_discogs` phase A *and* phase B, R11 and
+§10.3.1 all stay exactly as they are; AcoustID needed no decision because it merges
+nothing already. N1e's deletion list is **withdrawn in full** — this item is
+additive only.
+
+The measurements that motivated the deletion still stand and are worth keeping
+visible, because they bound what the retained code can be expected to contribute:
+Discogs supplied **0/18** values MB lacked on `catalog_number`/`label`/`country`,
+and R11 differed on **0/8** albums. Neither is evidence of harm — the merge is
+fill-blank, so it cannot overwrite a good value — so retaining it costs a network
+call and buys, on the evidence to date, nothing measurable. That is a defensible
+trade once the link has a real job; it is recorded here so nobody later reads the
+retention as evidence the merge was validated. R11 is the one exception worth
+watching: it is the only Discogs path that *overwrites* an already-set value
+(`original_release_year`, when the Discogs master year is earlier), and the 0/8
+sample never exercised the disagreement case it exists for.
+
+**For reference, the retained automatic merge surface** (verified 2026-08-05):
+
+| path | trigger | semantics | fields |
+|---|---|---|---|
+| Discogs phase A | always — **no Discogs call** | **overwrite** | `disc.barcode` ← canonical pick from MB hints |
+| Discogs phase B | exactly 1 search result **and** `_albums_match` | **fill-blank** (disc wins) | album, artist, barcode, disc_number/total, release_date, catalog_number, label, country, original_release_date, MB ids, discogs_release_id, set_title, + per-track title/performer/ISRC |
+| Discogs R11 | `discogs_release_id` set | **overwrite if earlier** | `original_release_year` |
+| Discogs §10.3.1 | selected release | PROV only | — |
+| **AcoustID (all paths)** | — | **merges nothing** | only `acoustid_corroborates` + the gate |
+
+**Testing.** The link-existence rate is already measurable without discs (19/24 =
+79% general; 7/7 on this disc's candidate set). The full auto-vs-menu path needs
+real containers from **different** discs — all seven on hand are the same album, so
+they cannot exercise a differing tie size or a blank `disambiguation`.
 
 #### N2. **[C2I] Build the Q + C2 map, and restore the per-track marker on the
 progress bar**
@@ -373,6 +829,14 @@ every step assumes the binding resolves without our `tools/` shim.
    `6154526`); what remains is routing the adapter's invalid-ISRC / "Unknown Artist"
    drops through `skipped`, which needs propose-then-skip instead of filter-first.
    **Wants a design conversation before code.**
+   **Design conversation started 2026-08-05 — see the "B-7 design input" block under
+   N1e**: kgr's proposal is to feed the per-candidate MB `disambiguation` strings
+   (plus each candidate's MB→Discogs link) into the alternatives menu. Note the
+   **granularity gap** recorded there — `contenders`/`skipped` are per-*field*,
+   whereas five pressings agreeing on every field and differing only in
+   `disambiguation` are alternatives of a *record*, one level up. That gap may be
+   why B-7 has stalled. N4 (`release_selected_via` naming the wrong rung) is
+   exactly the PROV-string defect B-7's second half exists to retire.
 10. **[C2I] B-4 post-soak cleanup** — delete the legacy merge chain. Needs the two
     mid-pipeline consumers decoupled first; retires `test_shadow_equivalence`.
 11. **[C2I] Make `ortools` optional.** The remainder of the dependency-hygiene item
@@ -1334,6 +1798,19 @@ log below.
   (Confirmed live 2026-06-09 while fixing the invalid-include regression.) Low impact:
   the full-release fetch on select recovers this via the release endpoint. Fix would
   need a per-release follow-up call — deferred (same per-row cost we declined for Trk).
+
+  > **SUPERSEDED 2026-08-05 — promoted to N3, and it was never "minor".** Two claims
+  > in the note above are wrong, measured live. (1) **"Low impact"**: this same call
+  > also truncates to **25 of 43** releases, silently dropping the disc's own release,
+  > which is why `acoustid_corroborates=NO` on every container — a false negative
+  > costing `+0.25` and a confidence bucket. (2) **"Fix would need a per-release
+  > follow-up call"**: a paged `browse_releases(recording=…, includes=["release-groups","media"])`
+  > fixes the truncation *and* the empty stub *and* keeps `medium-list` in **one**
+  > paged call, not one per row — so the cost argument that justified the deferral
+  > does not apply to the fix that works. The 0/N stub observation was accurate and
+  > well documented; the impact assessment attached to it was inferred and wrong.
+  > Lesson worth keeping: a defect logged as cosmetic gets re-read as settled, and
+  > the note's own confidence is what stopped anyone measuring the second symptom.
 
 ---
 
