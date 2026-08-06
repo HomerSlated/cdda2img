@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import shutil
 import wave
+from collections.abc import Sequence
 from pathlib import Path
 
 from cdda2img.lookup_result import DiscMeta
@@ -249,6 +250,107 @@ def _render_results_page(results: list[DiscMeta], page: int, title: str) -> None
         nav.append("[n] next")
     nav.append("[b] back without selecting")
     print("  " + "  ".join(nav))
+
+
+def _pressing_description(m: DiscMeta) -> str:
+    """One-line description of what physically distinguishes this pressing.
+
+    Prefers the annotation's first meaningful line over ``disambiguation``: the
+    latter is MB's lossy summary, and on the reference disc it drops the word
+    "France" — the single token that identified the user's copy. Falls back to
+    disambiguation, then to nothing (a genuinely undescribed pressing, which the
+    menu must still show rather than hide).
+    """
+    from cdda2img.mb_lookup import strip_annotation_markup
+
+    if m.annotation:
+        for line in strip_annotation_markup(m.annotation).splitlines():
+            if line.strip():
+                return line.strip()
+    return (m.disambiguation or "").strip()
+
+
+def _render_pressing_page(
+    candidates: list[DiscMeta], page: int, pinned_id: str | None
+) -> None:
+    """Pure repaint of one page of the N5 alternatives (pressing) picker.
+
+    These candidates all share the disc-ID fingerprint, the album, and (by the
+    ``barcode_plurality`` rung) the barcode. They are the same record pressed
+    differently, so the table shows the fields that CAN differ and the free text
+    that describes the physical object; artist and album are constant across the
+    list and would be pure noise in every column.
+    """
+    total = len(candidates)
+    total_pages = max(1, (total + _PAGE - 1) // _PAGE)
+    start = page * _PAGE
+    page_items = candidates[start : start + _PAGE]
+
+    _header(f"Choose the pressing  [{page + 1}/{total_pages}]  ({total} candidates)")
+    print("  MusicBrainz matched this disc's TOC to several pressings of the same")
+    print("  release. What separates them is print on the disc and inlay — read")
+    print("  yours and pick the match, or decline if none of them fit.")
+    print()
+    print(
+        f"  {'#':>3}  {'MBID':<8}  {'Cty':<3}  {'Year':<4}  {'Cat #':<14}  Description"
+    )
+    print(f"  {'─' * 3}  {'─' * 8}  {'─' * 3}  {'─' * 4}  {'─' * 14}  {'─' * 34}")
+    for i, m in enumerate(page_items, start=start + 1):
+        # The pinned row is marked, not hidden and not reordered: the user is
+        # told what the ladder guessed so they can confirm or contradict it.
+        mark = "*" if m.mb_release_id and m.mb_release_id == pinned_id else " "
+        desc = _pressing_description(m) or "(no description)"
+        print(
+            f"  {i:>2}{mark}  {(m.mb_release_id or '')[:8]:<8}"
+            f"  {(m.country or '')[:3]:<3}  {(m.release_date or '')[:4]:<4}"
+            f"  {_trunc(m.catalog_number, 14):<14}  {_trunc(desc, 34)}"
+        )
+    print()
+    print("  * = currently selected (picked automatically)")
+    print()
+    nav = []
+    if page > 0:
+        nav.append("[p] prev")
+    if page < total_pages - 1:
+        nav.append("[n] next")
+    nav.append("[x] none of these match my disc")
+    nav.append("[b] back")
+    print("  " + "  ".join(nav))
+
+
+def _render_pressing_detail(m: DiscMeta, annotation: str | None) -> None:
+    """Full detail for one pressing, including the fetched annotation."""
+    _header("Pressing detail")
+    print(f"  Release   : {m.mb_release_id or '(none)'}")
+    print(f"  Album     : {m.album or '—'}")
+    print(f"  Country   : {m.country or '—'}     Date: {m.release_date or '—'}")
+    print(f"  Label     : {m.label or '—'}")
+    print(f"  Cat #     : {m.catalog_number or '—'}")
+    print(f"  Barcode   : {m.barcode or '—'}")
+    print()
+    print(f"  Summary   : {m.disambiguation or '(none)'}")
+    print()
+    if annotation:
+        import textwrap
+
+        from cdda2img.mb_lookup import strip_annotation_markup
+
+        print("  Annotation (matrix / SID codes / plant — check against your disc):")
+        for line in strip_annotation_markup(annotation).splitlines():
+            if not line:
+                print()
+                continue
+            # Wrap to the menu width rather than letting the terminal do it: a
+            # soft-wrapped matrix code splits mid-token at whatever column the
+            # window happens to be, and these strings are read character by
+            # character against the disc.
+            for out in textwrap.wrap(line, width=_W - 4) or [""]:
+                print(f"    {out}")
+    else:
+        print("  Annotation: (none recorded on MusicBrainz)")
+    print()
+    print("  [a]  This is my disc — select it")
+    print("  [b]  Back to the list")
 
 
 # ---------------------------------------------------------------------------
@@ -563,6 +665,8 @@ def run_metadata_menu(
     ar_summary: str | None = None,
     tui: bool = True,
     auto_apply: bool = False,
+    pressing_candidates: Sequence[DiscMeta] = (),
+    provenance: dict[str, str] | None = None,
 ) -> RBIDisc:
     """Display current metadata and run the interactive enrichment/confirmation menu.
 
@@ -573,6 +677,11 @@ def run_metadata_menu(
     *ar_summary* — pre-rendered AccurateRip report (rip pipeline). When
     provided, it is stored on the controller (for potential future use)
     but no longer causes a separate pause screen before the main menu.
+    *pressing_candidates* — N5: the pressings the §10.3 ladder left tied after
+    its last evidence rung. More than one enables the "choose the pressing"
+    screen. *provenance* — when given, the pressing outcome
+    (``unique``/``auto_tiebreak``/``manual``/``rejected``) and the chosen
+    candidate's MB free text are written into it after the menu closes.
 
     Returns the (possibly updated) RBIDisc. Returns *disc* unchanged when stdin
     is not a TTY (batch/scripted mode).
@@ -583,11 +692,52 @@ def run_metadata_menu(
     """
     from cdda2img.menu_state import MenuController
 
-    return MenuController(
+    ctl = MenuController(
         disc,
         source_pcm=source_pcm,
         source_wavs=source_wavs,
         ar_summary=ar_summary,
         tui=tui,
         auto_apply=auto_apply,
-    ).run()
+        pressing_candidates=pressing_candidates,
+        pressing_outcome=(provenance or {}).get("release_selection", "unique"),
+    )
+    disc = ctl.run()
+    if provenance is not None:
+        _record_pressing_outcome(provenance, ctl)
+    return disc
+
+
+def _record_pressing_outcome(provenance: dict[str, str], ctl) -> None:
+    """Write the N5 pressing-provenance keys after the menu closes.
+
+    ``release_selection`` is the claim a future archivist reads to judge how much
+    the pinned pressing is worth. It takes four values because two cannot carry
+    the distinction: ``unique`` (one candidate — nothing was chosen, so nothing
+    can be wrong), ``auto_tiebreak`` (several — the alphabetical MBID sort
+    picked), ``manual`` (several — the user picked, holding the disc) and
+    ``rejected`` (several were shown and the user said none of them match).
+    Only ``auto_tiebreak`` is a guess, and it is precisely the one that must be
+    findable.
+
+    Written here, at the point of selection, rather than inferred from the
+    ``--auto`` flag: ``_gate_adjusted_auto`` can already demote a run from auto
+    to manual mid-disc, so the flag is not a reliable proxy for what happened.
+    """
+    if not ctl.disc.mb_release_id:
+        # No release pinned at all (MB did not know the disc, or every candidate
+        # was rejected upstream). There was no pressing selection to describe,
+        # and writing `unique` would claim one happened and was unambiguous.
+        return
+    provenance["release_selection"] = ctl.pressing_outcome
+    chosen = ctl.pressing_selected
+    if chosen is None:
+        pinned = ctl.disc.mb_release_id
+        chosen = next(
+            (c for c in ctl.pressing_candidates if c.mb_release_id == pinned), None
+        )
+    if chosen is not None and chosen.disambiguation:
+        # MB's own words for what distinguishes this pressing, recorded verbatim
+        # so the container states which physical object it claims to be — not
+        # just an opaque MBID that a future MB edit could redefine.
+        provenance["release_disambiguation"] = chosen.disambiguation

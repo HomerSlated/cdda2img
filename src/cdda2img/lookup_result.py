@@ -46,4 +46,19 @@ class DiscMeta:
     source: str = (
         "unknown"  # "cdtext" | "embedded" | "musicbrainz" | "discogs" | "manual"
     )
+    # N5 — the two free-text fields that describe the PHYSICAL pressing, and the
+    # only things that separate otherwise-identical MB candidates (same barcode,
+    # catalogue number, label, country and status). Presentational: shown in the
+    # alternatives menu so a user holding the disc can choose, and the chosen
+    # one is recorded in PROV. Neither is ever a matching or scoring input.
+    #
+    # `disambiguation` is MB's one-line summary; `annotation` is the full note.
+    # They are NOT interchangeable — the summary is lossy in a way that matters.
+    # On the reference disc it reads "WE 835, newer 'e above E' Elektra logo on
+    # disc" while the annotation says "price code '''France WE 835''' on back",
+    # and *France* is the token that identified the disc. The annotation also
+    # carries matrix codes, Mastering/Mould SID codes, the plant and the
+    # glass-master dates. Prefer the annotation; fall back to disambiguation.
+    disambiguation: str | None = None
+    annotation: str | None = None  # raw MediaWiki-ish markup; strip before display
     tracks: list[TrackMeta] = field(default_factory=list)

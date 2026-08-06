@@ -28,6 +28,7 @@ from cdda2img.menu_state import (
     MenuController,
     MenuState,
     OriginalReleaseScreen,
+    PressingScreen,
     ResultsScreen,
 )
 from cdda2img.rbi_format import RBIDisc, RBITocEntry
@@ -1252,3 +1253,183 @@ def test_restore_winch_tolerates_unset_sentinel() -> None:
     from cdda2img import menu_state as ms
 
     ms._restore_winch(ms._WINCH_UNSET)  # no-op, never raises
+
+
+# ---------------------------------------------------------------------------
+# N5 — the pressing (alternatives) menu
+#
+# This path cannot be exercised by a rip: every container on the shelf is the
+# same album, so none of them produces a differing tie size or a blank
+# disambiguation. The fixtures below are built to the reference disc's measured
+# shape instead — seven candidates, one barcode, six descriptions and one blank.
+# ---------------------------------------------------------------------------
+
+
+def _pressing(mbid: str, country: str = "XE", disamb: str | None = None) -> DiscMeta:
+    return DiscMeta(
+        album="Tracy Chapman",
+        artist="Tracy Chapman",
+        barcode="0075596077422",
+        mb_release_id=mbid,
+        mb_release_group_id="rg-1",
+        country=country,
+        catalog_number="7559-60774-2",
+        disambiguation=disamb,
+        source="musicbrainz",
+    )
+
+
+def _seven_pressings() -> list[DiscMeta]:
+    return [
+        _pressing("65e67d39", disamb='EW 835, upper-case "MADE IN GERMANY", 1999+'),
+        _pressing("7531d07c", disamb="WE 851, old Elektra logo, short cat#"),
+        _pressing("8e5e097d", disamb="WE 851, no red circle around CD rim"),
+        _pressing("928588a5", "FR", disamb='EW 835, mixed-case "Made in Germany"'),
+        _pressing("b63ffa5b", disamb="WE 835, newer 'e above E' Elektra logo"),
+        _pressing("e6676f25", disamb="WE 835, old Elektra logo, approx. 1994/95"),
+        _pressing("e9b905e6", "AU", disamb=None),  # a genuinely undescribed row
+    ]
+
+
+def _pressing_ctl(candidates=None, outcome="auto_tiebreak") -> MenuController:
+    disc = _disc()
+    disc.mb_release_id = "65e67d39"
+    return MenuController(
+        disc,
+        pressing_candidates=_seven_pressings() if candidates is None else candidates,
+        pressing_outcome=outcome,
+    )
+
+
+def test_main_offers_the_pressing_screen_only_when_there_is_a_choice() -> None:
+    """One candidate is not a choice; offering a menu there invites the user to
+    'confirm' something nothing could have got wrong."""
+    with_choice = _pressing_ctl()
+    without = _pressing_ctl(candidates=[_pressing("65e67d39")], outcome="unique")
+
+    with patch("cdda2img.metadata_menu._prompt", return_value="s"):
+        with_choice._apply(with_choice.stack[-1].handle_input(with_choice))
+    assert with_choice.state is MenuState.PRESSING
+
+    _step_with(without, "s")
+    # 's' is not a command here: it falls through to the unknown-command banner
+    # and the stack does not move.
+    assert without.state is MenuState.MAIN
+    assert "Unknown command" in without.banner
+
+
+def test_pressing_screen_shows_every_evidence_rung_survivor() -> None:
+    """N5's headline: the menu is NOT the set the ladder narrowed to.
+
+    `preferred_country` would drop the FR and AU rows, leaving five — and those
+    two are the only ones carrying a country or date a user could check against
+    the sleeve. A preference rung breaks ties in the absence of a human; with a
+    human present it hides options on a config setting rather than on evidence
+    about the disc.
+    """
+    ctl = _pressing_ctl()
+    _step_with(ctl, "s")
+    screen = ctl.stack[-1]
+    assert isinstance(screen, PressingScreen)
+    assert len(screen.candidates) == 7
+    ids = {c.mb_release_id for c in screen.candidates}
+    assert {"928588a5", "e9b905e6"} <= ids
+
+
+def test_pressing_screen_none_of_these_is_its_own_outcome() -> None:
+    """A menu without a decline option forces the user to endorse a row that may
+    be wrong, converting an honest automatic guess into a false manual
+    confirmation — worse provenance than never having asked."""
+    ctl = _pressing_ctl()
+    _step_with(ctl, "s")
+    _step_with(ctl, "x")
+    assert ctl.pressing_outcome == "rejected"
+    assert ctl.pressing_selected is None
+    assert ctl.state is MenuState.MAIN
+    # The automatic pick is kept; only the claim about it changes.
+    assert ctl.disc.mb_release_id == "65e67d39"
+
+
+def test_pressing_screen_back_leaves_the_outcome_untouched() -> None:
+    """Backing out is not a decision. The recorded claim must stay
+    `auto_tiebreak`, not silently become a manual confirmation."""
+    ctl = _pressing_ctl()
+    _step_with(ctl, "s")
+    _step_with(ctl, "b")
+    assert ctl.state is MenuState.MAIN
+    assert ctl.pressing_outcome == "auto_tiebreak"
+
+
+def test_pressing_selection_opens_detail_and_applies() -> None:
+    """Picking a row opens the detail screen (where the annotation is fetched
+    for that row only), and [a] there commits it."""
+    ctl = _pressing_ctl()
+    _step_with(ctl, "s")
+    _step_with(ctl, "5")  # b63ffa5b — kgr's actual disc
+    assert ctl.state is MenuState.PRESSING_DETAIL
+
+    with (
+        patch(
+            "cdda2img.mb_lookup.fetch_annotation",
+            return_value="price code '''France WE 835''' on back",
+        ),
+        patch("cdda2img.mb_lookup.lookup_release", return_value=None),
+    ):
+        ctl.stack[-1].render(ctl)
+        _step_with(ctl, "a")
+
+    assert ctl.pressing_outcome == "manual"
+    assert ctl.pressing_selected is not None
+    assert ctl.pressing_selected.mb_release_id == "b63ffa5b"
+    assert ctl.disc.mb_release_id == "b63ffa5b"
+
+
+def test_pressing_detail_fetches_the_annotation_once() -> None:
+    """The annotation is one request per release at MB's 1 req/s, so a repaint
+    (a terminal resize repaints every frame) must not re-request."""
+    ctl = _pressing_ctl()
+    _step_with(ctl, "s")
+    _step_with(ctl, "1")
+    with patch("cdda2img.mb_lookup.fetch_annotation", return_value="annot") as fetch:
+        ctl.stack[-1].render(ctl)
+        ctl.stack[-1].render(ctl)
+        ctl.stack[-1].render(ctl)
+    assert fetch.call_count == 1
+
+
+def test_pressing_outcome_recorded_in_provenance() -> None:
+    from cdda2img.metadata_menu import _record_pressing_outcome
+
+    ctl = _pressing_ctl()
+    ctl.pressing_outcome = "manual"
+    ctl.pressing_selected = _pressing("b63ffa5b", disamb="WE 835, newer 'e above E'")
+    ctl.disc.mb_release_id = "b63ffa5b"
+    prov: dict[str, str] = {}
+    _record_pressing_outcome(prov, ctl)
+    assert prov["release_selection"] == "manual"
+    assert prov["release_disambiguation"] == "WE 835, newer 'e above E'"
+
+
+def test_pressing_outcome_falls_back_to_the_pinned_candidate() -> None:
+    """With no manual pick, the free text recorded is the pinned candidate's —
+    so an auto_tiebreak container still states which physical object it claims
+    to be, not just an opaque MBID a later MB edit could redefine."""
+    from cdda2img.metadata_menu import _record_pressing_outcome
+
+    ctl = _pressing_ctl()
+    prov: dict[str, str] = {}
+    _record_pressing_outcome(prov, ctl)
+    assert prov["release_selection"] == "auto_tiebreak"
+    assert prov["release_disambiguation"].startswith("EW 835")
+
+
+def test_no_pressing_key_when_no_release_was_pinned() -> None:
+    """`unique` would claim a pressing selection happened and was unambiguous.
+    With no release pinned at all, none happened — so no key, rather than a key
+    whose value is indistinguishable from a real single-candidate match."""
+    from cdda2img.metadata_menu import _record_pressing_outcome
+
+    ctl = MenuController(_disc(), pressing_candidates=(), pressing_outcome="unique")
+    prov: dict[str, str] = {}
+    _record_pressing_outcome(prov, ctl)
+    assert "release_selection" not in prov

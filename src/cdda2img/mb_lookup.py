@@ -328,6 +328,11 @@ def _parse_release(
         disc_total=disc_total,
         set_title=set_title,
         source="musicbrainz",
+        # N5: pressing-identifying free text. `disambiguation` needs no include;
+        # `annotation` arrives as {"text": ...} and only when the caller asked
+        # for it, so it is None on every path that did not (search, browse).
+        disambiguation=release.get("disambiguation") or None,
+        annotation=(release.get("annotation") or {}).get("text") or None,
         tracks=tracks,
     )
 
@@ -378,6 +383,17 @@ def lookup_disc_id(disc: RBIDisc) -> list[DiscMeta]:
                 "release-groups",
                 "labels",
                 "isrcs",
+                # NB: do NOT add "annotation" here either, for the same reason
+                # as "discids" above, and it is worth spelling out because the
+                # obvious check says it is fine. musicbrainzngs lists
+                # "annotation" in VALID_INCLUDES["discid"], and the /release
+                # endpoint does accept it — but the /discid endpoint answers
+                # HTTP 400, measured 2026-08-06. The library's table is a
+                # client-side superset of what the server implements, so
+                # "the library allows it" and "the endpoint accepts it" are
+                # different claims, and checking the neighbouring endpoint
+                # answers neither. N5 fetches annotations per release, lazily,
+                # from the menu — see PressingScreen.
             ],
         )
     except musicbrainzngs.ResponseError as exc:
@@ -1226,6 +1242,48 @@ def _prepop_zero_match(
             meta=winner,
         )
     return MBPrepopResult(disc, hints, 0, isrc_disambiguated=False)
+
+
+def fetch_annotation(release_id: str) -> str | None:
+    """Fetch one release's MusicBrainz annotation (N5). None when it has none.
+
+    One request per release, deliberately **lazy** — called from the menu, never
+    from the rip pipeline. It cannot ride the disc-ID lookup (that endpoint
+    answers HTTP 400 for this include; see ``lookup_disc_id``), so at MB's 1
+    req/s (R15) an eager fetch would add a second per candidate to every
+    multi-match rip, including ``--auto`` runs that never open a menu.
+
+    Never raises: an annotation is a display nicety, and a network blip while
+    the user is choosing a pressing must not unwind the menu.
+    """
+    if not release_id:
+        return None
+    _setup_useragent()
+    try:
+        result = musicbrainzngs.get_release_by_id(release_id, includes=["annotation"])
+    except Exception as exc:
+        log.debug("MB annotation fetch for %s failed: %s", release_id, exc)
+        return None
+    release = result.get("release") or {}
+    return (release.get("annotation") or {}).get("text") or None
+
+
+def strip_annotation_markup(text: str) -> str:
+    """Render a MusicBrainz annotation as plain text for a terminal.
+
+    Annotations are MediaWiki-ish: ``'''bold'''``, ``''italic''``,
+    ``=== headings ===`` and ``[url|label]`` links. Left raw, the reference
+    disc's annotation reads *"price code '''France WE 835''' on back"* — the
+    quote runs are noise on a TTY and, worse, they cluster around exactly the
+    tokens the user needs to read off the disc.
+    """
+    import re
+
+    out = re.sub(r"\[([^\]|]*)\|([^\]]*)\]", r"\2", text)  # [url|label] -> label
+    out = re.sub(r"\[([^\]]*)\]", r"\1", out)  # [url] -> url
+    out = re.sub(r"'{2,}", "", out)  # ''italic'' / '''bold'''
+    out = re.sub(r"^\s*=+\s*(.*?)\s*=+\s*$", r"\1:", out, flags=re.MULTILINE)
+    return "\n".join(line.rstrip() for line in out.splitlines()).strip()
 
 
 class ReleaseSelection(NamedTuple):

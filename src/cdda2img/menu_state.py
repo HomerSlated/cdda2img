@@ -41,6 +41,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
     from cdda2img.lookup_result import DiscMeta
     from cdda2img.rbi_format import RBIDisc
 
@@ -148,6 +150,8 @@ class MenuState(Enum):
     ACOUSTID = auto()
     RESULTS = auto()
     ORIGINAL_RELEASE = auto()
+    PRESSING = auto()
+    PRESSING_DETAIL = auto()
     DONE = auto()
 
 
@@ -225,6 +229,16 @@ class MainScreen(Screen):
         print("  [f]  Fetch metadata from remote services")
         print("  [e]  Edit metadata")
         print("  [r]  Find original release")
+        if len(ctl.pressing_candidates) > 1:
+            # Offered only when there is a genuine choice. The trigger is the
+            # size of the post-evidence-rung set, NOT the tie the mbid sort
+            # broke: a preference rung that narrowed seven candidates to one
+            # would leave that tie at 1 and suppress a menu that should have
+            # shown seven.
+            print(
+                f"  [s]  Choose the pressing "
+                f"({len(ctl.pressing_candidates)} candidates matched this TOC)"
+            )
         print("  [u]  Reset to original (undo all changes this session)")
         print("  [c]  Clear all metadata")
         print()
@@ -241,6 +255,8 @@ class MainScreen(Screen):
             return Push(EditScreen())
         if choice == "r":
             return Push(OriginalReleaseScreen())
+        if choice == "s" and len(ctl.pressing_candidates) > 1:
+            return Push(PressingScreen(ctl.pressing_candidates, ctl.disc.mb_release_id))
         if choice == "u":
             ctl.disc = copy.deepcopy(ctl._original_disc)
             ctl.mb_rg_id = None
@@ -251,7 +267,12 @@ class MainScreen(Screen):
             ctl.mb_rg_id = None
             ctl.banner = "All metadata cleared."
             return Stay()
-        ctl.banner = "Unknown command. Use a / f / e / r / u / c."
+        keys = (
+            "a / f / e / r / s / u / c"
+            if len(ctl.pressing_candidates) > 1
+            else ("a / f / e / r / u / c")
+        )
+        ctl.banner = f"Unknown command. Use {keys}."
         return Stay()
 
 
@@ -1015,6 +1036,144 @@ class OriginalReleaseScreen(Screen):
         )
 
 
+class PressingScreen(Screen):
+    """N5 alternatives menu — choose which *pressing* of the matched release is
+    the disc in the drive.
+
+    Reached only when the §10.3 ladder's last EVIDENCE rung left more than one
+    candidate. The list is deliberately NOT the set the ladder narrowed to: the
+    preference rungs (``preferred_country``, ``date``) and the arbitrary terminal
+    ``mbid`` sort do not run here. A preference rung exists to break a tie in the
+    absence of a human; with a human present it hides options on the basis of a
+    config setting rather than evidence about the disc. On the reference disc
+    that is the difference between offering seven candidates and offering five —
+    and the two it would have dropped are the only rows carrying a country or a
+    date the user could check against the sleeve.
+
+    Selecting a row opens :class:`PressingDetailScreen` rather than applying
+    immediately, because the annotation that actually identifies a pressing is
+    one request per release and is fetched there, for that row only.
+    """
+
+    state = MenuState.PRESSING
+
+    def __init__(self, candidates: list[DiscMeta], pinned_id: str | None) -> None:
+        self.candidates = candidates
+        self.pinned_id = pinned_id
+        self.page = 0
+
+    def render(self, ctl: MenuController) -> None:
+        from cdda2img.metadata_menu import _render_pressing_page
+
+        _render_pressing_page(self.candidates, self.page, self.pinned_id)
+        if ctl.banner:
+            print()
+            print(f"  ! {ctl.banner}")
+            ctl.banner = ""
+
+    def handle_input(self, ctl: MenuController) -> Nav:
+        from cdda2img.metadata_menu import _PAGE, _prompt
+
+        total = len(self.candidates)
+        total_pages = max(1, (total + _PAGE - 1) // _PAGE)
+        choice = _prompt(f"  Select 1-{total}: ").strip().lower()
+        if choice == "n":
+            if self.page < total_pages - 1:
+                self.page += 1
+            return Stay()
+        if choice == "p":
+            if self.page > 0:
+                self.page -= 1
+            return Stay()
+        if choice == "b":
+            return Pop()
+        if choice == "x":
+            # "None of these" is a real answer and needs its own outcome. Without
+            # it a menu forces the user to endorse a row that is wrong, turning an
+            # honest automatic guess into a false manual confirmation — strictly
+            # worse provenance than never having asked. The pinned release is left
+            # in place; what changes is the claim recorded about it.
+            ctl.pressing_outcome = "rejected"
+            ctl.banner = (
+                "Recorded: none of the listed pressings match. The automatic "
+                "pick is kept, but flagged as unconfirmed."
+            )
+            return Pop()
+        try:
+            idx = int(choice) - 1
+        except ValueError:
+            ctl.banner = "Invalid selection."
+            return Stay()
+        if not 0 <= idx < total:
+            ctl.banner = "Invalid selection."
+            return Stay()
+        return Push(PressingDetailScreen(self.candidates[idx]))
+
+
+class PressingDetailScreen(Screen):
+    """Full detail for one candidate pressing, then apply or back.
+
+    Owns the lazy annotation fetch (N5). The annotation cannot ride the disc-ID
+    lookup — that endpoint answers HTTP 400 for the include — so it is one
+    request per release at MB's 1 req/s, and fetching all of them eagerly would
+    tax every multi-match rip including ``--auto`` runs that never open a menu.
+    Fetched once per screen instance and cached on the candidate, so paging back
+    and forth does not re-request.
+    """
+
+    state = MenuState.PRESSING_DETAIL
+
+    def __init__(self, candidate: DiscMeta) -> None:
+        self.candidate = candidate
+        self._fetched = False
+
+    def render(self, ctl: MenuController) -> None:
+        from cdda2img.metadata_menu import _render_pressing_detail
+
+        if not self._fetched:
+            # render() is meant to be a pure repaint, and this is the one
+            # deliberate exception: the fetch must happen before the first paint
+            # or the user sees an empty annotation panel that silently fills in.
+            # Guarded so the repaint after a resize does not re-request.
+            self._fetched = True
+            if self.candidate.annotation is None and self.candidate.mb_release_id:
+                from cdda2img.mb_lookup import fetch_annotation
+
+                print("  Fetching pressing details from MusicBrainz...")
+                self.candidate.annotation = fetch_annotation(
+                    self.candidate.mb_release_id
+                )
+        _render_pressing_detail(self.candidate, self.candidate.annotation)
+
+    def handle_input(self, ctl: MenuController) -> Nav:
+        from cdda2img.metadata_menu import _prompt
+        from cdda2img.resolver_adapter import apply_menu_selection
+
+        choice = _prompt("  > ").strip().lower()
+        if choice != "a":
+            return Pop()
+        selected = self.candidate
+        if selected.mb_release_id:
+            from cdda2img.mb_lookup import lookup_release
+
+            # The candidate came from the disc-ID response and already carries a
+            # track listing, but refetch for parity with the other apply tails
+            # and to pick up anything the disc-ID includes omitted. A failure
+            # keeps the candidate we have rather than aborting the choice.
+            full = lookup_release(
+                selected.mb_release_id, disc_number=ctl.disc.disc_number
+            )
+            if full and (full.album or full.tracks):
+                full.disambiguation = selected.disambiguation
+                full.annotation = selected.annotation
+                selected = full
+        ctl.disc = apply_menu_selection(ctl.disc, selected, overwrite=True)
+        ctl.pressing_outcome = "manual"
+        ctl.pressing_selected = selected
+        ctl.banner = f"Pressing set to {(selected.mb_release_id or '')[:8]}."
+        return Pop()
+
+
 class MenuController:
     """Screen-stack controller for the metadata menu.
 
@@ -1035,9 +1194,21 @@ class MenuController:
         ar_summary: str | None = None,
         tui: bool = True,
         auto_apply: bool = False,
+        pressing_candidates: Sequence[DiscMeta] = (),
+        pressing_outcome: str = "unique",
     ) -> None:
         self.disc: RBIDisc = disc
         self._original_disc: RBIDisc = copy.deepcopy(disc)  # undo savepoint
+        # N5. The candidates the §10.3 ladder left tied after its last EVIDENCE
+        # rung, and what is currently claimed about how the pressing was chosen.
+        # The caller seeds the outcome (`unique` when nothing was chosen because
+        # nothing could be, `auto_tiebreak` when the terminal mbid sort picked);
+        # the menu overwrites it with `manual` or `rejected`. Four states, not
+        # two: "no choice existed" and "an arbitrary choice was made" are
+        # opposite provenance claims, and a boolean cannot tell them apart.
+        self.pressing_candidates: list[DiscMeta] = list(pressing_candidates)
+        self.pressing_outcome: str = pressing_outcome
+        self.pressing_selected: DiscMeta | None = None
         self.source_pcm = source_pcm
         self.source_wavs = source_wavs
         self.ar_summary = ar_summary

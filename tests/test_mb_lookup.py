@@ -2279,3 +2279,86 @@ def test_discogs_link_and_barcode_network_error_returns_none_none():
     err = musicbrainzngs.NetworkError("timeout")
     with patch("musicbrainzngs.get_release_by_id", side_effect=err):
         assert discogs_link_and_barcode("some-mbid") == (None, None)
+
+
+# ---------------------------------------------------------------------------
+# N5 — annotation handling
+# ---------------------------------------------------------------------------
+
+
+def test_strip_annotation_markup_renders_the_reference_annotation():
+    """The annotation is what actually identifies a pressing, and MB stores it as
+    MediaWiki-ish markup. Left raw, the quote runs cluster around exactly the
+    tokens a user needs to read off the disc."""
+    from cdda2img.mb_lookup import strip_annotation_markup
+
+    raw = (
+        "This release has price code '''France WE 835''' on back and a "
+        "'''newer 'e over E' Elektra logo''' on disc\n"
+        "=== Matrix ===\n"
+        "Matrix code: '''{Warner 'W' logo} CD 755960774-2.4 07/04 V01'''\n"
+        "Disc ID: [https://musicbrainz.org/cdtoc/MhxKM|MhxKM]\n"
+    )
+    out = strip_annotation_markup(raw)
+
+    assert "France WE 835" in out
+    assert "'''" not in out
+    assert "Matrix:" in out  # === heading === -> "Matrix:"
+    assert "https://" not in out  # [url|label] collapses to the label
+    assert "MhxKM" in out
+    # A lone apostrophe inside a word is content, not markup, and must survive:
+    # "'e over E'" is a logo description the user reads off the disc.
+    assert "e over E" in out
+
+
+def test_fetch_annotation_never_raises_on_a_network_failure():
+    """An annotation is a display nicety. A blip while the user is choosing a
+    pressing must not unwind the menu they are standing in."""
+    from unittest.mock import patch
+
+    import musicbrainzngs
+
+    from cdda2img.mb_lookup import fetch_annotation
+
+    with patch(
+        "musicbrainzngs.get_release_by_id",
+        side_effect=musicbrainzngs.NetworkError("boom"),
+    ):
+        assert fetch_annotation("rel-1") is None
+
+
+def test_disc_id_includes_exclude_annotation():
+    """Regression guard. musicbrainzngs lists "annotation" in
+    VALID_INCLUDES["discid"] and the /release endpoint accepts it, but the
+    /discid endpoint answers HTTP 400 — measured 2026-08-06. Adding it here
+    breaks EVERY disc-ID lookup, which is the F-003 shape: the client-side
+    validation table is a superset of what the server implements, so "the
+    library allows it" is not evidence that the endpoint does.
+    """
+    from unittest.mock import patch
+
+    from cdda2img.mb_lookup import _DISC_ID_CACHE, lookup_disc_id
+
+    _DISC_ID_CACHE.clear()
+    disc = RBIDisc(
+        album="A",
+        artist="B",
+        tracks=[
+            RBITocEntry(
+                track_number=1,
+                title="T",
+                performer="B",
+                start_frame=0,
+                duration_frames=18000,
+            )
+        ],
+    )
+    with patch(
+        "musicbrainzngs.get_releases_by_discid", return_value={"disc": {}}
+    ) as gd:
+        lookup_disc_id(disc)
+    _DISC_ID_CACHE.clear()
+
+    includes = set(gd.call_args.kwargs["includes"])
+    assert "annotation" not in includes
+    assert "discids" not in includes  # the original F-003 offender

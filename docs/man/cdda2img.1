@@ -491,9 +491,26 @@ which renders only a curated subset of provenance, this shows
 .I every
 key \(em including ones no other view surfaces, such as
 .BR acoustid_gate ,
-.BR release_selected_via ,
+.BR release_tied_after ,
+.BR release_selection ,
 and
 .BR multi_match_isrc_disambiguated .
+When several MusicBrainz pressings matched the disc's TOC,
+.B release_selection
+records how the pinned one was chosen \(em
+.BR unique ,
+.BR auto_tiebreak ,
+.BR manual ,
+or
+.BR rejected
+\(em and only
+.B auto_tiebreak
+is a guess. Prefer
+.B release_tied_after
+over
+.BR release_selected_via :
+the latter names the first ranking key on which the candidates differ, which is
+not necessarily the key that picked the winner.
 Useful for auditing a library, e.g.
 .IP
 .EX

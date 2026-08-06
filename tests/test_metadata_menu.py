@@ -1282,3 +1282,63 @@ def test_pcm_extract_track_wav_returns_none_for_missing_track(tmp_path):
 # ::test_results_mb_select_fetches_full_before_preview_and_threads_rg and
 # ::test_mb_search_s_pushes_results_sorted_earliest_first.
 # ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+# N5 — the alternatives menu prefers annotation over disambiguation
+# ---------------------------------------------------------------------------
+
+
+def test_pressing_description_prefers_annotation_over_disambiguation():
+    """The decisive N5 design point. `disambiguation` is MB's one-line summary
+    and it is LOSSY in a way that matters: on the reference disc it reads
+    "WE 835, newer 'e above E' Elektra logo on disc" while the annotation says
+    "price code '''France WE 835''' on back" — and *France* is the token that
+    identified kgr's copy. Two candidates even share the 'e over E' logo, so the
+    summary's other token does not separate them either.
+    """
+    from cdda2img.metadata_menu import _pressing_description
+
+    m = DiscMeta(
+        mb_release_id="b63ffa5b",
+        disambiguation="WE 835, newer 'e above E' Elektra logo on disc",
+        annotation=(
+            "This release has price code '''France WE 835''' on back and a "
+            "'''newer 'e over E' Elektra logo''' on disc"
+        ),
+    )
+    desc = _pressing_description(m)
+    assert "France" in desc  # present in the annotation, absent from the summary
+    assert "'''" not in desc
+
+
+def test_pressing_description_falls_back_and_tolerates_neither():
+    from cdda2img.metadata_menu import _pressing_description
+
+    assert _pressing_description(DiscMeta(disambiguation="WE 851")) == "WE 851"
+    # A pressing MB describes not at all is still a candidate and must render.
+    assert _pressing_description(DiscMeta()) == ""
+
+
+def test_corroboration_target_recorded_when_the_user_changes_the_pressing():
+    """acoustid_corroborates and discogs_link_barcode_agrees are computed before
+    the menu, against the release the ladder pinned. After a manual change they
+    describe a release the container no longer claims to be — and they read
+    exactly the same as if they described the right one."""
+    from cdda2img.cdda2img import _note_corroboration_target
+
+    disc = RBIDisc(album="A", artist="B", mb_release_id="b63ffa5b")
+
+    changed: dict[str, str] = {"acoustid_corroborates": "YES"}
+    _note_corroboration_target(changed, "65e67d39", disc)
+    assert changed["corroborated_release"] == "65e67d39"
+
+    # Unchanged selection: nothing to disclose.
+    same: dict[str, str] = {"acoustid_corroborates": "YES"}
+    _note_corroboration_target(same, "b63ffa5b", disc)
+    assert "corroborated_release" not in same
+
+    # No corroboration ran: nothing to qualify.
+    none: dict[str, str] = {}
+    _note_corroboration_target(none, "65e67d39", disc)
+    assert "corroborated_release" not in none

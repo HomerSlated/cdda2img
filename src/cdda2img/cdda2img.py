@@ -1709,6 +1709,32 @@ def _emit_mb_provenance(
         provenance["mb_rejected_inconsistent"] = str(mb_result.rejected_inconsistent)
 
 
+def _note_corroboration_target(
+    provenance: dict[str, str], checked_release_id: str | None, disc: RBIDisc
+) -> None:
+    """Record when the corroboration checks ran against a different release than
+    the one finally selected (N5).
+
+    ``acoustid_corroborates`` and ``discogs_link_barcode_agrees`` are computed
+    *before* the menu, against the release the ladder pinned. If the user then
+    picks a different pressing, both keys silently describe a release the
+    container no longer claims to be — the same "reads true, and reads
+    identically under the alternative" shape N3 and N4 were about.
+
+    So name the release they were taken against. This is cheaper than
+    recomputing (AcoustID would need the per-track hits, which are not retained
+    past R6) and it is exact: an auditor can see which claim covers what. The
+    §10.4 gate is unaffected either way — it matches at release-GROUP level, and
+    every menu candidate is drawn from the one plurality release-group.
+    """
+    if not checked_release_id or checked_release_id == disc.mb_release_id:
+        return
+    if "acoustid_corroborates" in provenance or "discogs_link_barcode_agrees" in (
+        provenance
+    ):
+        provenance["corroborated_release"] = checked_release_id
+
+
 def _collect_metadata_proposals(
     baseline: RBIDisc,
     mb_meta: DiscMeta | None,
@@ -2114,9 +2140,26 @@ def _finalize_import(
         print(f"  Metadata auto-confirmed — {match_dist.summary()}")
     else:
         print(f"  Metadata: {match_dist.summary()}")
+    # N5: the pressing menu's population, and the claim to record about how the
+    # pressing was chosen. Note `selected_release_id` is already pinned by the
+    # full ladder — including the preference rungs the menu excludes. That pin
+    # is deliberate and is what everything upstream of here (the §10.3.1 Discogs
+    # check, R6, stage-7's gate, R9) has been reading. The menu OVERRIDES it; it
+    # does not replace the act of pinning, because deferring the pin would
+    # silently disable four checks in order to defer one choice.
+    pressing_candidates = list(mb_result.menu_candidates)
+    if len(pressing_candidates) > 1:
+        provenance["release_selection"] = "auto_tiebreak"
     disc = run_metadata_menu(
-        disc, source_pcm=pcm_file, ar_summary=ar_summary, tui=tui, auto_apply=auto_apply
+        disc,
+        source_pcm=pcm_file,
+        ar_summary=ar_summary,
+        tui=tui,
+        auto_apply=auto_apply,
+        pressing_candidates=pressing_candidates,
+        provenance=provenance,
     )
+    _note_corroboration_target(provenance, mb_result.selected_release_id, disc)
     if ui is not None:
         ui.resume()
 

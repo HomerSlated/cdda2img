@@ -5,7 +5,14 @@
 ### 🔴 NEXT SESSION
 
 Both raised by kgr at the close of 2026-08-03. N1a and N1b resolved 2026-08-04;
-N1d settled and N1c superseded 2026-08-05. **Open: N1e (queued, agreed) and N2.**
+N1d settled and N1c superseded 2026-08-05; **N3, N4 and N5 implemented 2026-08-06**.
+**Open: N2 only.** (N1e is withdrawn in full — retained below as evidence, not a
+plan. Its deletion list must not be actioned.)
+
+N5's remaining work is validation, not code: the alternatives menu is covered by
+fixtures built to the reference disc's measured shape, but every container on the
+shelf is the same album, so a differing tie size and a blank `disambiguation` have
+never been exercised on real hardware. kgr's step 8 stands.
 
 #### ~~N1a. Tracy Chapman track 8 no longer reports a failure — is the repair now
 invisible, or did it not happen?~~ — **RESOLVED 2026-08-04. It did not happen.**
@@ -395,7 +402,23 @@ pressings, and paginate when the list is long. Three measurements bear on it.
    the user" — the menu stops trying to decide and starts equipping the person who
    can.
 
-#### N3. **[BUG, measured live 2026-08-05] AcoustID corroboration is broken by a 25-result truncation, and the §10.4 gate can never fire**
+#### ~~N3. **[BUG, measured live 2026-08-05] AcoustID corroboration is broken by a 25-result truncation, and the §10.4 gate can never fire**~~ — **FIXED 2026-08-06 (`591e5f4`).**
+
+> Shipped as described below, with one correction to the plan: the browse is an
+> **addition**, not a replacement. `get_recording_by_id` is still needed for the
+> recording-level fields (title, artist credit, ISRCs) that a release browse does
+> not return, so it is two requests per recording, its includes reduced to
+> `["artists","isrcs"]`. Verified live on the reference recording: 25 → 43
+> releases, release-group 0/43 → 43/43, and **both** the pinned release
+> `65e67d39` and kgr's actual pressing `b63ffa5b` present where neither was
+> before. Through the real R6 path on `Tracy Chapman_6.rbi`,
+> `acoustid_corroborates` flips NO → YES; the gate now sees 13 distinct
+> release-groups and reaches a verdict (PASS). Paging turned out to be the
+> load-bearing half — a one-page walk reproduces the same defect at 100 instead
+> of 25 — so the page cap logs when it binds. The stale docstrings are corrected,
+> and `_r6_tally_and_merge`'s name is now flagged in its own docstring as
+> historical (it merges nothing on either branch).
+
 
 Two defects, one root cause, one fix. Found by tracing R6 end-to-end against
 `Tracy Chapman_6.rbi`. **The same 25-result truncation shape as the Discogs
@@ -469,7 +492,21 @@ depends on AcoustID contributing no proposals and asserts it by test. So the
 docstring describes behaviour the code deliberately does not have — and it is the
 first thing a reader consults when deciding whether AcoustID can write metadata.
 
-#### N4. **[BUG, measured live 2026-08-05] `release_selected_via` names the first rung that *varies*, not the rung that *decides***
+#### ~~N4. **[BUG, measured live 2026-08-05] `release_selected_via` names the first rung that *varies*, not the rung that *decides***~~ — **FIXED 2026-08-06 (`174a63a`).**
+
+> Option (b) shipped: `release_tied_after=<rung>:<n>` alongside `via`, plus
+> `menu_candidates` for N5. **One correction earned by a live run.** The count
+> must NOT be computed by asking whether each key varies across the candidate
+> set — that is how `via` is defined and it is exactly why `via` misleads. The
+> AU pressing is the only one of the seven carrying a date, so `date` varies
+> across the whole set while narrowing nothing (country eliminates that row one
+> rung earlier and the five survivors are all dateless), and the whole-set test
+> answers `date:5`. The first implementation did precisely that and only the
+> live MusicBrainz response caught it; the unit fixture had no dates at all. It
+> now walks the ladder progressively, asking at each key whether the *surviving*
+> set shrank, and the regression fixture carries the AU date. Live:
+> `release_tied_after=preferred_country:5`, matching the trace below exactly.
+
 
 Found while walking the MB disc-ID path end to end on `Tracy Chapman_6.rbi` at
 kgr's request. The container records `release_selected_via=preferred_country`.
@@ -567,7 +604,46 @@ keep *via* and add `release_candidates=7`. Option (b) carries the most
 information for an auditor and matches the `ctdb_declined` precedent of recording
 what happened rather than a verdict.
 
-#### N5. **[DESIGN, kgr 2026-08-05] Pressing selection: auto keeps the tiebreak, no-auto opens the alternatives menu**
+#### ~~N5. **[DESIGN, kgr 2026-08-05] Pressing selection: auto keeps the tiebreak, no-auto opens the alternatives menu**~~ — **IMPLEMENTED 2026-08-06.**
+
+> Shipped: `menu_state.PressingScreen` / `PressingDetailScreen`, reached from the
+> main menu as `[s]` and offered **only** when more than one candidate survives
+> the last evidence rung. The ladder split is as designed — `preferred_country`,
+> `date` and `mbid` do not narrow the menu, so the reference disc shows seven
+> rows, not five. Four PROV states (`release_selection`), MB's free text in
+> `release_disambiguation`, and `corroborated_release` when a manual change
+> leaves the pre-menu corroboration keys describing a different release.
+>
+> **Three corrections to the design as written.**
+>
+> 1. **The full ladder still pins a provisional winner on both paths.** Not
+>    pinning on no-auto would silently disable four downstream checks (§10.3.1
+>    Discogs, R6, stage-7's gate, R9) in order to defer one choice. The split is
+>    about what the menu *displays*; the menu overrides the pin.
+> 2. **The menu trigger is not `release_tied_after`'s `n`.** It is the size of
+>    the post-evidence-rung set. A country rung narrowing 7 → 1 leaves `n` at 1
+>    and would suppress a menu that should have shown 7. Two counts, not one.
+> 3. **`annotation` cannot ride the disc-ID lookup.** `musicbrainzngs` lists it
+>    in `VALID_INCLUDES["discid"]` and the `/release` endpoint accepts it, but
+>    the `/discid` endpoint answers **HTTP 400** — measured, after the agent had
+>    written a comment claiming it was "verified against a live response" on the
+>    strength of having checked the *neighbouring* endpoint. Same shape as the
+>    F-003 `discids` regression, and a guard test now pins it. Annotations are
+>    fetched lazily, one release at a time, from the detail screen.
+>
+> **Still open (deliberately not done):** after a manual pressing change,
+> `acoustid_corroborates` is *disclosed* as having been computed against the
+> previous release (`corroborated_release`) rather than recomputed. Recomputing
+> is a pure set-membership retest with no network cost, but the per-track hits
+> are not retained past R6. The §10.4 gate is unaffected either way — it matches
+> at release-group level and every menu candidate shares the one plurality RG.
+>
+> **Untested against hardware.** All seven containers on the shelf are the same
+> album, so the menu path is covered only by fixtures built to the reference
+> disc's measured shape. kgr's step 8 ("verify across several CDs") is
+> outstanding, and the one thing fixtures cannot check is whether the annotation
+> text is actually sufficient to pick a pressing with the disc in hand.
+
 
 kgr's design, stated at the close of the 2026-08-05 investigation. Governs N1e,
 N3, N4 and B-7 — read those for the measurements this rests on.
