@@ -141,6 +141,56 @@ def test_gate_not_evaluated_without_acoustid_release_group_evidence() -> None:
     assert "acoustid_gate" not in prov
 
 
+def test_gate_is_reachable_through_the_real_acoustid_chain() -> None:
+    """N3 guard: every ``"acoustid_gate" not in prov`` assertion above passes
+    vacuously when the hits carry no release-group — and until 2026-08-06 the
+    real ``_chain_to_mb`` produced exactly that, because the recording endpoint
+    embeds an empty release-group stub. The gate had therefore **never fired on
+    any disc** while its unit tests were green, since they build hits by hand.
+
+    So assert the property those tests cannot: that a DiscMeta coming out of the
+    real chain carries a release-group id, i.e. that ``rg_seen`` can be non-empty.
+    Asserting the gate stays quiet would keep passing for the wrong reason.
+    """
+    from pathlib import Path
+    from unittest.mock import patch
+
+    from cdda2img import acoustid_lookup
+
+    recording = {"recording": {"title": "T", "artist-credit": [], "isrc-list": []}}
+    browse = {
+        "release-list": [
+            {
+                "id": "rel-1",
+                "title": "Album",
+                "date": "1989",
+                "country": "GB",
+                "release-group": {"id": "rg-1", "first-release-date": "1989"},
+            }
+        ],
+        "release-count": 1,
+    }
+
+    with (
+        patch.dict("os.environ", {"ACOUSTID_API_KEY": "fake"}),
+        patch("acoustid.match", return_value=iter([(0.9, "rec-1", "T", "A")])),
+        patch("musicbrainzngs.get_recording_by_id", return_value=recording),
+        patch("musicbrainzngs.browse_releases", return_value=browse),
+    ):
+        hits = acoustid_lookup.fingerprint_and_lookup(Path("/fake/t.wav"))
+
+    rg_seen = {h.mb_release_group_id for h in hits if h.mb_release_group_id}
+    assert rg_seen, "AcoustID rows carry no release-group: the §10.4 gate is inert"
+
+    # And with that evidence present the gate can actually reach a verdict.
+    disc = RBIDisc(
+        album="Album", artist="A", mb_release_id="rel-1", mb_release_group_id="rg-OTHER"
+    )
+    prov: dict[str, str] = {}
+    _r6_tally_and_merge([hits], disc, prov, selected_release_id="rel-1")
+    assert prov["acoustid_gate"] == "failed"
+
+
 # ---------------------------------------------------------------------------
 # _gate_adjusted_auto — warn-only suppression of --auto
 # ---------------------------------------------------------------------------

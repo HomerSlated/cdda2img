@@ -1511,14 +1511,17 @@ def _r6_tally_and_merge(
     *,
     selected_release_id: str | None,
 ) -> RBIDisc:
-    """Tally AcoustID release MBIDs across fingerprinted tracks; merge winner.
+    """Tally AcoustID release MBIDs across fingerprinted tracks.
 
-    A "consistent winner" appears in every per-track result set. When the
-    disc already has an MB release MBID (from disc-ID lookup), the winner is
-    used only to set ``acoustid_corroborates`` YES/NO. When the disc has no
-    MBID yet, the winner's album-level fields are merged in (pressing-level
-    mb_release_id is always cleared — fingerprints identify recordings, not
-    pressings).
+    A "consistent winner" appears in every per-track result set. When a pressing
+    was selected upstream, ``acoustid_corroborates`` records whether it is among
+    the winners, and the §10.4 gate runs. When none was, a converged winner sets
+    ``acoustid_corroborates=YES`` and nothing else.
+
+    **The name is a leftover: this merges nothing on either branch.** The
+    no-MBID merge was removed (see the comment on that branch); the name was not.
+    ``resolver_adapter`` depends on the absence and asserts it by test, so read
+    the name as historical, not as a description.
     """
 
     all_rids: set[str] = set()
@@ -1570,11 +1573,17 @@ def _r6_acoustid_corroborate(
 ) -> RBIDisc:
     """R6: pre-menu AcoustID fingerprint of tracks 1 and ceil(N/2).
 
-    Emits ``provenance["acoustid_corroborates"]`` as YES (best AcoustID hit
-    agrees with the disc's existing MB release MBID) or NO (disagrees).
-    When the disc has no MB release MBID yet AND AcoustID converges
-    consistently across all fingerprinted tracks on a single MBID, merge
-    that release into the disc via ``_merge_into_disc``.
+    Emits ``provenance["acoustid_corroborates"]`` as YES (the selected MB release
+    is among those carrying the fingerprinted recordings) or NO (it is not), and
+    runs the §10.4 release-group gate.
+
+    **Merges nothing.** An earlier version of this docstring claimed that a disc
+    with no MB release MBID got the converged AcoustID release merged in via
+    ``_merge_into_disc``; that merge was removed deliberately and the docstring
+    outlived it by long enough to be found during the N3 investigation. See the
+    comment in ``_r6_tally_and_merge`` for why (the same recording appears on
+    every compilation that includes it, so the converged release is routinely the
+    wrong album), and ``resolver_adapter`` for the test that pins the absence.
 
     No-op when ``acoustid_lookup.is_available()`` is False. Failures from
     AcoustID propagate as empty results; the function never raises.

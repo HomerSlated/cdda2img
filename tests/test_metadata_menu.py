@@ -756,26 +756,43 @@ def test_acoustid_fingerprint_returns_empty_when_unavailable(tmp_path):
 def _mb_recording_response(
     recording_id, title, artist_name, release_id, album, date, country="US"
 ):
-    """Build a minimal musicbrainzngs get_recording_by_id response dict."""
+    """Build a minimal musicbrainzngs get_recording_by_id response dict.
+
+    Carries **no** ``release-list``: since N3 the releases come from a separate
+    ``browse_releases`` call (see ``_mb_browse_response``), because the recording
+    endpoint truncates its embedded list to 25 and embeds an empty release-group.
+    The unused *release_id* / *album* / *date* / *country* arguments are kept so
+    the paired browse fixture can be built from the same call.
+    """
     return {
         "recording": {
             "id": recording_id,
             "title": title,
             "artist-credit": [{"artist": {"name": artist_name}, "joinphrase": ""}],
             "isrc-list": ["USTES1700001"],
-            "release-list": [
-                {
-                    "id": release_id,
-                    "title": album,
-                    "date": date,
-                    "country": country,
-                    "release-group": {
-                        "id": f"rg-{release_id}",
-                        "first-release-date": date,
-                    },
-                }
-            ],
         }
+    }
+
+
+def _mb_release(release_id, album, date, country="US", medium_list=None):
+    """One release dict as ``browse_releases`` returns it — real release-group."""
+    rel = {
+        "id": release_id,
+        "title": album,
+        "date": date,
+        "country": country,
+        "release-group": {"id": f"rg-{release_id}", "first-release-date": date},
+    }
+    if medium_list is not None:
+        rel["medium-list"] = medium_list
+    return rel
+
+
+def _mb_browse_response(*releases, count=None):
+    """Build a musicbrainzngs browse_releases response dict."""
+    return {
+        "release-list": list(releases),
+        "release-count": len(releases) if count is None else count,
     }
 
 
@@ -796,10 +813,13 @@ def test_acoustid_fingerprint_chains_to_mb():
         "BE",
     )
 
+    browse = _mb_browse_response(_mb_release("rel-1", "Pump Up the Jam", "1989", "BE"))
+
     with (
         patch.dict("os.environ", {"ACOUSTID_API_KEY": "fake"}),
         patch("acoustid.match", return_value=iter(match_data)),
         patch("musicbrainzngs.get_recording_by_id", return_value=mb_resp),
+        patch("musicbrainzngs.browse_releases", return_value=browse),
     ):
         results = acoustid_lookup.fingerprint_and_lookup(Path("/fake/track.wav"))
 
@@ -812,6 +832,9 @@ def test_acoustid_fingerprint_chains_to_mb():
     assert r.release_date == "1989"
     assert r.tracks[0].isrc == "USTES1700001"
     assert r.source == "acoustid"
+    # N3: the release-group is genuinely populated now — it was always None under
+    # the recording endpoint's empty stub, which is why the §10.4 gate never fired.
+    assert r.mb_release_group_id == "rg-rel-1"
 
 
 def test_acoustid_chain_drops_malformed_isrc():
@@ -826,11 +849,13 @@ def test_acoustid_chain_drops_malformed_isrc():
         "rec-uuid-1", "Song", "Artist", "rel-1", "Album", "1989"
     )
     mb_resp["recording"]["isrc-list"] = ["USTEST000001"]  # malformed: "T0" year
+    browse = _mb_browse_response(_mb_release("rel-1", "Album", "1989"))
 
     with (
         patch.dict("os.environ", {"ACOUSTID_API_KEY": "fake"}),
         patch("acoustid.match", return_value=iter(match_data)),
         patch("musicbrainzngs.get_recording_by_id", return_value=mb_resp),
+        patch("musicbrainzngs.browse_releases", return_value=browse),
     ):
         results = acoustid_lookup.fingerprint_and_lookup(Path("/fake/track.wav"))
 
@@ -846,9 +871,10 @@ def test_acoustid_chain_uses_only_valid_recording_includes():
     subset of the library's own VALID_INCLUDES, so re-adding an invalid one
     fails loudly here instead of in production.
 
-    (Type genuinely cannot be cheaply sourced for AcoustID: primary-type lives
-    on the release-group, which the recording endpoint will not embed, so the
-    Type column stays "?" for AcoustID rows by design.)"""
+    Since N3 the release-group IS available — but from the *browse* endpoint,
+    where "release-groups" is valid (see the sibling test). primary_type stays
+    unset by choice, not by availability: populating it would make AcoustID
+    propose a field, and resolver_adapter requires it to propose none."""
     from pathlib import Path
 
     import musicbrainzngs  # type: ignore[import-untyped]
@@ -860,11 +886,13 @@ def test_acoustid_chain_uses_only_valid_recording_includes():
     mb_resp = _mb_recording_response(
         "rec-uuid-1", "Title", "Artist", "rel-1", "Album", "1989"
     )
+    browse = _mb_browse_response(_mb_release("rel-1", "Album", "1989"))
 
     with (
         patch.dict("os.environ", {"ACOUSTID_API_KEY": "fake"}),
         patch("acoustid.match", return_value=iter(match_data)),
         patch("musicbrainzngs.get_recording_by_id", return_value=mb_resp) as gr,
+        patch("musicbrainzngs.browse_releases", return_value=browse),
     ):
         results = acoustid_lookup.fingerprint_and_lookup(Path("/fake/track.wav"))
 
@@ -872,7 +900,41 @@ def test_acoustid_chain_uses_only_valid_recording_includes():
     assert passed <= valid, f"invalid recording includes: {passed - valid}"
     # a valid lookup carries full release metadata (did not hit the fallback)
     assert results[0].album == "Album"
-    assert results[0].primary_type is None  # Type unavailable for AcoustID
+    assert results[0].primary_type is None  # Type deliberately unset for AcoustID
+
+
+def test_acoustid_chain_uses_only_valid_browse_includes():
+    """Sibling guard for the N3 browse call: every include passed to
+    browse_releases must be valid for the *release browse* endpoint, whose
+    valid set differs from the recording endpoint's. An invalid include raises
+    UsageError, which _browse_releases_for_recording catches and turns into an
+    empty release list — i.e. exactly the false-negative corroboration N3 fixed,
+    reintroduced silently."""
+    from pathlib import Path
+
+    import musicbrainzngs  # type: ignore[import-untyped]
+
+    from cdda2img import acoustid_lookup
+
+    valid = set(musicbrainzngs.VALID_BROWSE_INCLUDES["release"])
+    match_data = [(0.9, "rec-uuid-1", "Title", "Artist")]
+    mb_resp = _mb_recording_response(
+        "rec-uuid-1", "Title", "Artist", "rel-1", "Album", "1989"
+    )
+    browse = _mb_browse_response(_mb_release("rel-1", "Album", "1989"))
+
+    with (
+        patch.dict("os.environ", {"ACOUSTID_API_KEY": "fake"}),
+        patch("acoustid.match", return_value=iter(match_data)),
+        patch("musicbrainzngs.get_recording_by_id", return_value=mb_resp),
+        patch("musicbrainzngs.browse_releases", return_value=browse) as br,
+    ):
+        results = acoustid_lookup.fingerprint_and_lookup(Path("/fake/track.wav"))
+
+    passed = set(br.call_args.kwargs["includes"])
+    assert passed <= valid, f"invalid browse includes: {passed - valid}"
+    assert "release-groups" in passed  # the include that makes the §10.4 gate work
+    assert results[0].mb_release_group_id == "rg-rel-1"
 
 
 @pytest.mark.parametrize(
@@ -893,9 +955,9 @@ def test_acoustid_release_track_count(medium_list, expected):
 
 
 def test_acoustid_chain_populates_trk_from_media_include():
-    """The "media" include (valid for recordings) supplies each release's
-    per-medium track count → DiscMeta.track_count, the menu's Trk column and
-    the album-vs-single cue. Zero extra requests — folded into the one call."""
+    """The "media" include supplies each release's per-medium track count →
+    DiscMeta.track_count, the menu's Trk column and the album-vs-single cue.
+    It rides the browse call since N3 (it used to ride the recording call)."""
     from pathlib import Path
 
     from cdda2img import acoustid_lookup
@@ -904,16 +966,19 @@ def test_acoustid_chain_populates_trk_from_media_include():
     mb_resp = _mb_recording_response(
         "rec-uuid-1", "Title", "Artist", "rel-1", "Album", "1989"
     )
-    mb_resp["recording"]["release-list"][0]["medium-list"] = [{"track-count": "2"}]
+    browse = _mb_browse_response(
+        _mb_release("rel-1", "Album", "1989", medium_list=[{"track-count": "2"}])
+    )
 
     with (
         patch.dict("os.environ", {"ACOUSTID_API_KEY": "fake"}),
         patch("acoustid.match", return_value=iter(match_data)),
-        patch("musicbrainzngs.get_recording_by_id", return_value=mb_resp) as gr,
+        patch("musicbrainzngs.get_recording_by_id", return_value=mb_resp),
+        patch("musicbrainzngs.browse_releases", return_value=browse) as br,
     ):
         results = acoustid_lookup.fingerprint_and_lookup(Path("/fake/track.wav"))
 
-    assert "media" in gr.call_args.kwargs["includes"]
+    assert "media" in br.call_args.kwargs["includes"]
     assert results[0].track_count == 2  # 2-track single → distinguishable
 
 
@@ -978,22 +1043,8 @@ def test_acoustid_fingerprint_deduplicates_releases():
         (0.9, "rec-1", "Title A", "Artist"),
         (0.8, "rec-2", "Title B", "Artist"),
     ]
-    resp_1 = {
-        "recording": {
-            "title": "Title A",
-            "artist-credit": [],
-            "isrc-list": [],
-            "release-list": [shared_release],
-        }
-    }
-    resp_2 = {
-        "recording": {
-            "title": "Title B",
-            "artist-credit": [],
-            "isrc-list": [],
-            "release-list": [shared_release],
-        }
-    }
+    resp_1 = {"recording": {"title": "Title A", "artist-credit": [], "isrc-list": []}}
+    resp_2 = {"recording": {"title": "Title B", "artist-credit": [], "isrc-list": []}}
 
     def mb_side_effect(recording_id, **_kwargs):
         return resp_1 if recording_id == "rec-1" else resp_2
@@ -1002,11 +1053,120 @@ def test_acoustid_fingerprint_deduplicates_releases():
         patch.dict("os.environ", {"ACOUSTID_API_KEY": "fake"}),
         patch("acoustid.match", return_value=iter(match_data)),
         patch("musicbrainzngs.get_recording_by_id", side_effect=mb_side_effect),
+        patch(
+            "musicbrainzngs.browse_releases",
+            return_value=_mb_browse_response(shared_release),
+        ),
     ):
         results = acoustid_lookup.fingerprint_and_lookup(Path("/fake/track.wav"))
 
     release_ids = [r.mb_release_id for r in results if r.mb_release_id]
     assert release_ids.count("shared-rel") == 1
+
+
+# ---------------------------------------------------------------------------
+# N3: recording -> releases browse (paging, degradation, the truncation itself)
+# ---------------------------------------------------------------------------
+
+
+def test_browse_releases_pages_past_the_first_hundred():
+    """The defect N3 fixed was a *silent* 25-of-43 truncation, so the paging is
+    the load-bearing part: a walk that stopped at one page would reproduce it at
+    100 instead of 25. Two pages of 100 against a reported count of 150."""
+    from cdda2img.acoustid_lookup import _browse_releases_for_recording
+
+    page1 = _mb_browse_response(
+        *[_mb_release(f"rel-{i}", "A", "1989") for i in range(100)], count=150
+    )
+    page2 = _mb_browse_response(
+        *[_mb_release(f"rel-{i}", "A", "1989") for i in range(100, 150)], count=150
+    )
+
+    calls = []
+
+    def browse(**kwargs):
+        calls.append(kwargs["offset"])
+        return page1 if kwargs["offset"] == 0 else page2
+
+    with patch("musicbrainzngs.browse_releases", side_effect=browse):
+        out = _browse_releases_for_recording("rec-1")
+
+    assert len(out) == 150
+    assert calls == [0, 100]  # offset advances by what was actually returned
+
+
+def test_browse_releases_stops_on_an_empty_page():
+    """A server reporting a count larger than it will serve must not spin to the
+    page cap on every recording — an empty page terminates the walk."""
+    from cdda2img.acoustid_lookup import _browse_releases_for_recording
+
+    page1 = _mb_browse_response(_mb_release("rel-0", "A", "1989"), count=999)
+    empty = _mb_browse_response(count=999)
+    responses = [page1, empty]
+
+    with patch(
+        "musicbrainzngs.browse_releases", side_effect=lambda **_k: responses.pop(0)
+    ) as br:
+        out = _browse_releases_for_recording("rec-1")
+
+    assert len(out) == 1
+    assert br.call_count == 2
+
+
+def test_browse_releases_page_cap_warns_rather_than_truncating_silently():
+    """The cap is a runaway guard, not a result cap. When it binds the set IS
+    truncated — the exact condition that made corroboration a false NO — so it
+    must be logged, because a short set reads identically to a genuine miss."""
+    import logging
+
+    from cdda2img.acoustid_lookup import (
+        _MAX_RELEASE_PAGES,
+        _browse_releases_for_recording,
+    )
+
+    full_page = _mb_browse_response(
+        *[_mb_release(f"rel-{i}", "A", "1989") for i in range(100)], count=10_000
+    )
+
+    with (
+        patch("musicbrainzngs.browse_releases", return_value=full_page) as br,
+        patch.object(logging.getLogger("cdda2img.acoustid_lookup"), "warning") as warn,
+    ):
+        out = _browse_releases_for_recording("rec-1")
+
+    assert br.call_count == _MAX_RELEASE_PAGES
+    assert len(out) == 100 * _MAX_RELEASE_PAGES
+    assert warn.called
+
+
+def test_browse_releases_failure_degrades_to_recording_level():
+    """A browse failure must not lose the whole match: the recording lookup
+    already succeeded, so the caller falls back to a recording-level DiscMeta."""
+    from pathlib import Path
+
+    import musicbrainzngs
+
+    from cdda2img import acoustid_lookup
+
+    match_data = [(0.9, "rec-uuid-1", "Title", "Artist")]
+    mb_resp = _mb_recording_response(
+        "rec-uuid-1", "Title", "Artist", "rel-1", "Album", "1989"
+    )
+
+    with (
+        patch.dict("os.environ", {"ACOUSTID_API_KEY": "fake"}),
+        patch("acoustid.match", return_value=iter(match_data)),
+        patch("musicbrainzngs.get_recording_by_id", return_value=mb_resp),
+        patch(
+            "musicbrainzngs.browse_releases",
+            side_effect=musicbrainzngs.NetworkError("timeout"),
+        ),
+    ):
+        results = acoustid_lookup.fingerprint_and_lookup(Path("/fake/track.wav"))
+
+    assert len(results) == 1
+    assert results[0].mb_release_id is None  # no release, but the recording survived
+    assert results[0].tracks[0].title == "Title"
 
 
 # _acoustid_fingerprint — single-track result tagging (cp3c). The select/confirm/
