@@ -638,6 +638,16 @@ what happened rather than a verdict.
 > are not retained past R6. The §10.4 gate is unaffected either way — it matches
 > at release-group level and every menu candidate shares the one plurality RG.
 >
+> **Noticed, not acted on: `match_distance` cannot see a manual confirmation.**
+> It awards `mb_disc_id_multi = 0.30` (rather than `mb_disc_id = 0.50`) on the
+> mere *presence* of `release_selected_via`, encoding "the pressing is a best
+> guess". After N5 that is no longer always true: a `manual` selection is a user
+> confirmation with the disc in hand, which is stronger evidence than a unique
+> disc-ID hit, yet it scores the same 0.550 as the `auto_tiebreak` it replaced.
+> The signal now exists (`release_selection`) and the scoring does not read it.
+> Deliberately left alone — kgr asked for the menu, not a scoring change, and
+> "the rest of the behaviour remains unchanged". Worth deciding separately.
+>
 > **Untested against hardware.** All seven containers on the shelf are the same
 > album, so the menu path is covered only by fixtures built to the reference
 > disc's measured shape. kgr's step 8 ("verify across several CDs") is
