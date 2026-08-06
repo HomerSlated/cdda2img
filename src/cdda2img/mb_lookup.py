@@ -1175,6 +1175,18 @@ class MBPrepopResult(NamedTuple):
     # when no rung selection ran (single match / ISRC winner upstream).
     # Surfaces in PROV as ``release_selected_via``.
     release_selected_via: str | None = None
+    # N4: ``"<rung>:<n>"`` — the tie the terminal ``mbid`` sort had to break, and
+    # the last rung that narrowed anything before it. Surfaces in PROV as
+    # ``release_tied_after``. ``release_selected_via`` alone cannot express this:
+    # it names the first rung that *varies*, so it reads identically whether the
+    # ladder determined the winner or merely narrowed to a tie (N4).
+    release_tied_after: str | None = None
+    # N5: the album-consistent candidates as they stand after the last *evidence*
+    # rung — the set the alternatives menu offers, and whose size (> 1) triggers
+    # it. Empty when no rung selection ran. A tuple, not a list: this is a
+    # shared class-level default, and a mutable one would be corruptible by any
+    # caller that appended to it.
+    menu_candidates: tuple[DiscMeta, ...] = ()
     # B-2 (trust_model_design.md §11.2): the Layer-1 *selected pressing* release id,
     # exposed as an explicit eager gating signal decoupled from the mutated disc.
     # Set at the ``prepopulate_from_mb`` chokepoint to the merged
@@ -1216,15 +1228,43 @@ def _prepop_zero_match(
     return MBPrepopResult(disc, hints, 0, isrc_disambiguated=False)
 
 
+class ReleaseSelection(NamedTuple):
+    """Outcome of the §10.3 lexicographic pressing-selection rung.
+
+    Three distinct quantities, deliberately not collapsed into one — N4 found
+    that reporting a single ``via`` conflated "the rung that narrowed" with "the
+    rung that decided", and N5 needs a third number again (how many candidates a
+    human should be offered, which is neither of the first two).
+    """
+
+    winner: DiscMeta | None
+    # The first key on which the candidates vary. Historical semantics, kept
+    # because it is what `match_distance` and existing containers read — but see
+    # `tied_after`, which is the honest account of how the winner was picked.
+    via: str | None
+    # N4: "<rung>:<n>" — after <rung>, the last key that narrowed anything, <n>
+    # candidates were still tied and the terminal `mbid` sort arbitrated between
+    # them. n == 1 means the ladder genuinely determined the winner; n > 1 means
+    # it did not, and the alphabetically-first MBID won. `<rung>` is `none` when
+    # no key above the terminal one varied at all.
+    tied_after: str | None
+    # N5: the candidate set as it stands after the last EVIDENCE rung
+    # (`barcode_plurality`) — i.e. before `preferred_country`, `date` and `mbid`,
+    # which are preference/arbitrary and must not narrow a list a human is
+    # looking at. This is the menu's population AND its trigger (len > 1), which
+    # is NOT `tied_after`'s n: a country rung that narrowed 7 to 1 would leave
+    # n == 1 and suppress a menu that should have shown 7.
+    menu_candidates: tuple[DiscMeta, ...]
+
+
 def _select_release_lexicographic(
     candidates: list[DiscMeta],
     disc: RBIDisc,
     preferred_country: list[str],
-) -> tuple[DiscMeta | None, str | None]:
+) -> ReleaseSelection:
     """Pick one pressing from several album-consistent candidates by a pure
-    lexicographic key chain (trust_model_design.md §10.3). Returns
-    ``(winner, via)`` where *via* names the key that put the winner ahead of the
-    runner-up:
+    lexicographic key chain (trust_model_design.md §10.3). *via* names the first
+    key on which the candidates vary:
 
       (0) ``barcode_plurality`` — the most common normalised barcode wins
       (1) ``preferred_country`` — user config ranking (priority, NOT a filter)
@@ -1243,7 +1283,7 @@ def _select_release_lexicographic(
     from cdda2img.barcode import normalize_barcode
 
     if not candidates:
-        return None, None
+        return ReleaseSelection(None, None, None, ())
 
     def _norm(cat: str | None) -> str | None:
         return normalize_barcode(cat, require_check_digit=False) if cat else None
@@ -1266,19 +1306,61 @@ def _select_release_lexicographic(
         return (k_plur, k_country, k_date, k_mbid)
 
     keys = [_key(c) for c in candidates]
-    winner = candidates[keys.index(min(keys))]
-    # *via* = the highest-priority key on which the candidates actually vary. The
-    # winner is the lexicographic minimum, so at the first key with any variation
-    # it necessarily holds the best value — that key is what decided the ranking.
-    # When nothing varies above the terminal id, report "mbid" (arbitrary but
-    # deterministic).
+    winning_key = min(keys)
+    winner = candidates[keys.index(winning_key)]
+
+    # *via* = the highest-priority key on which the candidates actually vary.
+    #
+    # N4 (2026-08-05): this is NOT "the key that decided", which is what this
+    # comment used to claim and what the name still implies. The two coincide
+    # only when the first varying key is also uniquely determining. Measured on
+    # the reference disc: `preferred_country` narrowed 7 candidates to 5 and left
+    # a 5-way tie that the terminal `mbid` sort broke alphabetically — yet *via*
+    # read `preferred_country`, naming a rung that eliminated but did not select.
+    # It is kept because containers and `match_distance` already read it;
+    # `tied_after` below is the honest account.
     via_names = ("barcode_plurality", "preferred_country", "date", "mbid")
     via = via_names[-1]
     for i, name in enumerate(via_names):
         if len({k[i] for k in keys}) > 1:
             via = name
             break
-    return winner, via
+
+    # N4: how many candidates the terminal `mbid` sort actually had to arbitrate
+    # between — those tied with the winner on every key ABOVE it — and the last
+    # key that narrowed anything. n == 1 is a determined result; n > 1 says
+    # plainly that the ladder ran out and the winner is the alphabetically-first
+    # MBID among n indistinguishable pressings.
+    # Walk the ladder progressively: at each key, keep only the candidates still
+    # tied with the winner, and ask whether THIS key reduced that surviving set.
+    #
+    # Not `len({k[i] for k in keys}) > 1` — that asks whether the key varies
+    # across the *whole* candidate set, which is a different question and gives a
+    # different answer. Measured live on the reference disc: the AU candidate is
+    # the only one carrying a date, so `date` varies across all seven, but it is
+    # eliminated one rung earlier by country and every remaining candidate dates
+    # to "9999". The whole-set test therefore credits `date` with a narrowing it
+    # did not perform, reporting `date:5` where the ladder's real last
+    # discriminator was `preferred_country`. (That whole-set test is exactly how
+    # *via* is defined, one block up, and exactly why it misleads.)
+    survivors = list(range(len(keys)))
+    narrowed: str | None = None
+    for i, name in enumerate(via_names[:-1]):
+        still = [j for j in survivors if keys[j][i] == winning_key[i]]
+        if len(still) < len(survivors):
+            narrowed = name
+        survivors = still
+    tied_after = f"{narrowed or 'none'}:{len(survivors)}"
+
+    # N5: the set a human should be offered — tied with the winner on the last
+    # EVIDENCE rung only. Preference rungs are excluded by design; see the
+    # ReleaseSelection docstring for why this is a third number and not one of
+    # the two above.
+    menu_candidates = tuple(
+        c for c, k in zip(candidates, keys) if k[0] == winning_key[0]
+    )
+
+    return ReleaseSelection(winner, via, tied_after, menu_candidates)
 
 
 def _prepop_multimatch(
@@ -1339,14 +1421,26 @@ def _prepop_multimatch(
     )
     if rg is not None:
         rg_subset = [m for m in matches if m.mb_release_group_id == rg]
-        winner, via = _select_release_lexicographic(rg_subset, disc, preferred_country)
+        sel = _select_release_lexicographic(rg_subset, disc, preferred_country)
+        winner = sel.winner
         if winner is not None:
+            # The full ladder runs on BOTH paths and pins a provisional winner —
+            # including the preference rungs that N5 keeps out of the menu. That
+            # is deliberate: everything downstream of here (the §10.3.1 Discogs
+            # barcode check, R6 corroboration, the stage-7 gate, R9) reads a
+            # selected release, so refusing to pin on the no-auto path would
+            # silently disable four checks rather than defer one choice. The
+            # ladder split is about what the MENU DISPLAYS; the menu overrides
+            # this pin, it does not replace the act of pinning.
             disc = _merge_into_disc(winner, disc)
             log.debug(
-                "MB multi-match (%d): pinned release %s via %s (rg=%s)",
+                "MB multi-match (%d): pinned release %s via %s, tied_after=%s, "
+                "menu candidates=%d (rg=%s)",
                 len(matches),
                 winner.mb_release_id,
-                via,
+                sel.via,
+                sel.tied_after,
+                len(sel.menu_candidates),
                 rg,
             )
             return MBPrepopResult(
@@ -1358,7 +1452,9 @@ def _prepop_multimatch(
                 mb_candidate_album=winner.album,
                 mb_candidate_artist=winner.artist,
                 meta=winner,
-                release_selected_via=via,
+                release_selected_via=sel.via,
+                release_tied_after=sel.tied_after,
+                menu_candidates=sel.menu_candidates,
             )
     log.debug("MB disc ID returned %d matches; no plurality RG", len(matches))
     return MBPrepopResult(disc, hints, len(matches), rejected_inconsistent=rejected)

@@ -2006,7 +2006,11 @@ def _cand(mbid, *, catalog=None, country=None, date=None, rg="rg"):
 
 def test_rung_empty_returns_none():
     disc = RBIDisc(album="A", artist="B")
-    assert _select_release_lexicographic([], disc, []) == (None, None)
+    sel = _select_release_lexicographic([], disc, [])
+    assert sel.winner is None
+    assert sel.via is None
+    assert sel.tied_after is None
+    assert sel.menu_candidates == ()
 
 
 def test_rung_key1_barcode_plurality_wins():
@@ -2016,10 +2020,14 @@ def test_rung_key1_barcode_plurality_wins():
         _cand("b", catalog="0042284229821"),
         _cand("c", catalog="0099999999996"),  # unique barcode
     ]
-    winner, via = _select_release_lexicographic(cands, disc, [])
-    assert winner is not None
-    assert winner.mb_release_id in {"a", "b"}  # plurality tier
-    assert via == "barcode_plurality"
+    sel = _select_release_lexicographic(cands, disc, [])
+    assert sel.winner is not None
+    assert sel.winner.mb_release_id in {"a", "b"}  # plurality tier
+    assert sel.via == "barcode_plurality"
+    # N4: barcode_plurality narrowed to the 2-strong tier; `mbid` then had to
+    # arbitrate between those two. The menu would show exactly that tier.
+    assert sel.tied_after == "barcode_plurality:2"
+    assert {c.mb_release_id for c in sel.menu_candidates} == {"a", "b"}
 
 
 def test_rung_key2_preferred_country_within_barcode_tier():
@@ -2030,10 +2038,15 @@ def test_rung_key2_preferred_country_within_barcode_tier():
         _cand("gb", catalog="0042284229821", country="GB"),
         _cand("de", catalog="0042284229821", country="DE"),
     ]
-    winner, via = _select_release_lexicographic(cands, disc, ["GB", "XE", "US"])
-    assert winner is not None
-    assert winner.mb_release_id == "gb"
-    assert via == "preferred_country"
+    sel = _select_release_lexicographic(cands, disc, ["GB", "XE", "US"])
+    assert sel.winner is not None
+    assert sel.winner.mb_release_id == "gb"
+    assert sel.via == "preferred_country"
+    # Country genuinely determined it here (GB is unique), so no tie remained.
+    assert sel.tied_after == "preferred_country:1"
+    # ...but all three still share the barcode, so the MENU shows all three:
+    # a preference rung must not remove a row a human is looking at (N5).
+    assert len(sel.menu_candidates) == 3
 
 
 def test_rung_preferred_country_only_within_barcode_tier():
@@ -2045,9 +2058,9 @@ def test_rung_preferred_country_only_within_barcode_tier():
         _cand("common2", catalog="0042284229821", country="US"),
         _cand("rareGB", catalog="0099999999996", country="GB"),  # unique barcode
     ]
-    winner, _ = _select_release_lexicographic(cands, disc, ["GB"])
-    assert winner is not None
-    assert winner.mb_release_id in {"common1", "common2"}  # not rareGB
+    sel = _select_release_lexicographic(cands, disc, ["GB"])
+    assert sel.winner is not None
+    assert sel.winner.mb_release_id in {"common1", "common2"}  # not rareGB
 
 
 def test_rung_key3_earliest_date_wins():
@@ -2057,10 +2070,11 @@ def test_rung_key3_earliest_date_wins():
         _cand("early", date="1987-03-09"),
         _cand("nodate"),
     ]
-    winner, via = _select_release_lexicographic(cands, disc, [])
-    assert winner is not None
-    assert winner.mb_release_id == "early"
-    assert via == "date"
+    sel = _select_release_lexicographic(cands, disc, [])
+    assert sel.winner is not None
+    assert sel.winner.mb_release_id == "early"
+    assert sel.via == "date"
+    assert sel.tied_after == "date:1"  # earliest date was unique
 
 
 def test_rung_key4_mbid_terminal_deterministic():
@@ -2068,10 +2082,94 @@ def test_rung_key4_mbid_terminal_deterministic():
     # deterministic (lexicographically smallest mbid) and via == "mbid".
     disc = RBIDisc(album="A", artist="B")
     cands = [_cand("zzz"), _cand("aaa"), _cand("mmm")]
-    winner, via = _select_release_lexicographic(cands, disc, [])
-    assert winner is not None
-    assert winner.mb_release_id == "aaa"
-    assert via == "mbid"
+    sel = _select_release_lexicographic(cands, disc, [])
+    assert sel.winner is not None
+    assert sel.winner.mb_release_id == "aaa"
+    assert sel.via == "mbid"
+    # N4: nothing above the terminal key varied, so nothing narrowed and all
+    # three were arbitrated alphabetically. `none:3` says so out loud.
+    assert sel.tied_after == "none:3"
+    assert len(sel.menu_candidates) == 3
+
+
+def test_rung_reports_the_tie_the_mbid_sort_actually_broke():
+    """N4 regression, built to the reference disc's measured shape.
+
+    Seven album-consistent candidates, all sharing one barcode and none carrying
+    a date. ``preferred_country`` drops two (FR, AU) and leaves FIVE tied; the
+    terminal ``mbid`` sort then picks the alphabetically-first among those five.
+
+    ``release_selected_via`` reads ``preferred_country`` — naming a rung that
+    eliminated but did not select — and reads *identically* whether that rung
+    determined the winner or merely narrowed to a tie. That ambiguity is the
+    whole defect: on the real disc it hid the fact that the pressing was chosen
+    by alphabetical accident, and the choice was wrong in seven containers.
+    ``tied_after`` distinguishes the two cases; ``via`` alone never could.
+    """
+    disc = RBIDisc(album="A", artist="B")
+    bc = "0075596077422"
+    cands = [
+        _cand("b63ffa5b", catalog=bc, country="XE"),
+        _cand("8e5e097d", catalog=bc, country="XE"),
+        _cand("e6676f25", catalog=bc, country="XE"),
+        _cand("65e67d39", catalog=bc, country="XE"),
+        _cand("7531d07c", catalog=bc, country="XE"),
+        _cand("928588a5", catalog=bc, country="FR"),
+        # The AU pressing is the only one carrying a date — a live detail, and a
+        # trap. `date` therefore VARIES across all seven while narrowing nothing,
+        # because country eliminates this row one rung earlier and the five
+        # survivors are all dateless. An implementation that asks "does this key
+        # vary across the candidate set" (which is how `via` is defined) credits
+        # `date` with the narrowing and reports `date:5`. Measured against live
+        # MusicBrainz, that is wrong; the real last discriminator is country.
+        _cand("e9b905e6", catalog=bc, country="AU", date="1988-04"),
+    ]
+    sel = _select_release_lexicographic(cands, disc, ["GB", "XE", "US"])
+
+    assert sel.winner is not None
+    assert sel.winner.mb_release_id == "65e67d39"  # '6' < '7' < '8' < 'b' < 'e'
+    assert sel.via == "preferred_country"  # the historical, ambiguous answer
+    assert sel.tied_after == "preferred_country:5"  # the honest one
+
+    # N5: the menu must offer all SEVEN — country is a preference, and the two it
+    # drops are exactly the rows carrying distinguishing information a user could
+    # check against the sleeve.
+    assert len(sel.menu_candidates) == 7
+    assert {"928588a5", "e9b905e6"} <= {c.mb_release_id for c in sel.menu_candidates}
+
+
+def test_rung_tied_after_separates_determined_from_arbitrary():
+    """The two outcomes `via` conflates, side by side: same rung named, opposite
+    meanings. Only the `:n` tells them apart."""
+    disc = RBIDisc(album="A", artist="B")
+    bc = "0075596077422"
+
+    determined = _select_release_lexicographic(
+        [_cand("z", catalog=bc, country="GB"), _cand("a", catalog=bc, country="DE")],
+        disc,
+        ["GB"],
+    )
+    # Same rung varies, but this time it leaves TWO candidates tied at the top —
+    # the shape that made `via` misleading. A third, non-preferred candidate is
+    # what makes the country key vary at all; without it `via` would read `mbid`
+    # and would not be ambiguous.
+    arbitrary = _select_release_lexicographic(
+        [
+            _cand("z", catalog=bc, country="GB"),
+            _cand("a", catalog=bc, country="GB"),
+            _cand("m", catalog=bc, country="DE"),
+        ],
+        disc,
+        ["GB"],
+    )
+
+    assert determined.winner is not None
+    assert arbitrary.winner is not None
+    assert determined.winner.mb_release_id == "z"  # country picked it
+    assert arbitrary.winner.mb_release_id == "a"  # the alphabet picked it
+    assert determined.via == arbitrary.via == "preferred_country"  # indistinguishable
+    assert determined.tied_after == "preferred_country:1"
+    assert arbitrary.tied_after == "preferred_country:2"
 
 
 def test_prepopulate_rung_preferred_country_threads_through():

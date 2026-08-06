@@ -1692,6 +1692,17 @@ def _emit_mb_provenance(
         provenance["release_selected_via"] = mb_result.release_selected_via
         if mb_result.release_selected_via == "preferred_country" and preferred_country:
             provenance["preferred_country_applied"] = ",".join(preferred_country)
+    if mb_result.release_tied_after:
+        # N4: `release_selected_via` names the first rung that *varies*, which is
+        # not the rung that decides — on the reference disc it read
+        # `preferred_country` while five candidates were still tied and the
+        # alphabetical `mbid` sort picked among them (wrongly, as it turned out).
+        # This key records what actually happened: the last rung that narrowed,
+        # and how many candidates the terminal sort had to arbitrate. `:1` is a
+        # determined result; anything higher is an admitted guess. Emitted
+        # alongside `via` rather than replacing it — the `ctdb_declined`
+        # precedent of recording the event, not a verdict.
+        provenance["release_tied_after"] = mb_result.release_tied_after
     if mb_result.rejected_inconsistent:
         # Unit G: record that N MB candidates were discarded for contradicting a
         # gospel on-disc MCN/ISRC — preserves the *why* behind a blanked field.
