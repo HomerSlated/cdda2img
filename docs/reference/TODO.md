@@ -631,6 +631,25 @@ what happened rather than a verdict.
 >    F-003 `discids` regression, and a guard test now pins it. Annotations are
 >    fetched lazily, one release at a time, from the detail screen.
 >
+> 4. **The menu OPENS; it is not an entry the user must find.** kgr's wording
+>    is that no-auto "will activate the alternatives menu". A `[s]` item on
+>    the main menu would not: `[a]` is the first option and the common action
+>    on a disc that looks right, so the alternatives would go unseen and the
+>    container would record `auto_tiebreak` — documenting the failure instead
+>    of preventing it. `PressingScreen` is therefore seeded above `MainScreen`
+>    and renders first; `[b]` drops through, `[s]` returns. `run()` still exits
+>    before rendering on `--auto` or a non-TTY, so no headless rip can block.
+> 5. **`release_disambiguation` is written by `_emit_mb_provenance`**, not by
+>    the menu. The menu's candidate list is empty on the single-match path —
+>    the common case — so sourcing it there alone left the key absent on most
+>    discs while the spec says absence means MB has no description. One
+>    signal, two causes: the N4 shape, reintroduced and caught in review.
+>
+> **Side effect of N3 worth knowing about, not a defect:** the AcoustID picker
+> now lists up to 43 releases per recording where it listed 25, so its
+> `ResultsScreen` paginates to ~5 pages on the reference disc instead of ~3.
+> That is the truncation being gone, not a regression.
+>
 > **Still open (deliberately not done):** after a manual pressing change,
 > `acoustid_corroborates` is *disclosed* as having been computed against the
 > previous release (`corroborated_release`) rather than recomputed. Recomputing

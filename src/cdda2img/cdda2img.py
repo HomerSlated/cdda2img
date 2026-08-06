@@ -1703,6 +1703,18 @@ def _emit_mb_provenance(
         # alongside `via` rather than replacing it — the `ctdb_declined`
         # precedent of recording the event, not a verdict.
         provenance["release_tied_after"] = mb_result.release_tied_after
+    if mb_result.meta is not None and mb_result.meta.disambiguation:
+        # N5: MB's own description of the pinned pressing, recorded so the
+        # container states which physical object it claims to be rather than
+        # only an MBID a later MB edit could redefine.
+        #
+        # Written here, for EVERY path that pins a release, not in the menu —
+        # the menu's candidate list is empty on the single-match path, which is
+        # the common case, so sourcing it there alone would leave the key absent
+        # on most discs while the spec says absence means "MB has no
+        # description". One signal, two causes: the shape N4 was about.
+        # `_record_pressing_outcome` overwrites this on a manual pick.
+        provenance["release_disambiguation"] = mb_result.meta.disambiguation
     if mb_result.rejected_inconsistent:
         # Unit G: record that N MB candidates were discarded for contradicting a
         # gospel on-disc MCN/ISRC — preserves the *why* behind a blanked field.

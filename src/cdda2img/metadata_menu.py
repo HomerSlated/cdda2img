@@ -730,14 +730,10 @@ def _record_pressing_outcome(provenance: dict[str, str], ctl) -> None:
         # and writing `unique` would claim one happened and was unambiguous.
         return
     provenance["release_selection"] = ctl.pressing_outcome
-    chosen = ctl.pressing_selected
-    if chosen is None:
-        pinned = ctl.disc.mb_release_id
-        chosen = next(
-            (c for c in ctl.pressing_candidates if c.mb_release_id == pinned), None
-        )
-    if chosen is not None and chosen.disambiguation:
-        # MB's own words for what distinguishes this pressing, recorded verbatim
-        # so the container states which physical object it claims to be — not
-        # just an opaque MBID that a future MB edit could redefine.
-        provenance["release_disambiguation"] = chosen.disambiguation
+    if ctl.pressing_selected is not None and ctl.pressing_selected.disambiguation:
+        # A manual pick replaces the pinned release, so it must replace the
+        # description too. The un-picked case is already covered upstream by
+        # `_emit_mb_provenance`, which writes it for every path that pins a
+        # release — including the single-match path, where this controller has
+        # no candidate list to read it from.
+        provenance["release_disambiguation"] = ctl.pressing_selected.disambiguation

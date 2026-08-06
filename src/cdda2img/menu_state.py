@@ -1058,7 +1058,12 @@ class PressingScreen(Screen):
     state = MenuState.PRESSING
 
     def __init__(self, candidates: list[DiscMeta], pinned_id: str | None) -> None:
-        self.candidates = candidates
+        # Sorted by release id, not left in MusicBrainz's match order: that order
+        # is not documented as stable, and a row number is what the user acts on.
+        # Two runs against the same disc should present the same list in the same
+        # order — otherwise "I picked number 5" is not reproducible, and the
+        # provenance this screen exists to produce is weaker for it.
+        self.candidates = sorted(candidates, key=lambda c: c.mb_release_id or "~")
         self.pinned_id = pinned_id
         self.page = 0
 
@@ -1232,6 +1237,23 @@ class MenuController:
         # True once the user accepts at the root; ends run().
         self.done: bool = False
         self.stack: list[Screen] = [MainScreen()]
+        if len(self.pressing_candidates) > 1:
+            # N5: the pressing screen OPENS on a multi-candidate disc — kgr's
+            # wording is that no-auto "will activate the alternatives menu",
+            # and an opt-in entry would not. A user who presses [a] on a disc
+            # that looks right (the first option, and the common action) would
+            # never see the alternatives, and the container would record
+            # `auto_tiebreak` — which is precisely the outcome that pinned the
+            # wrong pressing in seven containers, now merely documented rather
+            # than prevented. Pushed above MainScreen so it renders first;
+            # [b] drops through to the main menu as usual, and MainScreen's [s]
+            # is there to come back.
+            #
+            # `run()` returns before rendering anything on --auto or a non-TTY,
+            # so this cannot ambush a headless run.
+            self.stack.append(
+                PressingScreen(self.pressing_candidates, disc.mb_release_id)
+            )
 
     @property
     def state(self) -> MenuState:

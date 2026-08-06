@@ -1301,21 +1301,51 @@ def _pressing_ctl(candidates=None, outcome="auto_tiebreak") -> MenuController:
     )
 
 
-def test_main_offers_the_pressing_screen_only_when_there_is_a_choice() -> None:
-    """One candidate is not a choice; offering a menu there invites the user to
+def test_pressing_screen_opens_on_a_multi_candidate_disc() -> None:
+    """kgr's wording is that no-auto *activates* the alternatives menu, so it is
+    the first thing rendered — not an entry the user must notice.
+
+    An opt-in entry would be no mechanism at all: pressing [a] is the first
+    option and the common action on a disc that looks right, so the alternatives
+    would go unseen and the container would record `auto_tiebreak`. That is the
+    outcome that pinned the wrong pressing in seven containers; documenting it is
+    not the same as preventing it.
+    """
+    ctl = _pressing_ctl()
+    assert ctl.state is MenuState.PRESSING
+    # Backing out lands on the main menu, which is the stack root beneath it.
+    _step_with(ctl, "b")
+    assert ctl.state is MenuState.MAIN
+
+
+def test_pressing_screen_does_not_open_without_a_choice() -> None:
+    """One candidate is not a choice; opening a menu there invites the user to
     'confirm' something nothing could have got wrong."""
-    with_choice = _pressing_ctl()
-    without = _pressing_ctl(candidates=[_pressing("65e67d39")], outcome="unique")
-
-    with patch("cdda2img.metadata_menu._prompt", return_value="s"):
-        with_choice._apply(with_choice.stack[-1].handle_input(with_choice))
-    assert with_choice.state is MenuState.PRESSING
-
-    _step_with(without, "s")
+    ctl = _pressing_ctl(candidates=[_pressing("65e67d39")], outcome="unique")
+    assert ctl.state is MenuState.MAIN
+    _step_with(ctl, "s")
     # 's' is not a command here: it falls through to the unknown-command banner
     # and the stack does not move.
-    assert without.state is MenuState.MAIN
-    assert "Unknown command" in without.banner
+    assert ctl.state is MenuState.MAIN
+    assert "Unknown command" in ctl.banner
+
+
+def test_main_s_reopens_the_pressing_screen() -> None:
+    """After backing out, [s] is how the user gets back to the alternatives."""
+    ctl = _pressing_ctl()
+    _step_with(ctl, "b")
+    _step_with(ctl, "s")
+    assert ctl.state is MenuState.PRESSING
+
+
+def test_pressing_screen_never_ambushes_an_auto_run() -> None:
+    """`run()` returns before rendering on --auto or a non-TTY, so seeding the
+    screen cannot make a headless rip block on a prompt."""
+    ctl = _pressing_ctl()
+    ctl.auto_apply = True
+    with patch("cdda2img.menu_state.sys.stdin.isatty", return_value=True):
+        assert ctl.run() is ctl.disc
+    assert ctl.pressing_outcome == "auto_tiebreak"  # untouched
 
 
 def test_pressing_screen_shows_every_evidence_rung_survivor() -> None:
@@ -1328,7 +1358,6 @@ def test_pressing_screen_shows_every_evidence_rung_survivor() -> None:
     about the disc.
     """
     ctl = _pressing_ctl()
-    _step_with(ctl, "s")
     screen = ctl.stack[-1]
     assert isinstance(screen, PressingScreen)
     assert len(screen.candidates) == 7
@@ -1341,7 +1370,6 @@ def test_pressing_screen_none_of_these_is_its_own_outcome() -> None:
     be wrong, converting an honest automatic guess into a false manual
     confirmation — worse provenance than never having asked."""
     ctl = _pressing_ctl()
-    _step_with(ctl, "s")
     _step_with(ctl, "x")
     assert ctl.pressing_outcome == "rejected"
     assert ctl.pressing_selected is None
@@ -1354,7 +1382,6 @@ def test_pressing_screen_back_leaves_the_outcome_untouched() -> None:
     """Backing out is not a decision. The recorded claim must stay
     `auto_tiebreak`, not silently become a manual confirmation."""
     ctl = _pressing_ctl()
-    _step_with(ctl, "s")
     _step_with(ctl, "b")
     assert ctl.state is MenuState.MAIN
     assert ctl.pressing_outcome == "auto_tiebreak"
@@ -1364,7 +1391,6 @@ def test_pressing_selection_opens_detail_and_applies() -> None:
     """Picking a row opens the detail screen (where the annotation is fetched
     for that row only), and [a] there commits it."""
     ctl = _pressing_ctl()
-    _step_with(ctl, "s")
     _step_with(ctl, "5")  # b63ffa5b — kgr's actual disc
     assert ctl.state is MenuState.PRESSING_DETAIL
 
@@ -1388,7 +1414,6 @@ def test_pressing_detail_fetches_the_annotation_once() -> None:
     """The annotation is one request per release at MB's 1 req/s, so a repaint
     (a terminal resize repaints every frame) must not re-request."""
     ctl = _pressing_ctl()
-    _step_with(ctl, "s")
     _step_with(ctl, "1")
     with patch("cdda2img.mb_lookup.fetch_annotation", return_value="annot") as fetch:
         ctl.stack[-1].render(ctl)
@@ -1410,17 +1435,22 @@ def test_pressing_outcome_recorded_in_provenance() -> None:
     assert prov["release_disambiguation"] == "WE 835, newer 'e above E'"
 
 
-def test_pressing_outcome_falls_back_to_the_pinned_candidate() -> None:
-    """With no manual pick, the free text recorded is the pinned candidate's —
-    so an auto_tiebreak container still states which physical object it claims
-    to be, not just an opaque MBID a later MB edit could redefine."""
+def test_pressing_outcome_leaves_the_upstream_description_alone() -> None:
+    """Without a manual pick the menu must not touch `release_disambiguation`.
+
+    It is written upstream by `_emit_mb_provenance` for EVERY path that pins a
+    release — including the single-match path, which is the common case and where
+    this controller has no candidate list to read it from. Sourcing it here alone
+    would leave the key absent on most discs while the spec says absence means
+    "MusicBrainz has no description": one signal, two causes.
+    """
     from cdda2img.metadata_menu import _record_pressing_outcome
 
     ctl = _pressing_ctl()
-    prov: dict[str, str] = {}
+    prov: dict[str, str] = {"release_disambiguation": "set upstream"}
     _record_pressing_outcome(prov, ctl)
     assert prov["release_selection"] == "auto_tiebreak"
-    assert prov["release_disambiguation"].startswith("EW 835")
+    assert prov["release_disambiguation"] == "set upstream"
 
 
 def test_no_pressing_key_when_no_release_was_pinned() -> None:

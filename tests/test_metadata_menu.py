@@ -1342,3 +1342,36 @@ def test_corroboration_target_recorded_when_the_user_changes_the_pressing():
     none: dict[str, str] = {}
     _note_corroboration_target(none, "65e67d39", disc)
     assert "corroborated_release" not in none
+
+
+def test_release_disambiguation_written_on_the_single_match_path():
+    """The common case. `_record_pressing_outcome` searches the menu's candidate
+    list, which is empty when MB returned exactly one match — so if that were the
+    only writer, the key would be absent on most discs while the spec says
+    absence means MusicBrainz has no description for the release."""
+    from cdda2img.cdda2img import _emit_mb_provenance
+    from cdda2img.mb_lookup import MBPrepopResult
+
+    disc = RBIDisc(album="A", artist="B")
+    meta = DiscMeta(
+        mb_release_id="65e67d39", disambiguation="EW 835, upper-case MADE IN GERMANY"
+    )
+    # Single match: no rung ran, so no `release_selected_via` and no candidates.
+    result = MBPrepopResult(disc, [], 1, meta=meta)
+    prov: dict[str, str] = {}
+    _emit_mb_provenance(prov, result, [])
+
+    assert "release_selected_via" not in prov  # no rung selection happened
+    assert prov["release_disambiguation"] == "EW 835, upper-case MADE IN GERMANY"
+
+
+def test_no_release_disambiguation_when_mb_describes_nothing():
+    """The other cause of absence, now the only one: MB has no description."""
+    from cdda2img.cdda2img import _emit_mb_provenance
+    from cdda2img.mb_lookup import MBPrepopResult
+
+    disc = RBIDisc(album="A", artist="B")
+    result = MBPrepopResult(disc, [], 1, meta=DiscMeta(mb_release_id="e9b905e6"))
+    prov: dict[str, str] = {}
+    _emit_mb_provenance(prov, result, [])
+    assert "release_disambiguation" not in prov
