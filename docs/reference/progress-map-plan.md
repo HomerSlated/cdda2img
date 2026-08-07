@@ -131,16 +131,75 @@ leaves that contract untouched.
    from `CRC failed`, and is there a `PENDING` equivalent?
 3. **Does Q lag the audio?** `accudisc_probe_c2_lag` exists for C2. If the Q for
    sector N arrives alongside sector N+k, a map indexed by LBA is misaligned by
-   k, and every cell boundary is wrong by that much. This is the question most
-   likely to invalidate the design if answered late.
+   k, and every cell boundary is wrong by that much.
 
-**The DIY fallback, stated honestly.** We can compute the Q lane ourselves inside
-`_split_streams`, which already sees each chunk's raw P-W bytes. A deliberately
-naive per-sector Python loop measures **~15 µs/sector, ~5.4 s per disc** — an
-upper bound on a bad implementation, not a real cost; a table-driven version
-would be far better. So the ask is not "we are blocked", it is "you already
-compute this and discard only the position". That argument does not depend on our
-timing number, which is why the number is labelled rather than leaned on.
+### ANSWERED — AccuDisc §2026-08-07a, replied in §149
+
+**1. Per-sector, exactly once.** One classifier iteration per LBA, never
+revisited; every retry mechanism mutates the winning copy *inside* the chunk. An
+LBA-indexed map is safe. The Q that gets checked comes from the sector actually
+delivered, after rescue and consensus — so the Q verdict and the audio in one map
+cell come from the same transfer.
+
+**2. "Absent" is four states, and there is a fifth we did not know to ask for.**
+Proposed enum: `SUBQ_PENDING` / `OK` / `BAD` / `NO_POSITION` / `NO_AUDIO`.
+
+`NO_POSITION` is CRC-good with ADR≠1 — a legitimately interleaved MCN or ISRC
+frame. Measured **1,590 of 162,892 = 0.98%**. That is not a footnote at our
+aggregation: one cell stands for ~7,000 sectors, so **68 non-position frames per
+cell**, and treating them as errors would flag **100% of cells on a clean disc**.
+The bench had already produced this failure from the other direction (`sparse`
+under worst-wins), which is why the ramp exists — and we would still have walked
+into it, not knowing the 0.98% was there to look for.
+
+**Our rendering:** `NO_POSITION` counts as **healthy** in the map — the
+subchannel is working. It stays a distinct state because `subq_toc` wants the
+opposite reading: "no position available here" is signal when deriving pregaps
+and INDEX points. Two consumers, opposite polarity, one state.
+
+**3. Q lag: zero on this drive — and index by slot regardless.** Measured over a
+whole-disc capture: 157,871 CRC-good position frames at delta **exactly 0**
+(99.973%). But the structural half decides it, not the measurement:
+`accudisc_q_parse` deliberately leaves the position fields zero on CRC failure,
+so a **CRC-bad frame has no address of its own** and must be placed by transfer
+slot — and those are precisely the frames the Q lane exists to draw. There is no
+arrangement in which a self-locating frame lets us dodge the question. Plus 43
+frames that are CRC-good and positionally wrong, in six runs at exact multiples
+of 512 sectors (an observable; they attach no mechanism to it).
+
+**The trap that decides where the work belongs — reproduced on our side.** Hard
+sectors arrive zero-filled, and a zero frame *fails* CRC. Checked against our own
+CRC-16/GSM rather than taken on trust: `stored=0x0000 computed=0xffff`. So a DIY
+Q lane would paint fabricated subchannel damage on exactly the sectors whose
+audio is already gone — sitting beside the real failure, reading as corroboration
+rather than as a bug. The engine avoids it by `continue`ing before the check, and
+the only way to know that is to read their engine. **This, not the cost, is the
+argument for the ask.**
+
+**Cost in the engine: already paid.** The CRC runs unconditionally for every
+`SUB_RAW` read whether or not a map was requested; the only new work is one byte
+store per sector through the same relaxed atomic `status_map` already uses. ABI
+impact: none — `accudisc_read_req` carries its own `.size` and the field is
+additive.
+
+**Two design calls, both theirs, both agreed** (§149.4): refuse `subq_map`
+without `SUB_RAW` (`ACCUDISC_ERR_INVAL`) rather than return a uniform map that a
+renderer would draw as a lane; and the severity nibble stays zero, because Q
+integrity is one CRC-16 and anything else would be a proxy.
+
+**Superseded:** our DIY cost measurement (~15 µs/sector, ~5.4 s per disc) is no
+longer the relevant number. It was an upper bound on a bad implementation, and
+the correctness trap makes the cost argument moot either way.
+
+**Accepted:** their ~40-line device-free lag instrument. It needs a saved raw-sub
+capture and nothing else, and our disc shelf is larger than theirs — including at
+least one disc where Q health collapses while audio stays clean, the arm most
+likely to produce a nonzero lag if one exists anywhere.
+
+**STATUS: scope is kgr's call.** AccuDisc has put the new `accudisc_read_req`
+field to him rather than implementing it quietly. Nothing waits on the answer
+(§6 step 3). If it comes back "do it on your side", the five states plus the
+`HARD`-before-CRC rule are a complete specification with no further round trip.
 
 ---
 
