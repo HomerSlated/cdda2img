@@ -261,6 +261,31 @@ draw. **Design decision: index by slot, unconditionally.**
    needed, because testing on the wrong disc proves it unnecessary. Validating the
    Q lane on run7's disc alone would have concluded the state was optional.
 
+### The correspondence is a dataset, and it contains retracted rows
+
+Found 2026-08-07 by AccuDisc, confirmed here, and it outlasts this thread.
+
+Both sides follow a no-in-place-edit rule: a correction is a **new section**, so
+nothing anyone may already have read is silently rewritten. That rule is right.
+Its unpriced cost is that the retracted number stays in the old section, in the
+same format, **indistinguishable to a parser**. Since both projects have now
+agreed the correspondence is the shared artefact that public files lean on, it is
+a dataset — and it currently carries retracted rows with nothing marking them.
+
+Demonstrated rather than hypothesised: AccuDisc's first extraction of our §153
+picked up **46 rows** — the 42 generated ones plus our own four-row hand-typed
+excerpt, which §154 had already retracted — and produced a wrong band from the
+retracted 1.007%. We had counted the same 46 ourselves and read it as arithmetic
+agreeing with expectations; they read it as a hazard. Same number, better reading.
+
+Proposed to them in §156 (forward-only, so it never edits an existing section):
+every correcting section carries a fenced ```retracted block naming the section
+and the exact values it withdraws, one per row. A parser collects those first and
+subtracts before aggregating.
+
+**Adopted only if both sides take it** — a convention one side follows is worse
+than none, because the dataset looks curated while half of it is not.
+
 **STATUS: scope is kgr's call.** AccuDisc has put the new `accudisc_read_req`
 field to him rather than implementing it quietly. Nothing waits on the answer
 (§6 step 3). If it comes back "do it on your side", the five states plus the
