@@ -196,6 +196,40 @@ capture and nothing else, and our disc shelf is larger than theirs — including
 least one disc where Q health collapses while audio stays clean, the arm most
 likely to produce a nonzero lag if one exists anywhere.
 
+### Q lag: CLOSED on our corpus 2026-08-07 — 42 captures, all NO LAG
+
+AccuDisc delivered the instrument (`tools/qlag.c` in their tree, public header
+only, builds against the installed library). We reproduced their reference
+capture exactly, built our own shifted arm to confirm the tool can report
+nonzero (`LAG +3`, with the minority delta tracking the origin `-2048 -> -2045`),
+then swept `private/bench/runs/run{6,7,8}` — three discs, 4x/8x/24x/32x/40x,
+three passes each. Full table: `private/bench/qlag-sweep-2026-08-07.txt`.
+
+**Every capture NO LAG**, and the question that mattered is answered: a Q
+collapse does *not* disturb slot alignment. Two independent events —
+
+| event | CRC-good | in-slot |
+|---|---|---|
+| run6 32x (the vendor speed cliff), all 3 passes | 99.18% -> **47.79%** | **99.988%** |
+| run8 8x_p2, one degraded pass among identical siblings | 98.03% -> **38.73%** | **99.978%** |
+
+A slot-indexed Q lane stays correct through exactly the failure it exists to
+draw. **Design decision: index by slot, unconditionally.**
+
+**Two things the sweep found that neither side predicted.**
+
+1. **The raw `non-position` column is misleading across speeds.** It halves from
+   1.01% to 0.49% between 24x and 32x — but it is a percentage of *all* frames
+   and CRC-good halved underneath it. Normalised to CRC-good frames it is flat to
+   three digits (1.026 / 1.018 / 1.018 / 1.025% at 4x/8x/24x/32x). The MCN/ISRC
+   interleave is a property of the disc's subchannel stream, not of read quality.
+2. **`NO_POSITION` is 0.00% on an entire disc.** Every run7 capture — all five
+   speeds, fifteen passes — a pressing with neither MCN nor ISRCs. So the rate is
+   **0% to ~1% by disc**, which sharpens the case for the fifth state rather than
+   softening it: a state whose necessity varies by disc is *worse* than one always
+   needed, because testing on the wrong disc proves it unnecessary. Validating the
+   Q lane on run7's disc alone would have concluded the state was optional.
+
 **STATUS: scope is kgr's call.** AccuDisc has put the new `accudisc_read_req`
 field to him rather than implementing it quietly. Nothing waits on the answer
 (§6 step 3). If it comes back "do it on your side", the five states plus the
