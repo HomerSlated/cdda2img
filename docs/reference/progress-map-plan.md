@@ -283,8 +283,30 @@ every correcting section carries a fenced ```retracted block naming the section
 and the exact values it withdraws, one per row. A parser collects those first and
 subtracts before aggregating.
 
-**Adopted only if both sides take it** — a convention one side follows is worse
-than none, because the dataset looks curated while half of it is not.
+**Both sides adopted it 2026-08-07**, with one addition from AccuDisc that our
+own §153 proved necessary: **retraction is only half the problem — duplication is
+the other half.** Of the four hand-typed rows in §153, two were *wrong* (retracted
+by §154) and two were **correct copies** of rows already in the generated table.
+Retraction does not touch those, so a parser still over-counts. Measured here:
+
+```
+run6 unique   n=12  mean=1.02233  band 1.021-1.024
+run6 +dupes   n=14  mean=1.02243  band 1.021-1.024   <- band IDENTICAL
+```
+
+The band is unchanged because **min/max are insensitive to duplication** — and
+bands are the only aggregate either project quoted all evening, so the defect
+could not have surfaced through anything we were computing. A count or a mean is
+wrong and looks fine.
+
+**Final convention: a row's identity is `(section-of-origin, run, capture)`,
+de-duplicated before aggregation.** Retraction handles rows that are wrong;
+de-duplication handles rows that are repeated. Excerpts and emphasis blocks stay
+free — a rule against quoting your own data in prose is a rule that fights how
+people write, and gets dropped.
+
+*(superseded note: adopted only if both sides take it — a convention one side follows is worse
+than none, because the dataset looks curated while half of it is not.)*
 
 **STATUS: scope is kgr's call.** AccuDisc has put the new `accudisc_read_req`
 field to him rather than implementing it quietly. Nothing waits on the answer
