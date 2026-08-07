@@ -806,6 +806,20 @@ they cannot exercise a differing tie size or a blank `disambiguation`.
 #### N2. **[C2I] Build the Q + C2 map, and restore the per-track marker on the
 progress bar**
 
+> **PLAN: `docs/reference/progress-map-plan.md` (2026-08-07).** Bench built
+> (`tools/progress_lab.py`); aesthetic settled by kgr — `glyph` / `cb` / `ramp`,
+> no ruler. **The headline finding is that almost nothing needs building**:
+> `Device.read(status_map=True)` already supplies the frontier (`PENDING`), the
+> C2 lane and a per-sector severity nibble, and already composes with `sink` /
+> `c2` / `sub`; `read_span(**kwargs)` already forwards it. Two requests were
+> withdrawn *before* being sent because they asked for shipped features. The one
+> genuine gap is the **Q lane** — `ReadStats.subq_ok` proves AccuDisc runs the
+> per-sector CRC and discards only the position — asked as a parallel `subq_map`
+> in outbound §148, along with the question that can invalidate the design if
+> answered late: **does Q lag the audio, as C2 does?** The per-track marker is
+> the left-hand status text and has been there all along; the ruler row was an
+> addition, and kgr dropped it.
+
 Two halves of one design. The track-number status to the left of the progress bar
 was lost in the AccuDisc switch and never reimplemented. And per AccuDisc's preview,
 **the progress bar will *be* the Q and C2 map** — so this is not a bar with a map

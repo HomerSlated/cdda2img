@@ -38,6 +38,7 @@ Defaults are the combination kgr settled on 2026-08-07: ``--style glyph
 from __future__ import annotations
 
 import argparse
+import os
 import random
 import shutil
 import sys
@@ -94,6 +95,42 @@ PALETTES: dict[str, Palette] = {
     # character shape so the map still reads in a log file or over a pipe.
     "mono": Palette("mono", -1, -1, -1, "no colour; shape carries the signal"),
 }
+
+
+def colour_enabled(mode: str = "auto", stream: object = None) -> bool:
+    """Whether to emit SGR colour, per the NO_COLOR convention.
+
+    Two things matter and are easy to get wrong. **NO_COLOR is an application-
+    side convention** (https://no-color.org) — no terminal strips the codes for
+    us, so an application that does not check the variable simply ignores it.
+    And the rule is *presence*, not truthiness: any non-empty value disables
+    colour, so ``NO_COLOR=0`` means no colour. Testing the value would invert
+    the one case a user is most likely to try.
+
+    A non-TTY is the second trigger: piping the map into a file should give the
+    file the shape-encoded rendering, not a stream of escape sequences.
+    """
+    if mode == "always":
+        return True
+    if mode == "never":
+        return False
+    if os.environ.get("NO_COLOR"):
+        return False
+    stream = sys.stdout if stream is None else stream
+    return bool(getattr(stream, "isatty", lambda: False)())
+
+
+def resolve_palette(name: str, mode: str = "auto") -> Palette:
+    """The palette actually used, after NO_COLOR / non-TTY degradation.
+
+    Degrading to `mono` is lossless for `glyph` (verified: `cb` + `glyph` with
+    the SGR codes stripped is byte-identical to `mono` + `glyph`) and lossy for
+    every other style, where colour is the only channel and the map collapses
+    to one repeated character. It is also lossy for `--aggregate ramp` in ALL
+    styles: severity is carried in colour alone, so a mono map answers "where"
+    and "which lane" but never "how much".
+    """
+    return PALETTES[name] if colour_enabled(mode) else PALETTES["mono"]
 
 
 def fg(c: int) -> str:
@@ -509,7 +546,10 @@ def run_gallery(args) -> None:
         f"sectors={args.sectors}\n"
     )
 
+    live = colour_enabled(args.color)
     for pname, palette in PALETTES.items():
+        if not live and pname != "mono":
+            continue  # NO_COLOR / non-TTY: the other three have nothing to show
         print(f"\033[1m── palette: {pname}\033[0m  \033[2m({palette.note})\033[0m")
         for style in RENDERERS:
             if pname == "mono" and style != "glyph":
@@ -551,7 +591,7 @@ def run_aggregates(args) -> None:
     `worst` flags 34 of 60 cells at full intensity, `ratio` flags none at all,
     and `ramp` flags the same 34 in its two faintest bands."""
     cols = shutil.get_terminal_size().columns - 1
-    palette = PALETTES[args.palette]
+    palette = resolve_palette(args.palette, args.color)
     print(
         f"\n\033[1mQ + C2 map — aggregation sweep\033[0m  "
         f"\033[2m(pattern={args.pattern} style={args.style} "
@@ -580,7 +620,7 @@ def run_patterns(args) -> None:
     """Every damage pattern in one style — checks the map reads correctly against
     each real-world failure mode, not just the one that was handy."""
     cols = shutil.get_terminal_size().columns - 1
-    palette = PALETTES[args.palette]
+    palette = resolve_palette(args.palette, args.color)
     print(
         f"\n\033[1mQ + C2 map — pattern sweep\033[0m  "
         f"\033[2m(style={args.style} palette={args.palette})\033[0m\n"
@@ -610,6 +650,15 @@ def main() -> None:
     )
     ap.add_argument("--style", choices=list(RENDERERS), default="glyph")
     ap.add_argument("--palette", choices=list(PALETTES), default="cb")
+    ap.add_argument(
+        "--color",
+        choices=("auto", "always", "never"),
+        default="auto",
+        help=(
+            "auto honours NO_COLOR and degrades to the mono rendering when "
+            "stdout is not a TTY; never forces it; always overrides both"
+        ),
+    )
     ap.add_argument(
         "--pattern",
         choices=list(PATTERNS),
@@ -653,7 +702,7 @@ def main() -> None:
         return
 
     disc = make_disc(args.pattern, args.sectors, args.tracks, args.seed)
-    palette = PALETTES[args.palette]
+    palette = resolve_palette(args.palette, args.color)
     if args.live:
         run_live(args, disc, palette)
     else:
