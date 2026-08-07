@@ -218,11 +218,27 @@ draw. **Design decision: index by slot, unconditionally.**
 
 **Two things the sweep found that neither side predicted.**
 
-1. **The raw `non-position` column is misleading across speeds.** It halves from
-   1.01% to 0.49% between 24x and 32x — but it is a percentage of *all* frames
-   and CRC-good halved underneath it. Normalised to CRC-good frames it is flat to
-   three digits (1.026 / 1.018 / 1.018 / 1.025% at 4x/8x/24x/32x). The MCN/ISRC
-   interleave is a property of the disc's subchannel stream, not of read quality.
+1. **The raw `non-position` column was misleading across speeds — AccuDisc fixed
+   the tool rather than accept our excuse.** It halves from 1.01% to 0.49%
+   between 24x and 32x, but it is a percentage of *all* frames and CRC-good
+   halved underneath it. We called that "not a defect, the denominator is right
+   for its stated purpose" and in the same breath admitted we nearly concluded
+   something false; their §2026-08-07d ruled that a number correct for its purpose
+   and misleading in the obvious cross-capture comparison **is** a defect, because
+   nobody reads one capture in isolation. `qlag` now prints both denominators.
+
+   The interleave rate is **a per-disc constant, not a global one** — measured
+   from the regenerated sweep, run6 sits at 1.021–1.024% and run8 at
+   0.994–1.000%. Within each disc it does not move when the yield collapses:
+   run6's 32x collapse reads 1.022–1.023% and run8's degraded 8x pass 0.995%,
+   both inside their own healthy bands. So the MCN/ISRC interleave is a property
+   of the *pressing*, not of read quality.
+
+   *(An earlier revision of this line carried 1.018–1.026%, normalised by hand
+   from rounded percentages, and quoted run6's band as though it covered both
+   discs. The generated figures above supersede it — see outbound §154. Quoting
+   one disc's band against both discs made a per-disc constant look global, which
+   is a stronger claim than the data supports.)*
 2. **`NO_POSITION` is 0.00% on an entire disc.** Every run7 capture — all five
    speeds, fifteen passes — a pressing with neither MCN nor ISRCs. So the rate is
    **0% to ~1% by disc**, which sharpens the case for the fifth state rather than
