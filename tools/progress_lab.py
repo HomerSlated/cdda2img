@@ -10,22 +10,29 @@ carry.
 
 Layout under test::
 
-    ⠹  Ripping track 07…   ▀▀▀▀▀▀▀▀▀▀▀░░░░░░░   42.7% (149520/350000)
-    │  │                   │                    │
-    │  │                   │                    └─ right:  percent + sectors
-    │  │                   └─ middle: the Q + C2 map, which IS the progress bar
-    │  └─ left: status text
+    ⠹  Ripping track 07…  ▄████▄▀███░░░░░░░░░   42.7% (149520/350000)
+    │  │                  │                     │
+    │  │                  │                     └─ right:  percent + sectors
+    │  │                  └─ middle: the Q + C2 map, which IS the progress bar
+    │  └─ left: status text (this IS N2's per-track marker)
     └─ left: braille throbber
+
+Both variable-length parts are padded to their widest form so the map's width —
+and therefore the number of sectors each cell stands for — never changes during
+a rip. See ``status_width`` / ``right_text``.
 
 Run ``--gallery`` first: it renders every style and palette as static frames on
 one screen, which is the comparison this tool exists to make.
 
 Usage
 -----
+    uv run python tools/progress_lab.py --live --pattern mixed
     uv run python tools/progress_lab.py --gallery
-    uv run python tools/progress_lab.py --style dual --pattern rot
-    uv run python tools/progress_lab.py --style glyph --palette mono --at 60
     uv run python tools/progress_lab.py --aggregates --pattern sparse
+    uv run python tools/progress_lab.py --style dual --palette classic --pattern rot
+
+Defaults are the combination kgr settled on 2026-08-07: ``--style glyph
+--palette cb --aggregate ramp``.
 """
 
 from __future__ import annotations
@@ -374,18 +381,6 @@ RENDERERS = {
 }
 
 
-def render_ticks(disc: Disc, width: int, p: Palette) -> str:
-    """A track-boundary ruler under the map — the per-track marker N2 wants back."""
-    per = max(1, disc.sectors // width)
-    row = [" "] * width
-    for s in disc.track_starts:
-        c = min(width - 1, s // per)
-        row[c] = "╵"
-    dim = "" if p.name == "mono" else fg(240)
-    tail = "" if p.name == "mono" else RESET
-    return f"{dim}{''.join(row)}{tail}"
-
-
 # ── the whole line ────────────────────────────────────────────────────────────
 
 
@@ -398,6 +393,32 @@ def status_text(disc: Disc, sector: int, speed: int) -> str:
     return f"Ripping track {disc.track_at(sector):02d}…"
 
 
+# The map's width MUST NOT change mid-rip. It is not cosmetic: `per` (sectors per
+# cell) is derived from the width, so a one-column change re-buckets every cell
+# and the whole map appears to rewrite history — cells that were already drawn
+# visibly change glyph. Measured: the status text is 17, 19 and 17 columns across
+# the three phases, and the sector counter gains a digit at 100000, which between
+# them moved the width 55 → 53 → 54 → 53 on one run. So both variable-length
+# parts are padded to their widest form, once, for the whole rip.
+
+
+def status_width(disc: Disc, speed: int) -> int:
+    """Widest the status column can ever get for this disc."""
+    return max(
+        len("Grabbing track 1…"),
+        len(f"Ripping disc at {speed}x…"),
+        len(f"Ripping track {len(disc.track_starts):02d}…"),
+    )
+
+
+def right_text(disc: Disc, sector: int) -> str:
+    """Percent + sectors, at a constant width: the running count is right-aligned
+    in the total's own digit count, so 84875 and 106312 occupy the same columns."""
+    digits = len(str(disc.sectors))
+    pct = sector / disc.sectors * 100
+    return f"{pct:5.1f}% ({sector:>{digits}}/{disc.sectors})"
+
+
 def compose(
     disc: Disc,
     sector: int,
@@ -407,15 +428,13 @@ def compose(
     agg: str,
     frame: int,
     speed: int,
-    ticks: bool,
     cols: int,
 ) -> list[str]:
     spin = SPINNER[frame % len(SPINNER)]
-    status = status_text(disc, sector, speed)
-    pct = sector / disc.sectors * 100
-    right = f"{pct:5.1f}% ({sector}/{disc.sectors})"
+    status = status_text(disc, sector, speed).ljust(status_width(disc, speed))
+    right = right_text(disc, sector)
 
-    # Fixed overhead: spinner + 2 spaces + status + 2 spaces + 2 spaces + right.
+    # spinner(1) + "  "(2) + status + "  "(2) + map + "  "(2) + right
     overhead = 1 + 2 + len(status) + 2 + 2 + len(right)
     width = max(8, cols - overhead)
 
@@ -425,8 +444,6 @@ def compose(
     lines = [f"{spin}  {status}  {rows[0]}  {right}"]
     pad = " " * (1 + 2 + len(status) + 2)
     lines.extend(f"{pad}{r}" for r in rows[1:])
-    if ticks:
-        lines.append(f"{pad}{render_ticks(disc, width, palette)}")
     return lines
 
 
@@ -448,7 +465,6 @@ def run_live(args, disc: Disc, palette: Palette) -> None:
                 agg=args.aggregate,
                 frame=f,
                 speed=args.speed,
-                ticks=args.ticks,
                 cols=cols,
             )
             up = (
@@ -477,7 +493,6 @@ def run_static(args, disc: Disc, palette: Palette) -> None:
         agg=args.aggregate,
         frame=2,
         speed=args.speed,
-        ticks=args.ticks,
         cols=cols,
     )
     print("\n".join(lines))
@@ -509,7 +524,6 @@ def run_gallery(args) -> None:
                 agg=args.aggregate,
                 frame=2,
                 speed=args.speed,
-                ticks=args.ticks,
                 cols=cols,
             )
             print(f"  \033[2m{style:<8}\033[0m")
@@ -554,7 +568,6 @@ def run_aggregates(args) -> None:
             agg=mode,
             frame=2,
             speed=args.speed,
-            ticks=args.ticks,
             cols=cols,
         )
         print(f"  \033[2m{mode:<6}\033[0m")
@@ -583,7 +596,6 @@ def run_patterns(args) -> None:
             agg=args.aggregate,
             frame=2,
             speed=args.speed,
-            ticks=args.ticks,
             cols=cols,
         )
         print(f"  \033[2m{pat:<8}\033[0m")
@@ -596,8 +608,8 @@ def main() -> None:
     ap = argparse.ArgumentParser(
         description="Aesthetic bench for the N2 Q + C2 progress map.",
     )
-    ap.add_argument("--style", choices=list(RENDERERS), default="dual")
-    ap.add_argument("--palette", choices=list(PALETTES), default="classic")
+    ap.add_argument("--style", choices=list(RENDERERS), default="glyph")
+    ap.add_argument("--palette", choices=list(PALETTES), default="cb")
     ap.add_argument(
         "--pattern",
         choices=list(PATTERNS),
@@ -606,7 +618,7 @@ def main() -> None:
     ap.add_argument(
         "--aggregate",
         choices=("worst", "ratio", "ramp"),
-        default="worst",
+        default="ramp",
         help=(
             "how thousands of sectors collapse into one cell: worst=any flagged "
             "sector reddens the cell, ratio=majority, ramp=shade by error "
@@ -617,7 +629,6 @@ def main() -> None:
     ap.add_argument("--tracks", type=int, default=12)
     ap.add_argument("--speed", type=int, default=24)
     ap.add_argument("--seed", type=int, default=7)
-    ap.add_argument("--ticks", action="store_true", help="show track-boundary ruler")
     ap.add_argument("--at", type=float, default=100.0, help="static frame, %% done")
     ap.add_argument("--fps", type=float, default=20.0)
     ap.add_argument("--duration", type=float, default=8.0, help="seconds per run")
