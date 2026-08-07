@@ -25,6 +25,7 @@ Usage
     uv run python tools/progress_lab.py --gallery
     uv run python tools/progress_lab.py --style dual --pattern rot
     uv run python tools/progress_lab.py --style glyph --palette mono --at 60
+    uv run python tools/progress_lab.py --aggregates --pattern sparse
 """
 
 from __future__ import annotations
@@ -36,6 +37,7 @@ import sys
 import time
 from dataclasses import dataclass
 from enum import Enum
+from typing import NamedTuple
 
 # ── the two lanes' per-sector states ──────────────────────────────────────────
 #
@@ -63,16 +65,24 @@ class Palette:
     ok: int
     err: int
     note: str
+    # Four shades of the error hue, faintest first, for `--aggregate ramp`. They
+    # must stay within ONE hue: the ramp encodes severity, and a ramp that drifts
+    # across hues reads as a change of kind rather than a change of degree.
+    err_ramp: tuple[int, int, int, int] = (0, 0, 0, 0)
 
 
 PALETTES: dict[str, Palette] = {
     # The obvious one. Fails for ~8% of men: red/green is the common dichromacy.
-    "classic": Palette("classic", 236, 34, 196, "green/red — familiar, not safe"),
+    "classic": Palette(
+        "classic", 236, 34, 196, "green/red — familiar, not safe", (52, 124, 160, 196)
+    ),
     # Blue/orange survives deuteranopia and protanopia, and stays distinct in
     # greyscale because the two differ in luminance as well as hue.
-    "cb": Palette("cb", 236, 33, 208, "blue/orange — colourblind-safe"),
+    "cb": Palette(
+        "cb", 236, 33, 208, "blue/orange — colourblind-safe", (94, 136, 172, 214)
+    ),
     # Higher chroma for a bright terminal; same hue relationship as classic.
-    "vivid": Palette("vivid", 238, 46, 203, "bright green/salmon"),
+    "vivid": Palette("vivid", 238, 46, 203, "bright green/salmon", (89, 125, 168, 203)),
     # No colour at all — see the `glyph` style, which encodes both lanes in the
     # character shape so the map still reads in a log file or over a pipe.
     "mono": Palette("mono", -1, -1, -1, "no colour; shape carries the signal"),
@@ -157,9 +167,12 @@ def _pat_rot(q, c2, n, rng) -> None:
 
 
 def _pat_sparse(q, c2, n, rng) -> None:
-    """Isolated pinpricks — the case `--aggregate ratio` erases entirely."""
-    for _ in range(n // 900):
-        _burst(c2, rng.randrange(n), rng.randrange(4, 40), 0.7, rng)
+    """Isolated pinpricks — the case `ratio` erases entirely and `worst` inflates
+    into a solid red bar. Deliberately down at ~0.1% of the disc: at the 1.7% it
+    started out at, the name said "pinpricks" while the data was substantial
+    damage, and the ramp's lowest band never got exercised by anything."""
+    for _ in range(n // 6000):
+        _burst(c2, rng.randrange(n), rng.randrange(2, 12), 0.7, rng)
 
 
 def _pat_c2only(q, c2, n, rng) -> None:
@@ -214,21 +227,58 @@ def make_disc(pattern: str, sectors: int, tracks: int, seed: int) -> Disc:
 #
 # A disc is ~350k sectors and the map is ~40 cells wide, so one cell stands for
 # thousands of sectors. How that bucket collapses to one state is a real design
-# decision, not an implementation detail: `worst` shows a single bad sector in a
-# clean disc (right for a fault map), `ratio` shows overall health and hides it.
+# decision, not an implementation detail, and all three arms are wrong in a
+# different direction:
+#
+#   worst  any flagged sector reddens the whole cell. Right for a *fault* map —
+#          a single bad sector must be findable — and useless as a health
+#          indicator: it paints the entire `sparse` disc red.
+#   ratio  majority wins. Right for health, and it erases exactly the isolated
+#          damage a fault map exists to show: `sparse` renders solid green.
+#   ramp   error *density* picks a shade. Both facts at once, at the cost of a
+#          reader having to learn that dark red is not the same as bright red.
 
 
-def bucket(lane: list[St], lo: int, hi: int, frontier: int, mode: str) -> St:
+class Lane(NamedTuple):
+    """One cell's worth of one lane. ``level`` is the ramp band, or -1 when the
+    aggregation mode does not ramp (in which case the flat error colour is used
+    and the distinction never reaches the palette)."""
+
+    state: St
+    level: int = -1
+
+
+# Error densities span four orders of magnitude, so a LINEAR ramp is useless:
+# at ~10,600 sectors per cell, isolated damage lands around 1e-4..1e-3 and a
+# solid burst around 5e-1, which a linear scale renders as "nothing" and
+# "everything" with no shades in between. The bands are therefore decade-wide.
+# Boundaries are the fraction at which a cell moves UP a band.
+_RAMP_BANDS = (1e-3, 1e-2, 1e-1)
+
+
+def _band(frac: float) -> int:
+    level = 0
+    for edge in _RAMP_BANDS:
+        if frac >= edge:
+            level += 1
+    return level
+
+
+def bucket(lane: list[St], lo: int, hi: int, frontier: int, mode: str) -> Lane:
     if lo >= frontier:
-        return St.UNREAD
+        return Lane(St.UNREAD)
     hi = min(hi, frontier)
     window = lane[lo:hi]
     if not window:
-        return St.UNREAD
+        return Lane(St.UNREAD)
     errs = sum(1 for s in window if s is St.ERR)
-    if mode == "worst":
-        return St.ERR if errs else St.OK
-    return St.ERR if errs * 2 > len(window) else St.OK
+    if mode == "ratio":
+        return Lane(St.ERR if errs * 2 > len(window) else St.OK)
+    if not errs:
+        return Lane(St.OK)
+    if mode == "ramp":
+        return Lane(St.ERR, _band(errs / len(window)))
+    return Lane(St.ERR)  # worst
 
 
 # ── map renderers ─────────────────────────────────────────────────────────────
@@ -239,7 +289,7 @@ def bucket(lane: list[St], lo: int, hi: int, frontier: int, mode: str) -> St:
 # horizontal resolution.
 
 
-def _lanes(disc: Disc, width: int, frontier: int, agg: str) -> list[tuple[St, St]]:
+def _lanes(disc: Disc, width: int, frontier: int, agg: str) -> list[tuple[Lane, Lane]]:
     per = max(1, disc.sectors // width)
     out = []
     for c in range(width):
@@ -251,8 +301,21 @@ def _lanes(disc: Disc, width: int, frontier: int, agg: str) -> list[tuple[St, St
     return out
 
 
-def _col(state: St, p: Palette) -> int:
-    return {St.UNREAD: p.unread, St.OK: p.ok, St.ERR: p.err}[state]
+def _col(lane: Lane, p: Palette) -> int:
+    if lane.state is St.UNREAD:
+        return p.unread
+    if lane.state is St.OK:
+        return p.ok
+    return p.err if lane.level < 0 else p.err_ramp[lane.level]
+
+
+def _worse(a: Lane, b: Lane) -> Lane:
+    """Collapse two lanes to one for the single-lane renderers. UNREAD wins over
+    everything — an unread cell is not a clean cell — and among read cells the
+    worse state wins, then the higher ramp band."""
+    if St.UNREAD in (a.state, b.state):
+        return Lane(St.UNREAD)
+    return max(a, b, key=lambda x: (x.state.value, x.level))
 
 
 def render_dual(cells, p: Palette) -> list[str]:
@@ -274,11 +337,8 @@ def render_single(cells, p: Palette) -> list[str]:
     """One row, one lane: the worse of Q and C2. Simplest, but a reader cannot
     tell a subchannel collapse from an audio error — which are different
     problems with different remedies."""
-    out = []
-    for qs, cs in cells:
-        s = St.UNREAD if St.UNREAD in (qs, cs) else max(qs, cs, key=lambda x: x.value)
-        out.append(f"{fg(_col(s, p))}█")
-    return [f"{''.join(out)}{RESET}"]
+    out = "".join(f"{fg(_col(_worse(q, c), p))}█" for q, c in cells)
+    return [f"{out}{RESET}"]
 
 
 # Shape-encoded dual lane: the glyph itself says which lane failed, so the map
@@ -292,18 +352,17 @@ _GLYPH = {
 
 
 def render_glyph(cells, p: Palette) -> list[str]:
+    """Shape says which lane failed; colour (when there is any) says how badly.
+    Under ``--palette mono`` the ramp is not representable — the glyph is already
+    spending its shape on the lane split — so a mono map answers "where" and
+    "which lane" but never "how much"."""
     out = []
     for qs, cs in cells:
-        ch = "░" if St.UNREAD in (qs, cs) else _GLYPH[qs, cs]
+        ch = "░" if St.UNREAD in (qs.state, cs.state) else _GLYPH[qs.state, cs.state]
         if p.name == "mono":
             out.append(ch)
         else:
-            s = (
-                St.UNREAD
-                if St.UNREAD in (qs, cs)
-                else max(qs, cs, key=lambda x: x.value)
-            )
-            out.append(f"{fg(_col(s, p))}{ch}")
+            out.append(f"{fg(_col(_worse(qs, cs), p))}{ch}")
     return ["".join(out) + ("" if p.name == "mono" else RESET)]
 
 
@@ -460,8 +519,48 @@ def run_gallery(args) -> None:
 
     print(
         "\033[2mLegend — dual/stacked/single: colour is state. "
-        "glyph: █ both OK  ▀ C2 bad  ▄ Q bad  ▒ both bad  ░ unread.\033[0m\n"
+        "glyph: █ both OK  ▀ C2 bad  ▄ Q bad  ▒ both bad  ░ unread.\033[0m"
     )
+    if args.aggregate == "ramp":
+        p = PALETTES[args.palette if args.palette != "mono" else "classic"]
+        swatch = "".join(f"{fg(c)}█" for c in p.err_ramp)
+        print(
+            f"\033[2mramp bands (faint→bright, decade-wide): \033[0m{swatch}{RESET}"
+            f"\033[2m  <0.1%  <1%  <10%  ≥10% of the cell's sectors flagged.\033[0m"
+        )
+    print()
+
+
+def run_aggregates(args) -> None:
+    """The three aggregation arms on one pattern — the comparison that decides
+    which one ships. Run it against `--pattern sparse`, where they disagree most:
+    `worst` flags 34 of 60 cells at full intensity, `ratio` flags none at all,
+    and `ramp` flags the same 34 in its two faintest bands."""
+    cols = shutil.get_terminal_size().columns - 1
+    palette = PALETTES[args.palette]
+    print(
+        f"\n\033[1mQ + C2 map — aggregation sweep\033[0m  "
+        f"\033[2m(pattern={args.pattern} style={args.style} "
+        f"palette={args.palette})\033[0m\n"
+    )
+    for mode in ("worst", "ratio", "ramp"):
+        disc = make_disc(args.pattern, args.sectors, args.tracks, args.seed)
+        sector = int(disc.sectors * args.at / 100)
+        lines = compose(
+            disc,
+            sector,
+            style=args.style,
+            palette=palette,
+            agg=mode,
+            frame=2,
+            speed=args.speed,
+            ticks=args.ticks,
+            cols=cols,
+        )
+        print(f"  \033[2m{mode:<6}\033[0m")
+        for ln in lines:
+            print(f"  {ln}")
+        print()
 
 
 def run_patterns(args) -> None:
@@ -506,9 +605,13 @@ def main() -> None:
     )
     ap.add_argument(
         "--aggregate",
-        choices=("worst", "ratio"),
+        choices=("worst", "ratio", "ramp"),
         default="worst",
-        help="how thousands of sectors collapse into one cell (default: worst)",
+        help=(
+            "how thousands of sectors collapse into one cell: worst=any flagged "
+            "sector reddens the cell, ratio=majority, ramp=shade by error "
+            "density over decade-wide bands (default: worst)"
+        ),
     )
     ap.add_argument("--sectors", type=int, default=350000)
     ap.add_argument("--tracks", type=int, default=12)
@@ -520,6 +623,11 @@ def main() -> None:
     ap.add_argument("--duration", type=float, default=8.0, help="seconds per run")
     ap.add_argument("--gallery", action="store_true", help="every style x palette")
     ap.add_argument("--patterns", action="store_true", help="every damage pattern")
+    ap.add_argument(
+        "--aggregates",
+        action="store_true",
+        help="worst vs ratio vs ramp on one pattern (try --pattern sparse)",
+    )
     ap.add_argument("--live", action="store_true", help="animate instead of one frame")
     args = ap.parse_args()
 
@@ -528,6 +636,9 @@ def main() -> None:
         return
     if args.patterns:
         run_patterns(args)
+        return
+    if args.aggregates:
+        run_aggregates(args)
         return
 
     disc = make_disc(args.pattern, args.sectors, args.tracks, args.seed)
