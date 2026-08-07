@@ -827,6 +827,72 @@ signal we can already produce. AccuDisc's `--map-file` mmap status map was noted
 "not yet consumed" back in July and is the other candidate input; check what the
 binding exposes now before designing around the CLI-era artefact.
 
+#### N6. **[C2I] `match_distance` is computed before the menu and cannot see a
+confirmation** — QUEUED 2026-08-07, kgr thinking
+
+Raised as a footnote to N5 ("`match_distance` cannot see a manual confirmation"),
+investigated 2026-08-07, and the footnote understated it. **The ordering is the
+defect, not the weights.** `build_match_distance` runs at `cdda2img.py:2137` (and
+`:803` on the create path); `run_metadata_menu` runs at `:2165` (`:815`). The score
+is never recomputed. So `match_confidence` is a **pre-menu** number stored in the
+same PROV dict as `release_selection`, which `_record_pressing_outcome` writes
+*after* the menu closes — two keys describing two different moments, with nothing
+recording which is which. Every N5 container carries `match_confidence=0.550`
+beside `release_selection=manual`, computed before the manual choice existed.
+
+**The prior question is kgr's**: is `match_confidence` a pre-menu *hint* (its
+2026-06-20 role — informational, never skips the menu) or a record of what the
+container ended up believing? All three fix options below are unreachable at line
+2137 regardless of which is chosen, so this is not a scoring-table question yet.
+
+**Nothing reads the score back.** Tree-wide, `match_confidence` /
+`match_recommendation` are write-only: two writes in `cdda2img.py`, a man-page
+entry, a flow doc. No consumer in `catalogue`, `list` or `test`. The one live
+consumer is the printed `match_dist.summary()` line, which is pre-menu by design
+and earns its place there. Recomputing after the menu (or storing both) therefore
+costs nothing but the decision about what the stored key means.
+
+**Options** (none chosen):
+(1) **Read `release_selection` in the existing MB branch** — `manual` → above the
+0.50 unique-hit rung, `auto_tiebreak` → 0.30 unchanged, `rejected` → its own
+value. ~6 lines, no new PROV. Weakness: folds confirmation into the
+"how MB found it" axis, so a user-confirmed duration match still reads 0.20.
+(2) **A separate additive `user_confirmed` contributor** — keeps "how it was
+found" and "did a human check it" as the independent axes they are, and is the
+only option where `rejected` (negative evidence about the candidate *list*) has an
+honest home. Nothing reads `rejected` today.
+(3) **Do it inside B-7** — feed the resolver's `Resolution` in and delete the PROV
+string-sniffing. Right destination, wrong next step; see below.
+
+**Why (3) does not work yet — two structural findings.**
+- **The Trust ladder has no rung for an arbitrated pressing.**
+  `resolver_adapter.py:381` emits `Field.MB_RELEASE_ID` with one `src` for the
+  whole disc-field block, so a disc-ID match proposes `Source.MB_DISC_ID` @
+  `Trust.DISC_ID` **whether MB returned one release or seven**. The §10.3 ladder is
+  *intra*-source; the resolver is *cross*-source. Option 3 as stated would
+  therefore **lose** today's 0.50-vs-0.30 distinction, not replace it — making it
+  work means adding a trust rung, a larger design act than the tweak it avoids.
+- **There is no `Resolution` to read.** B-5 re-resolves `ctl.disc` on every apply
+  and the persistent menu accumulator does not exist (B-7, above). Option 3 is
+  "build the accumulator first" — which is the *same* prerequisite a post-menu
+  score of any kind needs, so the dependency is shared, not wasted.
+
+**The manual signal is already structured, though** — `menu_state.py:1175` applies
+the N5 pressing choice via `apply_menu_selection(..., overwrite=True)`, which
+`resolver_adapter.py:567-569` emits as `Source.MENU` @ `Trust.MANUAL`. Options 1
+and 2 would re-derive from PROV strings something the resolver already knows.
+
+**Two seams found on the way, filed here rather than fixed:**
+- **`mb_duration_match` (+0.20) appears unreachable.** It needs `disc.mb_release_id`
+  set *and* `duration_match_release` in PROV, but stage-7 routes through
+  `strip_pressing_mbid` (`mb_lookup.py:928`), which nulls the id precisely so a
+  recording-level source cannot assert a pressing (C2). The guard cannot be true
+  from that path, and the score runs before the menu could set the id another way.
+  Moving the score after the menu would bring the branch to life.
+- `Source.DURATION` is in `_RECORDING_LEVEL` and `FieldProposal.__post_init__`
+  raises on it proposing `MB_RELEASE_ID` — the scorer describes a state the
+  resolver forbids. More evidence the two models have drifted apart.
+
 ### ⭐ LIVE — outstanding work as of 2026-07-30
 
 Consolidated from both projects. AccuDisc is a peer project with its own
