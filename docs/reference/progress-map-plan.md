@@ -234,11 +234,26 @@ draw. **Design decision: index by slot, unconditionally.**
    both inside their own healthy bands. So the MCN/ISRC interleave is a property
    of the *pressing*, not of read quality.
 
-   *(An earlier revision of this line carried 1.018–1.026%, normalised by hand
-   from rounded percentages, and quoted run6's band as though it covered both
-   discs. The generated figures above supersede it — see outbound §154. Quoting
-   one disc's band against both discs made a per-disc constant look global, which
-   is a stronger claim than the data supports.)*
+   The two bands are **disjoint** — run6's floor 1.021% sits above run8's ceiling
+   1.000%, a 0.021 pp gap — so each collapse lands inside its own disc's band and
+   outside the other's entirely. With run7 at exactly 0.000%, that is three
+   pressings with three separated rates. Suggestive, and deliberately load-bearing
+   for nothing: one drive, three discs.
+
+   *(An earlier revision carried 1.018–1.026%, normalised by hand from rounded
+   percentages, and quoted run6's band as though it covered both discs —
+   superseded, outbound §154.)*
+
+   **The methodological lesson, which is the durable part.** One of those wrong
+   figures was not a typo: `0.39 ÷ 38.73 = 1.007%` is exactly what we typed, i.e.
+   NP/GOOD re-derived from the two *rounded* display values instead of read off
+   the three-decimal column (AccuDisc §2026-08-07f, reproduced here). That is a
+   **method**, so it reproduces — and the rounding error is amplified as the
+   denominator shrinks, 2.6x at 38.73% CRC-good. On healthy captures the same
+   derivation is right to three digits. **A method that is accurate everywhere
+   except where it matters is worse than one that is wrong everywhere, because
+   nothing prompts you to check it** — and here "where it matters" is precisely
+   the collapse rows the design rests on.
 2. **`NO_POSITION` is 0.00% on an entire disc.** Every run7 capture — all five
    speeds, fifteen passes — a pressing with neither MCN nor ISRCs. So the rate is
    **0% to ~1% by disc**, which sharpens the case for the fifth state rather than
