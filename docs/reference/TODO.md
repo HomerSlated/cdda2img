@@ -71,7 +71,7 @@ appearance, all fixed:
    barcode yields **68** releases and the one MB links to was not among the 25.
    Now paginated to a 4-page cap.
 3. **The corroboration key overstated its claim** and is renamed
-   `discogs_link_barcode_agrees` / `discogs_link_barcode_conflict`. An MB editor
+   `discogs_corroborates` / `discogs_barcode_conflict`. An MB editor
    supplies both the barcode and the relation, so agreement validates *the link*,
    not the pressing. Disagreement is the useful direction.
 
@@ -151,7 +151,7 @@ of many Discogs pages. **That is not independent corroboration.** And a
 reciprocal Discogs→MB link would not fix it — independence is not about which
 page holds the pointer, it is about whether the two records come from different
 populations. They do not: same community, often the same editor. So
-`discogs_link_barcode_agrees` still overstates even after today's rename; the
+`discogs_corroborates` still overstates even after today's rename; the
 honest reading is "two user-submitted records that a human deliberately
 associated do not contradict each other". Better characterised as *additional
 info that may or may not be accurate* than as corroboration.
@@ -267,7 +267,7 @@ asserts nothing, and writes nothing the user did not pick.
 
 **Delete** (automatic, machine-weighed):
 - `_discogs_barcode_corroborate` (§10.3.1) and both PROV keys
-  (`discogs_link_barcode_agrees` / `_conflict`).
+  (`discogs_corroborates` / `_conflict`).
 - `_prepopulate_from_discogs` **phase B only** — the barcode search + merge.
   **Phase A survives untouched**: the canonical-barcode pick is MB-hint driven and
   never calls Discogs. Its return signature loses `applied_hit`.

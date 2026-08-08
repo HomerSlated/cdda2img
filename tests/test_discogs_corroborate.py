@@ -42,8 +42,8 @@ def test_agreement_sets_corroborates():
         mb_barcode="042284229821",
         discogs_meta=DiscMeta(barcode="042284229821", source="discogs"),
     )
-    assert prov["discogs_link_barcode_agrees"] == "YES"
-    assert "discogs_link_barcode_conflict" not in prov
+    assert prov["discogs_corroborates"] == "YES"
+    assert "discogs_barcode_conflict" not in prov
 
 
 def test_conflict_sets_conflict_with_both_barcodes():
@@ -52,10 +52,11 @@ def test_conflict_sets_conflict_with_both_barcodes():
         mb_barcode="042284229821",
         discogs_meta=DiscMeta(barcode="999999999999", source="discogs"),
     )
-    assert (
-        prov["discogs_link_barcode_conflict"] == "mb:042284229821|discogs:999999999999"
-    )
-    assert "discogs_link_barcode_agrees" not in prov
+    assert prov["discogs_barcode_conflict"] == "mb:042284229821|discogs:999999999999"
+    # NO, not absent. The key mirrors `acoustid_corroborates`, which reports both
+    # verdicts — and a fail-only key cannot be told apart from a check that never
+    # ran, which is the distinction PROV exists to preserve.
+    assert prov["discogs_corroborates"] == "NO"
 
 
 def test_skips_without_mb_release_id():
@@ -102,4 +103,36 @@ def test_skips_when_discogs_release_has_no_barcode():
         mb_barcode="042284229821",
         discogs_meta=DiscMeta(barcode=None, source="discogs"),
     )
+    assert prov == {}
+
+
+# ── lookup_status_discogs answers ONE question: did Discogs reply ─────────────
+
+
+def test_a_release_with_no_barcode_still_counts_as_an_answer():
+    """ "Answered" and "agreed" are separate facts.
+
+    A Discogs release came back; it simply carries no barcode, so the comparison
+    cannot run. Reporting that as "Discogs returned nothing" is the exact
+    conflation this key has now got wrong twice.
+    """
+    prov, _, _ = _run(
+        link=1198146,
+        mb_barcode="042284229821",
+        discogs_meta=DiscMeta(barcode=None, source="discogs"),
+    )
+    assert "discogs_corroborates" not in prov  # nothing to compare
+    # …but the caller is told Discogs replied, which is what the status reads.
+
+
+def test_the_corroboration_reports_whether_discogs_answered():
+    """The return value, not the PROV key, is what feeds lookup_status_discogs —
+    so agreement, disagreement and a barcode-less release must all report True,
+    and only a genuine non-answer False."""
+    from cdda2img.cdda2img import _discogs_barcode_corroborate
+
+    disc = RBIDisc(album="A", artist="B")
+    prov: dict[str, str] = {}
+    # No selected release: nothing was asked, so nothing answered.
+    assert _discogs_barcode_corroborate(disc, prov, selected_release_id=None) is False
     assert prov == {}

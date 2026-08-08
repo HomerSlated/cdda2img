@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import bisect
 import copy
 import importlib.metadata
 import logging
@@ -13,6 +14,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from cdda2img.accudisc_reader import ReadLanes
     from cdda2img.config import Config
     from cdda2img.ctdb_repair import CtdbRepairResult
     from cdda2img.field_resolver import FieldProposal
@@ -1163,6 +1165,7 @@ def _prepopulate_from_discogs(
     ui: TerminalUI | None = None,
     *,
     barcode_hints: list[tuple[str, str]] | None = None,
+    provenance: dict[str, str] | None = None,
 ) -> tuple[RBIDisc, str | None, DiscMeta | None]:
     """Pre-populate disc.barcode and optionally enrich via Discogs barcode lookup.
 
@@ -1189,24 +1192,45 @@ def _prepopulate_from_discogs(
        one result comes back and its album matches disc.album, merge full metadata
        (label, country, year, track listing). Otherwise, leave the additional
        fields alone — the barcode is still set from phase A.
+
+    *provenance*, when given, receives ``discogs_barcode_matches=<n>`` — how many
+    releases the barcode search returned — and ``discogs_barcode_outcome``, why
+    the merge did or did not happen. Those are **disambiguation** facts and are
+    reported separately from ``lookup_status_discogs`` on purpose: 25 rows means
+    Discogs answered richly and could not be narrowed to one, which is the
+    opposite of the "empty" this used to be folded into.
     """
     from cdda2img import discogs_lookup
     from cdda2img.mb_lookup import _merge_into_disc
+
+    def _note(key: str, value: str) -> None:
+        if provenance is not None:
+            provenance[key] = value
 
     candidates = _collect_barcode_candidates(disc, barcode_hints)
     chosen = _pick_canonical_barcode(candidates)
     if chosen and disc.barcode != chosen:
         disc.barcode = chosen
-    if not chosen or not discogs_lookup.is_available():
+    if not chosen:
+        _note("discogs_barcode_outcome", "no_barcode_to_search")
+        return disc, chosen, None
+    if not discogs_lookup.is_available():
         return disc, chosen, None
 
     _ui_status(ui, f"Querying Discogs by barcode {chosen}…")
     results = discogs_lookup.search_by_barcode(chosen)
+    _note("discogs_barcode_matches", str(len(results)))
     if len(results) != 1:
+        _note(
+            "discogs_barcode_outcome",
+            "no_match" if not results else f"ambiguous_{len(results)}",
+        )
         return disc, chosen, None
     hit = results[0]
     if not _albums_match(disc.album, hit.album):
+        _note("discogs_barcode_outcome", "album_mismatch")
         return disc, chosen, None
+    _note("discogs_barcode_outcome", "applied")
     return _merge_into_disc(hit, disc), chosen, hit
 
 
@@ -1350,23 +1374,33 @@ def _r11_corroborate_with_discogs_master(
 
 def _discogs_barcode_corroborate(
     disc: RBIDisc, provenance: dict[str, str], *, selected_release_id: str | None
-) -> None:
+) -> bool:
     """§10.3.1 MB→Discogs link check — barcode agreement across the relation.
+
+    Returns whether **Discogs answered**, which is a different question from
+    whether it agreed and is what ``lookup_status_discogs`` is derived from.
 
     On the **selected** release only: follow the MB→Discogs url-relation, fetch
     the linked Discogs release, and compare its barcode to MusicBrainz's.
-    Agreement → ``discogs_link_barcode_agrees=YES``; disagreement →
-    ``discogs_link_barcode_conflict=mb:<bc>|discogs:<bc>``.
+    Agreement → ``discogs_corroborates=YES``; disagreement →
+    ``discogs_corroborates=NO`` plus
+    ``discogs_barcode_conflict=mb:<bc>|discogs:<bc>``.
 
-    **What this does and does not claim** (renamed from
-    ``discogs_barcode_corroborates`` 2026-08-04). The two sides are not
-    independent: an MB editor chose both the barcode and the relation, so
-    agreement validates *the link*, not the pressing. It catches a mis-linked
-    relation — a real and useful thing — but it is not a second source
-    confirming which pressing this is, and the old name said it was. The
-    distinction gets sharper if the linked release is ever promoted to a
-    metadata *source*, at which point the check would be comparing a record
-    against itself.
+    **What this does and does not claim.** The two sides are not independent: an
+    MB editor chose both the barcode and the relation, so agreement validates
+    *the link*, not the pressing. It catches a mis-linked relation — a real and
+    useful thing — but it is not a second source confirming which pressing this
+    is. That is why the key was once named ``discogs_barcode_corroborates`` and
+    narrowed to ``discogs_link_barcode_agrees`` on 2026-08-04.
+
+    **kgr restored the mirror-of-AcoustID shape on 2026-08-08**, and the reason
+    stands: a reader comparing ``lookup_status_*`` and ``*_corroborates`` across
+    sources should not have to learn a different vocabulary per source. The
+    scope lives here and in ``discogs_barcode_conflict``'s explicitness rather
+    than in the key name — but do not read this key as independent evidence
+    about the pressing, and be aware the distinction gets sharper if the linked
+    release is ever promoted to a metadata *source*, at which point the check
+    would compare a record against itself.
 
     Deliberately does **not** feed release selection (the rung has already
     chosen) and skips cleanly — no fetch, no PROV key — when there is no MB
@@ -1381,25 +1415,32 @@ def _discogs_barcode_corroborate(
     # B-2: gate on the Layer-1 selected pressing, not the mutated disc — identical
     # today, survives the B-4 flip.
     if not selected_release_id:
-        return
+        return False
     from cdda2img import discogs_lookup as _discogs
 
     if not _discogs.is_available():
-        return
+        return False
     from cdda2img.mb_lookup import discogs_link_and_barcode
 
     discogs_id, mb_barcode = discogs_link_and_barcode(selected_release_id)
     if discogs_id is None or not mb_barcode:
-        return
+        return False
     d_meta = _discogs.fetch_release(discogs_id)
-    if d_meta is None or not d_meta.barcode:
-        return
+    if d_meta is None:
+        return False
+    # A release came back, so Discogs answered — even if it carries no barcode
+    # and the comparison cannot run. "Answered" and "agreed" are separate facts
+    # and conflating them is the defect this whole change exists to fix.
+    if not d_meta.barcode:
+        return True
     if d_meta.barcode == mb_barcode:
-        provenance["discogs_link_barcode_agrees"] = "YES"
+        provenance["discogs_corroborates"] = "YES"
     else:
-        provenance["discogs_link_barcode_conflict"] = (
+        provenance["discogs_corroborates"] = "NO"
+        provenance["discogs_barcode_conflict"] = (
             f"mb:{mb_barcode}|discogs:{d_meta.barcode}"
         )
+    return True
 
 
 _R9_DISAGREE_THRESH = 0.15
@@ -1727,7 +1768,7 @@ def _note_corroboration_target(
     """Record when the corroboration checks ran against a different release than
     the one finally selected (N5).
 
-    ``acoustid_corroborates`` and ``discogs_link_barcode_agrees`` are computed
+    ``acoustid_corroborates`` and ``discogs_corroborates`` are computed
     *before* the menu, against the release the ladder pinned. If the user then
     picks a different pressing, both keys silently describe a release the
     container no longer claims to be — the same "reads true, and reads
@@ -1741,9 +1782,7 @@ def _note_corroboration_target(
     """
     if not checked_release_id or checked_release_id == disc.mb_release_id:
         return
-    if "acoustid_corroborates" in provenance or "discogs_link_barcode_agrees" in (
-        provenance
-    ):
+    if "acoustid_corroborates" in provenance or "discogs_corroborates" in (provenance):
         provenance["corroborated_release"] = checked_release_id
 
 
@@ -1934,23 +1973,36 @@ def _run_metadata_lookups(
 
     discogs_attempted = _discogs.is_available()
     disc, chosen_barcode, discogs_hit = _prepopulate_from_discogs(
-        disc, ui, barcode_hints=mb_result.barcode_hints
-    )
-    # has_data is the hit _prepopulate_from_discogs actually merged, which is what
-    # it returns `applied_hit` for. It used to be `disc.barcode changed during the
-    # call`, and that proxy answered a different question: phase A writes the
-    # barcode from **MusicBrainz's** hints *before* Discogs is queried, so on any
-    # disc where MB already supplied it — the normal case — there was no delta and
-    # the status read `empty` however much Discogs had returned. Measured on Tracy
-    # Chapman: search_by_barcode('0075596077422') yields 25 rows, PROV said empty.
-    provenance["lookup_status_discogs"] = _r12_status(
-        attempted=discogs_attempted,
-        has_data=discogs_hit is not None,
-        errored=False,
+        disc, ui, barcode_hints=mb_result.barcode_hints, provenance=provenance
     )
     # §10.3.1: cross-source barcode corroboration on the rung-selected release.
-    _discogs_barcode_corroborate(
+    link_answered = _discogs_barcode_corroborate(
         disc, provenance, selected_release_id=mb_result.selected_release_id
+    )
+    # `lookup_status_discogs` answers ONE question — did Discogs reply — and it is
+    # emitted after both queries because there are two of them: the barcode search
+    # here, and the MB→Discogs link follow above.
+    #
+    # It has now been wrong twice in the same direction, and the shape is worth
+    # keeping in view. First it was `disc.barcode changed during the call`, which
+    # reads as `empty` whenever MB had already supplied the barcode — the normal
+    # case. Then it was `a hit was merged`, which reads as `empty` whenever the
+    # search was too RICH to narrow: measured on Tracy Chapman,
+    # search_by_barcode('0075596077422') returns 25 rows and PROV said `empty`
+    # while `discogs_corroborates=YES` sat two lines below it, having successfully
+    # fetched a Discogs release in the same run.
+    #
+    # Both versions measured *what Discogs changed about our disc* and reported it
+    # as *whether Discogs answered*. Under fill-blank merge semantics those two
+    # diverge exactly when the rest of the metadata is good, so the better the
+    # record, the more likely the status lied. The disambiguation outcome is a
+    # real and useful fact — it is now `discogs_barcode_matches` and
+    # `discogs_barcode_outcome`, reported under its own name.
+    searched = int(provenance.get("discogs_barcode_matches", "0"))
+    provenance["lookup_status_discogs"] = _r12_status(
+        attempted=discogs_attempted,
+        has_data=searched > 0 or link_answered,
+        errored=False,
     )
 
     # AcoustID per-track corroboration (tracks 1 and ceil(N/2)).
@@ -2509,6 +2561,58 @@ def _stop_preview(preview: TrackPreview | None) -> None:
         preview.stop()
 
 
+class _RipPhase:
+    """The rip's left-hand status text, as a function of the read position.
+
+    Three phases, and the first is not cosmetic. Until the engine has read the
+    TOC there is no track list, and the drive is genuinely spinning up and
+    seeking the lead-in rather than reading track 1 — so "Ripping disc…" is what
+    is true, and naming a track there would be a guess dressed as a measurement.
+
+    ``widest_status`` exists because the map line pins every width for the life
+    of the read: a cell's sector span is derived from the column count, so one
+    column of drift re-buckets every cell and already-drawn damage jumps. The
+    widest text has to be known *before* the first frame, which means computing
+    it rather than measuring whichever phase happens to be showing.
+    """
+
+    def __init__(self) -> None:
+        self._lanes: ReadLanes | None = None
+
+    def begin(self, lanes: ReadLanes) -> None:
+        self._lanes = lanes
+
+    @property
+    def text(self) -> str:
+        return self._disc_text()
+
+    def _disc_text(self) -> str:
+        speed = self._lanes.speed_x if self._lanes else None
+        # No speed clause when the drive did not report one: "at 0x" or "at Nonex"
+        # reads as a measurement, and this one was never made.
+        return f"Ripping disc at {speed}x…" if speed else "Ripping disc…"
+
+    def at(self, done: int) -> str:
+        """The status for a read that has delivered *done* sectors."""
+        lanes = self._lanes
+        if lanes is None or not lanes.track_starts or done <= 0:
+            return self._disc_text()
+        # Sector `done - 1` is the last one actually delivered. Using `done`
+        # would name the next track one sector early at every boundary.
+        n = bisect.bisect_right(lanes.track_starts, done - 1)
+        return f"Ripping track {n:02d}…" if n else self._disc_text()
+
+    def widest_status(self) -> int:
+        lanes = self._lanes
+        tracks = len(lanes.track_starts) if lanes else 0
+        widths = [len(self._disc_text())]
+        if tracks:
+            # Every track label is the same width up to the digit count, so the
+            # last track bounds them all.
+            widths.append(len(f"Ripping track {tracks:02d}…"))
+        return max(widths)
+
+
 def _rip_disc_stage(
     device: str,
     pcm_file: Path,
@@ -2541,27 +2645,34 @@ def _rip_disc_stage(
     cdtext_file = pcm_file.with_suffix(".cdtext")
     fulltoc_file = pcm_file.with_suffix(".fulltoc")
 
-    status = "Reading PCM, C2, SUB (AccuDisc)…" if want_c2 else "Reading PCM, SUB…"
-    _ui_status(ui, status)
+    # The spin-up phase. It stands until the engine has read the TOC and handed
+    # over the lanes, which is the first moment a track number can be honest —
+    # the drive is genuinely spinning up and seeking the lead-in, and no sector
+    # of track 1 has been delivered.
+    phase = _RipPhase()
+    _ui_status(ui, phase.text)
 
     def _cb(done: int, total: int) -> None:
         if ui is not None:
             ui.set_status(
-                status,
+                phase.at(done),
                 done / total if total > 0 else 0.0,
                 detail=f"({done}/{total})",
             )
 
-    def _map_cb(damage: bytearray) -> None:
+    def _map_cb(lanes: ReadLanes) -> None:
         # The progress bar becomes the disc map for the length of the read: the
-        # buffer is handed over at allocation, filled by the reader as sectors
+        # lanes are handed over at allocation, filled by the reader as sectors
         # arrive, and polled by the render thread. Note this is NOT gated on
         # want_c2 — C2 pointers are requested on the wire unconditionally, and
         # cfg.c2_recovery = "off" suppresses only the bitmap *file*. Gating here
         # would blank the map for anyone using that escape hatch, and a blank map
         # is indistinguishable from a clean disc.
+        phase.begin(lanes)
         if ui is not None:
-            ui.set_map(damage)
+            ui.set_map(
+                lanes.damage, subq=lanes.subq, status_width=phase.widest_status()
+            )
 
     try:
         read_disc_c2(

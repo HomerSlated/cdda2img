@@ -25,6 +25,7 @@ def _bare_ui() -> TerminalUI:
     ui._output = []
     ui._prev_height = 0
     ui._map = None
+    ui._map_q = None
     ui._map_cols = 0
     ui._map_sw = 0
     ui._map_dw = 0

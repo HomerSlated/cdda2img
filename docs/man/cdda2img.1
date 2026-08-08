@@ -820,10 +820,15 @@ so agreement is not independent confirmation from a second source.
 Disagreement is the useful signal \(em positive evidence that the relation
 points at the wrong release.
 Agreement records
-.BR discogs_link_barcode_agrees=YES ;
+.BR discogs_corroborates=YES ;
 disagreement records
-.B discogs_link_barcode_conflict=mb:<barcode>|discogs:<barcode>
+.B discogs_corroborates=NO
+together with
+.B discogs_barcode_conflict=mb:<barcode>|discogs:<barcode>
 in provenance.
+Absence of the key means the check did not run, which is a different answer
+from
+.BR NO .
 This is informational only \(em it does not affect release selection or
 confidence \(em and is skipped entirely when there is no Discogs link, no
 .B DISCOGS_TOKEN

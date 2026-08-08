@@ -71,6 +71,7 @@ class TerminalUI:
         # Disc map. _map is the live per-sector C2 damage buffer owned by the
         # reader; the rest is geometry pinned once, for the reason in _build().
         self._map: bytearray | None = None
+        self._map_q: bytearray | None = None
         self._map_cols = 0
         self._map_sw = 0
         self._map_dw = 0
@@ -135,12 +136,27 @@ class TerminalUI:
             self._prog = progress
             self._detail = detail
 
-    def set_map(self, damage: bytearray | None) -> None:
+    def set_map(
+        self,
+        damage: bytearray | None,
+        *,
+        subq: bytearray | None = None,
+        status_width: int = 0,
+    ) -> None:
         """Make the progress bar *be* the disc map, or put the plain bar back.
 
-        *damage* is the reader's live per-sector C2 map — one byte per sector,
-        set as sectors are read. It is passed by reference and polled by the
-        renderer; it is never copied, so it must stay valid until ``set_map(None)``.
+        *damage* and *subq* are the reader's live per-sector lanes — one byte per
+        sector, set as sectors are read. They are passed by reference and polled
+        by the renderer; they are never copied, so they must stay valid until
+        ``set_map(None)``. *subq* is ``None`` when the engine cannot supply a Q
+        verdict, and the map then draws one lane rather than drawing Q healthy.
+
+        *status_width* is the widest status text this read will ever show, and
+        the caller must supply it because only the caller knows the phases. It
+        cannot be measured from the current text: **every width on the map line
+        is pinned for the life of the read**, so whichever phase happened to be
+        showing at the first frame would otherwise fix the column count forever
+        and truncate every longer one.
 
         Safe without a lock, and deliberately so: the reader is the only writer,
         each byte is written once, and the renderer only ever reads bytes below
@@ -149,12 +165,14 @@ class TerminalUI:
         """
         with self._slk:
             self._map = damage
-            # Geometry is pinned on the NEXT frame, once the terminal width and
-            # the status text are both known. Reset it here so a second read
-            # re-pins rather than inheriting the first one's layout.
+            self._map_q = subq
+            # Geometry is pinned on the NEXT frame, once the terminal width is
+            # known. Reset here so a second read re-pins rather than inheriting
+            # the first one's layout.
             self._map_cols = 0
             self._map_colour = disc_map.colour_enabled()
             self._map_dw = (2 * len(str(len(damage))) + 3) if damage else 0
+            self._map_sw = status_width
         with self._lock:
             if self._st == _St.RUNNING:
                 self._tick.set()
@@ -244,6 +262,7 @@ class TerminalUI:
             header = list(self._header)
             output = list(self._output)
             damage = self._map
+            damage_q = self._map_q
             map_cols = self._map_cols
             map_sw = self._map_sw
             map_dw = self._map_dw
@@ -264,6 +283,7 @@ class TerminalUI:
                 detail=detail,
                 cols=cols,
                 damage=damage,
+                damage_q=damage_q,
                 map_cols=map_cols,
                 map_sw=map_sw,
                 map_dw=map_dw,
@@ -305,6 +325,7 @@ class TerminalUI:
         detail: str,
         cols: int,
         damage: bytearray,
+        damage_q: bytearray | None,
         map_cols: int,
         map_sw: int,
         map_dw: int,
@@ -329,7 +350,10 @@ class TerminalUI:
         """
         if map_cols <= 0:
             # First frame with a map: pin the geometry against this terminal.
-            map_sw = len(status)
+            # map_sw comes from set_map() — the WIDEST text this read can show,
+            # not the one that happens to be on screen now. Measuring it here
+            # would pin the column count to whichever phase won the race.
+            map_sw = max(map_sw, len(status))
             map_cols = max(4, cols - 12 - map_sw - (3 + map_dw))
             with self._slk:
                 self._map_cols = map_cols
@@ -339,7 +363,16 @@ class TerminalUI:
         visible = max(0, min(map_cols, avail))
         frontier = round(prog * len(damage))
         cells = disc_map.cells_from_damage(damage, frontier, map_cols)
-        bar = disc_map.render(cells[:visible], colour=colour)
+        q_cells = (
+            disc_map.cells_from_damage(damage_q, frontier, map_cols)
+            if damage_q is not None
+            else None
+        )
+        bar = disc_map.render(
+            cells[:visible],
+            colour=colour,
+            q_cells=None if q_cells is None else q_cells[:visible],
+        )
         pct = f"{min(prog, 1.0) * 100:5.1f}%"
         return f"{sp}  {status:<{map_sw}.{map_sw}s} {bar}  {pct}   {detail:<{map_dw}}"
 

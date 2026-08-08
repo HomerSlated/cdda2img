@@ -811,11 +811,69 @@ _MAP_DAMAGE_STATES = ("C2", "HARD", "SUSPECT")
 # at that point; do not assume this list is still complete.
 
 
+#: 1x CD-DA = 75 sectors/s x 2352 B ≈ 176 kB/s. Duplicated from ``drive_speed``
+#: rather than imported: that module reaches the drive *through* this one, so
+#: importing it back would make the seam depend on its own caller.
+_KBPS_PER_X = 176
+
+
+@dataclass(frozen=True)
+class ReadLanes:
+    """Everything a live renderer needs from a whole-disc read, handed over once.
+
+    Passed to ``read_disc_c2``'s *map_cb* **before the first sector is read**, so
+    the caller holds every reference for the whole read and nothing is delivered
+    late. One object rather than four callbacks because these are answers to one
+    question — "what is this read going to look like?" — and a renderer that got
+    them piecemeal would have to cope with each arriving or not.
+
+    ``damage`` and ``subq`` are one byte per sector, written by the reader as
+    sectors arrive: non-zero means "not intact here". ``subq`` is ``None`` when
+    the engine cannot supply a Q verdict, which is **not** the same as a clean
+    subchannel and must not render as one — we do not compute that lane
+    ourselves, because a hard sector arrives zero-filled and a zero Q frame
+    fails CRC, so a DIY lane fabricates damage exactly where audio is already
+    gone.
+
+    ``track_starts`` is 0-based LBAs, in order, for the status line's track
+    number. ``speed_x`` is the drive's actual rate, ``None`` when it did not
+    report — a caller shown ``0x`` has been handed a measurement nobody made.
+    """
+
+    sectors: int
+    damage: bytearray
+    subq: bytearray | None
+    track_starts: tuple[int, ...]
+    speed_x: int | None
+
+
 #: AccuDisc's capability name for a caller-owned ``status_map`` buffer
 #: (their ``accudisc.features``, shipped 2026-08-08). Names are added, never
 #: removed or repurposed, so membership is safe to test forever and an absent
 #: name is safe to read as "older binding".
 _FEATURE_CALLER_MAPS = "caller_map_buffers"
+
+#: AccuDisc's capability name for the parallel Q-subchannel health lane. A
+#: **separate** name from the buffer capability and tested separately: a binding
+#: could ship either without the other, and reusing one check would either
+#: request a field that does not exist or decline one that does.
+_FEATURE_SUBQ_MAP = "subq_map"
+
+
+def _has_feature(module: Any, name: str) -> bool:
+    """Whether the binding publishes capability *name* in ``accudisc.features``.
+
+    Type is checked before membership: ``in`` works on ``str``, ``list`` and
+    ``dict``, so a ``features`` that is not a set would answer plausibly and by
+    accident — the string ``"caller_map_buffers subq_map"`` contains
+    ``"subq_map"``, and also contains ``"map"``.
+
+    A binding with no ``features`` at all answers ``False``. That is right for
+    every capability *except* caller buffers, which predates the attribute and
+    has its own signature fallback — see :func:`_supports_caller_map`.
+    """
+    features = getattr(module, "features", None)
+    return isinstance(features, (frozenset, set)) and name in features
 
 
 def _supports_caller_map(dev: Any, module: Any = None) -> bool:
@@ -845,9 +903,8 @@ def _supports_caller_map(dev: Any, module: Any = None) -> bool:
     import annotations``; without it the annotation is a type object and a
     string comparison would answer wrongly rather than fall back.
     """
-    features = getattr(module, "features", None)
-    if isinstance(features, (frozenset, set)):
-        return _FEATURE_CALLER_MAPS in features
+    if isinstance(getattr(module, "features", None), (frozenset, set)):
+        return _has_feature(module, _FEATURE_CALLER_MAPS)
     try:
         param = inspect.signature(dev.read).parameters["status_map"]
     except (AttributeError, KeyError, TypeError, ValueError):
@@ -856,48 +913,152 @@ def _supports_caller_map(dev: Any, module: Any = None) -> bool:
     return isinstance(ann, str) and ann.strip() not in {"bool", "'bool'", '"bool"'}
 
 
-def _prepare_damage_lane(
-    module: Any, dev: Any, count: int, map_cb: Callable[[bytearray], None] | None
-) -> tuple[bytearray | None, bytearray | None]:
-    """Allocate the damage lane and, if the binding allows, the status buffer.
+def _drive_speed_x(dev: Any) -> int | None:
+    """The drive's current rate as a plain multiplier, or ``None``.
 
-    Returns ``(damage, status)``. ``damage`` is ours and is handed to *map_cb*
-    **before the first sector is read**, because a buffer that only appears once
-    the read is over cannot drive a live display — the defect this whole
-    arrangement exists to route around.
+    ``Device.get_speed()`` is ``(max, current)`` — the opposite order from this
+    module's own :func:`read_speed`, a swap that type-checks and runs and would
+    silently report the advertised ceiling as the working rate. Destructured
+    explicitly here for that reason.
 
-    ``status`` is the engine's own per-sector map, allocated here and passed into
-    ``read`` so AccuDisc writes into memory we already hold. ``None`` on a
-    pre-0.5.0 binding, which sends the sink to the DIY census instead.
+    ``0`` means "did not report" and stays ``None``: a status line reading
+    "Ripping disc at 0x" is worse than one that omits the clause, because it
+    looks like a measurement.
+    """
+    try:
+        _max_kbps, cur_kbps = dev.get_speed()
+    except Exception:
+        return None
+    if not cur_kbps:
+        return None
+    return max(1, int(cur_kbps) // _KBPS_PER_X)
+
+
+def _track_starts(toc: Any) -> tuple[int, ...]:
+    """Audio track start LBAs from an already-fetched TOC, ascending.
+
+    Read off the TOC ``_read_disc_binding`` already fetches for the lead-out, so
+    the track numbers on the status line cost no extra command and no second
+    spin-up.
+
+    Tolerant of a TOC without ``tracks``: this is cosmetic, and a status line
+    that says "Ripping disc…" is a fair degrade where an ``AttributeError``
+    mid-rip is not.
+    """
+    tracks = getattr(toc, "tracks", None) or ()
+    starts = []
+    for t in tracks:
+        lba = getattr(t, "start_lba", None)
+        if lba is not None and getattr(t, "audio", True):
+            starts.append(int(lba))
+    return tuple(sorted(starts))
+
+
+def _prepare_lanes(
+    module: Any,
+    dev: Any,
+    toc: Any,
+    count: int,
+    want_subq: bool,
+    map_cb: Callable[[ReadLanes], None] | None,
+) -> tuple[ReadLanes | None, bytearray | None, bytearray | None]:
+    """Allocate the lanes and hand them over before the first sector is read.
+
+    Returns ``(lanes, status, subq)`` — the caller's view, and the two engine
+    buffers the sink projects from. A buffer that only appears once the read is
+    over cannot drive a live display, which is the defect this arrangement
+    exists to route around.
+
+    ``status``/``subq`` are ``None`` on a binding lacking the matching
+    capability. They are separate names in ``accudisc.features`` and tested
+    separately, because a binding could ship either without the other.
     """
     if map_cb is None:
-        return None, None
+        return None, None, None
     damage = bytearray(count)
     status = bytearray(count) if _supports_caller_map(dev, module) else None
-    map_cb(damage)
-    return damage, status
+    # subq needs BOTH the caller-buffer capability and the lane itself, and the
+    # engine refuses subq_map without SUB_RAW (ERR_INVAL) — gated here rather
+    # than trusting the caller to have asked for the subchannel.
+    subq = (
+        bytearray(count)
+        if status is not None and want_subq and _has_feature(module, _FEATURE_SUBQ_MAP)
+        else None
+    )
+    lanes = ReadLanes(
+        sectors=count,
+        damage=damage,
+        subq=bytearray(count) if subq is not None else None,
+        track_starts=_track_starts(toc),
+        speed_x=_drive_speed_x(dev),
+    )
+    map_cb(lanes)
+    return lanes, status, subq
 
 
 def _update_damage(
     module: Any,
     chunk: Any,
-    damage: bytearray,
+    lanes: ReadLanes,
     status: bytearray | None,
+    subq: bytearray | None,
     done: int,
 ) -> None:
-    """Bring the damage lane up to date for the sectors *chunk* just completed.
+    """Bring both lanes up to date for the sectors *chunk* just completed.
 
     Only that range is touched. The engine has written states for it; everything
     past it is still ``PENDING``, and projecting those would paint the unread
     remainder of the disc as damaged.
     """
     if status is None:
-        _census_c2(chunk, damage, done)
+        _census_c2(chunk, lanes.damage, done)
         return
     end = done + chunk.nsec
     _damage_from_status_map(
-        module, memoryview(status)[done:end], memoryview(damage)[done:end]
+        module, memoryview(status)[done:end], memoryview(lanes.damage)[done:end]
     )
+    if subq is not None and lanes.subq is not None:
+        _damage_from_subq_map(
+            module, memoryview(subq)[done:end], memoryview(lanes.subq)[done:end]
+        )
+
+
+def _damage_from_subq_map(module: Any, subq: Any, lane: Any) -> None:
+    """Project AccuDisc's Q-subchannel map onto our one-byte lane.
+
+    **Decoded with ``subq_state``, never ``map_state``.** The two enums are
+    numbered in parallel and their vocabularies are disjoint, so the wrong
+    decoder returns a well-formed name for a state that never happened —
+    ``NO_AUDIO`` reads back as ``RECOVERED``, which is a reassuring word on a
+    sector where no frame was delivered at all. AccuDisc pinned both collisions
+    in a test on their side.
+
+    Three classifications, and two of them are the ones easy to get backwards:
+
+    ``NO_POSITION`` is **healthy**. It is a CRC-good frame carrying MCN or ISRC
+    instead of a position — the ordinary subchannel interleave, measured at
+    0.98 to 1.00% of frames and stable per pressing. At ~10,000 sectors per cell
+    that is ~100 frames in every cell, so counting it as error would flag 100%
+    of cells on a perfectly clean disc.
+
+    ``NO_AUDIO`` **is** damage, and this is a deliberate call. It marks a sector
+    the drive could not read at all, which the C2 lane also draws as ``HARD`` —
+    so a hard sector shows both lanes bad, and one failure occupies two lanes.
+    That is correct here rather than double-counting: the lane answers "is the
+    subchannel intact at this sector", and where no frame was delivered the
+    answer is no. The alternative — leaving it healthy — would assert the
+    subchannel survived a sector that was never read, which is the same false
+    claim that stopped us drawing a Q lane at all before the engine had one. The
+    glyph for both-lanes-bad means "nothing here survived", and on a hard sector
+    that is exactly true.
+    """
+    bad = {
+        getattr(module.SubQState, name)
+        for name in ("BAD", "NO_AUDIO")
+        if hasattr(module.SubQState, name)
+    }
+    for i, byte in enumerate(subq):
+        lane[i] = 1 if module.subq_state(byte) in bad else 0
 
 
 def _damage_from_status_map(module: Any, status: Any, damage: Any) -> None:
@@ -924,7 +1085,7 @@ def _read_disc_binding(
     output_fulltoc: Path | None,
     read_speed: int | None,
     progress_cb: Callable[[int, int], None] | None,
-    map_cb: Callable[[bytearray], None] | None = None,
+    map_cb: Callable[[ReadLanes], None] | None = None,
 ) -> bool:
     """:func:`read_disc_c2` over the binding: one ``Device``, one spin-up.
 
@@ -964,7 +1125,8 @@ def _read_disc_binding(
             if packs:
                 output_cdtext.write_bytes(packs)
 
-        count = dev.read_toc().leadout_lba
+        toc = dev.read_toc()
+        count = toc.leadout_lba
         if count <= 0:
             msg = f"accudisc read: lead-out reported at LBA {count} — nothing to read"
             raise RuntimeError(msg)
@@ -980,25 +1142,32 @@ def _read_disc_binding(
                 if path is not None
             }
             done = 0
-            damage, status = _prepare_damage_lane(module, dev, count, map_cb)
+            want_sub = output_sub is not None
+            lanes, status, subq = _prepare_lanes(
+                module, dev, toc, count, want_sub, map_cb
+            )
 
             def split(chunk: Any) -> None:
                 nonlocal done
                 _split_streams(chunk, files)
-                if damage is not None:
-                    _update_damage(module, chunk, damage, status, done)
+                if lanes is not None:
+                    _update_damage(module, chunk, lanes, status, subq, done)
                 done += chunk.nsec
                 if progress_cb is not None:
                     progress_cb(done, count)
 
-            extra: dict[str, Any] = {} if status is None else {"status_map": status}
+            extra: dict[str, Any] = {}
+            if status is not None:
+                extra["status_map"] = status
+            if subq is not None:
+                extra["subq_map"] = subq
             result = dev.read(
                 0,
                 count,
                 sink=split,
                 copy=False,
                 c2=module.C2.PTRS,
-                sub=module.Sub.RAW if output_sub is not None else module.Sub.NONE,
+                sub=module.Sub.RAW if want_sub else module.Sub.NONE,
                 speed_x=read_speed or 0,
                 **extra,
             )
@@ -1015,7 +1184,7 @@ def read_disc_c2(
     output_fulltoc: Path | None = None,
     read_speed: int | None = None,
     progress_cb: Callable[[int, int], None] | None = None,
-    map_cb: Callable[[bytearray], None] | None = None,
+    map_cb: Callable[[ReadLanes], None] | None = None,
 ) -> None:
     """Full-disc raw audio (s16le, no byte-swap) + C2 bitmap via ``accudisc read``.
 
@@ -1030,16 +1199,16 @@ def read_disc_c2(
     for existence. *progress_cb(done, total)* receives sector counts from the
     ``--progress-fd`` machine channel.
 
-    *map_cb(damage)* is called **once**, with the per-sector C2 damage map, before
-    the first sector is read — the buffer is handed out at allocation rather than
+    *map_cb(lanes)* is called **once**, with a :class:`ReadLanes`, before the
+    first sector is read — everything is handed out at allocation rather than
     returned at the end, because a map that only exists once the read is over
-    cannot drive a live display. (That is precisely the shape the AccuDisc binding
-    is missing for ``status_map``; see :func:`_census_c2`.) The caller keeps the
-    reference and polls it from its render thread: one writer, one byte per
-    sector, monotonic, so a stale frame is merely stale and never wrong, and no
-    lock is needed. Requesting it does not change what is read — C2 pointers are
-    on the wire unconditionally — so the map is available even with
-    ``c2_recovery = "off"``, which suppresses only the bitmap *file*.
+    cannot drive a live display. The caller keeps the references and polls them
+    from its render thread: one writer, one byte per sector, monotonic, so a
+    stale frame is merely stale and never wrong, and no lock is needed.
+    Requesting it does not change what is read — C2 pointers are on the wire
+    unconditionally — so the map is available even with ``c2_recovery = "off"``,
+    which suppresses only the bitmap *file*. The Q lane additionally needs the
+    raw subchannel, so it is present only when *output_sub* was asked for.
 
     Raises RuntimeError only on a genuine read failure; "completed with caveats"
     is not a failure, and since the library returns no verdict for it,

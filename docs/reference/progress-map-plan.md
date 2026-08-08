@@ -469,10 +469,30 @@ gates exist.
    and nothing is lost by it, because `RECOVERED`/`SUSPECT` are the only states
    the sink cannot see and this path leaves every reread knob at zero, so they
    are structurally unreachable. Raw C2 bits are finer than `MapState.C2` anyway.
-4. Q lane, once the ask is answered. **Not DIY under any circumstance** — the
-   zero-fill trap (§3) means a Q lane computed here paints fabricated damage on
-   exactly the sectors whose audio is already gone. Until then the map draws one
-   lane and says so, rather than drawing Q as healthy.
+4. ~~Q lane~~ — **done 2026-08-08**, on AccuDisc 0.5.0's `subq_map`. Never DIY:
+   the zero-fill trap (§3) means a Q lane computed here paints fabricated damage
+   on exactly the sectors whose audio is already gone. Decoded with
+   `subq_state()`, never `map_state()`. `NO_POSITION` counts as **healthy**
+   (~1% interleave, ~100 frames per cell — as error it flags 100% of cells on a
+   clean disc); `NO_AUDIO` counts as **damage**, deliberately, because the lane
+   answers "is the subchannel intact here" and where no frame was delivered the
+   answer is no. A binding without the capability still draws one lane and says
+   so, rather than drawing Q as healthy.
+
+   Shipped with it: the **track number** on the status line, from the TOC
+   `_read_disc_binding` already fetches — so it costs no extra command and no
+   second spin-up — and a **"Ripping disc at Nx…"** spin-up phase that holds
+   until the TOC has been read, because until then there is no track list and
+   the drive really is seeking the lead-in. The speed clause is omitted rather
+   than printed as `0x` when the drive did not report.
+
+   The width trap came back and was caught in review before it shipped:
+   `_build_map` pinned the status column from *whichever text was showing at the
+   first frame*, which is fine for one constant string and wrong the moment the
+   text cycles — every longer phase would then be truncated for the rest of the
+   rip. `set_map(status_width=…)` now takes the widest text the read can ever
+   show, computed rather than measured. The bench had this (`status_width()`);
+   production did not.
 5. Recovery-ladder rendering (§2), which is our own work.
 6. CTDB result map via the pre/post diff (§5).
 

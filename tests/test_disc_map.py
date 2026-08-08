@@ -198,3 +198,38 @@ def test_the_last_cell_absorbs_the_division_remainder() -> None:
     damage[-1] = 1
     cells = disc_map.cells_from_damage(damage, frontier=total, width=width)
     assert cells[-1].state == ERR
+
+
+# ── two lanes ─────────────────────────────────────────────────────────────────
+
+
+def test_the_glyph_says_which_lane_survived() -> None:
+    """Top half = Q, bottom half = C2, FILLED means healthy. A full block is
+    both intact; the shaded block is neither — deliberately not blank, because
+    blank is unread and "no damage found" must never look like "not looked at"."""
+    c2 = [Cell(OK), Cell(ERR, 1), Cell(OK), Cell(ERR, 1)]
+    q = [Cell(OK), Cell(OK), Cell(ERR, 1), Cell(ERR, 1)]
+    assert disc_map.render(c2, colour=False, q_cells=q) == "█▀▄▒"
+
+
+def test_an_unread_cell_stays_unread_in_either_lane() -> None:
+    """A cell only half-read is not half-clean. UNREAD wins over everything,
+    which is why `_worse` short-circuits on it rather than ordering by state."""
+    assert disc_map.render([Cell(UNREAD)], colour=False, q_cells=[Cell(OK)]) == "░"
+    assert disc_map.render([Cell(OK)], colour=False, q_cells=[Cell(UNREAD)]) == "░"
+
+
+def test_without_a_q_lane_the_map_stays_single_lane() -> None:
+    """Drawing Q as healthy would assert something never measured — the map says
+    less rather than saying something false."""
+    cells = [Cell(OK), Cell(ERR, 2), Cell(UNREAD)]
+    assert disc_map.render(cells, colour=False) == "█▒░"
+    assert disc_map.render(cells, colour=False, q_cells=None) == "█▒░"
+
+
+def test_colour_takes_the_worse_lane_because_shape_already_spent_itself() -> None:
+    """The glyph has said WHICH lane failed, so colour is free to say how badly —
+    and severity is a property of the pair, not of one lane."""
+    hot = disc_map._worse(Cell(OK), Cell(ERR, 3))
+    assert hot == Cell(ERR, 3)
+    assert disc_map._worse(Cell(ERR, 0), Cell(ERR, 2)) == Cell(ERR, 2)

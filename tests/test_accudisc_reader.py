@@ -756,8 +756,9 @@ def _run_disc(device: _FakeDiscDevice, tmp_path: Path, **kw: Any) -> None:
         "read_speed": None,
         "progress_cb": None,
     }
+    module = kw.pop("module", None) or _disc_binding(device)
     defaults.update(kw)
-    ar._read_disc_binding(_disc_binding(device), "/dev/sr0", **defaults)
+    ar._read_disc_binding(module, "/dev/sr0", **defaults)
 
 
 def test_disc_binding_reads_lead_in_before_audio_on_one_device(tmp_path: Path) -> None:
@@ -1695,8 +1696,8 @@ def test_the_damage_map_is_handed_over_before_the_first_sector_is_read(
     seen: list[tuple[int, bytes]] = []
     device = _FakeDiscDevice(leadout=4, chunks=(_FakeReadChunk(4),))
 
-    def _map_cb(buf: bytearray) -> None:
-        seen.append((len(buf), bytes(buf)))
+    def _map_cb(lanes: Any) -> None:
+        seen.append((len(lanes.damage), bytes(lanes.damage)))
 
     _run_disc(device, tmp_path, map_cb=_map_cb)
 
@@ -1715,10 +1716,10 @@ def test_the_damage_map_is_populated_with_no_c2_file_requested(
     it were gated on the output file, that escape hatch would silently produce a
     blank map — and a blank map is indistinguishable from a clean disc.
     """
-    captured: list[bytearray] = []
+    captured: list[Any] = []
     device = _FakeDiscDevice(leadout=2, chunks=(_C2Chunk([True, False]),))
     _run_disc(device, tmp_path, output_c2=None, map_cb=captured.append)
-    assert list(captured[0]) == [1, 0]
+    assert list(captured[0].damage) == [1, 0]
 
 
 # ── caller-owned status map (AccuDisc 0.5.0+) ─────────────────────────────────
@@ -1779,24 +1780,24 @@ def test_a_modern_binding_is_given_a_buffer_and_the_diy_census_is_not_used(
     """
     device = _ModernDiscDevice(leadout=2, chunks=(_C2Chunk([False, False]),))
     device._map_fill = lambda i: (_FakeMapState.HARD if i == 0 else _FakeMapState.OK)  # type: ignore[method-assign]
-    captured: list[bytearray] = []
+    captured: list[Any] = []
     _run_disc(device, tmp_path, map_cb=captured.append)
 
     assert isinstance(device.read_kwargs["status_map"], bytearray), (
         "the engine must be handed OUR buffer, not asked to allocate one"
     )
-    assert list(captured[0]) == [1, 0]
+    assert list(captured[0].damage) == [1, 0]
 
 
 def test_an_older_binding_falls_back_to_the_diy_census(tmp_path: Path) -> None:
     """A 0.4.x checkout is one `git checkout` away in a tree we do not control,
     so the fallback is a live path rather than dead code."""
     device = _FakeDiscDevice(leadout=2, chunks=(_C2Chunk([True, False]),))
-    captured: list[bytearray] = []
+    captured: list[Any] = []
     _run_disc(device, tmp_path, map_cb=captured.append)
 
     assert device.read_kwargs["status_map"] is False, "no buffer on an old binding"
-    assert list(captured[0]) == [1, 0]
+    assert list(captured[0].damage) == [1, 0]
 
 
 def test_detection_is_not_pinned_to_one_spelling_of_the_new_annotation() -> None:
@@ -1980,3 +1981,137 @@ def test_the_real_binding_is_reachable_from_the_test_suite() -> None:
         f"absent this test is the right place to loosen — deliberately, not by "
         f"letting three guards go quiet."
     )
+
+
+# ── the Q-subchannel lane ─────────────────────────────────────────────────────
+
+
+class _FakeSubQState(enum.IntEnum):
+    PENDING = 0
+    OK = 1
+    BAD = 2
+    NO_POSITION = 3
+    NO_AUDIO = 4
+
+
+def _subq_module(device: _FakeDiscDevice, *, feature: bool = True) -> _FakeBinding:
+    module = _disc_binding(device)
+    module.SubQState = _FakeSubQState  # type: ignore[attr-defined]
+    module.subq_state = lambda b: _FakeSubQState(b & 0x0F)  # type: ignore[attr-defined]
+    names = {"caller_map_buffers"} | ({"subq_map"} if feature else set())
+    module.features = frozenset(names)  # type: ignore[attr-defined]
+    return module
+
+
+def test_no_position_is_healthy_not_an_error() -> None:
+    """The classification most easily inverted, because the NAME sounds like a
+    failure. `NO_POSITION` is a CRC-good frame carrying MCN or ISRC instead of a
+    position — the ordinary interleave, ~1% of frames. At ~10,000 sectors per
+    cell that is ~100 per cell, so counting it as error flags 100% of cells on a
+    perfectly clean disc. The bench produced exactly that picture once."""
+    module = _subq_module(_FakeDiscDevice())
+    lane = bytearray(4)
+    src = bytearray([
+        _FakeSubQState.OK,
+        _FakeSubQState.NO_POSITION,
+        _FakeSubQState.BAD,
+        _FakeSubQState.PENDING,
+    ])
+    ar._damage_from_subq_map(module, src, lane)
+    assert list(lane) == [0, 0, 1, 0]
+
+
+def test_no_audio_is_damage_in_the_q_lane() -> None:
+    """A deliberate call, not an oversight.
+
+    The C2 lane already draws this sector as HARD, so one failure occupies both
+    lanes. That is correct rather than double-counting: the lane answers "is the
+    subchannel intact here", and where no frame was delivered the answer is no.
+    Leaving it healthy would assert the subchannel survived a sector that was
+    never read — the same false claim that kept us from drawing a Q lane at all
+    before the engine had one.
+    """
+    module = _subq_module(_FakeDiscDevice())
+    lane = bytearray(2)
+    ar._damage_from_subq_map(
+        module, bytearray([_FakeSubQState.NO_AUDIO, _FakeSubQState.OK]), lane
+    )
+    assert list(lane) == [1, 0]
+
+
+def test_the_q_lane_is_requested_only_when_the_subchannel_is() -> None:
+    """The engine refuses `subq_map` without SUB_RAW (ERR_INVAL), so the gate
+    lives here rather than trusting every caller to have asked for the sub."""
+    device = _ModernDiscDevice(leadout=2, chunks=(_C2Chunk([False, False]),))
+    module = _subq_module(device)
+    captured: list[Any] = []
+    _run_disc(
+        device, tmp_path=Path("/nonexistent"), map_cb=captured.append, module=module
+    )
+    assert captured[0].subq is None
+    assert "subq_map" not in device.read_kwargs
+
+
+def test_the_q_lane_needs_its_own_capability_name() -> None:
+    """`subq_map` and `caller_map_buffers` are separate names in
+    `accudisc.features`. A binding could ship either without the other, so
+    reusing one check would request a field that does not exist."""
+    device = _ModernDiscDevice(leadout=2, chunks=(_C2Chunk([False, False]),))
+    module = _subq_module(device, feature=False)
+    captured: list[Any] = []
+    _run_disc(
+        device,
+        tmp_path=Path("/nonexistent"),
+        output_sub=None,
+        map_cb=captured.append,
+        module=module,
+    )
+    assert captured[0].subq is None
+
+
+# ── geometry and speed on the handover ────────────────────────────────────────
+
+
+def test_track_starts_come_from_the_toc_already_being_read() -> None:
+    """No extra command and no second spin-up: `_read_disc_binding` already
+    fetches this TOC for the lead-out."""
+    toc = SimpleNamespace(
+        leadout_lba=1000,
+        tracks=(
+            SimpleNamespace(start_lba=150, audio=True),
+            SimpleNamespace(start_lba=20000, audio=True),
+            SimpleNamespace(start_lba=0, audio=True),
+        ),
+    )
+    assert ar._track_starts(toc) == (0, 150, 20000)
+
+
+def test_data_tracks_are_not_offered_as_audio_track_starts() -> None:
+    toc = SimpleNamespace(
+        tracks=(
+            SimpleNamespace(start_lba=0, audio=True),
+            SimpleNamespace(start_lba=50000, audio=False),
+        )
+    )
+    assert ar._track_starts(toc) == (0,)
+
+
+def test_a_toc_without_tracks_degrades_rather_than_raising() -> None:
+    """Cosmetic: a status line reading "Ripping disc…" is a fair degrade where
+    an AttributeError mid-rip, after the drive has spun up, is not."""
+    assert ar._track_starts(SimpleNamespace(leadout_lba=10)) == ()
+
+
+def test_a_drive_that_reports_no_speed_yields_none_not_zero() -> None:
+    """ "Ripping disc at 0x" reads as a measurement, and this one was never made."""
+    assert ar._drive_speed_x(SimpleNamespace(get_speed=lambda: (7056, 0))) is None
+    assert ar._drive_speed_x(SimpleNamespace()) is None
+
+
+def test_the_speed_is_taken_from_the_CURRENT_field_not_the_maximum() -> None:
+    """`Device.get_speed()` is (max, current) — the opposite order from this
+    module's own `read_speed()`. Both are two ints in the same units, so a
+    straight hand-over type-checks, runs, and reports the advertised ceiling as
+    the working rate. Made to differ here, since at a drive's default they are
+    equal and the order is unobservable."""
+    assert ar._drive_speed_x(SimpleNamespace(get_speed=lambda: (7056, 1411))) == 8

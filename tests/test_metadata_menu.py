@@ -1321,7 +1321,7 @@ def test_pressing_description_falls_back_and_tolerates_neither():
 
 
 def test_corroboration_target_recorded_when_the_user_changes_the_pressing():
-    """acoustid_corroborates and discogs_link_barcode_agrees are computed before
+    """acoustid_corroborates and discogs_corroborates are computed before
     the menu, against the release the ladder pinned. After a manual change they
     describe a release the container no longer claims to be — and they read
     exactly the same as if they described the right one."""

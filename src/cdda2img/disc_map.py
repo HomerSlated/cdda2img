@@ -82,6 +82,18 @@ _READ_OK = "█"
 _READ_ERR = "▒"
 _UNREAD = "░"
 
+# Two lanes on one row. U+2580/U+2584 draw a half-block each, so the glyph says
+# WHICH lane is intact: top half = Q, bottom half = C2, **filled means healthy**.
+# A full block is both good and the shaded block is neither — deliberately not
+# blank, because blank is unread and "no damage found" must never look like "not
+# looked at". Settled on the bench, kgr 2026-08-07.
+_GLYPH = {
+    (OK, OK): "█",  # both lanes intact
+    (OK, ERR): "▀",  # Q intact, C2 damaged — only the top half survives
+    (ERR, OK): "▄",  # C2 intact, Q damaged
+    (ERR, ERR): "▒",  # nothing here survived
+}
+
 
 def colour_enabled(stream: object = None) -> bool:
     """Whether to emit SGR colour, per the NO_COLOR convention.
@@ -165,19 +177,39 @@ def _colour_of(cell: Cell, pal: Palette) -> int:
     return pal.err_ramp[cell.level] if cell.level >= 0 else pal.err_ramp[-1]
 
 
-def render(cells: list[Cell], *, colour: bool = True, pal: Palette = CB) -> str:
+def _worse(a: Cell, b: Cell) -> Cell:
+    """The cell whose colour the pair should take.
+
+    ``UNREAD`` wins over everything — an unread cell is not a clean cell — and
+    among read cells the worse state wins, then the higher severity band. Colour
+    carries severity, and severity is a property of the pair rather than of one
+    lane, because the glyph has already spent its shape saying *which* lane.
+    """
+    if UNREAD in (a.state, b.state):
+        return Cell(UNREAD)
+    return max(a, b, key=lambda c: (c.state, c.level))
+
+
+def render(
+    cells: list[Cell],
+    *,
+    colour: bool = True,
+    pal: Palette = CB,
+    q_cells: list[Cell] | None = None,
+) -> str:
     """One row of map, ready to drop into a progress line.
 
-    **Single lane, for now.** The bench's two-lane glyphs (``▀``/``▄`` for one
-    lane healthy, ``█`` for both) need a Q verdict, and the Q lane cannot be
-    computed here: AccuDisc zero-fills hard-unreadable sectors, and a zero Q
-    frame *fails* CRC, so a Q lane derived on this side would paint fabricated
-    subchannel damage onto exactly the sectors whose audio is already gone —
-    sitting beside the real failure and reading as corroboration. The engine
-    skips those frames before the check; only it can say. Until a ``subq_map``
-    lands, drawing Q as healthy would assert something we have not measured, so
-    the map draws C2 alone and ``▒`` keeps its meaning ("damage here") when the
-    second lane arrives.
+    *cells* is the C2 lane. *q_cells*, when given, is the Q-subchannel lane and
+    the row becomes two-lane: shape says which lane failed, colour says how
+    badly. Without it the row is C2 alone — the honest rendering on a binding
+    with no ``subq_map``, since **drawing Q as healthy would assert something
+    never measured**, and computing that lane here is not an option (a
+    hard-unreadable sector arrives zero-filled and a zero Q frame *fails* CRC,
+    so a DIY lane fabricates subchannel damage exactly where the audio is
+    already gone, sitting beside the real failure and reading as corroboration).
+
+    ``▒`` means "damage" in both renderings, so the picture stays readable
+    across a binding upgrade rather than changing vocabulary.
 
     SGR is emitted only on a colour *change*, so a clean disc costs two escapes
     for the whole row rather than one per cell.
@@ -186,14 +218,15 @@ def render(cells: list[Cell], *, colour: bool = True, pal: Palette = CB) -> str:
         return ""
     parts: list[str] = []
     last = None
-    for cell in cells:
-        ch = (
-            _UNREAD
-            if cell.state == UNREAD
-            else (_READ_OK if cell.state == OK else _READ_ERR)
-        )
+    for i, cell in enumerate(cells):
+        q = q_cells[i] if q_cells is not None and i < len(q_cells) else None
+        if q is None:
+            shown, ch = cell, _one_lane_glyph(cell)
+        else:
+            shown = _worse(q, cell)
+            ch = _UNREAD if shown.state == UNREAD else _GLYPH[q.state, cell.state]
         if colour:
-            col = _colour_of(cell, pal)
+            col = _colour_of(shown, pal)
             if col != last:
                 parts.append(f"\033[38;5;{col}m")
                 last = col
@@ -201,3 +234,9 @@ def render(cells: list[Cell], *, colour: bool = True, pal: Palette = CB) -> str:
     if colour:
         parts.append(RESET)
     return "".join(parts)
+
+
+def _one_lane_glyph(cell: Cell) -> str:
+    if cell.state == UNREAD:
+        return _UNREAD
+    return _READ_OK if cell.state == OK else _READ_ERR
