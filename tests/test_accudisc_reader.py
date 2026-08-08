@@ -2078,9 +2078,9 @@ def test_track_starts_come_from_the_toc_already_being_read() -> None:
     toc = SimpleNamespace(
         leadout_lba=1000,
         tracks=(
-            SimpleNamespace(start_lba=150, audio=True),
-            SimpleNamespace(start_lba=20000, audio=True),
-            SimpleNamespace(start_lba=0, audio=True),
+            SimpleNamespace(lba=150, is_audio=True),
+            SimpleNamespace(lba=20000, is_audio=True),
+            SimpleNamespace(lba=0, is_audio=True),
         ),
     )
     assert ar._track_starts(toc) == (0, 150, 20000)
@@ -2089,8 +2089,8 @@ def test_track_starts_come_from_the_toc_already_being_read() -> None:
 def test_data_tracks_are_not_offered_as_audio_track_starts() -> None:
     toc = SimpleNamespace(
         tracks=(
-            SimpleNamespace(start_lba=0, audio=True),
-            SimpleNamespace(start_lba=50000, audio=False),
+            SimpleNamespace(lba=0, is_audio=True),
+            SimpleNamespace(lba=50000, is_audio=False),
         )
     )
     assert ar._track_starts(toc) == (0,)
@@ -2115,3 +2115,33 @@ def test_the_speed_is_taken_from_the_CURRENT_field_not_the_maximum() -> None:
     the working rate. Made to differ here, since at a drive's default they are
     equal and the order is unobservable."""
     assert ar._drive_speed_x(SimpleNamespace(get_speed=lambda: (7056, 1411))) == 8
+
+
+_USED_TRACK_ATTRS = frozenset({"lba", "is_audio"})
+
+
+def test_track_starts_matches_the_real_binding() -> None:
+    """The guard for a bug that shipped, because a fake cannot catch it.
+
+    `_track_starts` first read `start_lba` and `audio`. Neither exists — the
+    binding has `lba` and `is_audio` — and both went through `getattr(…,
+    default)`, so every track was silently dropped and the rip's status line
+    read "Ripping disc…" for its whole duration, which is exactly what a disc
+    with no track list produces. The unit test passed because its fake used the
+    invented names. A fake cannot detect a name the binding never had; only the
+    real object can.
+    """
+    module = _real_binding()
+    missing = {n for n in _USED_TRACK_ATTRS if not hasattr(module.Track, n)}
+    assert not missing, f"Track no longer provides: {missing}"
+
+
+def test_the_track_fake_here_uses_the_binding_s_own_names() -> None:
+    """Keeps the fakes below honest against the real class.
+
+    Without this, the fakes are free to drift back to invented names and every
+    test that uses them keeps passing while production breaks.
+    """
+    module = _real_binding()
+    real = {f.name for f in dataclasses.fields(module.Track)} | {"is_audio"}
+    assert real >= _USED_TRACK_ATTRS

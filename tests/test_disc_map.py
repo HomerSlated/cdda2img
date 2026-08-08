@@ -233,3 +233,45 @@ def test_colour_takes_the_worse_lane_because_shape_already_spent_itself() -> Non
     hot = disc_map._worse(Cell(OK), Cell(ERR, 3))
     assert hot == Cell(ERR, 3)
     assert disc_map._worse(Cell(ERR, 0), Cell(ERR, 2)) == Cell(ERR, 2)
+
+
+# ── two lanes in colour: both halves inked ────────────────────────────────────
+
+
+def test_a_colour_two_lane_row_never_leaves_a_half_uninked() -> None:
+    """The bug kgr saw on a real 40x rip.
+
+    The PX-716A's Q yield collapses above ~32x, so the map correctly reported a
+    disc-wide Q failure — and drew it as `▄`, whose top half falls back to the
+    terminal background. It read as "the upper line of the bar failed to
+    render". A map that is right and looks broken is worse than one that says
+    less, so in colour BOTH halves carry a palette colour.
+    """
+    c2 = [Cell(OK)] * 4
+    q = [Cell(ERR, 3)] * 4  # a total Q collapse: the case that looked unrendered
+    out = disc_map.render(c2, colour=True, q_cells=q)
+    assert out.count("\033[48;5;") >= 1, "no background = an uninked half"
+    assert "\033[38;5;" in out
+    assert out.count(disc_map._UPPER_HALF) == 4
+
+
+def test_the_two_lanes_get_their_own_colours_the_right_way_up() -> None:
+    """Top half is Q (foreground), bottom half is C2 (background). Swapping them
+    would be invisible on a disc where both lanes agree, and exactly wrong on the
+    Q-collapse disc this exists for."""
+    out = disc_map.render([Cell(OK)], colour=True, q_cells=[Cell(ERR, 3)])
+    assert f"\033[38;5;{disc_map.CB.err_ramp[3]}m" in out  # Q damaged -> fg
+    assert f"\033[48;5;{disc_map.CB.ok}m" in out  # C2 healthy -> bg
+
+
+def test_mono_keeps_the_glyph_shapes_because_shape_is_all_it_has() -> None:
+    c2 = [Cell(OK), Cell(ERR, 1), Cell(OK), Cell(ERR, 1)]
+    q = [Cell(OK), Cell(OK), Cell(ERR, 1), Cell(ERR, 1)]
+    assert disc_map.render(c2, colour=False, q_cells=q) == "█▀▄▒"
+
+
+def test_colour_runs_are_still_collapsed_in_the_dual_row() -> None:
+    """A clean disc must not cost two escapes per cell at 10 fps."""
+    out = disc_map.render([Cell(OK)] * 60, colour=True, q_cells=[Cell(OK)] * 60)
+    assert out.count("\033[38;5;") == 1
+    assert out.count("\033[48;5;") == 1

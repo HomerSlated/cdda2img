@@ -82,6 +82,11 @@ _READ_OK = "█"
 _READ_ERR = "▒"
 _UNREAD = "░"
 
+#: U+2580 UPPER HALF BLOCK. Top half takes the foreground colour, bottom half
+#: the background — two independent lanes on one text row at full horizontal
+#: resolution, and the reason this map is one line rather than two.
+_UPPER_HALF = "▀"
+
 # Two lanes on one row. U+2580/U+2584 draw a half-block each, so the glyph says
 # WHICH lane is intact: top half = Q, bottom half = C2, **filled means healthy**.
 # A full block is both good and the shaded block is neither — deliberately not
@@ -199,23 +204,36 @@ def render(
 ) -> str:
     """One row of map, ready to drop into a progress line.
 
-    *cells* is the C2 lane. *q_cells*, when given, is the Q-subchannel lane and
-    the row becomes two-lane: shape says which lane failed, colour says how
-    badly. Without it the row is C2 alone — the honest rendering on a binding
-    with no ``subq_map``, since **drawing Q as healthy would assert something
-    never measured**, and computing that lane here is not an option (a
-    hard-unreadable sector arrives zero-filled and a zero Q frame *fails* CRC,
-    so a DIY lane fabricates subchannel damage exactly where the audio is
-    already gone, sitting beside the real failure and reading as corroboration).
+    *cells* is the C2 lane. *q_cells*, when given, is the Q-subchannel lane.
+    Without it the row is C2 alone — the honest rendering on a binding with no
+    ``subq_map``, since **drawing Q as healthy would assert something never
+    measured**, and computing that lane here is not an option (a hard-unreadable
+    sector arrives zero-filled and a zero Q frame *fails* CRC, so a DIY lane
+    fabricates subchannel damage exactly where the audio is already gone).
 
-    ``▒`` means "damage" in both renderings, so the picture stays readable
-    across a binding upgrade rather than changing vocabulary.
+    **Two lanes are drawn in colour, not in shape, whenever there is colour.**
+    ``▀`` paints its top half in the foreground and its bottom half in the
+    *background*, so one cell carries Q above C2 with both halves inked and
+    neither able to look unrendered.
 
-    SGR is emitted only on a colour *change*, so a clean disc costs two escapes
-    for the whole row rather than one per cell.
+    That last point is the whole reason this is not the bench's `glyph` style.
+    Glyph encodes a failing lane as an *unfilled half* — and on a disc where one
+    lane is broadly unhealthy, which is precisely when the map matters, half of
+    every cell falls back to the terminal background. Measured on a real 40x rip
+    where the PX-716A's Q yield collapses: the map correctly reported a
+    disc-wide Q failure, and it read as the top half of the bar having failed to
+    draw. A map that is right and looks broken is worse than one that says less.
+
+    Mono keeps the glyph shapes, because there the shape is the only channel
+    there is.
+
+    SGR is emitted only on a *change*, so a clean disc costs a couple of escapes
+    for the whole row rather than two per cell.
     """
     if not cells:
         return ""
+    if colour and q_cells is not None:
+        return _render_dual(cells, q_cells, pal)
     parts: list[str] = []
     last = None
     for i, cell in enumerate(cells):
@@ -233,6 +251,29 @@ def render(
         parts.append(ch)
     if colour:
         parts.append(RESET)
+    return "".join(parts)
+
+
+def _render_dual(cells: list[Cell], q_cells: list[Cell], pal: Palette) -> str:
+    """Q above C2, both inked: ``▀`` top half = foreground, bottom half = background.
+
+    Every cell is the same character, so the lanes are distinguished purely by
+    colour and nothing can be mistaken for a gap in the drawing.
+    """
+    parts: list[str] = []
+    last_fg = last_bg = None
+    for i, c2 in enumerate(cells):
+        q = q_cells[i] if i < len(q_cells) else Cell(UNREAD)
+        fg_col = _colour_of(q, pal)
+        bg_col = _colour_of(c2, pal)
+        if fg_col != last_fg:
+            parts.append(f"\033[38;5;{fg_col}m")
+            last_fg = fg_col
+        if bg_col != last_bg:
+            parts.append(f"\033[48;5;{bg_col}m")
+            last_bg = bg_col
+        parts.append(_UPPER_HALF)
+    parts.append(RESET)
     return "".join(parts)
 
 

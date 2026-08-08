@@ -944,12 +944,22 @@ def _track_starts(toc: Any) -> tuple[int, ...]:
     Tolerant of a TOC without ``tracks``: this is cosmetic, and a status line
     that says "Ripping disc…" is a fair degrade where an ``AttributeError``
     mid-rip is not.
+
+    **That tolerance is also how this shipped broken**, so it is worth naming.
+    The first version read ``start_lba`` and ``audio``; the binding's fields are
+    ``lba`` and ``is_audio``. Both wrong names went through ``getattr(…,
+    default)``, so every track was silently dropped, the tuple came back empty,
+    and the status line degraded to "Ripping disc…" for the whole rip — the
+    exact output a disc with no track list produces. The unit test passed
+    because its fake used the invented names: a fake cannot detect a name the
+    binding never had. ``test_track_starts_matches_the_real_binding`` is the
+    guard, and it has to run against the real thing.
     """
     tracks = getattr(toc, "tracks", None) or ()
     starts = []
     for t in tracks:
-        lba = getattr(t, "start_lba", None)
-        if lba is not None and getattr(t, "audio", True):
+        lba = getattr(t, "lba", None)
+        if lba is not None and getattr(t, "is_audio", True):
             starts.append(int(lba))
     return tuple(sorted(starts))
 

@@ -1066,11 +1066,35 @@ class PressingScreen(Screen):
         self.candidates = sorted(candidates, key=lambda c: c.mb_release_id or "~")
         self.pinned_id = pinned_id
         self.page = 0
+        # Snapshot for [q]. Taken on first paint rather than in __init__ because
+        # that is the first moment the controller — and therefore the disc — is
+        # in hand. Without it "exit without saving" would be a label with no
+        # mechanism: PressingDetailScreen applies its choice to ctl.disc
+        # immediately, so by the time the user asks to discard, the change is
+        # already made.
+        self._entry: tuple[RBIDisc, str, DiscMeta | None] | None = None
+
+    def _chosen_id(self, ctl: MenuController) -> str | None:
+        """The release the user picked this visit, or None if they have not."""
+        if ctl.pressing_outcome != "manual" or ctl.pressing_selected is None:
+            return None
+        return ctl.pressing_selected.mb_release_id
 
     def render(self, ctl: MenuController) -> None:
         from cdda2img.metadata_menu import _render_pressing_page
 
-        _render_pressing_page(self.candidates, self.page, self.pinned_id)
+        if self._entry is None:
+            self._entry = (
+                copy.deepcopy(ctl.disc),
+                ctl.pressing_outcome,
+                ctl.pressing_selected,
+            )
+        _render_pressing_page(
+            self.candidates,
+            self.page,
+            self.pinned_id,
+            chosen_id=self._chosen_id(ctl),
+        )
         if ctl.banner:
             print()
             print(f"  ! {ctl.banner}")
@@ -1081,7 +1105,7 @@ class PressingScreen(Screen):
 
         total = len(self.candidates)
         total_pages = max(1, (total + _PAGE - 1) // _PAGE)
-        choice = _prompt(f"  Select 1-{total}: ").strip().lower()
+        choice = _prompt(f"  Select 1-{total}, or s/q: ").strip().lower()
         if choice == "n":
             if self.page < total_pages - 1:
                 self.page += 1
@@ -1090,20 +1114,8 @@ class PressingScreen(Screen):
             if self.page > 0:
                 self.page -= 1
             return Stay()
-        if choice == "b":
-            return Pop()
-        if choice == "x":
-            # "None of these" is a real answer and needs its own outcome. Without
-            # it a menu forces the user to endorse a row that is wrong, turning an
-            # honest automatic guess into a false manual confirmation — strictly
-            # worse provenance than never having asked. The pinned release is left
-            # in place; what changes is the claim recorded about it.
-            ctl.pressing_outcome = "rejected"
-            ctl.banner = (
-                "Recorded: none of the listed pressings match. The automatic "
-                "pick is kept, but flagged as unconfirmed."
-            )
-            return Pop()
+        if choice in ("s", "b", "q", "x"):
+            return self._exit(ctl, choice)
         try:
             idx = int(choice) - 1
         except ValueError:
@@ -1113,6 +1125,49 @@ class PressingScreen(Screen):
             ctl.banner = "Invalid selection."
             return Stay()
         return Push(PressingDetailScreen(self.candidates[idx]))
+
+    def _exit(self, ctl: MenuController, choice: str) -> Nav:
+        """The three ways out. They differ only in what they claim about the disc.
+
+        ``s`` keeps whatever is currently applied; ``q`` puts back what was there
+        on entry; ``x`` records that none of the candidates is the disc. ``b`` is
+        an undocumented alias for ``s`` — it was the only exit for as long as this
+        screen has existed, and silently repurposing a familiar key is worse than
+        retiring it quietly.
+        """
+        if choice in ("s", "b"):
+            return Pop()
+
+        if choice == "q":
+            # Restore the disc, the outcome and the selection exactly as they were
+            # on entry. PressingDetailScreen applies its choice immediately, so
+            # without this there is nothing for "exit without saving" to undo and
+            # the label would name an action the screen cannot perform.
+            if self._entry is not None:
+                ctl.disc, ctl.pressing_outcome, ctl.pressing_selected = self._entry
+            ctl.banner = "Left unchanged — the automatic pick stands."
+            return Pop()
+
+        # "None of these" is a real answer and needs its own outcome. Without it a
+        # menu forces the user to endorse a row that is wrong, turning an honest
+        # automatic guess into a false manual confirmation — strictly worse
+        # provenance than never having asked. The pinned release is left in place;
+        # what changes is the claim recorded about it.
+        #
+        # Refused once a row HAS been chosen: the two answers contradict each
+        # other, and nothing on screen would say which one survived.
+        if self._chosen_id(ctl):
+            ctl.banner = (
+                "You have already chosen a pressing. Use [q] to discard it "
+                "first if none of these match after all."
+            )
+            return Stay()
+        ctl.pressing_outcome = "rejected"
+        ctl.banner = (
+            "Recorded: none of the listed pressings match. The automatic "
+            "pick is kept, but flagged as unconfirmed."
+        )
+        return Pop()
 
 
 class PressingDetailScreen(Screen):
@@ -1175,7 +1230,10 @@ class PressingDetailScreen(Screen):
         ctl.disc = apply_menu_selection(ctl.disc, selected, overwrite=True)
         ctl.pressing_outcome = "manual"
         ctl.pressing_selected = selected
-        ctl.banner = f"Pressing set to {(selected.mb_release_id or '')[:8]}."
+        ctl.banner = (
+            f"Pressing set to {(selected.mb_release_id or '')[:8]}. "
+            "[s] keeps it, [q] discards it."
+        )
         return Pop()
 
 

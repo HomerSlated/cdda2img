@@ -271,7 +271,11 @@ def _pressing_description(m: DiscMeta) -> str:
 
 
 def _render_pressing_page(
-    candidates: list[DiscMeta], page: int, pinned_id: str | None
+    candidates: list[DiscMeta],
+    page: int,
+    pinned_id: str | None,
+    *,
+    chosen_id: str | None = None,
 ) -> None:
     """Pure repaint of one page of the N5 alternatives (pressing) picker.
 
@@ -280,6 +284,12 @@ def _render_pressing_page(
     differently, so the table shows the fields that CAN differ and the free text
     that describes the physical object; artist and album are constant across the
     list and would be pure noise in every column.
+
+    *chosen_id* is the pressing the **user** has picked this visit, if any. It
+    takes the marker over *pinned_id*, and the legend and the footer both change
+    with it: after a choice the ``*`` has to mean "what you chose", or the screen
+    contradicts the confirmation it just printed, and "none of these match" stops
+    being an available answer because one of them evidently did.
     """
     total = len(candidates)
     total_pages = max(1, (total + _PAGE - 1) // _PAGE)
@@ -295,10 +305,15 @@ def _render_pressing_page(
         f"  {'#':>3}  {'MBID':<8}  {'Cty':<3}  {'Year':<4}  {'Cat #':<14}  Description"
     )
     print(f"  {'─' * 3}  {'─' * 8}  {'─' * 3}  {'─' * 4}  {'─' * 14}  {'─' * 34}")
+    # The marked row is whatever is selected NOW: the user's choice once they
+    # have made one, the ladder's guess until then. Leaving the mark on the
+    # automatic pick after a manual choice makes the screen disagree with the
+    # confirmation line directly beneath it.
+    marked = chosen_id or pinned_id
     for i, m in enumerate(page_items, start=start + 1):
-        # The pinned row is marked, not hidden and not reordered: the user is
-        # told what the ladder guessed so they can confirm or contradict it.
-        mark = "*" if m.mb_release_id and m.mb_release_id == pinned_id else " "
+        # The selected row is marked, not hidden and not reordered: the user is
+        # told what is currently chosen so they can confirm or contradict it.
+        mark = "*" if m.mb_release_id and m.mb_release_id == marked else " "
         desc = _pressing_description(m) or "(no description)"
         print(
             f"  {i:>2}{mark}  {(m.mb_release_id or '')[:8]:<8}"
@@ -306,15 +321,24 @@ def _render_pressing_page(
             f"  {_trunc(m.catalog_number, 14):<14}  {_trunc(desc, 34)}"
         )
     print()
-    print("  * = currently selected (picked automatically)")
+    print(
+        "  * = selected (your choice)"
+        if chosen_id
+        else "  * = currently selected (picked automatically)"
+    )
     print()
     nav = []
     if page > 0:
         nav.append("[p] prev")
     if page < total_pages - 1:
         nav.append("[n] next")
-    nav.append("[x] none of these match my disc")
-    nav.append("[b] back")
+    # "None of these match" is only an available answer while none has been
+    # chosen. Offering it after a choice invites the user to contradict
+    # themselves in one keystroke, with no indication which answer survives.
+    if not chosen_id:
+        nav.append("[x] none of these match my disc")
+    nav.append("[s] save and continue")
+    nav.append("[q] exit without saving")
     print("  " + "  ".join(nav))
 
 

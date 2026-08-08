@@ -1463,3 +1463,137 @@ def test_no_pressing_key_when_no_release_was_pinned() -> None:
     prov: dict[str, str] = {}
     _record_pressing_outcome(prov, ctl)
     assert "release_selection" not in prov
+
+
+# ── N5 pressing screen: the marker, and the two ways out ──────────────────────
+
+
+def _n5_ctl(candidates, pinned):
+    from cdda2img.menu_state import MenuController, PressingScreen
+    from cdda2img.rbi_format import RBIDisc
+
+    ctl = MenuController(RBIDisc(album="A", artist="B"))
+    screen = PressingScreen(candidates, pinned)
+    return ctl, screen
+
+
+def _n5_cands():
+    from cdda2img.lookup_result import DiscMeta
+
+    return [
+        DiscMeta(mb_release_id="aaaa1111", album="A", source="mb"),
+        DiscMeta(mb_release_id="bbbb2222", album="A", source="mb"),
+    ]
+
+
+def test_the_marker_follows_the_users_choice_not_the_auto_pick(capsys):
+    """After choosing, the `*` must move.
+
+    Leaving it on the automatic pick makes the table contradict the confirmation
+    line printed directly beneath it — which is what kgr saw.
+    """
+    cands = _n5_cands()
+    ctl, screen = _n5_ctl(cands, pinned="aaaa1111")
+    screen.render(ctl)
+    first = capsys.readouterr().out
+    assert "aaaa1111" in first
+    assert "1*" in first  # the auto pick is marked before any choice
+
+    ctl.pressing_outcome = "manual"
+    ctl.pressing_selected = cands[1]
+    screen.render(ctl)
+    after = capsys.readouterr().out
+    assert "2*" in after, "the marker did not move to the chosen row"
+    assert "1*" not in after
+    assert "your choice" in after
+
+
+def test_none_of_these_disappears_once_a_pressing_is_chosen(capsys):
+    """Offering both answers at once invites a contradiction in one keystroke,
+    with nothing on screen saying which one survives."""
+    cands = _n5_cands()
+    ctl, screen = _n5_ctl(cands, pinned="aaaa1111")
+    screen.render(ctl)
+    assert "none of these match" in capsys.readouterr().out
+
+    ctl.pressing_outcome = "manual"
+    ctl.pressing_selected = cands[1]
+    screen.render(ctl)
+    out = capsys.readouterr().out
+    assert "none of these match" not in out
+    assert "save and continue" in out
+    assert "exit without saving" in out
+
+
+def test_exit_without_saving_actually_restores_the_disc(capsys):
+    """The label has to name something the screen can do.
+
+    PressingDetailScreen applies its choice to ctl.disc immediately, so without
+    a snapshot "exit without saving" would print a reassuring message and change
+    nothing back.
+    """
+    from cdda2img.menu_state import Pop
+
+    cands = _n5_cands()
+    ctl, screen = _n5_ctl(cands, pinned="aaaa1111")
+    screen.render(ctl)  # takes the entry snapshot
+    capsys.readouterr()
+
+    ctl.disc.album = "MUTATED BY THE DETAIL SCREEN"
+    ctl.pressing_outcome = "manual"
+    ctl.pressing_selected = cands[1]
+
+    nav = screen._exit(ctl, "q")
+    assert isinstance(nav, Pop)
+    assert ctl.disc.album == "A"
+    # Back to the entry value, whatever it was — not to None. The default
+    # is "unique", and restoring to None would invent a state the pipeline
+    # never produces.
+    assert ctl.pressing_outcome == "unique"
+    assert ctl.pressing_selected is None
+
+
+def test_save_keeps_the_choice(capsys):
+    from cdda2img.menu_state import Pop
+
+    cands = _n5_cands()
+    ctl, screen = _n5_ctl(cands, pinned="aaaa1111")
+    screen.render(ctl)
+    capsys.readouterr()
+    ctl.pressing_outcome = "manual"
+    ctl.pressing_selected = cands[1]
+
+    assert isinstance(screen._exit(ctl, "s"), Pop)
+    assert ctl.pressing_outcome == "manual"
+    assert ctl.pressing_selected is cands[1]
+
+
+def test_b_still_saves_because_it_was_the_only_exit_for_months(capsys):
+    """Silently repurposing a familiar key is worse than retiring it."""
+    from cdda2img.menu_state import Pop
+
+    cands = _n5_cands()
+    ctl, screen = _n5_ctl(cands, pinned="aaaa1111")
+    screen.render(ctl)
+    capsys.readouterr()
+    ctl.pressing_outcome = "manual"
+    ctl.pressing_selected = cands[1]
+
+    assert isinstance(screen._exit(ctl, "b"), Pop)
+    assert ctl.pressing_outcome == "manual"
+
+
+def test_rejecting_after_choosing_is_refused_rather_than_silently_winning(capsys):
+    from cdda2img.menu_state import Stay
+
+    cands = _n5_cands()
+    ctl, screen = _n5_ctl(cands, pinned="aaaa1111")
+    screen.render(ctl)
+    capsys.readouterr()
+    ctl.pressing_outcome = "manual"
+    ctl.pressing_selected = cands[1]
+
+    nav = screen._exit(ctl, "x")
+    assert isinstance(nav, Stay)
+    assert ctl.pressing_outcome == "manual", "the choice must not be overwritten"
+    assert "already chosen" in ctl.banner
