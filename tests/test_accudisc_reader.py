@@ -22,6 +22,7 @@ What survived the cut, and why:
 
 from __future__ import annotations
 
+import dataclasses
 import enum
 import logging
 from pathlib import Path
@@ -288,6 +289,16 @@ def test_a_namespace_package_is_not_the_binding(
         "an attribute-less namespace package was accepted as the binding"
     )
     assert "namespace directory" in why
+
+    # Evict the phantom. `monkeypatch` restores sys.path and undoes the delitem,
+    # but the INSERTION `import_module` made into sys.modules is untracked, so
+    # the phantom outlives this test and every later `import accudisc` gets it
+    # from cache — no sys.path involved, nothing to restore. Measured: it made
+    # the real-binding shape tests skip with "binding unavailable" on a machine
+    # where it is installed and working, i.e. a guard silently not running.
+    sys.modules.pop("accudisc", None)
+    importlib.invalidate_caches()
+    ar._import_binding.cache_clear()
 
 
 def test_import_rejects_a_module_missing_part_of_the_surface() -> None:
@@ -1847,3 +1858,125 @@ def test_a_non_set_features_attribute_is_ignored_rather_than_trusted() -> None:
     assert ar._supports_caller_map(_ModernDiscDevice(), module)  # via signature
     module.features = None  # type: ignore[attr-defined]
     assert ar._supports_caller_map(_ModernDiscDevice(), module)
+
+
+# ── the binding's SHAPES, not just its symbol names ───────────────────────────
+#
+# `_BINDING_SURFACE` is checked at import and names the symbols we call. Nothing
+# checked the shapes we destructure — `ReadStats` fields, `Chunk` attributes,
+# `MapState` members — and a rename there is silent breakage on a green suite.
+# That is AccuDisc's own criterion from §2026-08-08e turned on us: if an artefact
+# is load-bearing for someone, does anything fail when it changes? These tests
+# are the answer. (They found the same gap in their own dataclasses when we
+# reported ours — fixed in their 4ba3517.)
+#
+# Names, not counts, and deliberately not a subset test: an ADDED field is
+# additive and harmless, a RENAMED one breaks us. So each test asserts the names
+# we use are present, and does not care what else is.
+
+
+def _real_binding():
+    """The actual AccuDisc binding, or a skip.
+
+    These are the only tests here that must run against the real thing — a fake
+    cannot detect an upstream rename, which is the entire point. The seam's own
+    resolution logic is reused so the skip is honest about what is missing.
+
+    The cache clear is load-bearing, not hygiene. ``_import_binding`` is a
+    ``functools.cache`` on a module global, and the namespace-package tests above
+    deliberately poison it with a *negative* result; inheriting that gives a skip
+    reading "binding unavailable" on a machine where it is installed and working.
+    A guard that silently skips is a guard that is not running — which is the
+    exact failure these tests exist to catch, arriving in the tests themselves.
+    """
+    ar._import_binding.cache_clear()
+    module, why = ar._import_binding()
+    if module is None:
+        pytest.skip(f"AccuDisc binding unavailable: {why}")
+    return module
+
+
+_USED_STATS_FIELDS = frozenset({
+    "sectors_read",
+    "hard_errors",
+    "sectors_suspect",
+    "sectors_flagged",
+    "subq_total",
+    "subq_ok",
+    "subq_bad",
+})
+_USED_CHUNK_ATTRS = frozenset({
+    "data",
+    "nsec",
+    "sector_len",
+    "audio_len",
+    "c2_len",
+    "sub_len",
+})
+
+
+def test_readstats_still_carries_every_field_we_read() -> None:
+    """`_log_read_caveats` rebuilds the caveat verdict from these, and it is the
+    ONLY source of that signal since the CLI went — a rename would silence it
+    while every test kept passing.
+
+    Checked by ATTRIBUTE, not by `dataclasses.fields`. Written the other way
+    first, and it failed on `subq_bad`, which is a derived **property**
+    (`subq_total - subq_ok`) and therefore not a field. The binding was right and
+    the test was wrong — but wrong in the direction that matters, because
+    attribute access is what our code does, so a field-based check both misses
+    renames of properties and invents failures for their existence.
+    """
+    module = _real_binding()
+    missing = {n for n in _USED_STATS_FIELDS if not hasattr(module.ReadStats, n)}
+    assert not missing, f"ReadStats no longer provides: {missing}"
+
+
+def test_chunk_still_carries_every_length_the_sink_slices_by() -> None:
+    """`_split_streams` de-interleaves by these lengths rather than by constants,
+    precisely so a pcm-only read is not mis-sliced. A rename turns that safety
+    into an AttributeError mid-rip, after the drive has spun up."""
+    module = _real_binding()
+    names = {f.name for f in dataclasses.fields(module.Chunk)}
+    missing = {n for n in _USED_CHUNK_ATTRS if n not in names}
+    assert not missing, f"Chunk no longer provides: {missing}"
+
+
+def test_mapstate_still_names_every_state_the_damage_lane_classifies() -> None:
+    """MEMBER NAMES, not values.
+
+    Every other assertion about this enum checks values against the C constants,
+    and a rename leaves all of them passing — `MapState.HARD` becoming
+    `MapState.UNREADABLE` breaks every consumer and moves no number. We look
+    members up by name via `getattr`, so the name IS the interface.
+
+    PENDING and RECOVERED are included although they are not in
+    `_MAP_DAMAGE_STATES`: they are the two states that must NOT be damage, and
+    the projection is only correct while both remain distinguishable.
+    """
+    module = _real_binding()
+    names = {m.name for m in module.MapState}
+    needed = set(ar._MAP_DAMAGE_STATES) | {"PENDING", "OK", "RECOVERED"}
+    assert needed <= names, f"missing: {needed - names}"
+
+
+def test_the_real_binding_is_reachable_from_the_test_suite() -> None:
+    """The shape tests above are worthless if they silently skip.
+
+    They did, for exactly one commit: `test_a_namespace_package_is_not_the_binding`
+    leaked a phantom `accudisc` into `sys.modules` — an insertion `monkeypatch`
+    does not track — so every later import got it from cache with no `sys.path`
+    involved. The shape tests reported "binding unavailable" on a machine where
+    it is installed and working.
+
+    This asserts rather than skips, so the *absence* of the guard is itself a
+    failure. A skipped test and a passing one are indistinguishable in a summary
+    line, which is the whole shape of AccuDisc's NDEBUG finding.
+    """
+    ar._import_binding.cache_clear()
+    module, why = ar._import_binding()
+    assert module is not None, (
+        f"the shape tests would silently skip: {why}. If the binding is genuinely "
+        f"absent this test is the right place to loosen — deliberately, not by "
+        f"letting three guards go quiet."
+    )
