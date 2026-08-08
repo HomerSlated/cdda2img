@@ -362,9 +362,14 @@ class TerminalUI:
         avail = max(0, cols - 12 - map_sw - (3 + map_dw))
         visible = max(0, min(map_cols, avail))
         frontier = round(prog * len(damage))
+        # Each lane gets its OWN severity calibration. C2's healthy baseline is
+        # zero; Q's is a few per cent of CRC-bad frames on a perfectly good disc.
+        # Sharing one table painted a clean Tracy Chapman entirely orange.
         cells = disc_map.cells_from_damage(damage, frontier, map_cols)
         q_cells = (
-            disc_map.cells_from_damage(damage_q, frontier, map_cols)
+            disc_map.cells_from_damage(
+                damage_q, frontier, map_cols, bands=disc_map.SUBQ_RAMP_BANDS
+            )
             if damage_q is not None
             else None
         )

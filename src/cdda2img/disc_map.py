@@ -41,13 +41,48 @@ class Cell(NamedTuple):
 # burst around 5e-1, which a linear scale renders as "nothing" and "everything"
 # with no shades between. The bands are therefore decade-wide. Each boundary is
 # the flagged fraction at which a cell moves UP a band.
+#
+# **C2 calibration.** The healthy baseline is exactly ZERO — a clean disc flags no
+# sectors at all — so any non-zero density is worth colouring and the faintest
+# band starts at 0.1%.
 RAMP_BANDS = (1e-3, 1e-2, 1e-1)
 
+# **Q calibration, and it cannot be the C2 one.** The subchannel's healthy
+# baseline is NOT zero: CRC-bad Q frames are ordinary. Measured across two discs
+# and five speeds each (RECOVERY.md §12.2.2, §12.3, and the 42-capture qlag
+# sweep):
+#
+#     ZZ Top    0.081% to 0.204% bad  (Q-ok 0.99919 to 0.99796)
+#     Tracy     ~2%                     (Q-ok 0.980 at every speed, flat)
+#     ABBA 4x   3.5%                    (Q-ok 0.965, healthy for that disc)
+#
+# Against the C2 bands that healthy 2% lands in band 2 of 4, so Tracy's normal
+# read paints EVERY cell orange — a clean disc drawn as uniformly damaged, and
+# with 2% and 20% saturating the same band the map could not tell them apart.
+# That shipped, and kgr's screenshot is what it looks like.
+#
+# The three measured collapses are 38.7%, 47.8% and 52% bad. So there is an
+# order of magnitude of empty space between "normal for some disc" and "this
+# read lost the subchannel", and the bands are placed in it: healthy stays band
+# 0 for any disc on the shelf, and a real collapse still reaches the top.
+#
+# The 5% floor is a **claim about discs, not about this drive**: a pressing whose
+# ordinary Q rate exceeds it would read as damaged. None of the three measured
+# does, ABBA's 3.5% being the worst, and no counter-example has been observed —
+# but it is a floor set from three discs and should move if a fourth contradicts
+# it, rather than being defended.
+SUBQ_RAMP_BANDS = (5e-2, 1.5e-1, 3.5e-1)
 
-def band(frac: float) -> int:
-    """Which severity band a flagged fraction falls in (0 = faintest)."""
+
+def band(frac: float, bands: tuple[float, ...] = RAMP_BANDS) -> int:
+    """Which severity band a flagged fraction falls in (0 = faintest).
+
+    *bands* selects the calibration: :data:`RAMP_BANDS` for C2 (healthy = 0),
+    :data:`SUBQ_RAMP_BANDS` for the Q lane (healthy = up to a few per cent).
+    Sharing one table across both lanes is what made a clean disc look damaged.
+    """
     level = 0
-    for edge in RAMP_BANDS:
+    for edge in bands:
         if frac >= edge:
             level += 1
     return level
@@ -125,13 +160,23 @@ def colour_enabled(stream: object = None) -> bool:
 
 
 def cells_from_damage(
-    damage: bytes | bytearray, frontier: int, width: int
+    damage: bytes | bytearray,
+    frontier: int,
+    width: int,
+    *,
+    bands: tuple[float, ...] = RAMP_BANDS,
 ) -> list[Cell]:
     """Bucket a per-sector damage map into *width* cells.
 
-    *damage* is one byte per sector, non-zero meaning "C2 fired somewhere in this
-    sector". *frontier* is how many sectors have been read: everything at or past
-    it is UNREAD, which is **not** the same as clean and must never render as it.
+    *damage* is one byte per sector, non-zero meaning "this sector is not intact
+    in this lane". *frontier* is how many sectors have been read: everything at
+    or past it is UNREAD, which is **not** the same as clean and must never
+    render as it.
+
+    *bands* is the severity calibration and **must match the lane**:
+    :data:`RAMP_BANDS` for C2, :data:`SUBQ_RAMP_BANDS` for Q. The two lanes have
+    different healthy baselines — zero versus a few per cent — so one table
+    cannot serve both without drawing one of them wrong.
 
     ``per`` is derived from *width*, so a caller that changes width mid-read
     re-buckets every cell and the map appears to rewrite its own history. Pin the
@@ -167,7 +212,7 @@ def cells_from_damage(
         if not errs:
             out.append(Cell(OK))
         else:
-            out.append(Cell(ERR, band(errs / (hi - lo))))
+            out.append(Cell(ERR, band(errs / (hi - lo), bands)))
     return out
 
 

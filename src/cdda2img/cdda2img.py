@@ -3036,12 +3036,24 @@ def rip_image(  # noqa: C901
     # Drive offset resolution may prompt the user (input()) — must happen before TUI.
     read_offset, _write_offset, drive_name = _resolve_drive_offsets(device, cfg)
 
-    # A drive left throttled by a previous run (recovery ladder, an interrupted read)
-    # keeps that speed; un-throttle before the lead-in scan so it — and the album-art
-    # fetch — run at full speed.
-    from cdda2img import drive_speed
-
-    drive_speed.restore_drive_speed(device)
+    # NO mid-pipeline restore-to-max here. This used to un-throttle the drive
+    # before the lead-in scan, and it is the `subq_speed_cliff` regression: the
+    # read speed is drive state that persists across handles and processes, so
+    # blasting it to maximum on the way in governs the rip that follows. Raw-Q
+    # yield falls off a cliff at the top of the range on this drive while audio,
+    # C2 and AccurateRip all stay clean — a rip that passes every audio gate and
+    # silently loses the disc's pre-gaps and INDEX points. Settled as D1 in
+    # accudisc-migration-plan.md §6: delete it, do not re-shape it.
+    #
+    # The stated justification was that a drive left throttled by a previous run
+    # keeps that speed, and that the lead-in scan and the album-art fetch should
+    # run at full speed. Only the first clause is true. `album_art` is network
+    # only and never touches the drive; and a throttled drive costs seconds on a
+    # lead-in read, where the failure this caused costs the disc's structure.
+    #
+    # Restoring at the END of the rip is kept (after the recovery ladder, which
+    # is the thing that actually throttles) — that is the "one restore at session
+    # end" half of D1, and it is where an inherited ceiling belongs.
 
     # A whole-disc rip needs the raw PCM (~up to 850 MB) plus apply_offset's transient
     # copy plus the C2 bitmap — require ~1.5 GB so a near-full tmpfs is rejected up front

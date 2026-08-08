@@ -275,3 +275,60 @@ def test_colour_runs_are_still_collapsed_in_the_dual_row() -> None:
     out = disc_map.render([Cell(OK)] * 60, colour=True, q_cells=[Cell(OK)] * 60)
     assert out.count("\033[38;5;") == 1
     assert out.count("\033[48;5;") == 1
+
+
+# ── the two lanes need two calibrations ───────────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    ("bad_rate", "disc"),
+    [
+        (0.00081, "ZZ Top best"),
+        (0.00204, "ZZ Top worst"),
+        (0.020, "Tracy, every speed"),
+        (0.035, "ABBA at 4x"),
+    ],
+)
+def test_a_healthy_q_rate_is_not_drawn_as_damage(bad_rate: float, disc: str) -> None:
+    """Every measured HEALTHY Q rate must land in the faintest band.
+
+    These are real figures (RECOVERY.md §12.2.2, §12.3): CRC-bad Q frames are
+    ordinary, so the lane's healthy baseline is a few per cent rather than zero.
+    Against the C2 bands, Tracy's normal 2% reached band 2 of 4 and painted the
+    whole disc orange — a clean read drawn as uniformly damaged.
+    """
+    assert disc_map.band(bad_rate, disc_map.SUBQ_RAMP_BANDS) == 0, disc
+
+
+@pytest.mark.parametrize("bad_rate", [0.387, 0.478, 0.52])
+def test_a_real_q_collapse_still_reaches_the_top_band(bad_rate: float) -> None:
+    """The three measured collapses. Quietening the healthy case is only worth
+    doing if the case the lane exists for still stands out."""
+    assert disc_map.band(bad_rate, disc_map.SUBQ_RAMP_BANDS) == 3
+
+
+def test_the_q_bands_do_not_quieten_the_c2_lane() -> None:
+    """C2's healthy baseline IS zero, so a single flagged sector in a cell is
+    worth colouring. Applying the Q calibration to C2 would hide it."""
+    one_in_ten_thousand = 1e-4
+    assert disc_map.band(one_in_ten_thousand, disc_map.RAMP_BANDS) == 0
+    assert disc_map.band(0.002, disc_map.RAMP_BANDS) == 1  # C2: worth showing
+    assert disc_map.band(0.002, disc_map.SUBQ_RAMP_BANDS) == 0  # Q: ordinary
+
+
+def test_bucketing_honours_the_band_table_it_is_given() -> None:
+    """The parameter has to reach the cells, or the calibration is decorative."""
+    damage = bytearray(1000)
+    damage[:20] = b"\x01" * 20  # 2% — Tracy's healthy Q rate
+    c2 = disc_map.cells_from_damage(damage, 1000, 1, bands=disc_map.RAMP_BANDS)
+    q = disc_map.cells_from_damage(damage, 1000, 1, bands=disc_map.SUBQ_RAMP_BANDS)
+    assert c2[0].level == 2, "C2 calibration should call 2% notable"
+    assert q[0].level == 0, "Q calibration should call 2% ordinary"
+
+
+def test_the_default_calibration_is_c2() -> None:
+    """C2 is the lane that has always been there and the one whose callers
+    predate the parameter; a silent default change would be the bug again."""
+    damage = bytearray(1000)
+    damage[:20] = b"\x01" * 20
+    assert disc_map.cells_from_damage(damage, 1000, 1)[0].level == 2
