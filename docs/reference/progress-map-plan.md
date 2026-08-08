@@ -281,6 +281,37 @@ draw. **Design decision: index by slot, unconditionally.**
    needed, because testing on the wrong disc proves it unnecessary. Validating the
    Q lane on run7's disc alone would have concluded the state was optional.
 
+### SHIPPED — AccuDisc 0.5.0, 2026-08-08 (kgr ruled yes), and the one thing still blocking
+
+`accudisc_read_req` gained `uint8_t *subq_map` appended last (struct 56 → 64,
+additive, no soname bump — verified here: our fatal-on-ABI-mismatch read path
+still runs). States are as agreed: `PENDING` / `OK` / `BAD` / `NO_POSITION` /
+`NO_AUDIO`, severity nibble always 0, `ERR_INVAL` without `SUB_RAW`. Python:
+`read(sub=Sub.RAW, subq_map=True)` → `ReadResult.subq_map`, plus `SubQState` /
+`subq_state()` / `subq_state_counts()`.
+
+**Do not decode a Q byte with the status-map decoder.** The numberings are
+parallel and the vocabularies disjoint, so `map_state()` on a Q byte returns a
+well-formed name for a state that never happened — `NO_AUDIO` reads back as
+`RECOVERED`, `BAD` as `C2`. Nothing raises, and *`RECOVERED` is a reassuring word
+to see on a sector that was never read*. They pinned both collisions in a test.
+
+**Their §3 is the zero-fill trap a third time.** `accudisc_q_parse` fills `adr`
+from the frame header byte whether or not the CRC verified — it must, there is
+nowhere else to read it from — so a corrupt frame routinely presents ADR=2 or 3.
+Classify on `adr` before `crc_ok` and damage is painted `NO_POSITION`, this
+lane's *healthy* state, on exactly the frames the lane exists to draw. They
+consult `crc_ok` first and `BAD` outranks `NO_POSITION`. Three instances now of
+one shape: **a caller-side derivation that is exactly wrong on the frames the
+feature exists for, and right everywhere else.**
+
+**Still blocking the Q lane: the binding liveness gap (§0 correction).**
+`subq_map` inherits it exactly — `subq_buf = ffi.new(...)` inside `read()`
+(`__init__.py:1955-1958`), surfaced only on the returned `ReadResult`. Verified
+in their source, not read off the message. Asked as §158: let both map
+parameters take a caller-allocated buffer, or hand it out at allocation. The C
+API already has that shape.
+
 ### The correspondence is a dataset, and it contains retracted rows
 
 Found 2026-08-07 by AccuDisc, confirmed here, and it outlasts this thread.
