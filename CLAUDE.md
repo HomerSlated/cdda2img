@@ -355,6 +355,11 @@ Public documentation and research in `docs/`:
 - `docs/reference/RECOVERY.md` — the failed-read recovery toolkit: component inventory (roles, status, dependencies, conflicts, combinations), c2read user guide, and the developer deep-dive (science, evidence, design philosophy, adoption/rejection history). Living doc — update alongside recovery-strategy changes
 - `docs/reference/reference.toc` — annotated cdrdao TOC grammar reference
 - `docs/reference/TUI_Design.md` — TUI design notes
+- `docs/reference/progress-map-legend.md` — **user-facing legend for the rip progress
+  map**: every colour, both lanes' severity bands (they are calibrated differently —
+  C2's healthy baseline is zero, Q's is a few per cent), the mono glyph fallback, and
+  what each combination means. Values are generated from `disc_map.py`; regenerate
+  rather than hand-edit if the palette or bands move
 - `docs/man/cdda2img.1` — man page (install: `doas install -m 644 docs/man/cdda2img.1 /usr/local/share/man/man1/`)
 - `docs/research/ABHOOD.md` — AB/HD ripping and offset research
 - `docs/research/NONSPEC.md` — non-spec / real-world disc behaviour notes
