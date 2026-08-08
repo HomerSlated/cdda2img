@@ -1806,3 +1806,44 @@ def test_detection_is_not_pinned_to_one_spelling_of_the_new_annotation() -> None
 
     assert ar._supports_caller_map(_Widened())
     assert not ar._supports_caller_map(_Quoted()), "quoting is not a new feature"
+
+
+def test_the_capability_set_is_preferred_over_the_signature() -> None:
+    """`accudisc.features` is the intended signal; the annotation never was.
+
+    The two are made to DISAGREE here — the device's signature says old, the
+    feature set says supported — because a test where both agree cannot show
+    which one was consulted.
+    """
+    module = _disc_binding(_FakeDiscDevice())
+    module.features = frozenset({"caller_map_buffers", "subq_map"})  # type: ignore[attr-defined]
+    assert ar._supports_caller_map(_FakeDiscDevice(), module)
+
+
+def test_the_capability_set_can_also_say_NO() -> None:
+    """A `features` set without the name means the binding lacks it — the
+    absence must be believed, not treated as "ask the signature instead".
+    Otherwise a capability could never be retired or staged."""
+    module = _disc_binding(_ModernDiscDevice())
+    module.features = frozenset({"subq_map"})  # type: ignore[attr-defined]
+    assert not ar._supports_caller_map(_ModernDiscDevice(), module)
+
+
+def test_a_binding_without_features_falls_back_to_the_signature() -> None:
+    """The fallback has to answer for exactly the bindings that lack `features`,
+    which is the only population it can ever be asked about."""
+    module = _disc_binding(_FakeDiscDevice())
+    assert not hasattr(module, "features")
+    assert ar._supports_caller_map(_ModernDiscDevice(), module)
+    assert not ar._supports_caller_map(_FakeDiscDevice(), module)
+
+
+def test_a_non_set_features_attribute_is_ignored_rather_than_trusted() -> None:
+    """`in` works on str, list and dict, so a `features` that is not a set would
+    still answer — plausibly and by accident. A string "subq_map" contains
+    "subq_map"; it also contains "map". Type is checked before membership."""
+    module = _disc_binding(_ModernDiscDevice())
+    module.features = "caller_map_buffers subq_map"  # type: ignore[attr-defined]
+    assert ar._supports_caller_map(_ModernDiscDevice(), module)  # via signature
+    module.features = None  # type: ignore[attr-defined]
+    assert ar._supports_caller_map(_ModernDiscDevice(), module)

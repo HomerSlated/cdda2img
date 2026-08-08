@@ -811,7 +811,14 @@ _MAP_DAMAGE_STATES = ("C2", "HARD", "SUSPECT")
 # at that point; do not assume this list is still complete.
 
 
-def _supports_caller_map(dev: Any) -> bool:
+#: AccuDisc's capability name for a caller-owned ``status_map`` buffer
+#: (their ``accudisc.features``, shipped 2026-08-08). Names are added, never
+#: removed or repurposed, so membership is safe to test forever and an absent
+#: name is safe to read as "older binding".
+_FEATURE_CALLER_MAPS = "caller_map_buffers"
+
+
+def _supports_caller_map(dev: Any, module: Any = None) -> bool:
     """Whether this binding accepts a caller-owned ``status_map`` buffer.
 
     **Feature detection, never a version check** — AccuDisc shipped this in the
@@ -819,19 +826,28 @@ def _supports_caller_map(dev: Any) -> bool:
     change (their §2026-08-08c.6). A version guard here would be permanently
     false while looking exactly right.
 
-    Asked of the **open device**, not of ``module.Device``: that is the object
-    whose ``read`` we are about to call, so it is the only one whose signature is
-    evidence about what that call will do. The signature is read rather than the
-    behaviour probed, because probing means starting a read.
+    Two probes, in order of how much they are *meant* to be interface.
 
-    The test is "``bool`` is not the whole annotation", not "the annotation is
-    some expected string". AccuDisc uses ``from __future__ import annotations``,
-    so what arrives is source text (``'bool'`` or ``'bool | Any'``) rather than a
-    type — and pinning the exact new spelling would make a later
-    ``bool | memoryview`` read as the old binding and silently drop us to the
-    fallback census. Failing towards the fallback is the safe direction, but
-    doing it *invisibly* on a binding that supports the feature is not.
+    ``accudisc.features`` is the answer and is preferred whenever present. It
+    exists because we reported the second probe as a fragility and AccuDisc ruled
+    it a defect in what they had shipped: they told us to feature-detect and left
+    a type annotation doing the job, with no test of theirs naming it (their
+    §2026-08-08e).
+
+    The signature probe stays as the fallback, because a binding old enough to
+    lack ``features`` is exactly the one it has to answer for. Asked of the
+    **open device**, not of ``module.Device``: that is the object whose ``read``
+    we are about to call. The test is "``bool`` is not the whole annotation", not
+    "the annotation is the string we expect" — pinning the current spelling would
+    make a later ``bool | memoryview`` read as an old binding and drop us to the
+    census silently, on a binding that supports the feature. ``isinstance(ann,
+    str)`` is required because the text form exists only under ``from __future__
+    import annotations``; without it the annotation is a type object and a
+    string comparison would answer wrongly rather than fall back.
     """
+    features = getattr(module, "features", None)
+    if isinstance(features, (frozenset, set)):
+        return _FEATURE_CALLER_MAPS in features
     try:
         param = inspect.signature(dev.read).parameters["status_map"]
     except (AttributeError, KeyError, TypeError, ValueError):
@@ -841,7 +857,7 @@ def _supports_caller_map(dev: Any) -> bool:
 
 
 def _prepare_damage_lane(
-    dev: Any, count: int, map_cb: Callable[[bytearray], None] | None
+    module: Any, dev: Any, count: int, map_cb: Callable[[bytearray], None] | None
 ) -> tuple[bytearray | None, bytearray | None]:
     """Allocate the damage lane and, if the binding allows, the status buffer.
 
@@ -857,7 +873,7 @@ def _prepare_damage_lane(
     if map_cb is None:
         return None, None
     damage = bytearray(count)
-    status = bytearray(count) if _supports_caller_map(dev) else None
+    status = bytearray(count) if _supports_caller_map(dev, module) else None
     map_cb(damage)
     return damage, status
 
@@ -964,7 +980,7 @@ def _read_disc_binding(
                 if path is not None
             }
             done = 0
-            damage, status = _prepare_damage_lane(dev, count, map_cb)
+            damage, status = _prepare_damage_lane(module, dev, count, map_cb)
 
             def split(chunk: Any) -> None:
                 nonlocal done
