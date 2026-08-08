@@ -49,6 +49,7 @@ from __future__ import annotations
 
 import contextlib
 import functools
+import inspect
 import logging
 import sys
 from dataclasses import dataclass, field
@@ -760,23 +761,19 @@ def _split_streams(chunk: Any, files: dict[str, Any]) -> None:
 
 
 def _census_c2(chunk: Any, damage: bytearray, first: int) -> None:
-    """Mark, per sector, whether C2 fired anywhere in it.
+    """Mark, per sector, whether C2 fired anywhere in it — the fallback lane.
 
-    Written **from the sink**, not from ``ReadResult.status_map``, and that is a
-    deliberate correction to an earlier plan. The C API takes a caller-supplied
-    ``uint8_t *status_map`` (``accudisc.h:1444``), but the Python binding
-    allocates the buffer itself and surfaces it only through the returned
-    ``ReadResult`` — which does not exist until the read *finishes*. So the map
-    the binding documents as "read it live from another thread" is, through the
-    binding, unreachable while the read is running. The C2 lane is the one thing
-    we can honestly compute ourselves, so it is computed here.
+    **Superseded 2026-08-08 by AccuDisc 0.5.0's caller-owned buffers** and kept
+    only for a binding that predates them. The engine's own ``status_map`` is
+    better on every axis: it costs no Python per sector, and it distinguishes
+    ``HARD`` (nothing delivered) from ``C2`` (delivered and flagged), which these
+    bytes cannot — a zero-filled hard sector has an all-ones C2 block here and
+    reads as ordinary damage.
 
-    Nothing is lost by doing so. ``status_map``'s extra states are ``RECOVERED``
-    and ``SUSPECT``, which only the reread machinery produces, and this path
-    leaves ``retries``/``c2_retries``/``verify_passes``/``overlap_sectors`` at
-    their zero defaults — a single streaming pass. Those states are structurally
-    unreachable here. Raw C2 bits are also *finer* than ``MapState.C2``: the map
-    is one enum per sector, these are 2352 bits.
+    Reached only via :func:`_supports_caller_map` returning ``False``. Kept
+    rather than deleted because our read path resolves the binding from a live
+    build tree, so a checkout of 0.4.x is one ``git checkout`` away in a
+    directory this project does not control.
 
     ``bytes(...).count(0)`` is one C-level pass; ``any(memoryview)`` is a
     per-byte interpreter loop, ~173,000 steps per chunk. The copy is 294 B per
@@ -789,6 +786,116 @@ def _census_c2(chunk: Any, damage: bytearray, first: int) -> None:
         c2 = bytes(chunk.data[off : off + chunk.c2_len])
         if c2.count(0) != chunk.c2_len:
             damage[first + i] = 1
+
+
+# Map states that mean "the audio here is not intact". Named rather than
+# inlined because the complement — what counts as healthy — is the judgement:
+# PENDING is the unread frontier and is NOT damage, and RECOVERED is a success,
+# not a failure. Both are easy to sweep into "anything non-OK is bad", which
+# would draw an unread disc as a destroyed one.
+_MAP_DAMAGE_STATES = ("C2", "HARD", "SUSPECT")
+
+# CONDITION on wiring recovery profiles into this read (AccuDisc §2026-08-08d):
+# the map is one byte per sector with priority `hard > suspect > recovered > C2 >
+# ok`, so a **higher state masks a lower one that also applies** — a recovered
+# sector whose winning copy still had C2 fired displays as RECOVERED and its C2
+# is invisible here, while `sectors_flagged++` counts it regardless.
+#
+# Unreachable today: RECOVERED has THREE independent gates in their engine —
+# `overlap_sectors` (engine.c:514), `c2_retries` (:536) and `verify_passes >= 2`
+# (:574) — and this read leaves all three at zero. Every shipped recovery profile
+# sets at least one, and `overlap_sectors` is set independently of `c2_retries`,
+# so the masking arrives with the profiles rather than with any single knob.
+# Their `engine.c:512-514` runs before `bits[]` exists at :520-523, so the
+# overlap path cannot even record the C2 it masked. Revisit the damage projection
+# at that point; do not assume this list is still complete.
+
+
+def _supports_caller_map(dev: Any) -> bool:
+    """Whether this binding accepts a caller-owned ``status_map`` buffer.
+
+    **Feature detection, never a version check** — AccuDisc shipped this in the
+    Python layer alone, so ``library_version()`` stays ``(0, 5, 0)`` across the
+    change (their §2026-08-08c.6). A version guard here would be permanently
+    false while looking exactly right.
+
+    Asked of the **open device**, not of ``module.Device``: that is the object
+    whose ``read`` we are about to call, so it is the only one whose signature is
+    evidence about what that call will do. The signature is read rather than the
+    behaviour probed, because probing means starting a read.
+
+    The test is "``bool`` is not the whole annotation", not "the annotation is
+    some expected string". AccuDisc uses ``from __future__ import annotations``,
+    so what arrives is source text (``'bool'`` or ``'bool | Any'``) rather than a
+    type — and pinning the exact new spelling would make a later
+    ``bool | memoryview`` read as the old binding and silently drop us to the
+    fallback census. Failing towards the fallback is the safe direction, but
+    doing it *invisibly* on a binding that supports the feature is not.
+    """
+    try:
+        param = inspect.signature(dev.read).parameters["status_map"]
+    except (AttributeError, KeyError, TypeError, ValueError):
+        return False
+    ann = param.annotation
+    return isinstance(ann, str) and ann.strip() not in {"bool", "'bool'", '"bool"'}
+
+
+def _prepare_damage_lane(
+    dev: Any, count: int, map_cb: Callable[[bytearray], None] | None
+) -> tuple[bytearray | None, bytearray | None]:
+    """Allocate the damage lane and, if the binding allows, the status buffer.
+
+    Returns ``(damage, status)``. ``damage`` is ours and is handed to *map_cb*
+    **before the first sector is read**, because a buffer that only appears once
+    the read is over cannot drive a live display — the defect this whole
+    arrangement exists to route around.
+
+    ``status`` is the engine's own per-sector map, allocated here and passed into
+    ``read`` so AccuDisc writes into memory we already hold. ``None`` on a
+    pre-0.5.0 binding, which sends the sink to the DIY census instead.
+    """
+    if map_cb is None:
+        return None, None
+    damage = bytearray(count)
+    status = bytearray(count) if _supports_caller_map(dev) else None
+    map_cb(damage)
+    return damage, status
+
+
+def _update_damage(
+    module: Any,
+    chunk: Any,
+    damage: bytearray,
+    status: bytearray | None,
+    done: int,
+) -> None:
+    """Bring the damage lane up to date for the sectors *chunk* just completed.
+
+    Only that range is touched. The engine has written states for it; everything
+    past it is still ``PENDING``, and projecting those would paint the unread
+    remainder of the disc as damaged.
+    """
+    if status is None:
+        _census_c2(chunk, damage, done)
+        return
+    end = done + chunk.nsec
+    _damage_from_status_map(
+        module, memoryview(status)[done:end], memoryview(damage)[done:end]
+    )
+
+
+def _damage_from_status_map(module: Any, status: Any, damage: Any) -> None:
+    """Project AccuDisc's per-sector status map onto our one-byte damage lane.
+
+    Called from the render side, on the live buffer, while the read runs.
+
+    ``PENDING`` must stay 0. The renderer derives its frontier from the read's
+    own progress count, so a `PENDING` sector marked as damage would draw the
+    unread remainder of the disc as destroyed the instant the map went live.
+    """
+    bad = {getattr(module.MapState, name) for name in _MAP_DAMAGE_STATES}
+    for i, byte in enumerate(status):
+        damage[i] = 1 if module.map_state(byte) in bad else 0
 
 
 def _read_disc_binding(
@@ -857,20 +964,18 @@ def _read_disc_binding(
                 if path is not None
             }
             done = 0
-            damage: bytearray | None = None
-            if map_cb is not None:
-                damage = bytearray(count)
-                map_cb(damage)
+            damage, status = _prepare_damage_lane(dev, count, map_cb)
 
             def split(chunk: Any) -> None:
                 nonlocal done
                 _split_streams(chunk, files)
                 if damage is not None:
-                    _census_c2(chunk, damage, done)
+                    _update_damage(module, chunk, damage, status, done)
                 done += chunk.nsec
                 if progress_cb is not None:
                     progress_cb(done, count)
 
+            extra: dict[str, Any] = {} if status is None else {"status_map": status}
             result = dev.read(
                 0,
                 count,
@@ -879,6 +984,7 @@ def _read_disc_binding(
                 c2=module.C2.PTRS,
                 sub=module.Sub.RAW if output_sub is not None else module.Sub.NONE,
                 speed_x=read_speed or 0,
+                **extra,
             )
     _log_read_caveats(result.stats, "read")
     return True

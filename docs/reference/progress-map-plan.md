@@ -30,6 +30,33 @@ covers, with no change on either side:
 | the C2 lane | `MapState.C2` / `HARD` / `RECOVERED` / `SUSPECT` |
 | per-sector C2 severity | the severity nibble (~log2 of fired C2 bits) |
 
+### RESOLVED 2026-08-08 — AccuDisc shipped caller-owned buffers; we adopted them
+
+The correction below stood for about six hours. AccuDisc confirmed the defect,
+fixed the false docstring as its own change, and shipped `status_map=` /
+`subq_map=` accepting **a writable buffer of exactly `count` bytes** alongside
+the existing `True`/`False`. We pass our own `bytearray` and project it onto the
+damage lane in the sink (`accudisc_reader._prepare_damage_lane` /
+`_update_damage`); `_census_c2` survives as the pre-0.5.0 fallback, which is a
+live path because our binding resolves through a symlink into their build tree.
+
+Three things from that exchange worth keeping:
+
+- **They measured the thing that decides it, before designing.** Does cffi release
+  the GIL during `accudisc_read_cdda`? A spinner thread advanced 114,777 ticks
+  across a 6.08 s read with `sink=None`. It does. Neither side had checked, and
+  both designs were unusable if it did not.
+- **Feature-detect, never version-check.** The C library is untouched, so
+  `library_version()` stays `(0, 5, 0)` across the change. A version guard would
+  be permanently false while looking exactly right.
+- **Their buffer beats our callback, and the argument is not performance.** A
+  callback's contract is a *timing* property, and timing properties fail
+  silently: move the call after the read and it still fires once, with a
+  correctly-sized buffer of plausible bytes, and every test still passes. We had
+  already written an all-zero assertion to detect exactly that — a guard invented
+  because the design permits a silent failure. Passing the buffer in has no
+  handover to order, so it needs no guard.
+
 ### CORRECTION 2026-08-08 — "no change on either side" is false for the LIVE case
 
 Found while wiring, and it is the load-bearing detail the table above misses:

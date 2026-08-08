@@ -594,6 +594,15 @@ def test_read_span_binding_refuses_a_short_span() -> None:
 # real binding would fail whenever they are mid-rebuild.
 
 
+class _FakeMapState(enum.IntEnum):
+    PENDING = 0
+    OK = 1
+    C2 = 2
+    HARD = 3
+    RECOVERED = 4
+    SUSPECT = 5
+
+
 class _FakeReadChunk:
     """One delivered chunk, with the per-stream lengths the real Chunk carries."""
 
@@ -676,12 +685,33 @@ class _FakeDiscDevice:
         self.calls.append("toc")
         return SimpleNamespace(leadout_lba=self._leadout)
 
-    def read(self, lba: int, count: int, **kwargs: Any):
+    def read(self, lba: int, count: int, *, status_map: bool = False, **kwargs: Any):
         self.calls.append("read")
-        self.read_kwargs = {"lba": lba, "count": count, **kwargs}
+        self.read_kwargs = {
+            "lba": lba,
+            "count": count,
+            "status_map": status_map,
+            **kwargs,
+        }
+        # Stand in for the engine writing states as sectors complete. The real
+        # one fills as it goes; filling up-front is equivalent here because the
+        # sink only ever projects the range it has been told is finished.
+        if isinstance(status_map, bytearray):
+            for i in range(len(status_map)):
+                status_map[i] = self._map_fill(i)
         for chunk in self._chunks:
             kwargs["sink"](chunk)
         return _FakeReadResult(self._stats)
+
+    def _map_fill(self, i: int) -> int:
+        return _FakeMapState.OK
+
+
+class _ModernDiscDevice(_FakeDiscDevice):
+    """A 0.5.0+ device: ``status_map`` accepts a buffer."""
+
+    def read(self, lba: int, count: int, *, status_map: bool | Any = False, **kw: Any):
+        return _FakeDiscDevice.read(self, lba, count, status_map=status_map, **kw)
 
 
 class _FakeC2(enum.IntEnum):
@@ -700,6 +730,8 @@ def _disc_binding(device: _FakeDiscDevice) -> _FakeBinding:
     module = _binding_with(device)  # type: ignore[arg-type]
     module.C2 = _FakeC2  # type: ignore[attr-defined]
     module.Sub = _FakeSub  # type: ignore[attr-defined]
+    module.MapState = _FakeMapState  # type: ignore[attr-defined]
+    module.map_state = lambda b: _FakeMapState(b & 0x0F)  # type: ignore[attr-defined]
     return module
 
 
@@ -1676,3 +1708,101 @@ def test_the_damage_map_is_populated_with_no_c2_file_requested(
     device = _FakeDiscDevice(leadout=2, chunks=(_C2Chunk([True, False]),))
     _run_disc(device, tmp_path, output_c2=None, map_cb=captured.append)
     assert list(captured[0]) == [1, 0]
+
+
+# ── caller-owned status map (AccuDisc 0.5.0+) ─────────────────────────────────
+
+
+def test_the_caller_buffer_is_feature_detected_never_version_checked() -> None:
+    """AccuDisc shipped this in the Python layer with the C library untouched,
+    so ``library_version()`` is identical either side of it. A version guard
+    would be permanently false while looking exactly correct."""
+    assert ar._supports_caller_map(_ModernDiscDevice())
+    assert not ar._supports_caller_map(_FakeDiscDevice())
+
+
+def test_feature_detection_survives_a_device_with_no_read_at_all() -> None:
+    """Detection must answer False, not raise: the fallback census still works,
+    and a crash here would take out a rip that had every reason to succeed."""
+    assert not ar._supports_caller_map(SimpleNamespace())
+
+
+def test_pending_sectors_are_not_damage() -> None:
+    """The frontier is PENDING, and marking it as damage would draw the entire
+    unread remainder of the disc as destroyed the moment the map went live."""
+    module = _disc_binding(_FakeDiscDevice())
+    damage = bytearray(4)
+    status = bytearray([
+        _FakeMapState.PENDING,
+        _FakeMapState.OK,
+        _FakeMapState.C2,
+        _FakeMapState.PENDING,
+    ])
+    ar._damage_from_status_map(module, status, damage)
+    assert list(damage) == [0, 0, 1, 0]
+
+
+def test_recovered_is_a_success_not_a_failure() -> None:
+    """RECOVERED means the engine got the sector back. Sweeping every non-OK
+    state into "damage" would report a successful repair as loss."""
+    module = _disc_binding(_FakeDiscDevice())
+    damage = bytearray(4)
+    status = bytearray([
+        _FakeMapState.RECOVERED,
+        _FakeMapState.HARD,
+        _FakeMapState.SUSPECT,
+        _FakeMapState.OK,
+    ])
+    ar._damage_from_status_map(module, status, damage)
+    assert list(damage) == [0, 1, 1, 0]
+
+
+def test_a_modern_binding_is_given_a_buffer_and_the_diy_census_is_not_used(
+    tmp_path: Path,
+) -> None:
+    """The engine's own map is used when it can be.
+
+    ``_C2Chunk`` carries CLEAN C2 bytes, so the DIY census would mark nothing,
+    while the status buffer says HARD. Only one of the two can produce the
+    result — which is what makes this test able to tell them apart at all.
+    """
+    device = _ModernDiscDevice(leadout=2, chunks=(_C2Chunk([False, False]),))
+    device._map_fill = lambda i: (_FakeMapState.HARD if i == 0 else _FakeMapState.OK)  # type: ignore[method-assign]
+    captured: list[bytearray] = []
+    _run_disc(device, tmp_path, map_cb=captured.append)
+
+    assert isinstance(device.read_kwargs["status_map"], bytearray), (
+        "the engine must be handed OUR buffer, not asked to allocate one"
+    )
+    assert list(captured[0]) == [1, 0]
+
+
+def test_an_older_binding_falls_back_to_the_diy_census(tmp_path: Path) -> None:
+    """A 0.4.x checkout is one `git checkout` away in a tree we do not control,
+    so the fallback is a live path rather than dead code."""
+    device = _FakeDiscDevice(leadout=2, chunks=(_C2Chunk([True, False]),))
+    captured: list[bytearray] = []
+    _run_disc(device, tmp_path, map_cb=captured.append)
+
+    assert device.read_kwargs["status_map"] is False, "no buffer on an old binding"
+    assert list(captured[0]) == [1, 0]
+
+
+def test_detection_is_not_pinned_to_one_spelling_of_the_new_annotation() -> None:
+    """A later `bool | memoryview` must still read as supported.
+
+    AccuDisc uses `from __future__ import annotations`, so what we inspect is
+    source TEXT, not a type. Matching the current spelling exactly would make a
+    future widening read as an old binding and drop us to the fallback census —
+    silently, on a binding that supports the feature. The test is therefore
+    "bool is not the whole annotation", not "the annotation is what we expect".
+    """
+
+    class _Widened:
+        def read(self, *, status_map: bool | memoryview = False) -> None: ...
+
+    class _Quoted:
+        def read(self, *, status_map: "bool" = False) -> None: ...  # noqa: UP037
+
+    assert ar._supports_caller_map(_Widened())
+    assert not ar._supports_caller_map(_Quoted()), "quoting is not a new feature"
