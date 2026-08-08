@@ -2552,15 +2552,34 @@ def _rip_disc_stage(
                 detail=f"({done}/{total})",
             )
 
-    read_disc_c2(
-        device,
-        pcm_file,
-        c2_file if want_c2 else None,
-        output_sub=sub_file,
-        output_cdtext=cdtext_file,
-        output_fulltoc=fulltoc_file,
-        progress_cb=_cb if ui is not None else None,
-    )
+    def _map_cb(damage: bytearray) -> None:
+        # The progress bar becomes the disc map for the length of the read: the
+        # buffer is handed over at allocation, filled by the reader as sectors
+        # arrive, and polled by the render thread. Note this is NOT gated on
+        # want_c2 — C2 pointers are requested on the wire unconditionally, and
+        # cfg.c2_recovery = "off" suppresses only the bitmap *file*. Gating here
+        # would blank the map for anyone using that escape hatch, and a blank map
+        # is indistinguishable from a clean disc.
+        if ui is not None:
+            ui.set_map(damage)
+
+    try:
+        read_disc_c2(
+            device,
+            pcm_file,
+            c2_file if want_c2 else None,
+            output_sub=sub_file,
+            output_cdtext=cdtext_file,
+            output_fulltoc=fulltoc_file,
+            progress_cb=_cb if ui is not None else None,
+            map_cb=_map_cb if ui is not None else None,
+        )
+    finally:
+        # Release the buffer on the failure path too — the renderer holds a
+        # reference and would keep polling a map whose read has stopped, leaving
+        # a frozen frontier on screen that reads as a stalled drive.
+        if ui is not None:
+            ui.set_map(None)
     try:
         from cdda2img.subq_toc import build_rip_info
 

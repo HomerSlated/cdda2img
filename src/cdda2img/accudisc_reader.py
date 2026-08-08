@@ -759,6 +759,38 @@ def _split_streams(chunk: Any, files: dict[str, Any]) -> None:
             files["sub"].write(chunk.data[off : off + chunk.sub_len])
 
 
+def _census_c2(chunk: Any, damage: bytearray, first: int) -> None:
+    """Mark, per sector, whether C2 fired anywhere in it.
+
+    Written **from the sink**, not from ``ReadResult.status_map``, and that is a
+    deliberate correction to an earlier plan. The C API takes a caller-supplied
+    ``uint8_t *status_map`` (``accudisc.h:1444``), but the Python binding
+    allocates the buffer itself and surfaces it only through the returned
+    ``ReadResult`` — which does not exist until the read *finishes*. So the map
+    the binding documents as "read it live from another thread" is, through the
+    binding, unreachable while the read is running. The C2 lane is the one thing
+    we can honestly compute ourselves, so it is computed here.
+
+    Nothing is lost by doing so. ``status_map``'s extra states are ``RECOVERED``
+    and ``SUSPECT``, which only the reread machinery produces, and this path
+    leaves ``retries``/``c2_retries``/``verify_passes``/``overlap_sectors`` at
+    their zero defaults — a single streaming pass. Those states are structurally
+    unreachable here. Raw C2 bits are also *finer* than ``MapState.C2``: the map
+    is one enum per sector, these are 2352 bits.
+
+    ``bytes(...).count(0)`` is one C-level pass; ``any(memoryview)`` is a
+    per-byte interpreter loop, ~173,000 steps per chunk. The copy is 294 B per
+    sector against the 2352 B already being written for the same sector.
+    """
+    if not chunk.c2_len:
+        return
+    for i in range(chunk.nsec):
+        off = i * chunk.sector_len + chunk.audio_len
+        c2 = bytes(chunk.data[off : off + chunk.c2_len])
+        if c2.count(0) != chunk.c2_len:
+            damage[first + i] = 1
+
+
 def _read_disc_binding(
     module: Any,
     device: str,
@@ -769,6 +801,7 @@ def _read_disc_binding(
     output_fulltoc: Path | None,
     read_speed: int | None,
     progress_cb: Callable[[int, int], None] | None,
+    map_cb: Callable[[bytearray], None] | None = None,
 ) -> bool:
     """:func:`read_disc_c2` over the binding: one ``Device``, one spin-up.
 
@@ -824,10 +857,16 @@ def _read_disc_binding(
                 if path is not None
             }
             done = 0
+            damage: bytearray | None = None
+            if map_cb is not None:
+                damage = bytearray(count)
+                map_cb(damage)
 
             def split(chunk: Any) -> None:
                 nonlocal done
                 _split_streams(chunk, files)
+                if damage is not None:
+                    _census_c2(chunk, damage, done)
                 done += chunk.nsec
                 if progress_cb is not None:
                     progress_cb(done, count)
@@ -854,6 +893,7 @@ def read_disc_c2(
     output_fulltoc: Path | None = None,
     read_speed: int | None = None,
     progress_cb: Callable[[int, int], None] | None = None,
+    map_cb: Callable[[bytearray], None] | None = None,
 ) -> None:
     """Full-disc raw audio (s16le, no byte-swap) + C2 bitmap via ``accudisc read``.
 
@@ -867,6 +907,17 @@ def read_disc_c2(
     produces no cdtext file (absence does not affect the read's exit code) — check
     for existence. *progress_cb(done, total)* receives sector counts from the
     ``--progress-fd`` machine channel.
+
+    *map_cb(damage)* is called **once**, with the per-sector C2 damage map, before
+    the first sector is read — the buffer is handed out at allocation rather than
+    returned at the end, because a map that only exists once the read is over
+    cannot drive a live display. (That is precisely the shape the AccuDisc binding
+    is missing for ``status_map``; see :func:`_census_c2`.) The caller keeps the
+    reference and polls it from its render thread: one writer, one byte per
+    sector, monotonic, so a stale frame is merely stale and never wrong, and no
+    lock is needed. Requesting it does not change what is read — C2 pointers are
+    on the wire unconditionally — so the map is available even with
+    ``c2_recovery = "off"``, which suppresses only the bitmap *file*.
 
     Raises RuntimeError only on a genuine read failure; "completed with caveats"
     is not a failure, and since the library returns no verdict for it,
@@ -885,6 +936,7 @@ def read_disc_c2(
             output_fulltoc,
             read_speed,
             progress_cb,
+            map_cb,
         ),
     )
 

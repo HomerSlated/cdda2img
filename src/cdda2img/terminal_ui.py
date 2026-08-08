@@ -40,6 +40,8 @@ import threading
 import tty
 from enum import Enum, auto
 
+from cdda2img import disc_map
+
 SPINNER = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
 _FULL = "█"
 _EMPTY = "░"
@@ -65,6 +67,14 @@ class TerminalUI:
         self._detail = ""
         self._header: list[str] = []
         self._output: list[str] = []
+
+        # Disc map. _map is the live per-sector C2 damage buffer owned by the
+        # reader; the rest is geometry pinned once, for the reason in _build().
+        self._map: bytearray | None = None
+        self._map_cols = 0
+        self._map_sw = 0
+        self._map_dw = 0
+        self._map_colour = False
 
         # Number of lines written in the last render frame (renderer thread only).
         # Used by _clear_region() to rewind the cursor to the top of the TUI area.
@@ -124,6 +134,30 @@ class TerminalUI:
             self._status = text
             self._prog = progress
             self._detail = detail
+
+    def set_map(self, damage: bytearray | None) -> None:
+        """Make the progress bar *be* the disc map, or put the plain bar back.
+
+        *damage* is the reader's live per-sector C2 map — one byte per sector,
+        set as sectors are read. It is passed by reference and polled by the
+        renderer; it is never copied, so it must stay valid until ``set_map(None)``.
+
+        Safe without a lock, and deliberately so: the reader is the only writer,
+        each byte is written once, and the renderer only ever reads bytes below
+        the frontier it was told about. A frame caught mid-chunk is a frame that
+        renders slightly less of the disc, which is what "in progress" means.
+        """
+        with self._slk:
+            self._map = damage
+            # Geometry is pinned on the NEXT frame, once the terminal width and
+            # the status text are both known. Reset it here so a second read
+            # re-pins rather than inheriting the first one's layout.
+            self._map_cols = 0
+            self._map_colour = disc_map.colour_enabled()
+            self._map_dw = (2 * len(str(len(damage))) + 3) if damage else 0
+        with self._lock:
+            if self._st == _St.RUNNING:
+                self._tick.set()
 
     def set_header(self, lines: list[str]) -> None:
         """Replace the fixed header region rendered *above* the progress line.
@@ -209,6 +243,11 @@ class TerminalUI:
             detail = self._detail
             header = list(self._header)
             output = list(self._output)
+            damage = self._map
+            map_cols = self._map_cols
+            map_sw = self._map_sw
+            map_dw = self._map_dw
+            map_colour = self._map_colour
 
         cols = shutil.get_terminal_size().columns - 1
         det = prog >= 0.0
@@ -216,6 +255,21 @@ class TerminalUI:
         max_s = max(8, cols // 3)
         if len(status) > max_s:
             status = status[: max_s - 1] + "…"
+
+        if damage is not None and det:
+            progress_line = self._build_map(
+                sp=SPINNER[frame % len(SPINNER)],
+                status=status,
+                prog=prog,
+                detail=detail,
+                cols=cols,
+                damage=damage,
+                map_cols=map_cols,
+                map_sw=map_sw,
+                map_dw=map_dw,
+                colour=map_colour,
+            )
+            return self._frame(header, progress_line, output)
 
         # Fixed overhead per line:
         #   spinner(1) + "  "(2) + " "(1) + "  "(2) + pct(6) = 12
@@ -240,7 +294,57 @@ class TerminalUI:
 
         pct_part = f"{pct}   {detail}" if detail else pct
         progress_line = f"{sp}  {status} {bar}  {pct_part}"
+        return self._frame(header, progress_line, output)
 
+    def _build_map(
+        self,
+        *,
+        sp: str,
+        status: str,
+        prog: float,
+        detail: str,
+        cols: int,
+        damage: bytearray,
+        map_cols: int,
+        map_sw: int,
+        map_dw: int,
+        colour: bool,
+    ) -> str:
+        """The progress line rendered as a disc map.
+
+        **Every width on this line is pinned for the life of the read**, and that
+        is the whole design, not tidiness. A cell's sector span is
+        ``len(damage) // width``, so a one-column change re-buckets every cell
+        and already-drawn damage jumps to a different column — the map appears to
+        rewrite its own history. The plain bar is immune (one number, redrawn),
+        which is why the layout could safely float before and cannot now.
+
+        Two things move a width here and both are ordinary: the sector counter
+        gains a digit (``(99999/204143)`` → ``(100000/204143)``), and the
+        terminal is resized mid-rip. The first is pinned away by sizing *detail*
+        to the largest value it can ever hold; the second cannot be, so a
+        narrowed terminal **clips cells off the right** rather than re-bucketing.
+        Clipping loses the least: the map's content is left-weighted, and the
+        frontier is also reported numerically as a percentage and a count.
+        """
+        if map_cols <= 0:
+            # First frame with a map: pin the geometry against this terminal.
+            map_sw = len(status)
+            map_cols = max(4, cols - 12 - map_sw - (3 + map_dw))
+            with self._slk:
+                self._map_cols = map_cols
+                self._map_sw = map_sw
+
+        avail = max(0, cols - 12 - map_sw - (3 + map_dw))
+        visible = max(0, min(map_cols, avail))
+        frontier = round(prog * len(damage))
+        cells = disc_map.cells_from_damage(damage, frontier, map_cols)
+        bar = disc_map.render(cells[:visible], colour=colour)
+        pct = f"{min(prog, 1.0) * 100:5.1f}%"
+        return f"{sp}  {status:<{map_sw}.{map_sw}s} {bar}  {pct}   {detail:<{map_dw}}"
+
+    def _frame(self, header: list[str], progress_line: str, output: list[str]) -> str:
+        """Wrap the rendered lines in the cursor motion that repaints in place."""
         all_lines = [*header, progress_line, *output]
         new_height = len(all_lines)
 

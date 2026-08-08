@@ -644,7 +644,9 @@ class _FakeDiscDevice:
     def __init__(
         self,
         leadout: int = 10,
-        chunks: tuple[_FakeReadChunk, ...] = (),
+        # Any chunk-shaped object: _FakeReadChunk for slicing tests, _C2Chunk
+        # for census ones, which need per-sector control of the C2 block.
+        chunks: tuple[Any, ...] = (),
         cdtext: bytes | None = b"CDTEXT",
         stats: _FakeStats | None = None,
     ) -> None:
@@ -1587,3 +1589,90 @@ def test_c2_support_is_claimed_and_functional_or_it_is_false(
     """
     _bind(monkeypatch, _FeaturesDevice(verdict))
     assert ar.drive_supports_c2("/dev/sr0") is expected
+
+
+# ── the C2 damage map (disc map lane) ─────────────────────────────────────────
+
+
+class _C2Chunk:
+    """A chunk whose per-sector C2 block can be flagged individually.
+
+    The default ``_FakeReadChunk`` fills C2 with a non-zero filler, which reads
+    as "every sector damaged" — fine for a slicing test and useless for a census
+    one, where the whole question is which sectors got marked.
+    """
+
+    def __init__(self, flags: list[bool], audio_len: int = 8, c2_len: int = 4) -> None:
+        self.nsec = len(flags)
+        self.audio_len = audio_len
+        self.c2_len = c2_len
+        self.sub_len = 0
+        self.sector_len = audio_len + c2_len
+        self.data = b"".join(
+            b"A" * audio_len + (b"\x00\x08\x00\x00" if f else b"\x00" * c2_len)
+            for f in flags
+        )
+
+
+def test_the_c2_census_marks_only_the_flagged_sectors() -> None:
+    damage = bytearray(4)
+    ar._census_c2(_C2Chunk([False, True, False, True]), damage, 0)
+    assert list(damage) == [0, 1, 0, 1]
+
+
+def test_the_c2_census_writes_at_the_chunks_absolute_offset() -> None:
+    """The sink is handed chunk-relative indices and an LBA-indexed map, so an
+    off-by-a-chunk here paints damage onto the wrong part of the disc — a map
+    that is wrong in the one way it cannot look wrong."""
+    damage = bytearray(10)
+    ar._census_c2(_C2Chunk([True, False]), damage, 6)
+    assert list(damage) == [0, 0, 0, 0, 0, 0, 1, 0, 0, 0]
+
+
+def test_a_pcm_only_chunk_leaves_the_census_alone() -> None:
+    """``c2_len == 0`` means C2 was not requested, not that it came back clean."""
+    damage = bytearray(2)
+    chunk = _C2Chunk([True, True])
+    chunk.c2_len = 0
+    ar._census_c2(chunk, damage, 0)
+    assert list(damage) == [0, 0]
+
+
+def test_the_damage_map_is_handed_over_before_the_first_sector_is_read(
+    tmp_path: Path,
+) -> None:
+    """Handed over at ALLOCATION, not returned at the end.
+
+    This is the whole reason the lane is computed in the sink rather than read
+    from ``ReadResult.status_map``: the binding allocates that buffer internally
+    and surfaces it only on the returned result, which does not exist until the
+    read has finished. A map that appears when the read is over cannot drive a
+    live display, so this one must arrive before any sector does.
+    """
+    seen: list[tuple[int, bytes]] = []
+    device = _FakeDiscDevice(leadout=4, chunks=(_FakeReadChunk(4),))
+
+    def _map_cb(buf: bytearray) -> None:
+        seen.append((len(buf), bytes(buf)))
+
+    _run_disc(device, tmp_path, map_cb=_map_cb)
+
+    assert len(seen) == 1, "handed over exactly once, not per chunk"
+    length, contents = seen[0]
+    assert length == 4  # one byte per sector, sized from the lead-out
+    assert contents == b"\x00" * 4  # nothing marked yet
+
+
+def test_the_damage_map_is_populated_with_no_c2_file_requested(
+    tmp_path: Path,
+) -> None:
+    """``c2_recovery = "off"`` suppresses the bitmap FILE, not the read.
+
+    C2 pointers are on the wire unconditionally, so the map must still fill. If
+    it were gated on the output file, that escape hatch would silently produce a
+    blank map — and a blank map is indistinguishable from a clean disc.
+    """
+    captured: list[bytearray] = []
+    device = _FakeDiscDevice(leadout=2, chunks=(_C2Chunk([True, False]),))
+    _run_disc(device, tmp_path, output_c2=None, map_cb=captured.append)
+    assert list(captured[0]) == [1, 0]

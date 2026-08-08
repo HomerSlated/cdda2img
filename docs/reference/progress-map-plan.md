@@ -30,6 +30,26 @@ covers, with no change on either side:
 | the C2 lane | `MapState.C2` / `HARD` / `RECOVERED` / `SUSPECT` |
 | per-sector C2 severity | the severity nibble (~log2 of fired C2 bits) |
 
+### CORRECTION 2026-08-08 — "no change on either side" is false for the LIVE case
+
+Found while wiring, and it is the load-bearing detail the table above misses:
+**through the Python binding, the status map is unreachable until the read has
+finished.** `Device.read` allocates the buffer itself
+(`map_buf = ffi.new("uint8_t[]", count)`, `__init__.py:1874`) and surfaces it
+only via `ReadResult.status_map` — and `ReadResult` is constructed *after*
+`accudisc_read_cdda` returns. So the docstring's "read it live from another
+thread through `ReadResult.status_map`" describes something no caller can do: the
+object holding the map does not exist while there is anything live to read.
+
+The C API has no such problem — `accudisc_read_req.status_map` is a
+**caller-supplied** `uint8_t *` (`accudisc.h:1444`), which is exactly the shape
+that works. This is a *binding* gap, not an engine one, and the same gap will
+apply to `subq_map` the moment it lands. See §3's amended ask.
+
+The table is still right about the *post-read* map, which is what §5's static
+map wants. It is only the live claim that was wrong, and it was wrong because it
+was read off the docstring rather than off the allocation.
+
 **`status_map` composes with everything we already pass.** Verified by reading
 `Device.read`'s body (`1849-1880`): `c2`, `sub`, `sink`, `copy` and `status_map`
 are independent fields on one `accudisc_read_req`. Our seam
@@ -381,13 +401,43 @@ gates exist.
 
 1. ~~Colour degradation in the bench~~ — done 2026-08-07.
 2. **§148 to AccuDisc**: the `subq_map` ask and the three questions. Blocking for
-   the Q lane and nothing else.
-3. **Wire the C2 lane and the frontier into `_rip_disc_stage`** — needs no reply,
-   because `status_map` is already there. Ship the map with one lane live and the
-   Q lane dark rather than waiting.
-4. Q lane, once §148 is answered (or the DIY path if they decline).
+   the Q lane and nothing else. *(kgr took this over 2026-08-08; see the amended
+   ask under the §0 correction — the binding gap now rides with it.)*
+3. ~~**Wire the C2 lane and the frontier into `_rip_disc_stage`**~~ — **done
+   2026-08-08.** `src/cdda2img/disc_map.py` (bucketing, bands, palette, NO_COLOR),
+   `TerminalUI.set_map` / `_build_map` (the bar *becomes* the map, all widths
+   pinned), `accudisc_reader._census_c2` + `read_disc_c2(map_cb=…)`. Computed in
+   the **sink**, not from `status_map`, for the reason in the §0 correction —
+   and nothing is lost by it, because `RECOVERED`/`SUSPECT` are the only states
+   the sink cannot see and this path leaves every reread knob at zero, so they
+   are structurally unreachable. Raw C2 bits are finer than `MapState.C2` anyway.
+4. Q lane, once the ask is answered. **Not DIY under any circumstance** — the
+   zero-fill trap (§3) means a Q lane computed here paints fabricated damage on
+   exactly the sectors whose audio is already gone. Until then the map draws one
+   lane and says so, rather than drawing Q as healthy.
 5. Recovery-ladder rendering (§2), which is our own work.
 6. CTDB result map via the pre/post diff (§5).
 
-Step 3 is deliberately ahead of step 2 in dependency terms: the useful half needs
-no one's permission.
+Step 3 was deliberately ahead of step 2 in dependency terms, and that held: the
+useful half needed no one's permission.
+
+### What shipped, and the two things the bench could not have caught
+
+Both were found by writing production code against a real terminal, which is the
+honest limit of a synthetic bench — worth recording, because the bench was
+otherwise right about everything it was asked.
+
+- **A resize re-buckets the map.** The bench pinned width by construction; the
+  real `_build` recomputes `shutil.get_terminal_size()` every frame. Resolved by
+  pinning cell size for the life of the read and **clipping cells off the right**
+  when the terminal narrows. Clipping loses least: the content is left-weighted
+  and the frontier is also reported numerically.
+- **`count(1, …)` is not `count non-zero`.** The first census counted bytes equal
+  to 1, so any other marker byte — a severity value, a bitmask — would have read
+  as a clean disc. Caught by the test written for it. The map now counts *zeros*
+  and subtracts, so an unexpected value falls to the safe side.
+
+One more, from the first render rather than from a test: `per = total // width`
+leaves up to `width - 1` sectors at the **end** of the disc in no cell at all —
+the outer edge, where damage concentrates. The last cell now absorbs the
+remainder.

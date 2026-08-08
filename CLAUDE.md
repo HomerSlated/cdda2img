@@ -90,8 +90,11 @@ Standalone utility scripts live in `tools/` (tracked, not part of the installed 
   the erasures landed in the right grid positions is a plausible-looking column count,
   which a coincidence of population reproduces exactly (measured: `erasure_columns`
   533 → 30 at identical flag count, while the decode still succeeds, so misalignment is
-  detectable but not fatal at npar=16). Three fixtures exist under `/var/tmp/ctdb-fixture*`
-  (2026-08-01): Tracy stored/basis, Tracy raw/erasures, ABBA `bounds[0]=33`/domain.
+  detectable but not fatal at npar=16). Three fixtures were built 2026-08-01 — Tracy
+  stored/basis, Tracy raw/erasures, ABBA `bounds[0]=33`/domain — and **deleted 2026-08-08**
+  once AccuDisc's decoder was adopted; they were 1.6 GB of scratch and this script
+  regenerates any of them. Do not leave a rebuilt fixture on disk past the session that
+  needs it (**scratch scope rule**, below).
 - **AccuDisc** — the low-level CD-DA read engine `accudisc_reader.py` drives, a **separate
   project** (https://github.com/HomerSlated/accudisc), external like cdrdao / cd-paranoia and
   **not shipped from this repo**. `tools/accudisc/accudisc` (git-ignored) is a **symlink into
@@ -173,6 +176,25 @@ Standalone utility scripts live in `tools/` (tracked, not part of the installed 
   moved file is named instead of silently dropped. Refuses a dirty tree (`git archive`
   reads HEAD, so uncommitted work would be absent) and re-scans the finished archive for
   private prefixes, which can only fire if something private was *committed*.
+
+## Scratch and temporary files — scope rule
+
+Set by kgr 2026-08-08, after an agent filled RAM and cost a reboot.
+
+**`/tmp` is RAM-backed tmpfs (~7.8 GB).** Writing a disc-sized dataset there consumes
+memory, and the failure mode is a hung machine, not a disk-full error. The agent
+scratchpad lives under `/tmp`, which is fine for notes and scripts and is exactly what
+makes the rule easy to forget.
+
+1. **Never create a fixture, image, PCM capture or any multi-hundred-MB artefact under
+   `/tmp`** — not in the scratchpad either. Real disk only: `/var/tmp`, or a path kgr
+   names. `TMPDIR=/var/tmp` before any rip (`feedback_tmpdir_rips`).
+2. **Scratch is session-scoped.** Delete what you created before the session ends. A
+   fixture that a *future* session might want is not a reason to keep it: if a script
+   regenerates it (`tools/ctdb_fixture.py`, `tools/make_preemph_disc.py`, …), the script
+   is the durable artefact and the bytes are not.
+3. **If something must outlive the session, say so and get it agreed** — with a path, an
+   owner and a reason. Silence is not consent to leave 2 GB behind.
 
 ## Commit and push workflow
 

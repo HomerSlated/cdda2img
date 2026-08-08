@@ -819,6 +819,18 @@ progress bar**
 > answered late: **does Q lag the audio, as C2 does?** The per-track marker is
 > the left-hand status text and has been there all along; the ruler row was an
 > addition, and kgr dropped it.
+>
+> **C2 lane + frontier SHIPPED 2026-08-08.** `disc_map.py`, `TerminalUI.set_map`,
+> `accudisc_reader._census_c2` / `read_disc_c2(map_cb=…)`, 33 new tests. Q lag
+> closed on 42 captures (all NO LAG). **The headline finding above needs one
+> correction**: through the Python binding the status map is unreachable until
+> the read *returns* (`Device.read` allocates it internally and surfaces it only
+> on `ReadResult`), so the C2 lane is computed in the sink instead — no loss,
+> since the states the sink cannot see need reread machinery this path does not
+> use. The C API already takes a caller-supplied buffer, so the amended ask is a
+> **binding** change that serves `status_map` and `subq_map` alike. Remaining:
+> the Q lane (blocked on that ask — never DIY, see the zero-fill trap), the
+> recovery-ladder rendering, and the static post-CTDB map.
 
 Two halves of one design. The track-number status to the left of the progress bar
 was lost in the AccuDisc switch and never reimplemented. And per AccuDisc's preview,
