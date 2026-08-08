@@ -2561,6 +2561,22 @@ def _stop_preview(preview: TrackPreview | None) -> None:
         preview.stop()
 
 
+def _probe_read_speed(device: str) -> int | None:
+    """The drive's current rate as a plain multiplier, for the status line only.
+
+    MODE SENSE page 2A: instant, no disc spin-up, no command to the media. Never
+    raises — a status line is not worth failing a rip over, and ``None`` simply
+    drops the speed clause rather than printing a number nobody measured.
+    """
+    from cdda2img.accudisc_reader import _KBPS_PER_X, read_speed
+
+    try:
+        current, _maximum = read_speed(device)
+    except (RuntimeError, OSError):
+        return None
+    return max(1, current // _KBPS_PER_X) if current else None
+
+
 class _RipPhase:
     """The rip's left-hand status text, as a function of the read position.
 
@@ -2576,41 +2592,60 @@ class _RipPhase:
     it rather than measuring whichever phase happens to be showing.
     """
 
-    def __init__(self) -> None:
+    #: Red Book's ceiling. Bounds the track label without knowing the disc, which
+    #: is what lets the width be pinned from the very first frame — before the
+    #: TOC has been read and therefore before there is a track count at all.
+    _MAX_TRACK_LABEL = len("Ripping track 99…")
+
+    def __init__(self, speed_x: int | None = None) -> None:
         self._lanes: ReadLanes | None = None
+        self._speed = speed_x
 
     def begin(self, lanes: ReadLanes) -> None:
         self._lanes = lanes
+        # The engine's own reading wins if it has one; the pre-read value stands
+        # otherwise, so the clause never disappears once shown.
+        self._speed = lanes.speed_x or self._speed
 
     @property
     def text(self) -> str:
-        return self._disc_text()
+        return self._pad(self._disc_text())
 
     def _disc_text(self) -> str:
-        speed = self._lanes.speed_x if self._lanes else None
         # No speed clause when the drive did not report one: "at 0x" or "at Nonex"
         # reads as a measurement, and this one was never made.
-        return f"Ripping disc at {speed}x…" if speed else "Ripping disc…"
+        return f"Ripping disc at {self._speed}x…" if self._speed else "Ripping disc…"
 
     def at(self, done: int) -> str:
         """The status for a read that has delivered *done* sectors."""
         lanes = self._lanes
         if lanes is None or not lanes.track_starts or done <= 0:
-            return self._disc_text()
+            return self._pad(self._disc_text())
         # Sector `done - 1` is the last one actually delivered. Using `done`
         # would name the next track one sector early at every boundary.
         n = bisect.bisect_right(lanes.track_starts, done - 1)
-        return f"Ripping track {n:02d}…" if n else self._disc_text()
+        return self._pad(f"Ripping track {n:02d}…" if n else self._disc_text())
+
+    def _pad(self, text: str) -> str:
+        """Every phase returns the same width, so nothing downstream can shift.
+
+        The map pins its column count against this text, but the **plain bar**
+        renders the spin-up frame before the map exists and sizes itself from
+        `len(status)` directly. Padding here is what keeps the bar starting in
+        the same column across that handover — otherwise the whole widget jumps
+        sideways the moment the map appears, which is what it did.
+        """
+        return text.ljust(self.widest_status())
 
     def widest_status(self) -> int:
-        lanes = self._lanes
-        tracks = len(lanes.track_starts) if lanes else 0
-        widths = [len(self._disc_text())]
-        if tracks:
-            # Every track label is the same width up to the digit count, so the
-            # last track bounds them all.
-            widths.append(len(f"Ripping track {tracks:02d}…"))
-        return max(widths)
+        """The widest text this rip can ever show — computable from the start.
+
+        Bounded by 99 tracks rather than by the disc's own count, because the
+        width has to be known before the TOC is read and a value that changes
+        when the TOC lands is not a pinned width. The cost is a few spaces on a
+        single-digit disc; the alternative is a map that re-buckets once.
+        """
+        return max(len(self._disc_text()), self._MAX_TRACK_LABEL)
 
 
 def _rip_disc_stage(
@@ -2649,7 +2684,14 @@ def _rip_disc_stage(
     # over the lanes, which is the first moment a track number can be honest —
     # the drive is genuinely spinning up and seeking the lead-in, and no sector
     # of track 1 has been delivered.
-    phase = _RipPhase()
+    #
+    # The speed is resolved HERE, before the read, and that is the whole point.
+    # Taking it from the lanes instead put it one step too late: the handover
+    # that carries the speed also carries the track list, so by the time the
+    # speed was known `at()` was already returning a track number and the clause
+    # this phase exists to show was unreachable. It is one MODE SENSE page 2A —
+    # instant, no spin-up — and never fatal.
+    phase = _RipPhase(speed_x=_probe_read_speed(device))
     _ui_status(ui, phase.text)
 
     def _cb(done: int, total: int) -> None:
