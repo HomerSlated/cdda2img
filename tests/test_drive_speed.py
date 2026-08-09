@@ -176,6 +176,58 @@ def test_restore_swallows_a_refusing_drive(monkeypatch: pytest.MonkeyPatch) -> N
     ds.restore_drive_speed("/dev/sr0", 24)  # nor on the targeted path
 
 
+# ── admitted_ladder must not blast the drive to max on its way out ───────────
+
+
+def test_the_ladder_probe_restores_to_entry_not_to_max(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The probe leaves the drive at its last rung, so it must restore — but to
+    where the caller had it.
+
+    A bare restore-to-max was harmless while the rip never requested a speed. With
+    `--ad-speed 8` it stopped being harmless: read at 8, probe, *set 40*, then run
+    the recovery ladder, so the re-reads inherited a rate nobody asked for. That is
+    the D1 subq_speed_cliff shape, and `test_no_restore_to_max_before_the_disc_is_read`
+    cannot see it — that guard only looks at restores sited BEFORE the disc read.
+    """
+    from cdda2img.accudisc_reader import SpeedRow
+
+    targets: list[int | None] = []
+    monkeypatch.setattr(ds, "current_speed_x", lambda dev: 8)
+    monkeypatch.setattr(
+        ds,
+        "read_speed_rows",
+        lambda dev: [SpeedRow(32, 32, 31.8, "admitted")],
+    )
+    monkeypatch.setattr(
+        ds, "restore_drive_speed", lambda dev, target=None: targets.append(target)
+    )
+
+    assert ds.admitted_ladder("/dev/sr0") == [32]
+    assert targets == [8], "the probe restored somewhere other than the entry rate"
+
+
+def test_the_ladder_probe_leaves_a_silent_drive_alone(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No entry rate captured means no rate to restore to. Guessing at max here is
+    the behaviour that was just removed; the rip's own finally is the backstop."""
+    from cdda2img.accudisc_reader import SpeedRow
+
+    calls: list[object] = []
+    monkeypatch.setattr(ds, "current_speed_x", lambda dev: None)
+    monkeypatch.setattr(
+        ds, "read_speed_rows", lambda dev: [SpeedRow(32, 32, 31.8, "admitted")]
+    )
+    monkeypatch.setattr(
+        ds, "restore_drive_speed", lambda dev, target=None: calls.append(target)
+    )
+
+    assert ds.admitted_ladder("/dev/sr0") == [32]
+    assert calls == []
+
+
 # ── probe_speed_ladder is gone ───────────────────────────────────────────────
 
 

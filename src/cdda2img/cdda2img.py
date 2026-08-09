@@ -2622,9 +2622,17 @@ def _apply_read_speed(device: str, want_x: int | None) -> int | None:
     The mismatch is a **warning, not a failure**. A drive declining a rate is a
     normal thing for a drive to do — a governor caps degraded media regardless of
     what was asked — and the correct response is to record what actually happened,
-    not to refuse to rip. The returned value is what page 2A reports *after* the
-    request, so the status line and the container's provenance both name the rate
-    the disc was really read at.
+    not to refuse to rip.
+
+    **What this verifies is OUR request, not the rate the read ran at**, and the
+    difference is not pedantic. ``read_disc_c2`` sets ``speed_x`` again inside
+    AccuDisc's own ``Device``, *after* this read-back — that pass-through is the
+    authoritative request, and this one exists so there is something to verify and
+    something honest to display before the read begins. If AccuDisc's set lands
+    somewhere else, the number here is stale and nothing would say so. Closing that
+    needs the achieved rate on the read *result*, which is asked of AccuDisc in
+    §163.3 of the outbound correspondence; until it exists, do not describe this as
+    "the speed the disc was read at" anywhere user-facing.
 
     ``want_x=None`` skips the request entirely and just reads: the drive keeps its
     own management, which is the default and by far the common case.

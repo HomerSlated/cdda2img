@@ -217,6 +217,15 @@ def admitted_ladder(device: str) -> list[int]:
     admitted [32, 24, 8, 4] on ABBA *Gold* in July and [8, 4] on the same disc once
     it had degraded further. Never cache this per drive.
     """
+    # Captured before the probe, restored after it. This used to be a bare
+    # `restore_drive_speed(device)` — i.e. a blast to MAX — which was harmless while
+    # the rip never requested a speed of its own. It is not harmless now: with
+    # `--ad-speed 8` the sequence became read-at-8, probe, *set 40*, then run the
+    # recovery ladder, so the re-reads inherited a rate nobody asked for. That is the
+    # D1 subq_speed_cliff shape, and the D1 guard cannot see it — that guard only
+    # checks for restores sited before the disc read, and this one is after.
+    entry_x = current_speed_x(device)
+
     rows = read_speed_rows(device)
     ladder: list[int] = []
 
@@ -243,7 +252,12 @@ def admitted_ladder(device: str) -> list[int]:
             by_rate.setdefault(round(r.measured), r.requested)
         ladder = [by_rate[k] for k in sorted(by_rate, reverse=True)]
 
-    restore_drive_speed(device)  # the probe left the drive at its last rung
+    # The probe leaves the drive at its last rung, so this is not optional — but it
+    # restores to where the caller had it, not to max. `entry_x is None` means the
+    # drive would not report, and restoring to a rate nobody measured is worse than
+    # leaving it: the rip's own `finally` is the backstop either way.
+    if entry_x is not None:
+        restore_drive_speed(device, entry_x)
 
     if not ladder:
         _, maximum = read_drive_speed(device)

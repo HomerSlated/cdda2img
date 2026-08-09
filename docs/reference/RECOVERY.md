@@ -221,9 +221,14 @@ read-engine side; "caller" means cdda2img (or any application driving AccuDisc).
   was deleted 2026-08-09. Note what went with it: it was the only set-then-read-back
   check in the tree, and `admitted_ladder` does not replace that half — it compares
   `req` against `page2a`, but both now come from AccuDisc, so it is our policy over
-  their measurement rather than a second opinion. The read-back moved to
-  `cdda2img._apply_read_speed`, which covers the one speed request that governs a
-  whole rip.
+  their measurement rather than a second opinion. A read-back was added at
+  `cdda2img._apply_read_speed`, but be precise about its scope: it verifies **our**
+  `--ad-speed` request, issued before the read. AccuDisc sets `speed_x` again inside
+  its own `Device` at the head of the read — that is the authoritative request — so
+  nothing currently reports the rate a read *actually ran at*, on any path. The
+  recovery ladder is uncovered entirely: every re-read passes `speed_x` and nobody
+  looks. Closing this needs the achieved rate on the read result; asked of AccuDisc
+  2026-08-09 (outbound §163.3).
 - **Conflicts**: alternative exit to parity repair (2.3). Not self-sufficient —
   without a gate there is nothing to verify a candidate against.
 - **Combinations**: sequential after parity-repair failure; each attempt

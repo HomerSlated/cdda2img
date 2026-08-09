@@ -58,8 +58,11 @@ _PX716A_TRACY_VERDICTS = [
 
 @pytest.fixture
 def _no_restore(monkeypatch: pytest.MonkeyPatch) -> None:
-    """admitted_ladder restores the drive after probing; there is no drive here."""
-    monkeypatch.setattr(drive_speed, "restore_drive_speed", lambda device: None)
+    """admitted_ladder captures the entry speed and restores it; no drive here."""
+    monkeypatch.setattr(drive_speed, "current_speed_x", lambda device: 40)
+    monkeypatch.setattr(
+        drive_speed, "restore_drive_speed", lambda device, target=None: None
+    )
 
 
 def _ladder(monkeypatch: pytest.MonkeyPatch, rows: list[SpeedRow]) -> list[int]:
@@ -192,12 +195,22 @@ def test_the_probe_leaves_the_drive_throttled_so_the_binder_restores_it(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """`accudisc speeds` performs real timed reads and ends at its last rung (4x).
-    Forgetting the restore would silently run the whole rip at 4x."""
-    restored: list[str] = []
+    Forgetting the restore would silently run the whole rip at 4x.
+
+    The restore is now TARGETED at the rate captured before the probe, not at max —
+    otherwise a rip that asked for `--ad-speed 8` would have its recovery ladder run
+    after an unrequested blast to 40x.
+    """
+    restored: list[tuple[str, int | None]] = []
+    monkeypatch.setattr(drive_speed, "current_speed_x", lambda device: 8)
     monkeypatch.setattr(drive_speed, "read_speed_rows", lambda device: _PX716A_DEGRADED)
-    monkeypatch.setattr(drive_speed, "restore_drive_speed", restored.append)
+    monkeypatch.setattr(
+        drive_speed,
+        "restore_drive_speed",
+        lambda device, target=None: restored.append((device, target)),
+    )
     drive_speed.admitted_ladder("/dev/sr0")
-    assert restored == ["/dev/sr0"]
+    assert restored == [("/dev/sr0", 8)]
 
 
 def test_speed_rows_expose_the_fields_the_ladder_policy_reads() -> None:
