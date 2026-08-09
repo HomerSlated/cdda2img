@@ -25,6 +25,9 @@ from __future__ import annotations
 import dataclasses
 import enum
 import logging
+import pathlib
+import subprocess
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -1961,6 +1964,40 @@ def test_mapstate_still_names_every_state_the_damage_lane_classifies() -> None:
     assert needed <= names, f"missing: {needed - names}"
 
 
+def _binding_installed_in_a_clean_process() -> bool:
+    """Is the binding importable in a process this test suite has not touched?
+
+    A **subprocess is the oracle** precisely because the failure being guarded
+    against is in-process state: a phantom `accudisc` cached in `sys.modules`.
+    Any in-process check shares the contamination it is supposed to detect, so it
+    would answer the same way whether the binding was absent or merely shadowed —
+    which is the whole distinction this function exists to draw.
+
+    It calls the seam's own `_import_binding` rather than `find_spec`, so the
+    identity check (a PEP 420 namespace package is not the binding) is the real
+    one and not a second implementation that can drift from it.
+    """
+    probe = (
+        "import sys; sys.path.insert(0, 'src');"
+        "from cdda2img import accudisc_reader as a;"
+        "m, _ = a._import_binding();"
+        "sys.exit(0 if m is not None else 1)"
+    )
+    try:
+        return (
+            subprocess.run(  # noqa: S603
+                [sys.executable, "-c", probe],
+                cwd=pathlib.Path(__file__).resolve().parents[1],
+                capture_output=True,
+                timeout=60,
+                check=False,
+            ).returncode
+            == 0
+        )
+    except (OSError, subprocess.SubprocessError):  # pragma: no cover - CI safety
+        return False
+
+
 def test_the_real_binding_is_reachable_from_the_test_suite() -> None:
     """The shape tests above are worthless if they silently skip.
 
@@ -1970,16 +2007,40 @@ def test_the_real_binding_is_reachable_from_the_test_suite() -> None:
     involved. The shape tests reported "binding unavailable" on a machine where
     it is installed and working.
 
-    This asserts rather than skips, so the *absence* of the guard is itself a
-    failure. A skipped test and a passing one are indistinguishable in a summary
-    line, which is the whole shape of AccuDisc's NDEBUG finding.
+    **The assertion is conditional on the binding actually being installed, and
+    that is not a weakening — it is the fix for a guard that was wrong on CI.**
+    As written, this asserted unconditionally and so demanded the binding exist
+    everywhere the suite runs. AccuDisc is a separate external project reached
+    here through a git-ignored symlink; CI has no copy and never will, so the
+    guard failed all five Python versions for a condition CI cannot satisfy. Its
+    own docstring named the remedy ("the right place to loosen — deliberately")
+    and I did not apply it.
+
+    What survives is the part that was always the point: **when the binding IS
+    installed, an unavailable result means our own suite hid it**, and that is a
+    hard failure. The subprocess oracle is what separates the two cases — see
+    :func:`_binding_installed_in_a_clean_process`.
+
+    A plain `pytest.skip` would NOT do. A skipped test and a passing one are
+    indistinguishable in a summary line, which is the shape of AccuDisc's NDEBUG
+    finding; so the skip carries the reason, and the developer machine — where
+    the binding is present — still gets the assertion.
     """
     ar._import_binding.cache_clear()
     module, why = ar._import_binding()
-    assert module is not None, (
-        f"the shape tests would silently skip: {why}. If the binding is genuinely "
-        f"absent this test is the right place to loosen — deliberately, not by "
-        f"letting three guards go quiet."
+    if module is not None:
+        return
+
+    if _binding_installed_in_a_clean_process():
+        pytest.fail(
+            f"the binding imports in a clean process but not here ({why}) — the "
+            f"test suite is hiding it, and the shape tests above are silently "
+            f"skipping on a machine where they should run"
+        )
+    pytest.skip(
+        f"AccuDisc binding not installed in this environment ({why}); the shape "
+        f"tests cannot run. This is expected on CI and a real gap on a developer "
+        f"machine — `cdda2img doctor` reports it."
     )
 
 
