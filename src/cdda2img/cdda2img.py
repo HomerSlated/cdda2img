@@ -328,20 +328,59 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="List installed recovery profiles and exit",
     )
-    # AccuDisc passthrough. Supplying ANY of these bypasses profiles entirely (§9.4
-    # rung 1) — it is an escape hatch for driving the engine directly, and merging it
-    # with a profile would produce a configuration nobody asked for.
+    # AccuDisc passthrough. Supplying any of these EXCEPT --ad-speed bypasses profiles
+    # entirely (§9.4 rung 1) — an escape hatch for driving the engine directly, and
+    # merging it with a profile would produce a configuration nobody asked for.
+    # --ad-speed is exempt because it sets the INITIAL pass rate, which no profile has
+    # an opinion about, so there is nothing for it to conflict with.
     _ad = r_cmd.add_argument_group(
         "AccuDisc passthrough",
-        "Drive AccuDisc's recovery knobs directly. Any of these disables profiles.",
+        "Drive AccuDisc's recovery knobs directly. Any of these except --ad-speed "
+        "disables profiles.",
     )
-    _ad.add_argument("--ad-speed", type=int, metavar="X")
-    _ad.add_argument("--ad-retries", type=int, metavar="K")
-    _ad.add_argument("--ad-c2-retries", type=int, metavar="N", dest="ad_c2")
-    _ad.add_argument("--ad-verify", type=int, metavar="P")
-    _ad.add_argument("--ad-overlap", type=int, metavar="K")
-    _ad.add_argument("--ad-ladder", metavar="LIST")
-    _ad.add_argument("--ad-recovery", metavar="FLAGS")
+    _ad.add_argument(
+        "--ad-speed",
+        type=int,
+        metavar="X",
+        help="Read the disc at X (1-72). Verified against the drive after the "
+        "request; a drive that settles elsewhere warns and the real rate is used. "
+        "Composes with --profile",
+    )
+    _ad.add_argument(
+        "--ad-retries",
+        type=int,
+        metavar="K",
+        help="Per-sector attempts after a chunk fails (AccuDisc default 2)",
+    )
+    _ad.add_argument(
+        "--ad-c2-retries",
+        type=int,
+        metavar="N",
+        dest="ad_c2",
+        help="Cache-defeated rereads hunting a C2-clean copy of each flagged sector",
+    )
+    _ad.add_argument(
+        "--ad-verify",
+        type=int,
+        metavar="P",
+        help="Whole-range verify passes; consensus decides disagreements",
+    )
+    _ad.add_argument(
+        "--ad-overlap",
+        type=int,
+        metavar="K",
+        help="Extend each chunk by K trailing sectors and compare against the next "
+        "chunk's head, catching drive slips at chunk seams (0-8)",
+    )
+    _ad.add_argument(
+        "--ad-ladder",
+        metavar="LIST",
+        help='Recovery speed rungs, in attempt order, e.g. "32,16,8". Taken verbatim '
+        "— not filtered against the drive's admitted set",
+    )
+    _ad.add_argument(
+        "--ad-recovery", metavar="FLAGS", help="Raw AccuDisc recovery flag string"
+    )
     r_cmd.add_argument(
         "--device",
         default=None,
@@ -2561,20 +2600,64 @@ def _stop_preview(preview: TrackPreview | None) -> None:
         preview.stop()
 
 
-def _probe_read_speed(device: str) -> int | None:
-    """The drive's current rate as a plain multiplier, for the status line only.
+# ``_probe_read_speed`` lived here until 2026-08-09 and was a second wrapper over
+# the same seam call as ``drive_speed.current_speed_x`` — already compliant, merely
+# duplicated. It now matters that there is one: the rip captures this value for the
+# status line AND hands the same number back to the drive on the way out, and two
+# functions computing "the current speed" is how those two uses drift apart.
 
-    MODE SENSE page 2A: instant, no disc spin-up, no command to the media. Never
-    raises — a status line is not worth failing a rip over, and ``None`` simply
-    drops the speed clause rather than printing a number nobody measured.
+
+def _apply_read_speed(device: str, want_x: int | None) -> int | None:
+    """Ask for *want_x*, then read page 2A back. Returns the rate to display.
+
+    **This is the only place in the shipping path that checks a speed request was
+    honoured**, and it exists because until now nothing did. Every set was
+    fire-and-forget: ``restore_drive_speed`` set and never re-read, the recovery
+    ladder passed ``speed_x`` per re-read and never looked, and the one function
+    that did set-then-read-back (``drive_speed.probe_speed_ladder``) had no caller.
+    A drive that silently ignored a request would have produced a rip labelled with
+    a speed it never ran at — and every measurement taken at that label would be
+    mislabelled, which is worse than a rip that is merely slower than asked.
+
+    The mismatch is a **warning, not a failure**. A drive declining a rate is a
+    normal thing for a drive to do — a governor caps degraded media regardless of
+    what was asked — and the correct response is to record what actually happened,
+    not to refuse to rip. The returned value is what page 2A reports *after* the
+    request, so the status line and the container's provenance both name the rate
+    the disc was really read at.
+
+    ``want_x=None`` skips the request entirely and just reads: the drive keeps its
+    own management, which is the default and by far the common case.
     """
-    from cdda2img.accudisc_reader import _KBPS_PER_X, read_speed
+    from cdda2img import drive_speed
 
-    try:
-        current, _maximum = read_speed(device)
-    except (RuntimeError, OSError):
-        return None
-    return max(1, current // _KBPS_PER_X) if current else None
+    if want_x is None:
+        return drive_speed.current_speed_x(device)
+
+    if not drive_speed.request_speed(device, want_x):
+        log.warning("drive %s refused the %dX read-speed request", device, want_x)
+        return drive_speed.current_speed_x(device)
+
+    got_x = drive_speed.current_speed_x(device)
+    if got_x is None:
+        # Asked, no error, but the drive will not say where it landed. Report the
+        # request rather than inventing a measurement — and say which it is.
+        log.warning(
+            "drive %s accepted the %dX request but does not report its speed; "
+            "the rate shown is what was asked for, not what was measured",
+            device,
+            want_x,
+        )
+        return want_x
+    if got_x != want_x:
+        log.warning(
+            "drive %s was asked for %dX and settled at %dX — reading at %dX",
+            device,
+            want_x,
+            got_x,
+            got_x,
+        )
+    return got_x
 
 
 class _RipPhase:
@@ -2655,6 +2738,7 @@ def _rip_disc_stage(
     read_offset: int,
     cfg: Config,
     ui: TerminalUI | None = None,
+    read_speed: int | None = None,
 ) -> tuple[RipInfo, str, Path | None]:
     """Read the disc, returning (info, rip_type, c2_path).
 
@@ -2669,6 +2753,12 @@ def _rip_disc_stage(
     ``cfg.c2_recovery = "off"`` skips the C2 bitmap (the audio + Q capture is unchanged);
     the bitmap is what lets ctanalyse treat flagged sectors as erasures downstream, so
     turning it off costs recovery power, not fidelity.
+
+    *read_speed* is the requested rate in X (``--ad-speed``), or ``None`` to leave the
+    drive at its own management. It is **requested twice, deliberately**: once here so
+    the request can be verified and displayed, and again as ``read_disc_c2(read_speed=)``
+    — which is the authoritative one, since AccuDisc opens its own ``Device`` and sets
+    ``speed_x`` at the head of the read. See :func:`_apply_read_speed`.
 
     The PCM returned is RAW — the drive offset is not applied here. The caller works raw
     through AR + ctanalyse and calls apply_offset exactly once, at storage.
@@ -2691,7 +2781,7 @@ def _rip_disc_stage(
     # speed was known `at()` was already returning a track number and the clause
     # this phase exists to show was unreachable. It is one MODE SENSE page 2A —
     # instant, no spin-up — and never fatal.
-    phase = _RipPhase(speed_x=_probe_read_speed(device))
+    phase = _RipPhase(speed_x=_apply_read_speed(device, read_speed))
     _ui_status(ui, phase.text)
 
     def _cb(done: int, total: int) -> None:
@@ -2724,6 +2814,7 @@ def _rip_disc_stage(
             output_sub=sub_file,
             output_cdtext=cdtext_file,
             output_fulltoc=fulltoc_file,
+            read_speed=read_speed,
             progress_cb=_cb if ui is not None else None,
             map_cb=_map_cb if ui is not None else None,
         )
@@ -3022,6 +3113,7 @@ def rip_image(  # noqa: C901
 ) -> None:
     import sys
 
+    from cdda2img import drive_speed
     from cdda2img.accuraterip import (
         format_ar_report,
         pack_arip_block,
@@ -3139,6 +3231,15 @@ def rip_image(  # noqa: C901
 
     track_preview: TrackPreview | None = None
     rbi_path: Path | None = None
+    # Captured BEFORE anything asks the drive for a rate, and handed back in the
+    # `finally` below. AccuDisc documents `read_req.speed_x` as deliberately NOT
+    # restored on exit (accudisc.h:1414) — a recovery loop steps rungs without
+    # re-spinning and restores once itself — so the drive is left wherever the last
+    # request put it, and this is the "once itself". It has to be a `finally`: the
+    # only restore before this lived after the recovery loop, so a rip that never
+    # entered recovery (i.e. a clean one) left the drive throttled with no restore
+    # anywhere, and a rip that raised left it throttled too.
+    entry_speed_x = drive_speed.current_speed_x(device)
     try:
         # Grab track 1 first (drive is single-use), then play it on a loop in
         # the background while the rest of the rip runs.
@@ -3146,7 +3247,13 @@ def rip_image(  # noqa: C901
 
         c2_file = temp.pcm_file.with_suffix(".c2")
         info, rip_type, c2_path = _rip_disc_stage(
-            device, temp.pcm_file, c2_file, read_offset, cfg, ui=ui
+            device,
+            temp.pcm_file,
+            c2_file,
+            read_offset,
+            cfg,
+            ui=ui,
+            read_speed=strategy.read_speed if strategy is not None else None,
         )
 
         track_count = len(info.disc.tracks)
@@ -3260,7 +3367,7 @@ def rip_image(  # noqa: C901
             # each attempt and splicing the first match; a track that never matches
             # keeps its original audio. The sweep across passes x speeds is the recovery
             # mechanism (validated 6/6 on the damaged reference disc).
-            from cdda2img import drive_speed, recovery_profile
+            from cdda2img import recovery_profile
             from cdda2img.accuraterip import fetch_ar_responses
 
             ar_responses, _ar_transport, _ar_b3 = fetch_ar_responses(
@@ -3271,9 +3378,18 @@ def rip_image(  # noqa: C901
             # regardless of drive capability, so it must be probed per rip.
             # `cfg.recovery_passes = 0` remains the global kill switch; otherwise
             # the profile owns the sweep count.
+            #
+            # The gate is `strategy is not None`, NOT `strategy.profile is not
+            # None`. The narrower test was a perfectly good check for "can I call
+            # rungs_for" and quite the wrong one for "should recovery run": the
+            # ad-flags rung carries no profile by construction, so any --ad-* flag
+            # silently turned recovery off — including --ad-ladder, whose entire
+            # purpose is to supply the ladder that was being discarded. bind_ladder
+            # now sources rungs for that rung too and returns an empty ladder when
+            # there genuinely are none.
             bound = (
                 recovery_profile.bind_ladder(strategy, device)
-                if strategy is not None and strategy.profile is not None
+                if strategy is not None
                 else None
             )
             recovery_ladder = (
@@ -3301,7 +3417,13 @@ def rip_image(  # noqa: C901
                     ui,
                 )
                 recovery_outcomes.update(outcomes)
-                drive_speed.restore_drive_speed(device)  # one restore after the loop
+                # No restore here any more. The ladder leaves the drive at its last
+                # rung, and the `finally` at the end of this function puts it back to
+                # the rate captured at entry — which covers this path *and* the clean
+                # rip that never reaches it. Restoring twice was not harmful, but the
+                # old call restored to MAX while the finally restores as-found, so
+                # leaving both would have made the drive's final state depend on
+                # whether recovery happened to run.
 
             rip_type = f"{rip_type}+c2rec"
             _ui_status(ui, "Verifying AccurateRip (re-read)…")
@@ -3451,6 +3573,12 @@ def rip_image(  # noqa: C901
         _stop_preview(track_preview)
         if ui is not None:
             ui.stop()
+        # Put the drive back where we found it, on every exit path including the
+        # failure one. `entry_speed_x` is None when the drive would not report at
+        # entry, and restoring to a rate nobody measured is worse than leaving it —
+        # so that case deliberately does nothing rather than guessing at max.
+        if entry_speed_x is not None:
+            drive_speed.restore_drive_speed(device, entry_speed_x)
         temp.cleanup()
 
     if extract and rbi_path is not None:

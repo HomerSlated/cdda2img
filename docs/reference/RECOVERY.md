@@ -206,13 +206,24 @@ read-engine side; "caller" means cdda2img (or any application driving AccuDisc).
   `--ladder` inside one invocation.
 - **cdda2img status**: included (`_recover_failed_tracks`; AccuDisc engine since
   the c2read→AccuDisc flip, 2026-07-11 — previously cd-paranoia, R2).
-- **Dependencies**: a settable read speed (best-effort `CDROM_SELECT_SPEED` /
-  `--speed`); requires an external gate (AR) to know when to stop.
+- **Dependencies**: a settable read speed (`accudisc_reader.set_speed` → AccuDisc's
+  `Device.set_speed`, which prefers SET STREAMING and falls back to
+  `CDROM_SELECT_SPEED`); requires an external gate (AR) to know when to stop.
 - **Optional**: `recovery_passes` config (default 3; 0 disables).
-- **Auto-detected**: the ladder is probed live (`drive_speed.probe_speed_ladder` /
-  `drive_speed.admitted_ladder` over `accudisc speeds`: set each candidate, read back
-  the achieved speed). **Probe it every time; never cache it.** The ladder is a
+- **Auto-detected**: the ladder is probed live by `drive_speed.admitted_ladder` over
+  `accudisc_reader.speed_ladder_rows` — timed reads at three radii per rung, judged
+  by AccuDisc's own verdict. **Probe it every time; never cache it.** The ladder is a
   property of drive × disc × *session*, not of the drive — see the caveat below.
+- **Overridden by**: `--ad-ladder 32,16,8` takes rungs verbatim, unfiltered by the
+  admission policy — the escape hatch exists precisely for the rung the policy would
+  reject.
+- **Legacy**: `drive_speed.probe_speed_ladder` (set a candidate, read page 2A back)
+  was deleted 2026-08-09. Note what went with it: it was the only set-then-read-back
+  check in the tree, and `admitted_ladder` does not replace that half — it compares
+  `req` against `page2a`, but both now come from AccuDisc, so it is our policy over
+  their measurement rather than a second opinion. The read-back moved to
+  `cdda2img._apply_read_speed`, which covers the one speed request that governs a
+  whole rip.
 - **Conflicts**: alternative exit to parity repair (2.3). Not self-sufficient —
   without a gate there is nothing to verify a candidate against.
 - **Combinations**: sequential after parity-repair failure; each attempt

@@ -1,39 +1,35 @@
 """
-drive_speed.py — restore the optical drive to full read speed.
+drive_speed.py — read-speed **policy**. Every command to the drive goes through
+:mod:`cdda2img.accudisc_reader`.
 
-cd-paranoia's ``-S`` flag (used to slow the AccurateRip-recovery re-rips) sets the
-drive read speed *persistently* — it stays in effect until the next speed-set, not
-just for that one command. cdrdao has no read-speed control, so a drive left slow by
-a prior ``-S 1`` cripples the next cdrdao operation (e.g. fast-toc), slow enough to
-blow the album-art fetch timeout. This module reads the drive's current/max read speed
-and, if the drive is throttled, restores it to maximum.
+This module used to own "the ioctl side" of speed control while AccuDisc owned the
+reads — a split that put the two halves of one conversation on two different SCSI
+commands. Setting went out as ``CDROM_SELECT_SPEED`` (the kernel's ``SET CD SPEED``)
+while ``Device.set_speed`` prefers **SET STREAMING (0xB6)**, an enforced ceiling, and
+only falls back to ``SET CD SPEED``. So a ceiling AccuDisc installed was being cleared
+by a different command than the one that set it, on a drive-dependent whether-it-works
+basis, with nothing on either side able to report which had happened. Retired
+2026-08-09 (kgr): everything that touches the disc goes through the one engine.
 
 Reading: there is no Linux ioctl for CD speed. The trustworthy source is MODE SENSE
 page 2A read at the *correct offsets* (max = page[8:10], current = page[14:16] — the
 fields cdrdao drive-info reports; the "page 2A lies" folklore is naive readers using
-the wrong fields). ``accudisc speed`` reads exactly those fields (validated
-kB/s-identical to cdrdao drive-info at 4X and 40X on the PX-716A) and is the only
-reader — there is no cdrdao fallback (M6 of the AccuDisc migration).
-
-This module owns the **ioctl** side of speed control. Every AccuDisc invocation
-lives in :mod:`cdda2img.accudisc_reader`, which is the single seam the library
-binding will replace; nothing here builds an argv.
-
-Setting: the ``CDROM_SELECT_SPEED`` block-device ioctl (proven by cd-paranoia/cdspeedctl)
-needs only device access — no root, unlike a raw SG_IO ``SET CD SPEED``.
+the wrong fields). ``Device.get_speed`` reads exactly those fields (validated
+kB/s-identical to cdrdao drive-info at 4X and 40X on the PX-716A).
 
 Best-effort throughout: every failure path is swallowed so a rip is never affected.
 
 Public interface:
     read_drive_speed(device) -> (current_kbps, max_kbps) | (None, None)
-    restore_drive_speed(device) -> None
+    current_speed_x(device) -> int | None
+    request_speed(device, nx) -> bool
+    restore_drive_speed(device, target_x=None) -> None
+    admitted_ladder(device) -> list[int]
 """
 
 from __future__ import annotations
 
-import fcntl
 import logging
-import os
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -44,9 +40,6 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
-# linux/cdrom.h: set the CD-ROM speed. The arg is an Nx multiplier (the kernel scales
-# it by ~177 into a SET CD SPEED command); arg 0 is the "fastest possible" sentinel.
-_CDROM_SELECT_SPEED = 0x5322
 _KBPS_PER_X = 176  # 1x CD = 75 sectors/s * 2352 bytes / 1000 ≈ 176 kB/s
 
 #: AccuDisc's verdict tokens that :func:`admitted_ladder` keys on. The others —
@@ -56,17 +49,11 @@ _KBPS_PER_X = 176  # 1x CD = 75 sectors/s * 2352 bytes / 1000 ≈ 176 kB/s
 _VERDICT_ADMITTED = "admitted"
 _VERDICT_UNKNOWN = "unknown"
 
-# Candidate Nx values to probe for the drive's real speed ladder; the drive snaps each to a
-# supported speed and we read back the achieved value (so the ladder is the drive's own,
-# not an assumed table).
-_SPEED_PROBE = (1, 2, 3, 4, 6, 8, 10, 12, 16, 20, 24, 32, 40, 48)
-
 
 def read_drive_speed(device: str) -> tuple[int | None, int | None]:
     """Return ``(current_kbps, max_kbps)``, or ``(None, None)``.
 
-    Delegates to :func:`accudisc_reader.read_speed` — this module owns the *ioctl*
-    side of speed control, not the AccuDisc transport. Never raises: any failure
+    Delegates to :func:`accudisc_reader.read_speed`. Never raises: any failure
     yields ``(None, None)`` and callers treat that as "unknown".
     """
     from cdda2img.accudisc_reader import read_speed
@@ -74,36 +61,77 @@ def read_drive_speed(device: str) -> tuple[int | None, int | None]:
     return read_speed(device)
 
 
-def _select_speed(device: str, nx: int) -> bool:
-    """Issue CDROM_SELECT_SPEED(nx). Returns True on success; swallows OSError."""
+def request_speed(device: str, nx: int) -> bool:
+    """Ask the drive for *nx*, via the seam. True on success; never raises.
+
+    Does NOT verify the drive honoured it — a successful command and an honoured
+    rate are different claims, and the caller that cares (``_apply_read_speed``)
+    reads page 2A back itself. ``nx = 0`` is the "fastest possible" sentinel.
+    """
+    from cdda2img.accudisc_reader import set_speed
+
     try:
-        fd = os.open(device, os.O_RDONLY | os.O_NONBLOCK)
-    except OSError as exc:
-        log.warning("could not open %s to restore read speed: %s", device, exc)
+        return set_speed(device, nx)
+    except (RuntimeError, OSError) as exc:
+        log.warning("could not set %s to %dX: %s", device, nx, exc)
         return False
+
+
+def current_speed_x(device: str) -> int | None:
+    """The drive's current read rate as a plain multiplier, or ``None``.
+
+    The value :func:`restore_drive_speed` is meant to be handed back later, so it
+    is captured *before* anything sets a speed. ``None`` when the drive did not
+    report — which callers must keep distinct from a number, since restoring to a
+    speed nobody measured is worse than not restoring at all.
+
+    MODE SENSE page 2A: instant, no disc spin-up, no command to the media. Never
+    raises: this is called for the rip's status line as well as for the restore,
+    and neither is worth failing a rip over.
+    """
     try:
-        fcntl.ioctl(fd, _CDROM_SELECT_SPEED, nx)
-    except OSError as exc:
-        log.warning("CDROM_SELECT_SPEED(%d) failed on %s: %s", nx, device, exc)
-        return False
-    finally:
-        os.close(fd)
-    return True
+        current, _maximum = read_drive_speed(device)
+    except (RuntimeError, OSError):
+        return None
+    return max(1, current // _KBPS_PER_X) if current else None
 
 
-def restore_drive_speed(device: str) -> None:
-    """If the drive is throttled below its max read speed, restore it to maximum.
+def restore_drive_speed(device: str, target_x: int | None = None) -> None:
+    """Put the drive back where we found it — or at max when we do not know.
 
-    Read-then-conditional: queries current vs max via :func:`read_drive_speed` and only
-    acts when they differ. Sets the exact max (``max_kbps // 176`` as an Nx multiplier),
-    which avoids relying on the ``0 = max`` convention; if the read failed, falls back to
-    Nx ``0`` so the drive is un-throttled regardless. Best-effort — never raises.
+    *target_x* is the multiplier captured by :func:`current_speed_x` before the rip
+    touched anything. **Restore-as-found is the semantic, and it is a change**: this
+    used to restore unconditionally to maximum, which was right when the thing being
+    undone was cd-paranoia's persistent ``-S 1``. cd-paranoia is gone from the tree,
+    and the only process that now throttles this drive is us — so a drive found at 8x
+    was deliberately set to 8x by the user or by another program, and blasting it to
+    max on our way out is us editing someone else's setting.
+
+    ``target_x=None`` keeps the old read-then-conditional behaviour for callers with
+    nothing captured (the ladder probe, which leaves the drive at its last rung and
+    genuinely does want it back at the top).
+
+    Best-effort — never raises.
     """
     current, maximum = read_drive_speed(device)
+    current_x = current // _KBPS_PER_X if current else None
+
+    if target_x is not None:
+        if current_x == target_x:
+            log.debug("drive %s already at %dX", device, target_x)
+            return
+        if request_speed(device, target_x):
+            log.info(
+                "drive %s read speed: %sX -> %dX (restored as found)",
+                device,
+                current_x if current_x else "?",
+                target_x,
+            )
+        return
 
     if maximum is None:
         # Couldn't read — un-throttle blind with the "fastest" sentinel.
-        if _select_speed(device, 0):
+        if request_speed(device, 0):
             log.info("drive %s read speed reset to max (speed unknown)", device)
         return
 
@@ -112,9 +140,13 @@ def restore_drive_speed(device: str) -> None:
         return
 
     nx = max(1, maximum // _KBPS_PER_X)
-    if _select_speed(device, nx):
-        cur_x = current // _KBPS_PER_X if current else "?"
-        log.info("drive %s read speed: %sX -> %dX (restored)", device, cur_x, nx)
+    if request_speed(device, nx):
+        log.info(
+            "drive %s read speed: %sX -> %dX (restored)",
+            device,
+            current_x if current_x else "?",
+            nx,
+        )
 
 
 def read_speed_rows(device: str) -> list[SpeedRow]:
@@ -227,20 +259,22 @@ def admitted_ladder(device: str) -> list[int]:
     return ladder
 
 
-def probe_speed_ladder(device: str) -> list[int]:
-    """Return the drive's actual discrete read speeds (X), ascending and de-duplicated.
-
-    Sets each :data:`_SPEED_PROBE` candidate via ``CDROM_SELECT_SPEED`` and reads back the
-    achieved speed from ``cdrdao drive-info`` — so the ladder reflects the drive's real
-    snapping behaviour, not an assumed table. Restores the drive to max afterwards.
-    Best-effort: a candidate that can't be set or read back is skipped.
-    """
-    achieved: set[int] = set()
-    for n in _SPEED_PROBE:
-        if not _select_speed(device, n):
-            continue
-        current_kbps, _ = read_drive_speed(device)
-        if current_kbps:
-            achieved.add(max(1, round(current_kbps / _KBPS_PER_X)))
-    restore_drive_speed(device)  # leave the drive at max after probing
-    return sorted(achieved)
+# ``probe_speed_ladder`` — the legacy set-then-read-back sweep over a candidate
+# table — was DELETED 2026-08-09. It had no caller in ``src/``: `admitted_ladder`
+# superseded it, deriving rungs from AccuDisc's timed reads at three radii rather
+# than from a page-2A read-back of what we had just asked for.
+#
+# It is worth recording what went with it, because the replacement is not strictly
+# better on every axis. That sweep was the **only** code in this project that set a
+# speed and then independently checked the drive had taken it. `admitted_ladder`
+# compares `req` against `page2a`, but both numbers now arrive from AccuDisc, so it
+# is our policy over their measurement rather than a second opinion. The
+# verification did not move to a better home; it stopped happening, and nothing
+# recorded the trade at the time. `_rip_disc_stage` now carries an explicit
+# read-back for the one speed request that matters (§ the whole-disc read), which
+# is where that check belongs.
+#
+# The equivalent probe, if one is ever wanted again, is
+# ``Device.probe_speed_ladder(candidates=…)`` through
+# :func:`accudisc_reader.speed_ladder_rows` — it takes the same candidate list and
+# returns a measured rate per rung instead of an echoed request.

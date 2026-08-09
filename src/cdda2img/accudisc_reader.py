@@ -579,6 +579,42 @@ def read_speed(device: str) -> tuple[int | None, int | None]:
     return _call(module, "speed", _read)
 
 
+def set_speed(device: str, speed_x: int) -> bool:
+    """Ask the drive to read at *speed_x* (Nx). ``True`` when the call succeeded.
+
+    ``Device.set_speed`` prefers **SET STREAMING (0xB6)** — a ceiling the drive
+    enforces — and falls back to the unprivileged ``CDROM_SELECT_SPEED`` when it
+    cannot issue one. That two-tier behaviour is the reason this replaced the raw
+    ``fcntl`` ioctl that used to live in :mod:`cdda2img.drive_speed`: the ioctl
+    could only ever reach the weaker of the two mechanisms, so a ceiling AccuDisc
+    had installed via SET STREAMING was being cleared — or not — by a *different*
+    command than the one that set it, and nothing on either side would have said
+    which. One call in both directions removes the question rather than answering
+    it.
+
+    Returning ``True``/``False`` rather than raising: every caller here is a
+    courtesy (restore the drive, step a rung), and a drive that declines has not
+    broken a rip. The boolean exists so a caller can still *say* it did not take —
+    a bare ``None`` would make "asked and refused" indistinguishable from "asked
+    and it worked", which is the shape of the gap this whole change is closing.
+
+    ``speed_x = 0`` is the "fastest the drive can manage" sentinel, passed through
+    unchanged; it is the one value that is a command rather than a rate.
+    """
+    module = _binding("set speed")
+
+    def _set() -> bool:
+        try:
+            with module.Device(device) as dev:
+                dev.set_speed(speed_x)
+        except (module.AccuDiscError, OSError) as exc:
+            log.debug("accudisc set_speed(%d) failed for %s: %s", speed_x, device, exc)
+            return False
+        return True
+
+    return _call(module, "set speed", _set)
+
+
 def _speed_ladder_binding(module: Any, device: str) -> list[SpeedRow]:
     """``speed_ladder_rows`` over ``Device.probe_speed_ladder``.
 
