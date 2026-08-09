@@ -221,12 +221,20 @@ read-engine side; "caller" means cdda2img (or any application driving AccuDisc).
   was deleted 2026-08-09. Note what went with it: it was the only set-then-read-back
   check in the tree, and `admitted_ladder` does not replace that half — it compares
   `req` against `page2a`, but both now come from AccuDisc, so it is our policy over
-  their measurement rather than a second opinion. The **pass** speed is now reported
-  by the engine: `ReadStats.speed_requested_x`/`speed_honoured_x` + `speed_quantized`
-  (AccuDisc 0.7.0), surfaced by `accudisc_reader._log_speed_adopted`. Our own page-2A
-  read-back was retired the same day it was written — it ran *before* the hand-off,
-  and `Device.read` sets `speed_x` again at the head of the read, so it measured a
-  moment the authoritative request then superseded.
+  their measurement rather than a second opinion. **Two speed reports now exist and
+  both are needed** — they answer different questions at different times:
+  - `cdda2img._apply_read_speed` reads page 2A back straight after the request, so
+    the spin-up status line can name the rate the disc is about to be read at. A
+    PX-716A asked for 16x adopts 8x and says so immediately (measured 2026-08-09).
+  - `accudisc_reader._log_speed_adopted` reports `ReadStats.speed_honoured_x`
+    (AccuDisc 0.7.0) — what the engine's own `speed_x` achieved during the read.
+
+  The read-back was briefly deleted on the reasoning that the engine's field
+  superseded it. It does not: the engine's answer rides on the read *result*, i.e.
+  after the read finishes, and a status line drawn before the first sector cannot
+  wait for it. `--ad-speed 16` printed "Ripping disc at 16x…" while the drive was
+  audibly at 8x. **A later, better measurement of the same quantity does not replace
+  an earlier one that something consumes earlier.**
 - **Still uncovered — the ladder.** `speed_honoured_x` is the *pass* speed, read back
   once when applied. The recovery ladder moves speed per rung mid-read, and a scalar
   pair cannot record that; AccuDisc said so explicitly rather than widening the field

@@ -2608,29 +2608,32 @@ def _stop_preview(preview: TrackPreview | None) -> None:
 
 
 def _apply_read_speed(device: str, want_x: int | None) -> int | None:
-    """Request *want_x* and return the rate to show on the spin-up status line.
+    """Request *want_x*, read back what the drive took, and return that for display.
 
-    **The verification lives in the engine now, not here** (2026-08-09). This used
-    to request a speed and then read page 2A back itself — the only such check in
-    the shipping path, added the same morning AccuDisc independently added
-    ``ReadStats.speed_requested_x``/``speed_honoured_x`` for the same reason. Theirs
-    is strictly better and ours had a flaw worth naming: it read back *before*
-    handing off, and ``Device.read`` sets ``speed_x`` again inside its own handle at
-    the head of the read, so our number described the drive at a moment the
-    authoritative request then superseded. Two measurements of one quantity, and the
-    one we owned was the earlier and weaker. :func:`accudisc_reader._log_speed_adopted`
-    now reports the adopted speed from the engine's own answer, which is also what
-    AccuDisc's CLI derives its notice from — so the two cannot disagree about the
-    same read.
+    **The read-back is required, and deleting it was a regression** (2026-08-09,
+    reported by kgr the same day). The reasoning that removed it was that AccuDisc's
+    ``ReadStats.speed_honoured_x`` supersedes it, which is true of the *engine's*
+    request and false of the status line. Two different things were being conflated:
 
-    What is left here is the **request**, which is still ours to make. It has to
-    happen before the read for the status line to say anything true about the rate
-    the disc is about to be read at, and it gives the drive a chance to spin up at
-    the right speed rather than changing mid-stream.
+    * The engine's answer arrives on the **read result** — i.e. after the read has
+      finished. The spin-up line is drawn before the first sector.
+    * So with the read-back gone, ``--ad-speed 16`` printed ``Ripping disc at 16x…``
+      on a PX-716A, which has no 16x rung and quantizes to 8x. The drive was audibly
+      at 8x. Nothing on screen ever said so; the engine's correct report landed in a
+      DEBUG log after the fact.
 
-    So the number returned is what we asked for, not a measurement — and it is used
-    for the spin-up phase text only, which is why that is acceptable. A drive that
-    quantizes it will be reported by the engine once the read begins.
+    Measured on the PX-716A rather than assumed, because "did the drive report the
+    quantization at set time?" is the question the whole fix rests on, and a drive
+    that answered only after the read would make this impossible rather than merely
+    wrong. Setting 4x then 16x reports 8x; 32x reports 32x; 32x then 16x reports 8x
+    again. The baseline is moved between arms deliberately — read back at 8x after a
+    drive already sitting at 8x cannot distinguish "quantized" from "unchanged".
+
+    This does **not** un-adopt their field. Both are kept and they answer different
+    questions: this one says what the drive took *before* the read, and
+    :func:`accudisc_reader._log_speed_adopted` reports what the engine's own request
+    achieved *during* it. The earlier one being superseded later is exactly why the
+    display needs it — a status line cannot wait for a result that arrives at the end.
 
     ``want_x=None`` skips the request entirely: the drive keeps its own management,
     which is the default and by far the common case.
@@ -2641,12 +2644,31 @@ def _apply_read_speed(device: str, want_x: int | None) -> int | None:
         return drive_speed.current_speed_x(device)
 
     if not drive_speed.request_speed(device, want_x):
-        # A refused command is worth saying immediately rather than leaving to the
-        # engine: it means the rate the user asked for was never installed at all,
-        # which is a different thing from a drive that took it and snapped it down.
+        # Refused outright: the rate was never installed. Distinct from quantizing,
+        # where the drive took the command and snapped it to a rung it has.
         log.warning("drive %s refused the %dX read-speed request", device, want_x)
         return drive_speed.current_speed_x(device)
-    return want_x
+
+    got_x = drive_speed.current_speed_x(device)
+    if got_x is None:
+        # Accepted, but the drive will not say where it landed. Return the request
+        # and say which it is — a number nobody measured must not read as measured.
+        log.warning(
+            "drive %s accepted the %dX request but does not report its speed; "
+            "the rate shown is what was asked for, not what was measured",
+            device,
+            want_x,
+        )
+        return want_x
+    if got_x != want_x:
+        log.info(
+            "drive %s asked for %dX, adopted %dX (quantized) — reading at %dX",
+            device,
+            want_x,
+            got_x,
+            got_x,
+        )
+    return got_x
 
 
 class _RipPhase:

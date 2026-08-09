@@ -252,35 +252,58 @@ def test_no_request_means_query_only(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_a_request_is_issued_before_the_read(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The request stays ours even though the verification no longer is.
-
-    It has to happen before the read for the spin-up line to say anything true, and
-    it lets the drive spin up at the target rate rather than changing mid-stream.
-    """
+    """The request has to happen before the read, so the spin-up line can say
+    something true and the drive spins up at the target rate rather than changing
+    mid-stream."""
     fake = _FakeDrive(reports=8)
     _patch_drive(monkeypatch, fake)
     assert cdda2img._apply_read_speed("/dev/sr0", 8) == 8
     assert fake.requested == [8]
 
 
-def test_no_page_2a_read_back_after_a_request(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Retired 2026-08-09 in favour of `ReadStats.speed_honoured_x`.
+def test_the_status_line_shows_the_quantized_rate_not_the_request(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """THE REGRESSION, and the reason this read-back exists at all.
 
-    Ours read back BEFORE handing off, and `Device.read` sets `speed_x` again inside
-    its own handle at the head of the read — so our number described the drive at a
-    moment the authoritative request then superseded. Two measurements of one
-    quantity, and ours was the earlier and weaker one.
+    I deleted it earlier on 2026-08-09, reasoning that AccuDisc's
+    `ReadStats.speed_honoured_x` superseded it. That is true of the ENGINE's request
+    and false of the STATUS LINE, and conflating the two is what broke it: the
+    engine's answer arrives on the read *result*, i.e. after the read has finished,
+    while the spin-up line is drawn before the first sector.
 
-    Pinned by counting the queries: a read-back would make this two (one for the
-    return value, one to verify), and the point is that there is now only the one
-    the None-branch needs.
+    Live consequence, reported by kgr within hours: `--ad-speed 16` printed
+    "Ripping disc at 16x…" on a PX-716A, which has no 16x rung and quantizes to 8x.
+    The drive was audibly at 8x. Nothing on screen ever said otherwise.
+
+    Measured on the drive rather than assumed — set 4x then 16x reports 8x, 32x
+    reports 32x, 32x then 16x reports 8x — with the baseline deliberately moved
+    between arms, because a read-back of 8x on a drive already at 8x cannot tell
+    "quantized" from "unchanged".
     """
-    fake = _FakeDrive(reports=40)
+    fake = _FakeDrive(reports=8)  # drive snaps the 16x request down to 8x
     _patch_drive(monkeypatch, fake)
-    assert cdda2img._apply_read_speed("/dev/sr0", 8) == 8, (
-        "must return the REQUEST; a measured rate here means the read-back is back"
+    with caplog.at_level("INFO"):
+        got = cdda2img._apply_read_speed("/dev/sr0", 16)
+    assert got == 8, (
+        "the status line would claim 16x on a drive reading at 8x — the whole defect"
     )
-    assert fake.queried == 0, "the drive was interrogated after the request"
+    assert fake.queried == 1, "the drive must be read back after the request"
+    assert "adopted 8X (quantized)" in caplog.text
+
+
+def test_a_silent_drive_reports_the_request_and_says_which_it_is(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Accepted the command, will not say where it landed. Returning the request is
+    the only option left, so the log carries the distinction the number cannot."""
+    fake = _FakeDrive(reports=None)
+    _patch_drive(monkeypatch, fake)
+    with caplog.at_level("WARNING"):
+        assert cdda2img._apply_read_speed("/dev/sr0", 8) == 8
+    assert "not what was measured" in caplog.text
 
 
 def test_a_refused_command_falls_back_to_a_plain_query(
