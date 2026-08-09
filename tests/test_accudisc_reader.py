@@ -962,15 +962,129 @@ def test_exit_three_is_reconstructed_from_stats(
 
 
 def test_subchannel_yield_is_reported(caplog: pytest.LogCaptureFixture) -> None:
-    """The counter the exit code cannot carry, and the one the Q speed cliff moves.
+    """The counter the exit code cannot carry.
 
-    Q yield collapses at high speed (98% at 24x, 47% at 32x on the PX-716A) while
-    the audio stays clean, so a rip can pass every audio gate having lost the
-    disc's pre-gaps and INDEX points.
+    Q health is a real quantity the audio gates cannot see: a rip can pass every
+    audio gate having lost the disc's pre-gaps and INDEX points, because Q carries
+    them and fails independently of the audio.
+
+    This used to cite the speed cliff ("98% at 24x, 47% at 32x") as the reason.
+    That model is superseded — RECOVERY.md §12.3/§12.8 records one run reading
+    clean at 40/32/8x and dirty at 24/4x, which is non-monotone and therefore not
+    a cliff. The test is unchanged; only its stated reason was wrong.
     """
     with caplog.at_level(logging.DEBUG, logger=ar.log.name):
         ar._log_read_caveats(_FakeStats(subq_total=100, subq_ok=47), "read")
     assert "47/100 Q frames good (53 bad)" in caplog.text
+
+
+# ── the adopted read speed (AccuDisc 0.7.0 `speed_honoured`) ─────────────────
+#
+# Four states share two numbers and THREE of them involve a zero. AccuDisc set
+# this out explicitly (§2026-08-09a) because both natural hand-rolled tests are
+# wrong, in opposite directions, out of the same zero:
+#
+#   state                     requested  honoured
+#   nothing asked                     0         0
+#   asked, NO ANSWER                  N         0   <- `honoured < requested` calls
+#   quantized (the signal)           16         8      this quantized
+#   honoured                          8         8   <- treating 0 as benign calls
+#                                                      the failed set honoured
+#
+# So the comparison lives in THEIR `ReadStats.speed_quantized`, and these tests
+# exist to prove we are calling it rather than reimplementing it.
+
+
+class _SpeedStats(_FakeStats):
+    """Stats carrying the 0.7.0 speed pair, with AccuDisc's own nonzero test."""
+
+    def __init__(self, requested: int, honoured: int) -> None:
+        super().__init__()
+        self.speed_requested_x = requested
+        self.speed_honoured_x = honoured
+
+    @property
+    def speed_quantized(self) -> bool:
+        # Mirrors their property exactly: the nonzero guard is the whole point.
+        return bool(self.speed_honoured_x) and (
+            self.speed_honoured_x < self.speed_requested_x
+        )
+
+
+def _speed_module(*, feature: bool = True) -> Any:
+    return SimpleNamespace(
+        features=frozenset({"speed_honoured"}) if feature else frozenset()
+    )
+
+
+def test_a_quantized_read_is_reported(caplog: pytest.LogCaptureFixture) -> None:
+    """The signal: asked 16, drive adopted 8. INFO, not a warning — a drive
+    snapping to a rung it implements is ordinary. It matters because a rip
+    LABELLED with a speed it never ran at poisons every later comparison."""
+    with caplog.at_level(logging.DEBUG, logger=ar.log.name):
+        ar._log_speed_adopted(_SpeedStats(16, 8), "read", _speed_module())
+    assert "asked for 16X, drive adopted 8X (quantized)" in caplog.text
+
+
+def test_a_failed_set_is_not_reported_as_quantized(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """THE TRAP. `honoured == 0` is *no answer* — the set failed, or page 2A did
+    not read back. AccuDisc populates the field only when the set returned OK.
+
+    A bare `honoured < requested` makes this `0 < 16` and reports a quantization
+    that never happened. Both readings are well-formed, so nothing downstream
+    catches it; this test is the thing that catches it.
+    """
+    with caplog.at_level(logging.DEBUG, logger=ar.log.name):
+        ar._log_speed_adopted(_SpeedStats(16, 0), "read", _speed_module())
+    assert "quantized" not in caplog.text
+    assert "did not report back" in caplog.text
+    assert "unconfirmed" in caplog.text
+
+
+def test_an_honoured_request_is_not_a_warning(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The other side of the same zero: treating it as benign would report a
+    failed set as honoured."""
+    with caplog.at_level(logging.DEBUG, logger=ar.log.name):
+        ar._log_speed_adopted(_SpeedStats(8, 8), "read", _speed_module())
+    assert "reading at 8X as requested" in caplog.text
+    assert "quantized" not in caplog.text
+
+
+def test_a_drive_managed_read_says_nothing(caplog: pytest.LogCaptureFixture) -> None:
+    """`requested == 0` means nothing was asked — the common case. There is no
+    request to compare against, so there is nothing to report."""
+    with caplog.at_level(logging.DEBUG, logger=ar.log.name):
+        ar._log_speed_adopted(_SpeedStats(0, 0), "read", _speed_module())
+    assert caplog.text == ""
+
+
+def test_an_older_engine_is_silent_rather_than_reassuring(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Feature-detected, never version-checked, and never `getattr`-defaulted.
+
+    A binding without `speed_honoured` cannot tell us what the drive adopted.
+    **Absent is not the same as "not quantized"** — a default would convert "this
+    engine cannot answer" into a positive claim that the drive complied.
+    """
+    stats = _SpeedStats(16, 8)  # would report quantized on a capable engine
+    with caplog.at_level(logging.DEBUG, logger=ar.log.name):
+        ar._log_speed_adopted(stats, "read", _speed_module(feature=False))
+    assert caplog.text == ""
+
+
+def test_the_speed_pair_is_the_shape_the_binding_actually_ships() -> None:
+    """Against the REAL binding: a fake cannot detect an upstream rename, which is
+    the whole reason these shape tests exist."""
+    module = _real_binding()
+    if "speed_honoured" not in getattr(module, "features", frozenset()):
+        pytest.skip("engine predates the speed_honoured capability")
+    for name in ("speed_requested_x", "speed_honoured_x", "speed_quantized"):
+        assert hasattr(module.ReadStats, name), f"ReadStats no longer provides {name}"
 
 
 # ── write_disc + speed_ladder_rows over the binding ──────────────────────────

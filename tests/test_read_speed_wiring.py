@@ -221,12 +221,17 @@ class _FakeDrive:
         self.reports = reports
         self.accepts = accepts
         self.requested: list[int] = []
+        #: Queries made AFTER a request — the read-back signal. Counted rather
+        #: than flagged so a second one is visible too.
+        self.queried = 0
 
     def request_speed(self, device: str, nx: int) -> bool:
         self.requested.append(nx)
         return self.accepts
 
     def current_speed_x(self, device: str) -> int | None:
+        if self.requested:
+            self.queried += 1
         return self.reports
 
 
@@ -246,54 +251,48 @@ def test_no_request_means_query_only(monkeypatch: pytest.MonkeyPatch) -> None:
     assert fake.requested == []
 
 
-def test_an_honoured_request_reports_the_measured_rate(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_a_request_is_issued_before_the_read(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The request stays ours even though the verification no longer is.
+
+    It has to happen before the read for the spin-up line to say anything true, and
+    it lets the drive spin up at the target rate rather than changing mid-stream.
+    """
     fake = _FakeDrive(reports=8)
     _patch_drive(monkeypatch, fake)
     assert cdda2img._apply_read_speed("/dev/sr0", 8) == 8
     assert fake.requested == [8]
 
 
-def test_a_declined_request_reports_what_the_drive_did(
-    monkeypatch: pytest.MonkeyPatch,
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    """The check nothing in the shipping path performed before 2026-08-09.
+def test_no_page_2a_read_back_after_a_request(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Retired 2026-08-09 in favour of `ReadStats.speed_honoured_x`.
 
-    A drive that ignores a request would otherwise produce a rip LABELLED with a
-    speed it never ran at — and every measurement taken under that label is
-    mislabelled, which is worse than a rip that is merely slower than asked. It is
-    a warning, not a failure: a governor capping degraded media is normal.
+    Ours read back BEFORE handing off, and `Device.read` sets `speed_x` again inside
+    its own handle at the head of the read — so our number described the drive at a
+    moment the authoritative request then superseded. Two measurements of one
+    quantity, and ours was the earlier and weaker one.
+
+    Pinned by counting the queries: a read-back would make this two (one for the
+    return value, one to verify), and the point is that there is now only the one
+    the None-branch needs.
     """
     fake = _FakeDrive(reports=40)
     _patch_drive(monkeypatch, fake)
-    with caplog.at_level("WARNING"):
-        got = cdda2img._apply_read_speed("/dev/sr0", 8)
-    assert got == 40, "must report the rate the disc was really read at"
-    assert "settled at 40X" in caplog.text
+    assert cdda2img._apply_read_speed("/dev/sr0", 8) == 8, (
+        "must return the REQUEST; a measured rate here means the read-back is back"
+    )
+    assert fake.queried == 0, "the drive was interrogated after the request"
 
 
 def test_a_refused_command_falls_back_to_a_plain_query(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
+    """Still ours to report, and distinct from quantization: a refused command means
+    the requested rate was never installed at all, where a quantized one means the
+    drive took it and snapped it down. The engine can only tell us about the second.
+    """
     fake = _FakeDrive(reports=40, accepts=False)
     _patch_drive(monkeypatch, fake)
     with caplog.at_level("WARNING"):
         assert cdda2img._apply_read_speed("/dev/sr0", 8) == 40
     assert "refused" in caplog.text
-
-
-def test_a_silent_drive_reports_the_request_and_says_so(
-    monkeypatch: pytest.MonkeyPatch,
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    """Accepted the command, will not say where it landed. Returning the request
-    is the only option left, so the log has to carry the distinction the return
-    value cannot."""
-    fake = _FakeDrive(reports=None)
-    _patch_drive(monkeypatch, fake)
-    with caplog.at_level("WARNING"):
-        assert cdda2img._apply_read_speed("/dev/sr0", 8) == 8
-    assert "not what was measured" in caplog.text

@@ -728,7 +728,7 @@ def engine_version() -> str:
         return "accudisc (version unknown)"
 
 
-def _log_read_caveats(stats: Any, what: str) -> None:
+def _log_read_caveats(stats: Any, what: str, module: Any = None) -> None:
     """Reconstruct the retired CLI's exit-3 verdict from ``ReadStats`` and log it.
 
     Exit 3 was **not** a library return. ``cli/main.c`` computed it after the read
@@ -746,10 +746,16 @@ def _log_read_caveats(stats: Any, what: str) -> None:
     AccurateRip's and CTDB's question, not the engine's.
 
     The subchannel counters have no CLI equivalent at all — the exit code cannot
-    carry them — so they are reported here as the extra the binding buys. Q-frame
-    yield falls off a cliff at high speed (98% at 24x, 47% at 32x on the PX-716A)
-    and takes pre-gaps and INDEX points with it while the audio stays clean, so a
-    rip can pass every audio gate and still have lost the disc's structure.
+    carry them — so they are reported here as the extra the binding buys. A rip can
+    pass every audio gate and still have lost the disc's structure: Q carries the
+    pre-gaps and INDEX points, and it fails independently of the audio.
+
+    **The reason for reporting them is NOT the speed cliff.** This docstring cited
+    "98% at 24x, 47% at 32x" as the motivation; that model is superseded
+    (`RECOVERY.md` §12.3/§12.8 — one run read clean at 40/32/8x and dirty at 24/4x,
+    which is non-monotone and so cannot be a cliff). The counters are worth
+    reporting because Q health is a real quantity the audio gates cannot see. The
+    justification moved; the reporting was right for a different reason.
     """
     if stats.subq_total:
         log.debug(
@@ -759,6 +765,12 @@ def _log_read_caveats(stats: Any, what: str) -> None:
             stats.subq_total,
             stats.subq_bad,
         )
+    # *module* is optional so the caveat tests can call this with a fake stats
+    # object and no binding; without it the speed report is skipped rather than
+    # guessed at, which is the same rule as everywhere else here — absent
+    # capability information is not evidence of anything.
+    if module is not None:
+        _log_speed_adopted(stats, what, module)
     if not (stats.hard_errors or stats.sectors_suspect or stats.sectors_flagged):
         log.debug("accudisc %s: clean (%d sectors)", what, stats.sectors_read)
         return
@@ -770,6 +782,73 @@ def _log_read_caveats(stats: Any, what: str) -> None:
         stats.sectors_suspect,
         stats.sectors_flagged,
     )
+
+
+#: ``ReadStats`` carries ``speed_requested_x``/``speed_honoured_x`` and the derived
+#: ``speed_quantized`` (AccuDisc 0.7.0). Feature-detected, never version-checked:
+#: **absent is not the same as "not quantized"**, so a ``getattr`` default would
+#: turn "this engine cannot tell us" into a positive claim that the drive complied.
+_FEATURE_SPEED_HONOURED = "speed_honoured"
+
+
+def _log_speed_adopted(stats: Any, what: str, module: Any) -> None:
+    """Report the speed the drive actually adopted, from the engine's own answer.
+
+    This replaced a page-2A read-back on our side (2026-08-09, AccuDisc §2026-08-09a).
+    Ours ran *before* handing off, and ``Device.read`` sets ``speed_x`` again inside
+    its own handle at the head of the read — so our number described the drive at a
+    moment that the authoritative request then superseded. Two measurements of one
+    quantity, and the one we kept was the earlier and weaker of them. AccuDisc's CLI
+    derives its own notice from these same fields, so a consumer reading them cannot
+    disagree with the CLI about the same read.
+
+    **Never hand-roll the comparison.** Four states share two numbers and three of
+    them involve a zero: nothing-asked is ``(0, 0)``, a *failed* set is ``(N, 0)``,
+    quantized is ``(16, 8)``, honoured is ``(8, 8)``. A bare
+    ``honoured < requested`` reports the failed set as quantized (``0 < 16``);
+    treating the zero as benign reports it as honoured. Both are well-formed, both
+    are wrong, and they are wrong in opposite directions — so the nonzero test lives
+    in ``ReadStats.speed_quantized`` and we use theirs.
+
+    A quantized read is logged at **INFO**: it is not a fault, and a drive snapping
+    16x down to 8x is ordinary. It matters because a rip *labelled* with a speed it
+    never ran at poisons every comparison drawn against it afterwards.
+
+    Scope, stated because it is easy to over-read: these are the **pass** speed, set
+    once and read back once. The recovery ladder moves speed per rung mid-read, and a
+    scalar pair cannot record that — AccuDisc said so explicitly rather than widening
+    the field to look like it covers it. The pre-flight answer there is
+    ``probe_speed_ladder(points=3)``'s ``QUANTIZED`` verdict, which is the drive
+    telling us directly (their `speeds.c:163-166` — the only exact clause in that
+    verdict function, no radius caveat).
+    """
+    if not _has_feature(module, _FEATURE_SPEED_HONOURED):
+        return
+    requested = getattr(stats, "speed_requested_x", 0)
+    if not requested:
+        return  # nothing was asked; the drive ran at its own management
+    honoured = getattr(stats, "speed_honoured_x", 0)
+    if not honoured:
+        # Asked, no answer. AccuDisc populates this ONLY when the set returned OK,
+        # so a zero here is a failed set or an unreadable page 2A — never evidence
+        # the request was honoured. Distinct from quantized, and it needs saying:
+        # the rip is about to be labelled with a speed nobody confirmed.
+        log.warning(
+            "accudisc %s: asked for %dX and the drive did not report back — "
+            "the read speed is unconfirmed",
+            what,
+            requested,
+        )
+        return
+    if stats.speed_quantized:
+        log.info(
+            "accudisc %s: asked for %dX, drive adopted %dX (quantized)",
+            what,
+            requested,
+            honoured,
+        )
+    else:
+        log.debug("accudisc %s: reading at %dX as requested", what, honoured)
 
 
 def _split_streams(chunk: Any, files: dict[str, Any]) -> None:
@@ -1217,7 +1296,7 @@ def _read_disc_binding(
                 speed_x=read_speed or 0,
                 **extra,
             )
-    _log_read_caveats(result.stats, "read")
+    _log_read_caveats(result.stats, "read", module)
     return True
 
 

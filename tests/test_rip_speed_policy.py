@@ -1,12 +1,16 @@
 """The rip path must not blast the drive to max before reading the disc.
 
-This is the `subq_speed_cliff` regression, settled as D1 in
-`docs/reference/accudisc-migration-plan.md` §6. Read speed is drive state that
-persists across handles and processes, so restoring to maximum on the way in
-governs the rip that follows — and raw-Q yield falls off a cliff at the top of
-the range while audio, C2 and AccurateRip all stay clean. The result is a rip
-that passes every audio gate and silently loses the disc's pre-gaps and INDEX
-points.
+Settled as D1 in `docs/reference/accudisc-migration-plan.md` §6. Read speed is
+drive state that persists across handles and processes, so restoring to maximum
+on the way in governs the rip that follows.
+
+**The rule survived its original justification.** D1 was argued from the
+`subq_speed_cliff` model — raw-Q yield collapsing at the top of the range while
+the audio gates stayed clean. That model is superseded (RECOVERY.md §12.3/§12.8:
+one run read clean at 40/32/8x and dirty at 24/4x, non-monotone, so not a
+cliff). The rule now rests on something plainer: since 2026-08-09 the initial
+pass has a *requested* speed (`--ad-speed`), and a restore sited before the read
+would silently overwrite it between the request and the read.
 
 A test that merely asserts "restore_drive_speed is not called" would pass if
 `rip_image` were deleted, so these read the source instead and pin WHERE the

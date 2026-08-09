@@ -221,14 +221,21 @@ read-engine side; "caller" means cdda2img (or any application driving AccuDisc).
   was deleted 2026-08-09. Note what went with it: it was the only set-then-read-back
   check in the tree, and `admitted_ladder` does not replace that half — it compares
   `req` against `page2a`, but both now come from AccuDisc, so it is our policy over
-  their measurement rather than a second opinion. A read-back was added at
-  `cdda2img._apply_read_speed`, but be precise about its scope: it verifies **our**
-  `--ad-speed` request, issued before the read. AccuDisc sets `speed_x` again inside
-  its own `Device` at the head of the read — that is the authoritative request — so
-  nothing currently reports the rate a read *actually ran at*, on any path. The
-  recovery ladder is uncovered entirely: every re-read passes `speed_x` and nobody
-  looks. Closing this needs the achieved rate on the read result; asked of AccuDisc
-  2026-08-09 (outbound §163.3).
+  their measurement rather than a second opinion. The **pass** speed is now reported
+  by the engine: `ReadStats.speed_requested_x`/`speed_honoured_x` + `speed_quantized`
+  (AccuDisc 0.7.0), surfaced by `accudisc_reader._log_speed_adopted`. Our own page-2A
+  read-back was retired the same day it was written — it ran *before* the hand-off,
+  and `Device.read` sets `speed_x` again at the head of the read, so it measured a
+  moment the authoritative request then superseded.
+- **Still uncovered — the ladder.** `speed_honoured_x` is the *pass* speed, read back
+  once when applied. The recovery ladder moves speed per rung mid-read, and a scalar
+  pair cannot record that; AccuDisc said so explicitly rather than widening the field
+  to look like it covers it. The available answer is `probe_speed_ladder(points=3)`'s
+  `QUANTIZED` verdict — the drive reporting a lower speed than requested for that
+  rung, asked *before* the read. It is the only exact clause in their verdict function
+  (no rate comparison, no radius caveat). **Do not add a page-2A read-back per rung**:
+  every rung re-read already costs a seek and a MODE SENSE on each is a per-sector tax
+  on the recovery path — if it is worth paying it belongs in the engine.
 - **Conflicts**: alternative exit to parity repair (2.3). Not self-sufficient —
   without a gate there is nothing to verify a candidate against.
 - **Combinations**: sequential after parity-repair failure; each attempt

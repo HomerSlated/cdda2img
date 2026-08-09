@@ -2608,34 +2608,32 @@ def _stop_preview(preview: TrackPreview | None) -> None:
 
 
 def _apply_read_speed(device: str, want_x: int | None) -> int | None:
-    """Ask for *want_x*, then read page 2A back. Returns the rate to display.
+    """Request *want_x* and return the rate to show on the spin-up status line.
 
-    **This is the only place in the shipping path that checks a speed request was
-    honoured**, and it exists because until now nothing did. Every set was
-    fire-and-forget: ``restore_drive_speed`` set and never re-read, the recovery
-    ladder passed ``speed_x`` per re-read and never looked, and the one function
-    that did set-then-read-back (``drive_speed.probe_speed_ladder``) had no caller.
-    A drive that silently ignored a request would have produced a rip labelled with
-    a speed it never ran at — and every measurement taken at that label would be
-    mislabelled, which is worse than a rip that is merely slower than asked.
+    **The verification lives in the engine now, not here** (2026-08-09). This used
+    to request a speed and then read page 2A back itself — the only such check in
+    the shipping path, added the same morning AccuDisc independently added
+    ``ReadStats.speed_requested_x``/``speed_honoured_x`` for the same reason. Theirs
+    is strictly better and ours had a flaw worth naming: it read back *before*
+    handing off, and ``Device.read`` sets ``speed_x`` again inside its own handle at
+    the head of the read, so our number described the drive at a moment the
+    authoritative request then superseded. Two measurements of one quantity, and the
+    one we owned was the earlier and weaker. :func:`accudisc_reader._log_speed_adopted`
+    now reports the adopted speed from the engine's own answer, which is also what
+    AccuDisc's CLI derives its notice from — so the two cannot disagree about the
+    same read.
 
-    The mismatch is a **warning, not a failure**. A drive declining a rate is a
-    normal thing for a drive to do — a governor caps degraded media regardless of
-    what was asked — and the correct response is to record what actually happened,
-    not to refuse to rip.
+    What is left here is the **request**, which is still ours to make. It has to
+    happen before the read for the status line to say anything true about the rate
+    the disc is about to be read at, and it gives the drive a chance to spin up at
+    the right speed rather than changing mid-stream.
 
-    **What this verifies is OUR request, not the rate the read ran at**, and the
-    difference is not pedantic. ``read_disc_c2`` sets ``speed_x`` again inside
-    AccuDisc's own ``Device``, *after* this read-back — that pass-through is the
-    authoritative request, and this one exists so there is something to verify and
-    something honest to display before the read begins. If AccuDisc's set lands
-    somewhere else, the number here is stale and nothing would say so. Closing that
-    needs the achieved rate on the read *result*, which is asked of AccuDisc in
-    §163.3 of the outbound correspondence; until it exists, do not describe this as
-    "the speed the disc was read at" anywhere user-facing.
+    So the number returned is what we asked for, not a measurement — and it is used
+    for the spin-up phase text only, which is why that is acceptable. A drive that
+    quantizes it will be reported by the engine once the read begins.
 
-    ``want_x=None`` skips the request entirely and just reads: the drive keeps its
-    own management, which is the default and by far the common case.
+    ``want_x=None`` skips the request entirely: the drive keeps its own management,
+    which is the default and by far the common case.
     """
     from cdda2img import drive_speed
 
@@ -2643,29 +2641,12 @@ def _apply_read_speed(device: str, want_x: int | None) -> int | None:
         return drive_speed.current_speed_x(device)
 
     if not drive_speed.request_speed(device, want_x):
+        # A refused command is worth saying immediately rather than leaving to the
+        # engine: it means the rate the user asked for was never installed at all,
+        # which is a different thing from a drive that took it and snapped it down.
         log.warning("drive %s refused the %dX read-speed request", device, want_x)
         return drive_speed.current_speed_x(device)
-
-    got_x = drive_speed.current_speed_x(device)
-    if got_x is None:
-        # Asked, no error, but the drive will not say where it landed. Report the
-        # request rather than inventing a measurement — and say which it is.
-        log.warning(
-            "drive %s accepted the %dX request but does not report its speed; "
-            "the rate shown is what was asked for, not what was measured",
-            device,
-            want_x,
-        )
-        return want_x
-    if got_x != want_x:
-        log.warning(
-            "drive %s was asked for %dX and settled at %dX — reading at %dX",
-            device,
-            want_x,
-            got_x,
-            got_x,
-        )
-    return got_x
+    return want_x
 
 
 class _RipPhase:
@@ -3137,13 +3118,21 @@ def rip_image(  # noqa: C901
     read_offset, _write_offset, drive_name = _resolve_drive_offsets(device, cfg)
 
     # NO mid-pipeline restore-to-max here. This used to un-throttle the drive
-    # before the lead-in scan, and it is the `subq_speed_cliff` regression: the
-    # read speed is drive state that persists across handles and processes, so
-    # blasting it to maximum on the way in governs the rip that follows. Raw-Q
-    # yield falls off a cliff at the top of the range on this drive while audio,
-    # C2 and AccurateRip all stay clean — a rip that passes every audio gate and
-    # silently loses the disc's pre-gaps and INDEX points. Settled as D1 in
-    # accudisc-migration-plan.md §6: delete it, do not re-shape it.
+    # before the lead-in scan; read speed is drive state that persists across
+    # handles and processes, so blasting it to maximum on the way in governs the
+    # rip that follows. Settled as D1 in accudisc-migration-plan.md §6: delete it,
+    # do not re-shape it.
+    #
+    # **The conclusion outlived its original reason, and the reason is now a
+    # different one.** D1 was argued from the `subq_speed_cliff` model — raw-Q
+    # yield collapsing at the top of the range while audio stayed clean. That
+    # model is superseded (RECOVERY.md §12.3/§12.8: one run read clean at
+    # 40/32/8x and dirty at 24/4x, non-monotone, so not a cliff). What keeps the
+    # rule is plainer and no longer speculative: since 2026-08-09 the initial
+    # pass has a REQUESTED speed (--ad-speed), and a restore sited here would
+    # silently overwrite the rate the user asked for, between the request and the
+    # read. A rule can be right for a reason that later turns out to be wrong;
+    # what it must not do is keep citing that reason.
     #
     # The stated justification was that a drive left throttled by a previous run
     # keeps that speed, and that the lead-in scan and the album-art fetch should
