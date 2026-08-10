@@ -22,6 +22,7 @@ CRC bytes are padded back to 0x00 before passing to parse_cdtext_packs().
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
 from typing import IO
 
@@ -405,11 +406,18 @@ def info_ccd(ccd_path: Path) -> tuple[RBIDisc, bool, int]:
     return disc, has_cdtext, img_path.stat().st_size
 
 
-def import_ccd(ccd_path: Path, pcm_out: Path) -> tuple[RBIDisc, int]:
+def import_ccd(
+    ccd_path: Path, pcm_out: Path, report: Callable[[str], None] | None = None
+) -> tuple[RBIDisc, int]:
     """Import a CloneCD CCD/IMG disc image as master-mode RBI.
 
     Reads ``ccd_path`` (*.ccd text TOC) and the paired *.img file.
     Returns ``(disc, FLAG_MASTER_MODE)``.
+
+    *report* receives the human-readable notes (currently the CD-Text line).
+    It defaults to ``print``; under the TUI the caller passes a sink that
+    appends to the output region, because a bare ``print`` moves the cursor
+    without telling the renderer and leaves an orphaned progress bar behind.
 
     Raises:
         FileNotFoundError: IMG file not found alongside the CCD.
@@ -417,7 +425,7 @@ def import_ccd(ccd_path: Path, pcm_out: Path) -> tuple[RBIDisc, int]:
                     missing lead-out entry, or no audio tracks.
     """
     disc, has_cdtext, layout, img_path = _parse_ccd_image(ccd_path)
-    print(f"  CD-Text: {'YES' if has_cdtext else 'NO'}")
+    (report or print)(f"  CD-Text: {'YES' if has_cdtext else 'NO'}")
     with open(img_path, "rb") as img:
         _write_pcm(img, layout, pcm_out)
     return disc, FLAG_MASTER_MODE

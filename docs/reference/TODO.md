@@ -6,7 +6,7 @@
 
 Both raised by kgr at the close of 2026-08-03. N1a and N1b resolved 2026-08-04;
 N1d settled and N1c superseded 2026-08-05; **N3, N4 and N5 implemented 2026-08-06**.
-**Open: N2, N6 (queued 2026-08-07) and N7 (queued 2026-08-10).** (N1e is withdrawn
+**Open: N2, N6 (queued 2026-08-07), N7 and N8 (queued 2026-08-10).** (N1e is withdrawn
 in full — retained below as evidence, not a plan. Its deletion list must not be
 actioned.)
 
@@ -985,6 +985,43 @@ kgr's to run, not an agent's. The existing sample is at
 `/mnt/aladdin/Storage/Install/Burning/Images/Plextools/`. Note that part 2 needs
 PlexTools to drive a *non-Plextor* drive, or a second Plextor with a different
 offset — check that is even possible before planning around it.
+
+#### N8. **[C2I] Any `log` record emitted while the TUI is live orphans a progress
+bar** — QUEUED 2026-08-10, found while fixing the import readers
+
+**Mechanism, measured under a pty 2026-08-10.** `TerminalUI._frame` repaints by
+rewinding `_prev_height - 1` lines and erasing to the screen bottom, where
+`_prev_height` is the TUI's model of its own region. Any write it did not make
+moves the cursor without updating that model, so the next rewind lands in the
+wrong place and the previous frame is never erased. **One stranded progress bar
+per stray write** — kgr saw three during a `.pxi` import: two orphans plus the
+live one that `stop()` clears.
+
+The reader half is fixed (readers take a `report` sink; `_import_source` binds it
+to `_ui_print`). **The logging half is not, and it is the larger surface.**
+`main()` installs a handler only under `--verbose`, so at default verbosity a
+`log.warning` falls through to `logging.lastResort` → stderr, with the same
+effect and from any module. `accudisc_reader` and `subq_toc` alone hold 7
+`log.warning`/`log.info` calls, several on the rip path
+(`_log_read_caveats`, `_log_speed_adopted`, the CD-Text binding guard). It has
+probably not been reported because those fire only on caveats, quantised speeds
+and rejected CD-Text — i.e. exactly when the operator most wants a clean screen.
+
+**The obvious fix has a rule in front of it.** A `logging.Handler` that calls
+`ui.add_output`, installed in `TerminalUI.start()` and removed in `stop()`, is the
+natural answer — but CLAUDE.md forbids global logging mutation inside `src/`
+("install narrow filters at `__main__` entry only"), and it would double up with
+`basicConfig`'s own `StreamHandler` under `--verbose`. Worth doing properly:
+decide whether the handler belongs at the entry point (installed when a TUI is
+created), how it interacts with `--verbose`, and what level it filters at.
+
+**Do not "fix" this by removing the log calls.** They are the right records; the
+defect is that there is no route from a log record to the TUI output region.
+
+**Reproduction harness** (write it fresh, it is ten lines): drive a real
+`TerminalUI` under `pty.spawn`, emit a `log.warning` mid-render, and look for a
+`\r\x1b[J` rewind where a `\x1b[<n>A\r\x1b[J` was needed. Include the negative
+control — the old code path — or the probe cannot fail and proves nothing.
 
 ### ⭐ LIVE — outstanding work as of 2026-07-30
 

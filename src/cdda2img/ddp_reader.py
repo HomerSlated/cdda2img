@@ -19,6 +19,7 @@ disc has a non-silent Track 1 hidden area (index 0 content before index 1), that
 content will be silently dropped — this is accepted behaviour for the prototype.
 """
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -311,12 +312,19 @@ def info_ddp(ddp_dir: Path) -> tuple[RBIDisc, bool, int]:
     return disc, has_cdtext, total_bytes
 
 
-def import_ddp(ddp_dir: Path, pcm_out: Path) -> tuple[RBIDisc, int]:
+def import_ddp(
+    ddp_dir: Path, pcm_out: Path, report: Callable[[str], None] | None = None
+) -> tuple[RBIDisc, int]:
     """Parse a DDP 2.0 directory and write s16le PCM to *pcm_out*.
 
     Returns ``(disc, FLAG_MASTER_MODE)``.
+
+    *report* receives the human-readable notes (currently the CD-Text line).
+    It defaults to ``print``; under the TUI the caller passes a sink that
+    appends to the output region, because a bare ``print`` moves the cursor
+    without telling the renderer and leaves an orphaned progress bar behind.
     """
     disc, has_cdtext, track_count, skip_frames = _parse_ddp(ddp_dir)
-    print(f"  CD-Text: {'YES' if has_cdtext else 'NO'}")
+    (report or print)(f"  CD-Text: {'YES' if has_cdtext else 'NO'}")
     _assemble_pcm(ddp_dir, track_count, skip_frames, pcm_out)
     return disc, FLAG_MASTER_MODE

@@ -51,6 +51,7 @@ from __future__ import annotations
 
 import logging
 import struct
+from collections.abc import Callable
 from pathlib import Path
 from typing import IO
 
@@ -466,7 +467,10 @@ def info_pxi(pxi_path: Path) -> tuple[RBIDisc, bool, int]:
 
 
 def import_pxi(
-    pxi_path: Path, pcm_out: Path, prov: dict[str, str] | None = None
+    pxi_path: Path,
+    pcm_out: Path,
+    prov: dict[str, str] | None = None,
+    report: Callable[[str], None] | None = None,
 ) -> tuple[RBIDisc, int]:
     """Import a PlexTools ``.pxi`` disc image as master-mode RBI.
 
@@ -474,13 +478,23 @@ def import_pxi(
     padding applied to reach the declared lead-out is recorded there as
     ``pxi_tail_padded`` so the fabricated samples stay identifiable.
 
+    *report* receives the human-readable notes.  It defaults to ``print``;
+    under the TUI the caller passes a sink that appends to the output region,
+    because a bare ``print`` moves the cursor without telling the renderer and
+    leaves an orphaned progress bar behind.  The tail-padding note goes there
+    too rather than to ``log.warning``: with no handler configured a warning
+    falls through to :data:`logging.lastResort` on stderr, which orphans a bar
+    in exactly the same way.  The durable record is ``pxi_tail_padded`` in
+    PROV, which outlives any log line.
+
     Raises :class:`PXIError` for images this parser does not understand:
     multi-session, non-consecutive or non-ascending tracks, a gap in the index
-    table, a lead-out that the index table does not reach, or a track count the
-    TOC and the index table disagree on.
+    table, a lead-out that the index table does not reach, or an audio region
+    short by more than one sector.
     """
+    say = report or print
     disc, has_cdtext, total_frames = _parse_pxi(pxi_path)
-    print(f"  CD-Text: {'YES' if has_cdtext else 'NO'}")
+    say(f"  CD-Text: {'YES' if has_cdtext else 'NO'}")
 
     with open(pxi_path, "rb") as f:
         pad = _write_pcm(
@@ -488,11 +502,8 @@ def import_pxi(
         )
 
     if pad:
-        log.warning(
-            "%s: audio ran %d bytes short of the lead-out; tail zero-filled",
-            pxi_path.name,
-            pad,
-        )
+        say(f"  Tail: audio ran {pad} bytes short of the lead-out; zero-filled")
+        log.debug("%s: tail zero-filled by %d bytes", pxi_path.name, pad)
         if prov is not None:
             prov["pxi_tail_padded"] = str(pad)
 

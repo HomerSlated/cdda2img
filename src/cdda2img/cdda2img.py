@@ -1031,15 +1031,24 @@ def _import_source(
     One branch per supported foreign format.  Split out of ``import_image`` so
     the format dispatch can grow without the surrounding orchestration —
     metadata lookups, ReplayGain, container build — growing with it.
+
+    Every reader is handed *say* rather than being left to ``print``.  A bare
+    write moves the cursor without telling the TUI renderer, whose repaint
+    rewinds a fixed number of lines; the rewind then lands in the wrong place
+    and the previous frame is never erased, so each stray write leaves a dead
+    copy of the progress bar on screen.
     """
     _ui_status(ui, f"Importing {'DDP image ' if source.is_dir() else ''}{source.name}…")
     provenance = {"mode": "import", "source": str(source.resolve())}
     suffix = source.suffix.lower()
 
+    def say(text: str) -> None:
+        _ui_print(ui, text)
+
     if source.is_dir():
         from cdda2img.ddp_reader import import_ddp
 
-        disc, _ = import_ddp(source, temp.pcm_file)
+        disc, _ = import_ddp(source, temp.pcm_file, say)
         provenance["ripper"] = "ddp"
         return disc, sanitize_title(disc.album) or source.name, provenance
 
@@ -1069,14 +1078,14 @@ def _import_source(
     if suffix == ".nrg":
         from cdda2img.nrg_reader import import_nrg
 
-        disc, _ = import_nrg(source, temp.pcm_file)
+        disc, _ = import_nrg(source, temp.pcm_file, say)
         provenance["ripper"] = "nrg"
         return disc, sanitize_title(disc.album) or source.stem, provenance
 
     if suffix == ".ccd":
         from cdda2img.ccd_reader import import_ccd
 
-        disc, _ = import_ccd(source, temp.pcm_file)
+        disc, _ = import_ccd(source, temp.pcm_file, say)
         provenance["ripper"] = "ccd"
         return disc, sanitize_title(disc.album) or source.stem, provenance
 
@@ -1084,7 +1093,7 @@ def _import_source(
         from cdda2img.pxi_reader import import_pxi
 
         provenance["ripper"] = "pxi"
-        disc, _ = import_pxi(source, temp.pcm_file, provenance)
+        disc, _ = import_pxi(source, temp.pcm_file, provenance, say)
         return disc, sanitize_title(disc.album) or source.stem, provenance
 
     raise ValueError(_unsupported_source_msg(source))

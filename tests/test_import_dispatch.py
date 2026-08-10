@@ -19,8 +19,9 @@ asymmetry to survive an edit.
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
+from typing import cast
 
 import pytest
 
@@ -132,7 +133,7 @@ def test_pxi_is_handed_the_provenance_dict_it_records_padding_into(
     source = tmp_path / "album.pxi"
     source.write_bytes(b"")
 
-    def _fake(path: Path, pcm_out: Path, prov: dict[str, str] | None = None):
+    def _fake(path: Path, pcm_out: Path, prov: dict[str, str] | None = None, *args):
         assert prov is not None
         prov["pxi_tail_padded"] = "120"
         return _disc(), FLAG_MASTER_MODE
@@ -141,6 +142,70 @@ def test_pxi_is_handed_the_provenance_dict_it_records_padding_into(
 
     _d, _stem, prov = app._import_source(source, temp, None)
     assert prov["pxi_tail_padded"] == "120"
+
+
+# ---------------------------------------------------------------------------
+# Output routing — the readers must not write to the terminal themselves
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(("suffix", "module", "attr", "ripper"), SINGLE_CALL)
+def test_every_reader_is_handed_a_sink_that_reaches_the_tui(
+    tmp_path: Path,
+    temp: TempFiles,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    suffix: str,
+    module: str,
+    attr: str,
+    ripper: str,
+) -> None:
+    """A reader's notes must go through the TUI, never straight to the terminal.
+
+    ``TerminalUI`` repaints by rewinding a fixed number of lines.  A bare
+    ``print`` moves the cursor without telling it, so the next rewind lands in
+    the wrong place and the previous frame is never erased — one orphaned
+    progress bar per stray write (reported by kgr 2026-08-10: three bars for
+    two stray writes plus the live one).
+    """
+    source = tmp_path / f"album{suffix}"
+    source.write_bytes(b"")
+    lines: list[str] = []
+
+    class _FakeUI:
+        def clear_output(self) -> None: ...
+        def set_status(self, text: str, prog: float = -1.0) -> None: ...
+        def add_output(self, text: str) -> None:
+            lines.append(text)
+
+    def _fake(path: Path, pcm_out: Path, *args: object):
+        sink = args[-1]
+        assert callable(sink), f"{attr} was not handed a report sink"
+        cast("Callable[[str], None]", sink)("  CD-Text: YES")
+        return _disc(), FLAG_MASTER_MODE
+
+    monkeypatch.setattr(f"{module}.{attr}", _fake)
+
+    app._import_source(source, temp, _FakeUI())  # type: ignore[arg-type]
+
+    assert "  CD-Text: YES" in lines
+    assert "CD-Text" not in capsys.readouterr().out
+
+
+def test_no_reader_writes_to_the_terminal_directly() -> None:
+    """No bare ``print`` may survive in an importer's module-level code.
+
+    All four printed the CD-Text line directly until 2026-08-10; PXI added a
+    ``log.warning`` on top, which with no handler configured falls through to
+    ``logging.lastResort`` on stderr and orphans a bar the same way.
+    """
+    import inspect
+
+    from cdda2img import ccd_reader, ddp_reader, nrg_reader, pxi_reader
+
+    for module in (ddp_reader, nrg_reader, ccd_reader, pxi_reader):
+        src = inspect.getsource(module)
+        assert "\n    print(" not in src, f"{module.__name__} prints directly"
 
 
 # ---------------------------------------------------------------------------
@@ -155,7 +220,7 @@ def test_a_directory_is_dispatched_to_the_ddp_reader(
     source.mkdir()
     seen: dict[str, object] = {}
 
-    def _fake(path: Path, pcm_out: Path) -> tuple[RBIDisc, int]:
+    def _fake(path: Path, pcm_out: Path, *args: object) -> tuple[RBIDisc, int]:
         seen["path"] = path
         return _disc(), FLAG_MASTER_MODE
 

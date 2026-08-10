@@ -10,6 +10,7 @@ Multi-session images and TAO (ETN2/ETNF) images are rejected.
 from __future__ import annotations
 
 import struct
+from collections.abc import Callable
 from pathlib import Path
 from typing import IO
 
@@ -307,16 +308,23 @@ def info_nrg(nrg_path: Path) -> tuple[RBIDisc, bool, int]:
     return disc, has_cdtext, nrg_path.stat().st_size
 
 
-def import_nrg(nrg_path: Path, pcm_out: Path) -> tuple[RBIDisc, int]:
+def import_nrg(
+    nrg_path: Path, pcm_out: Path, report: Callable[[str], None] | None = None
+) -> tuple[RBIDisc, int]:
     """Import a Nero NRG disc image as master-mode RBI.
 
     Returns ``(disc, FLAG_MASTER_MODE)``.
+
+    *report* receives the human-readable notes (currently the CD-Text line).
+    It defaults to ``print``; under the TUI the caller passes a sink that
+    appends to the output region, because a bare ``print`` moves the cursor
+    without telling the renderer and leaves an orphaned progress bar behind.
 
     Raises ValueError for: multi-session images, TAO format (ETN2/ETNF),
     non-CD-DA tracks, unsupported sector sizes, and sector-alignment failures.
     """
     disc, has_cdtext, dao_tracks = _parse_nrg(nrg_path)
-    print(f"  CD-Text: {'YES' if has_cdtext else 'NO'}")
+    (report or print)(f"  CD-Text: {'YES' if has_cdtext else 'NO'}")
     with open(nrg_path, "rb") as f:
         _write_pcm(f, dao_tracks, pcm_out)
     return disc, FLAG_MASTER_MODE

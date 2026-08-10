@@ -255,7 +255,24 @@ Five source types, each producing s16le PCM, then all call `_finalize_import()`.
 format dispatch is `cdda2img._import_source()`, returning `(disc, output_stem, provenance)`;
 the list of accepted sources is spelled out for the user in exactly one place
 (`_unsupported_source_msg`), because it had already drifted — both the argparse help and
-the error message omitted CloneCD for two months after it shipped:
+the error message omitted CloneCD for two months after it shipped.
+
+**No reader writes to the terminal itself.** Each `import_*` takes a
+`report: Callable[[str], None] | None` sink (defaulting to `print` for standalone use)
+and `_import_source` binds it to `_ui_print` → `TerminalUI.add_output`. `TerminalUI`
+repaints by rewinding `_prev_height - 1` lines and erasing downward, where `_prev_height`
+is its model of its own region; **a write it did not make moves the cursor without
+updating that model, so the next rewind lands short and the previous frame is never
+erased — one stranded progress bar per stray write.** All four readers printed the
+CD-Text line directly until 2026-08-10 (kgr saw three bars during a `.pxi` import: two
+orphans plus the live one). The same applies to `log` records — PXI's tail-padding note
+is a `report` call plus `log.debug`, *not* `log.warning`, because at default verbosity no
+handler is installed and a warning falls through to `logging.lastResort` on stderr with
+identical effect. The durable record is `pxi_tail_padded` in PROV, which outlives any log
+line. **The general case is unfixed and filed as TODO N8**: any module's `log.warning`
+during a TUI phase does this, and `accudisc_reader`/`subq_toc` hold several on the rip
+path. Verified under a pty with a negative control — the old code path reproduces the
+orphan, so the probe can fail:
 - **DDP 2.0** (`ddp_reader.py:import_ddp()`): parses DDPID (MCN), PQDESCR (timing + ISRC), CDTEXT.BIN; PCM (TRACK*.DAT) is already s16le — no byte-swap
 - **cdrdao TOC+BIN** (`cdrdao_reader.py`): parses `.toc` text via `toc_parser.py`; byte-swaps s16be BIN → s16le WAV via `convert_cdrdao_bin_to_wav()`
 - **Nero NRG** (`nrg_reader.py:import_nrg()`): parses NER5 (64-bit offsets) and NERO (32-bit) DAOX/DAOI track blocks, CDTX (CD-Text), MTYP; PCM is s16le — no byte-swap

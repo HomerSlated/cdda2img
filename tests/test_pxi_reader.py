@@ -473,6 +473,47 @@ def test_a_complete_image_records_no_padding(simple: Path, tmp_path: Path) -> No
     assert prov == {}
 
 
+def test_a_padding_import_touches_neither_the_terminal_nor_a_warning(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Both notes go to the sink; nothing reaches stdout, stderr or a WARNING.
+
+    Under the TUI either one would orphan a progress bar — ``print`` by moving
+    the cursor behind the renderer's back, ``log.warning`` by falling through
+    to :data:`logging.lastResort` on stderr when no handler is configured.
+    Tested by behaviour, not by grepping the source: the first version of this
+    check searched for the string ``log.warning`` and matched the docstring
+    explaining why there isn't one.
+    """
+    path = build_pxi(
+        tmp_path,
+        records=SIMPLE_RECORDS,
+        leadout=SIMPLE_LEADOUT,
+        audio_frames=SIMPLE_LEADOUT - LEAD_IN - 1,
+    )
+    lines: list[str] = []
+    capsys.readouterr()  # discard anything banked before this point
+
+    with caplog.at_level("WARNING"):
+        import_pxi(path, tmp_path / "out.pcm", {}, lines.append)
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == ""
+    assert caplog.records == []
+    assert any("CD-Text" in line for line in lines)
+    assert any("zero-filled" in line for line in lines)
+
+
+def test_without_a_sink_the_notes_still_print(
+    simple: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The sink is opt-in — a standalone caller keeps the plain behaviour."""
+    capsys.readouterr()
+    import_pxi(simple, tmp_path / "out.pcm")
+    assert "CD-Text" in capsys.readouterr().out
+
+
 def test_info_pxi_reports_the_file_size_without_writing_pcm(simple: Path) -> None:
     disc, has_cdtext, size = info_pxi(simple)
     assert size == simple.stat().st_size
