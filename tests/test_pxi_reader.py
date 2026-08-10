@@ -263,16 +263,42 @@ def test_a_table_that_misses_the_leadout_is_refused(tmp_path: Path) -> None:
         _parse_pxi(path)
 
 
-def test_the_two_track_counts_are_cross_checked(tmp_path: Path) -> None:
-    """The 0x47 byte and the index table are independent; neither is trusted alone."""
+def test_a_disagreeing_track_count_warns_but_the_table_wins(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The 0x47 byte cross-checks the table; it does not overrule it.
+
+    The table is independently validated — contiguous, and it reaches the
+    lead-out — so refusing a file we demonstrably read correctly is the worse
+    failure of the two.
+    """
     path = build_pxi(
         tmp_path,
         records=SIMPLE_RECORDS,
         leadout=SIMPLE_LEADOUT,
         declared_tracks=7,
     )
-    with pytest.raises(PXIError, match="declares 7 tracks"):
-        _parse_pxi(path)
+    with caplog.at_level("WARNING"):
+        disc, _, _ = _parse_pxi(path)
+    assert len(disc.tracks) == 3
+    assert "trusting the table" in caplog.text
+
+
+def test_the_track_count_byte_is_accepted_as_a_last_track_number(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Whether 0x47 is a count or the last track is unresolved — accept both.
+
+    They coincide on every disc whose first track is 1, which is every sample we
+    have, so one sample cannot separate the readings.  Encoding either one as a
+    rule would refuse a correctly-parsed file on a guess.
+    """
+    records = [(1, 5, 150, 0), (1, 5, 150, 400), (1, 6, 550, 0), (1, 6, 550, 300)]
+    path = build_pxi(tmp_path, records=records, leadout=850, declared_tracks=6)
+    with caplog.at_level("WARNING"):
+        disc, _, _ = _parse_pxi(path)
+    assert [t.track_number for t in disc.tracks] == [5, 6]
+    assert caplog.text == ""
 
 
 def test_non_ascending_tracks_are_refused(tmp_path: Path) -> None:
@@ -403,6 +429,42 @@ def test_a_short_tail_is_zero_filled_and_recorded_in_provenance(
     assert prov == {"pxi_tail_padded": str(SECTOR)}
     assert out.stat().st_size == (SIMPLE_LEADOUT - LEAD_IN) * SECTOR
     assert out.read_bytes()[-SECTOR:] == bytes(SECTOR)
+
+
+def test_a_truncated_image_is_refused_rather_than_padded(tmp_path: Path) -> None:
+    """Unbounded padding would import a half-copied file as a silent disc.
+
+    The container would be structurally perfect — right TOC, right disc ID —
+    and wrong in the only way that matters, reported as a success.  Zeros are
+    also what a file that was never fully written produces.
+    """
+    path = build_pxi(
+        tmp_path,
+        records=SIMPLE_RECORDS,
+        leadout=SIMPLE_LEADOUT,
+        audio_frames=10,
+    )
+    out = tmp_path / "out.pcm"
+    with pytest.raises(PXIError, match="looks truncated"):
+        import_pxi(path, out)
+
+
+def test_the_pad_limit_is_one_sector(tmp_path: Path) -> None:
+    """One short final sector passes; one byte more does not."""
+    frames = SIMPLE_LEADOUT - LEAD_IN
+    ok = build_pxi(
+        tmp_path,
+        records=SIMPLE_RECORDS,
+        leadout=SIMPLE_LEADOUT,
+        audio_frames=frames - 1,
+        name="ok.pxi",
+    )
+    import_pxi(ok, tmp_path / "ok.pcm")  # exactly one sector short: allowed
+
+    too_short = tmp_path / "short.pxi"
+    too_short.write_bytes(ok.read_bytes()[:-1])  # one byte further
+    with pytest.raises(PXIError, match="looks truncated"):
+        import_pxi(too_short, tmp_path / "short.pcm")
 
 
 def test_a_complete_image_records_no_padding(simple: Path, tmp_path: Path) -> None:

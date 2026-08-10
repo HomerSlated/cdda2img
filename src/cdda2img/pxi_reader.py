@@ -82,6 +82,11 @@ _CDDA_SECTOR_BYTES = 2352
 _LEAD_IN_FRAMES = 150  # absolute frame 150 == LBA 0
 _MAX_TRACKS = 99
 
+# The largest tail shortfall that counts as a format quirk rather than a broken
+# file.  One partial final sector is what the reference image exhibits; anything
+# beyond that is a truncated copy and must not be padded into a silent disc.
+_MAX_TAIL_PAD_BYTES = _CDDA_SECTOR_BYTES
+
 
 class PXIError(ValueError):
     """A ``.pxi`` file that cannot be parsed as a single-session CD-DA image."""
@@ -111,6 +116,16 @@ def _read_index_records(buf: bytes, filename: str) -> list[tuple[int, int, int, 
             break
         records.append((session, track, position, length))
         off += _INDEX_RECORD_BYTES
+    else:
+        # Log when the guard binds: a truncated table would otherwise surface
+        # as "the table does not reach the lead-out", a confident diagnosis of
+        # a different fault (cf. acoustid_lookup._MAX_RELEASE_PAGES).
+        log.warning(
+            "%s: index table still had records at the %d-record guard;"
+            " what follows describes a truncated table, not the disc",
+            filename,
+            _MAX_INDEX_RECORDS,
+        )
 
     if not records:
         msg = f"{filename}: index table is empty — not a PlexTools CD-DA image"
@@ -158,26 +173,43 @@ def _group_by_track(
     return groups
 
 
+def _check_track_count(
+    declared: int, groups: list[list[tuple[int, int]]], first_track: int, filename: str
+) -> None:
+    """Cross-check the ``0x47`` byte against the index table, without overruling it.
+
+    Whether that byte holds a track *count* or the *last track number* is
+    **unresolved**: the two coincide on every disc whose first track is 1, which
+    is every sample we have, and MMC TOC structures more often store the last
+    track.  Both readings are therefore accepted.
+
+    A disagreement warns rather than raises, and the table wins.  The table is
+    independently validated — contiguous, and it reaches the lead-out — so
+    refusing a file this parser demonstrably read correctly would be the worse
+    failure, and it is the one an unresolved field would cause.
+    """
+    last_track = first_track + len(groups) - 1
+    if declared in (len(groups), last_track):
+        return
+    log.warning(
+        "%s: TOC byte 0x%02x says %d, but the index table describes %d track(s)"
+        " numbered %d-%d; trusting the table",
+        filename,
+        _TOC_TRACK_COUNT,
+        declared,
+        len(groups),
+        first_track,
+        last_track,
+    )
+
+
 def _validate_layout(
     records: list[tuple[int, int, int, int]],
     groups: list[list[tuple[int, int]]],
     leadout: int,
-    declared_tracks: int,
     filename: str,
 ) -> None:
-    """Check the index table describes a gapless disc ending at the lead-out.
-
-    The two independent track counts — the ``0x47`` byte and the table itself —
-    are cross-checked rather than one being trusted, because a disagreement
-    means the layout is not the one this parser was written against.
-    """
-    if declared_tracks != len(groups):
-        msg = (
-            f"{filename}: TOC declares {declared_tracks} tracks but the index table"
-            f" describes {len(groups)}"
-        )
-        raise PXIError(msg)
-
+    """Check the index table describes a gapless disc ending at the lead-out."""
     for (_s, track, position, length), (_s2, _t2, next_position, _l2) in zip(
         records, records[1:]
     ):
@@ -313,15 +345,36 @@ def _build_disc(
 # ---------------------------------------------------------------------------
 
 
-def _write_pcm(f: IO[bytes], total_frames: int, pcm_out: Path) -> int:
+def _write_pcm(
+    f: IO[bytes], total_frames: int, file_bytes: int, pcm_out: Path, filename: str
+) -> int:
     """Copy the audio region to *pcm_out*; return the number of pad bytes added.
 
-    PXI stores raw s16le, so the copy is verbatim.  The stored audio can fall
-    short of the lead-out by a partial sector (see the module docstring); the
-    tail is zero-filled to the declared length so the PCM block and the TOC
-    agree, because every downstream consumer slices the PCM using the TOC.
+    The copy is verbatim — PXI stores s16le, the byte order the RBI PCM block
+    wants.  The stored audio can stop short of the lead-out by a partial sector
+    (see the module docstring); the tail is zero-filled to the declared length so
+    the PCM block and the TOC agree, because every downstream consumer slices the
+    PCM using the TOC.
+
+    The shortfall is checked **before** anything is written and capped at one
+    sector.  Unbounded padding would turn a truncated or half-copied file into a
+    structurally perfect container — right TOC, right disc ID, hundreds of
+    megabytes of silence — reported as a success with one warning line.  Silence
+    is also what a file that was never fully written produces, so a short file
+    has to fail rather than import (``tools/write_smoke.py``'s reasoning,
+    inverted).
     """
     want = total_frames * _CDDA_SECTOR_BYTES
+    available = max(file_bytes - _AUDIO_OFFSET, 0)
+    shortfall = want - available
+    if shortfall > _MAX_TAIL_PAD_BYTES:
+        msg = (
+            f"{filename}: audio region holds {available} bytes but the lead-out"
+            f" declares {want} — short by {shortfall}, past the {_MAX_TAIL_PAD_BYTES}-byte"
+            " limit; the file looks truncated"
+        )
+        raise PXIError(msg)
+
     written = 0
     f.seek(_AUDIO_OFFSET)
     with open(pcm_out, "wb") as out:
@@ -376,10 +429,11 @@ def _parse_pxi(pxi_path: Path) -> tuple[RBIDisc, bool, int]:
 
     records = _read_index_records(toc, name)
     groups = _group_by_track(records, name)
-    _validate_layout(records, groups, leadout, declared_tracks, name)
+    _validate_layout(records, groups, leadout, name)
 
     first_track = records[0][1]
     last_track = first_track + len(groups) - 1
+    _check_track_count(declared_tracks, groups, first_track, name)
 
     cdtext = _read_cdtext(head, name)
     if cdtext is not None and not _cdtext_matches_disc(cdtext, first_track, last_track):
@@ -421,7 +475,9 @@ def import_pxi(
     print(f"  CD-Text: {'YES' if has_cdtext else 'NO'}")
 
     with open(pxi_path, "rb") as f:
-        pad = _write_pcm(f, total_frames, pcm_out)
+        pad = _write_pcm(
+            f, total_frames, pxi_path.stat().st_size, pcm_out, pxi_path.name
+        )
 
     if pad:
         log.warning(
