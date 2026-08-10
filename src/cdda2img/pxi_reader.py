@@ -37,6 +37,14 @@ real LBA-0 samples, or it stored corrected audio and simply ran 30 samples short
 at the tail.  **The two predict identical bytes at every offset in the file**,
 and the only region that could separate them is silence under both, so the file
 cannot settle it.  Recorded as unresolved rather than guessed.
+
+The shortfall is very likely purposeful rather than damage — kgr, 2026-08-10 —
+precisely because 120 lands on a known constant of the writing drive.  What
+would settle it is a second image from a drive with a *different* read offset:
+a shortfall that tracks the offset is PlexTools applying it, one that stays at
+120 is a hard-coded constant.  Filed as TODO N7, which also lists the four other
+questions a second sample would answer — starting with whether the offsets
+above are fixed at all, since the CD-Text block before them is variable-length.
 """
 
 from __future__ import annotations
