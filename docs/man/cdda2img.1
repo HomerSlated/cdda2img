@@ -389,6 +389,16 @@ A CloneCD
 file (the corresponding
 .B .img
 must exist in the same directory; audio tracks only; single-session).
+.IP \(bu 4
+A PlexTools
+.B .pxi
+file (single-session CD\-DA only).
+The format is undocumented and was reverse\-engineered; embedded CD\-Text,
+per\-track INDEX points and the MCN are recovered.
+Where the stored audio stops short of a whole final sector the tail is
+zero\-filled to the declared lead\-out and the amount is recorded in the
+container's provenance as
+.BR pxi_tail_padded .
 .RE
 .TP
 .BI \-\-loudness " {rg|none}"
@@ -1332,6 +1342,15 @@ Import a Nero NRG image:
 .nf
 cdda2img import album.nrg
 cdda2img import album.nrg \-\-loudness none
+.fi
+.RE
+.PP
+Inspect a PlexTools image without importing it, then import it:
+.PP
+.RS
+.nf
+cdda2img import album.pxi \-\-info
+cdda2img import album.pxi
 .fi
 .RE
 .PP

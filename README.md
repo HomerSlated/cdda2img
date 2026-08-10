@@ -60,6 +60,8 @@ This is an active prototype. A Rust reimplementation is planned once the design 
   - *Nero NRG* — DAO CD-DA images in NER5 (64-bit offsets) and NERO (32-bit) variants;
     parses DAOX/DAOI track blocks, CDTX (CD-Text), and MTYP; audio stored as s16le
   - *CloneCD CCD/IMG* — parses `.ccd` index file; byte-swaps s16be→s16le
+  - *PlexTools PXI* — Plextor's own bundled ripper; undocumented format, reverse-engineered.
+    Embedded CD-Text, per-track INDEX points and MCN; audio stored as s16le (no byte-swap)
 
   Pass `--info` for a dry-run that prints image metadata without importing
 - **Automatic metadata lookup** — disc is identified before the interactive menu fires:

@@ -439,12 +439,12 @@ def parse_args() -> argparse.Namespace:
     )
     i_cmd = sub.add_parser(
         "import",
-        help="Import a foreign disc image as an RBI container (master mode): cdrdao .toc, DDP 2.0, or Nero .nrg",
+        help="Import a foreign disc image as an RBI container (master mode): cdrdao .toc, DDP 2.0, Nero .nrg, CloneCD .ccd, or PlexTools .pxi",
     )
     i_cmd.add_argument(
         "source",
         type=Path,
-        help="cdrdao .toc file, DDP 2.0 image directory, or Nero .nrg file",
+        help="cdrdao .toc file, DDP 2.0 image directory, Nero .nrg file, CloneCD .ccd file, or PlexTools .pxi file",
     )
     i_cmd.add_argument(
         "--loudness",
@@ -961,6 +961,18 @@ def _print_source_info(
         print(row)
 
 
+def _unsupported_source_msg(source: Path) -> str:
+    """The one place the accepted import sources are spelled out for the user.
+
+    Shared by ``info_image`` and ``import_image`` so a newly supported format
+    cannot be listed in one message and missing from the other.
+    """
+    return (
+        f"{source.name}: expected a cdrdao .toc file, DDP 2.0 image directory,"
+        " Nero .nrg file, CloneCD .ccd file, or PlexTools .pxi file"
+    )
+
+
 def info_image(source: Path) -> None:
     """Parse and display metadata for a foreign disc image without importing it."""
     if not source.exists():
@@ -999,12 +1011,83 @@ def info_image(source: Path) -> None:
         disc, has_cdtext, total_bytes = info_ccd(source)
         _print_source_info("CloneCD Image", source.name, total_bytes, disc, has_cdtext)
 
-    else:
-        msg = (
-            f"{source.name}: expected a cdrdao .toc file, DDP 2.0 image directory,"
-            " Nero .nrg file, or CloneCD .ccd file"
+    elif source.suffix.lower() == ".pxi":
+        from cdda2img.pxi_reader import info_pxi
+
+        disc, has_cdtext, total_bytes = info_pxi(source)
+        _print_source_info(
+            "PlexTools PXI Image", source.name, total_bytes, disc, has_cdtext
         )
-        raise ValueError(msg)
+
+    else:
+        raise ValueError(_unsupported_source_msg(source))
+
+
+def _import_source(
+    source: Path, temp: TempFiles, ui: TerminalUI | None
+) -> tuple[RBIDisc, str, dict[str, str]]:
+    """Decode *source* into ``(disc, output_stem, provenance)``, PCM at ``temp.pcm_file``.
+
+    One branch per supported foreign format.  Split out of ``import_image`` so
+    the format dispatch can grow without the surrounding orchestration —
+    metadata lookups, ReplayGain, container build — growing with it.
+    """
+    _ui_status(ui, f"Importing {'DDP image ' if source.is_dir() else ''}{source.name}…")
+    provenance = {"mode": "import", "source": str(source.resolve())}
+    suffix = source.suffix.lower()
+
+    if source.is_dir():
+        from cdda2img.ddp_reader import import_ddp
+
+        disc, _ = import_ddp(source, temp.pcm_file)
+        provenance["ripper"] = "ddp"
+        return disc, sanitize_title(disc.album) or source.name, provenance
+
+    if suffix == ".toc":
+        from cdda2img.cdrdao_reader import (
+            _find_bin_filename,
+            convert_cdrdao_bin_to_wav,
+            parsed_to_rbi_disc,
+        )
+        from cdda2img.toc_parser import parse_toc
+
+        toc_text = source.read_text(encoding="utf-8")
+        bin_name = _find_bin_filename(toc_text)
+        bin_path = source.parent / bin_name
+        if not bin_path.exists():
+            msg = f"BIN file not found: {bin_path}"
+            raise FileNotFoundError(msg)
+
+        disc = parsed_to_rbi_disc(parse_toc(toc_text.encode("utf-8")))
+
+        _ui_status(ui, f"Converting {bin_name} (s16be → s16le)…")
+        convert_cdrdao_bin_to_wav(bin_path, temp.pcm_pre)
+        wav_to_raw_pcm(temp.pcm_pre, temp.pcm_file)
+        provenance["ripper"] = "toc"
+        return disc, sanitize_title(disc.album) or source.stem, provenance
+
+    if suffix == ".nrg":
+        from cdda2img.nrg_reader import import_nrg
+
+        disc, _ = import_nrg(source, temp.pcm_file)
+        provenance["ripper"] = "nrg"
+        return disc, sanitize_title(disc.album) or source.stem, provenance
+
+    if suffix == ".ccd":
+        from cdda2img.ccd_reader import import_ccd
+
+        disc, _ = import_ccd(source, temp.pcm_file)
+        provenance["ripper"] = "ccd"
+        return disc, sanitize_title(disc.album) or source.stem, provenance
+
+    if suffix == ".pxi":
+        from cdda2img.pxi_reader import import_pxi
+
+        provenance["ripper"] = "pxi"
+        disc, _ = import_pxi(source, temp.pcm_file, provenance)
+        return disc, sanitize_title(disc.album) or source.stem, provenance
+
+    raise ValueError(_unsupported_source_msg(source))
 
 
 def import_image(
@@ -1035,72 +1118,7 @@ def import_image(
         ui = _TUI().start()
 
     try:
-        if source.is_dir():
-            from cdda2img.ddp_reader import import_ddp
-
-            _ui_status(ui, f"Importing DDP image {source.name}…")
-            disc, _ = import_ddp(source, temp.pcm_file)
-            output_stem = sanitize_title(disc.album) or source.name
-            provenance = {
-                "mode": "import",
-                "source": str(source.resolve()),
-                "ripper": "ddp",
-            }
-        elif source.suffix.lower() == ".toc":
-            from cdda2img.cdrdao_reader import (
-                _find_bin_filename,
-                convert_cdrdao_bin_to_wav,
-                parsed_to_rbi_disc,
-            )
-            from cdda2img.toc_parser import parse_toc
-
-            _ui_status(ui, f"Importing {source.name}…")
-            toc_text = source.read_text(encoding="utf-8")
-            bin_name = _find_bin_filename(toc_text)
-            bin_path = source.parent / bin_name
-            if not bin_path.exists():
-                msg = f"BIN file not found: {bin_path}"
-                raise FileNotFoundError(msg)
-
-            disc = parsed_to_rbi_disc(parse_toc(toc_text.encode("utf-8")))
-
-            _ui_status(ui, f"Converting {bin_name} (s16be → s16le)…")
-            convert_cdrdao_bin_to_wav(bin_path, temp.pcm_pre)
-            wav_to_raw_pcm(temp.pcm_pre, temp.pcm_file)
-            output_stem = sanitize_title(disc.album) or source.stem
-            provenance = {
-                "mode": "import",
-                "source": str(source.resolve()),
-                "ripper": "toc",
-            }
-        elif source.suffix.lower() == ".nrg":
-            from cdda2img.nrg_reader import import_nrg
-
-            _ui_status(ui, f"Importing {source.name}…")
-            disc, _ = import_nrg(source, temp.pcm_file)
-            output_stem = sanitize_title(disc.album) or source.stem
-            provenance = {
-                "mode": "import",
-                "source": str(source.resolve()),
-                "ripper": "nrg",
-            }
-        elif source.suffix.lower() == ".ccd":
-            from cdda2img.ccd_reader import import_ccd
-
-            _ui_status(ui, f"Importing {source.name}…")
-            disc, _ = import_ccd(source, temp.pcm_file)
-            output_stem = sanitize_title(disc.album) or source.stem
-            provenance = {
-                "mode": "import",
-                "source": str(source.resolve()),
-                "ripper": "ccd",
-            }
-        else:
-            msg = (
-                f"{source.name}: expected a cdrdao .toc file, DDP 2.0 image directory,"
-                " Nero .nrg file, or CloneCD .ccd file"
-            )
-            raise ValueError(msg)
+        disc, output_stem, provenance = _import_source(source, temp, ui)
 
         cddb_track_lsns: list[int] | None = None
         cddb_disc_last_lsn: int | None = None
