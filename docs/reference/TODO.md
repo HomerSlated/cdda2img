@@ -6,7 +6,7 @@
 
 Both raised by kgr at the close of 2026-08-03. N1a and N1b resolved 2026-08-04;
 N1d settled and N1c superseded 2026-08-05; **N3, N4 and N5 implemented 2026-08-06**.
-**Open: N2, N6 (queued 2026-08-07), N7 and N8 (queued 2026-08-10).** (N1e is withdrawn
+**Open: N2, N6 (queued 2026-08-07) and N8 (queued 2026-08-10). N7 answered 2026-08-11.** (N1e is withdrawn
 in full — retained below as evidence, not a plan. Its deletion list must not be
 actioned.)
 
@@ -920,71 +920,66 @@ and 2 would re-derive from PROV strings something the resolver already knows.
   raises on it proposing `MB_RELEASE_ID` — the scorer describes a state the
   resolver forbids. More evidence the two models have drifted apart.
 
-#### N7. **[C2I/K] Rip a second disc with PlexTools — is the 120-byte tail shortfall
-purposeful?** — QUEUED 2026-08-10, kgr
+#### N7. **[C2I/K] Is the 120-byte tail shortfall purposeful?** — **ANSWERED
+2026-08-11.** It was not a shortfall at all: the assumed audio origin was 120 bytes
+too high. kgr supplied three further PlexTools images the same day.
 
-**The observation.** In the one `.pxi` we have (ABBA *Gold*), the audio region ends
-120 bytes before a whole final sector. `pxi_reader._write_pcm` zero-fills the gap
-and records `pxi_tail_padded=120`, and that pad is measurably benign here — with it
-the final sector matches our own AccurateRip-verified rip exactly.
+**Result.** `_AUDIO_OFFSET` was `0x6007B`; the true raw-audio origin is **`0x60003`**.
+From there every image is *exactly* a whole number of sectors. The 120 bytes are
+present at the **head**, not missing from the tail — they are the first 30 samples of
+LBA 0, which the drive's +30 read offset discards. kgr's call ("not a bug, it has a
+purpose") was right, and the purpose is simply that the file is a raw read.
 
-**kgr's hypothesis, and it is the better one: this is not a bug.** 120 bytes is 30
-stereo samples, which is *exactly* the PX-716A's +30-sample read offset — the drive
-that wrote the image. A number that lands on a known constant of the writing drive
-is unlikely to be a coincidence of truncation. The obvious mechanism: PlexTools
-applies the read offset by shifting its window forward and simply stops when the
-disc runs out, rather than padding.
+**PXI stores RAW audio.** Settled by AccurateRip, which is offset-sensitive by
+construction: fed the audio from the measured origin, **+30 verifies and 0 does not**.
 
-**Why one sample cannot settle it.** The two readings of the audio region —
-PlexTools stored *raw* audio and the 120 bytes preceding our measured origin are
-real LBA-0 samples, versus PlexTools stored *offset-corrected* audio and ran 30
-samples short at the tail — predict **identical bytes at every offset in the file**.
-The only region that could separate them is silence under both. See the
-`pxi_reader` module docstring; do not let either reading be written down as fact on
-this evidence.
+| image | +30 | 0 |
+|---|---|---|
+| disc A, 11 tr | 11/11 conf 4400 | 0/11 conf 0 |
+| disc A, re-rip | 11/11 conf 4400 | 0/11 conf 0 |
+| disc B (ABBA), 19 tr | 18/19 | no match |
+| disc C, 12 tr | 11/12 | no match |
 
-**The measurement, in two parts.**
+This refutes "already corrected" **without knowing the drive** — correction is
+correction, so a corrected stream verifies at 0 whatever wrote it. Every other
+verifying offset (-639, -1967, +1573 ...) differs per disc: pressing cohorts, exactly
+as `accuraterip.detect_offset` warns. **+30 is the only offset common to all four**,
+which is the signature of a drive rather than a disc. Note part 2 of the original plan
+(a drive with a different offset) proved *unnecessary* for this question — AR answered
+it from one drive, because it compares against the world's rips rather than ours.
 
-1. *Same drive, different disc.* Rip anything else with PlexTools on the PX-716A and
-   measure `file_size - _AUDIO_OFFSET` against `(leadout - 150) * 2352`.
-   - **120 again** → a constant, not truncation. Rules out "that one file got cut
-     short" and makes the offset story much stronger, but does **not** yet separate
-     "the drive's offset" from "a fixed 120 baked into PlexTools".
-   - **Not 120** → the shortfall varies per disc; the offset story is wrong and the
-     quantity is a function of something else (last-track length? lead-out?).
-   - **Zero** → the ABBA file really is short, and the pad is covering damage rather
-     than a design decision. Least likely, most important to know.
+**Why the original evidence was under-determined, not wrong.** The unique byte-match
+that pinned `0x6007B` was against our own *offset-corrected* rip, so it necessarily
+landed at origin+120. Both readings did predict identical bytes, as recorded; what
+broke the tie was an instrument sensitive to the quantity in dispute.
 
-2. *Different drive, different read offset.* This is the arm that actually
-   discriminates, and it is worth more than several repeats of part 1. Rip on a
-   drive whose offset is **not** +30 and see whether the shortfall tracks it
-   (`4 × offset` bytes) or stays at 120. Tracking it settles the raw-vs-corrected
-   question the single file cannot; staying at 120 says PlexTools has a hard-coded
-   constant and the match to this drive's offset was luck after all.
+**The other four questions, also answered:**
 
-**Do not stop at the tail — a second sample answers four other open questions**, and
-these may matter more to the parser than the 120 bytes do:
+- **Are `_TOC_OFFSET` / `_INDEX_TABLE_OFFSET` / `_AUDIO_OFFSET` fixed? YES.** CD-Text
+  ran 0, 758 and 848 bytes across the four images — including a disc with none at all,
+  kgr's "cheapest test there is" — and none of the three offsets moved.
+- **Is there ever an MCN? YES.** Two discs carry one (`5099746863722`,
+  `7559607740206`), both valid GTIN-13, read correctly from `0x804C`; the all-zero
+  sentinel is confirmed by the two that do not.
+- **Does anything occupy `0x305-0x8000`? NO — the question dissolved.** That boundary
+  was one disc's CD-Text *end*: `0x0B + 2 + 758 = 0x305` exactly. A disc with more
+  CD-Text writes further (Tracy Chapman, 848). No structure, no ISRC table; ISRCs
+  parse as absent on every image. `0x85BF-0x60003` remains zero throughout.
+- **More than two index records per track? STILL UNTESTED.** No image has an
+  INDEX >= 02, so `index_points` has never executed on real data.
 
-- **Are `_TOC_OFFSET` (0x8000), `_INDEX_TABLE_OFFSET` (0x8067) and `_AUDIO_OFFSET`
-  (0x6007B) fixed, or do they move?** The CD-Text block at `0x0B` is
-  **variable-length** (758 bytes on this disc) and everything after it is currently
-  hard-coded. A disc with *no* CD-Text, or markedly more of it, is the cheapest test
-  there is — and if any of the three moves, the parser is wrong on every disc but
-  this one while looking perfectly correct on this one.
-- **Is there ever an MCN?** `0x804C` holds thirteen ASCII zeros here, read as absent.
-  A disc that carries an MCN confirms both the field position and the sentinel.
-- **Are there ever more than two index records per track?** The parser deliberately
-  groups by the track field rather than assuming a 72-byte stride, so a disc with
-  INDEX ≥ 02 would exercise `index_points` for the first time.
-- **Does anything ever occupy `0x305–0x8000` or `0x85BF–0x6007B`?** Both are entirely
-  zero here. A disc with ISRCs is the likely candidate — the ABBA sample has none,
-  so a per-track ISRC table could exist and simply be empty.
+**What remains open, and it is a different question.** The reader now applies
+`_PLEXTOOLS_READ_OFFSET = 30` explicitly and records `pxi_read_offset` in PROV. Since
+the audio is raw and the file records no drive identity, **a `.pxi` written by a drive
+with a different read offset imports shifted by the difference.** That is now a stated
+limitation rather than a silent accident, but it is unresolved policy: hardcode,
+prompt, take a CLI flag, or store raw and correct downstream. kgr's call. A rip on a
+non-+30 drive would confirm the mechanism, and is the one part of the original part 2
+still worth doing.
 
-**Constraint:** PlexTools is Windows software and needs a Plextor drive, so this is
-kgr's to run, not an agent's. The existing sample is at
-`/mnt/aladdin/Storage/Install/Burning/Images/Plextools/`. Note that part 2 needs
-PlexTools to drive a *non-Plextor* drive, or a second Plextor with a different
-offset — check that is even possible before planning around it.
+**Instrument:** `tools/pxi_probe.py` (origin arithmetic, header-fill boundary,
+`--ar` offset discrimination). Images at
+`/mnt/aladdin/Storage/Install/Burning/Images/Plextools/`.
 
 #### N8. **[C2I] Any `log` record emitted while the TUI is live orphans a progress
 bar** — QUEUED 2026-08-10, found while fixing the import readers

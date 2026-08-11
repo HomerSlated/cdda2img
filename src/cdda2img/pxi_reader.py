@@ -24,27 +24,41 @@ record of a track is INDEX 00, the rest are INDEX 01, 02, …  Track 1's INDEX 0
 sits at absolute frame 0, i.e. LBA -150, describing lead-in that no image can
 contain; its start is clamped to LBA 0.
 
-Audio origin (``_AUDIO_OFFSET``) is the one constant that cannot be derived
-from the file.  It is pinned by measurement, not by structure: the byte there is
-LBA 0 of the *offset-corrected* stream, established by a unique byte-match
-against our own AccurateRip-verified rip of the same disc and by AccurateRip
-verifying 17/19 tracks of the result at confidence 61-67.
+Audio origin (``_AUDIO_OFFSET``) is not derivable from any field, but it *is*
+derivable from each file's own arithmetic: ``size - lead_out * 2352`` is one
+equation in one unknown, so every image determines its origin exactly rather
+than modulo the sector size.  All four images we hold answer **0x60003**, across
+three discs and a month apart (``tools/pxi_probe.py``).
 
-That leaves ``_AUDIO_OFFSET - 120`` bytes of preceding silence unaccounted for,
-and 120 bytes is exactly the +30-sample read offset of the drive that wrote this
-image.  Two readings fit — PlexTools stored raw audio and those 120 bytes are
-real LBA-0 samples, or it stored corrected audio and simply ran 30 samples short
-at the tail.  **The two predict identical bytes at every offset in the file**,
-and the only region that could separate them is silence under both, so the file
-cannot settle it.  Recorded as unresolved rather than guessed.
+**PXI stores RAW audio** — settled 2026-08-11 (N7), having been explicitly
+recorded as unresolved before that, correctly: the first image could not settle
+it.  The reader used to start at ``0x6007B``, which is this origin plus 120
+bytes, and 120 bytes is exactly the +30-sample read offset of the drive that
+wrote these images.  So the file appeared to stop 120 bytes short of a whole
+final sector when in truth the assumed origin was 120 bytes too high, and those
+bytes are present at the *head*, not missing from the tail.  kgr called that in
+advance: not a bug, a purpose.
 
-The shortfall is very likely purposeful rather than damage — kgr, 2026-08-10 —
-precisely because 120 lands on a known constant of the writing drive.  What
-would settle it is a second image from a drive with a *different* read offset:
-a shortfall that tracks the offset is PlexTools applying it, one that stays at
-120 is a hard-coded constant.  Filed as TODO N7, which also lists the four other
-questions a second sample would answer — starting with whether the offsets
-above are fixed at all, since the CD-Text block before them is variable-length.
+What settled it is AccurateRip, which is offset-sensitive by construction.
+Feeding it the audio from the measured origin, **+30 verifies and 0 does not**:
+
+    disc A (11 tr)   +30: 11/11 conf 4400      0: 0/11 conf 0
+    disc A (re-rip)  +30: 11/11 conf 4400      0: 0/11 conf 0
+    disc B (19 tr)   +30: 18/19               0: no match
+    disc C (12 tr)   +30: 11/12               0: no match
+
+That refutes "already corrected" without needing to know the drive: correction
+is correction, so a corrected stream would verify at 0 whatever wrote it.  Every
+*other* verifying offset (-639, -1967, +1573 …) differs per disc — pressing
+cohorts, as ``accuraterip.detect_offset`` warns.  +30 is the only offset common
+to all four, which is the signature of a drive rather than a disc.
+
+Consequence for this reader: the stored audio needs the writing drive's read
+offset applied, and the file records no drive identity — see
+``_PLEXTOOLS_READ_OFFSET``.  The previous code reached byte-identical output by
+accident, reading from origin+120 and zero-filling the tail; that is now stated
+rather than implied, so a ``.pxi`` from a drive with a different offset is a
+known limitation instead of a silent 30-sample shift.
 """
 
 from __future__ import annotations
@@ -85,16 +99,23 @@ _IDX_LENGTH = 20  # u32, frames
 _MAX_INDEX_RECORDS = 99 * 100  # 99 tracks x 100 index points, a runaway guard
 
 # Audio. See the module docstring — measured, not derived.
-_AUDIO_OFFSET = 0x6007B
+#: Raw-audio origin. Measured, not derived: ``size - lead_out * 2352`` on every
+#: image we hold (three discs, four rips) — see the module docstring.
+_AUDIO_OFFSET = 0x60003
+
+#: Read offset, in samples, of the drive that wrote the image. The file records
+#: no drive identity, so this is an assumption, and it is the one assumption in
+#: this module that silently changes the audio rather than failing: a ``.pxi``
+#: written by a drive with a different offset imports shifted by the difference.
+#: +30 is the PX-716A, measured through AccurateRip on all four images we hold
+#: (+30 verifies, 0 does not). Kept as a named parameter so PROV can record what
+#: was assumed and a future image from another drive has somewhere to say so.
+_PLEXTOOLS_READ_OFFSET = 30
 
 _CDDA_SECTOR_BYTES = 2352
+_BYTES_PER_SAMPLE = 4  # 16-bit stereo
 _LEAD_IN_FRAMES = 150  # absolute frame 150 == LBA 0
 _MAX_TRACKS = 99
-
-# The largest tail shortfall that counts as a format quirk rather than a broken
-# file.  One partial final sector is what the reference image exhibits; anything
-# beyond that is a truncated copy and must not be padded into a silent disc.
-_MAX_TAIL_PAD_BYTES = _CDDA_SECTOR_BYTES
 
 
 class PXIError(ValueError):
@@ -355,37 +376,46 @@ def _build_disc(
 
 
 def _write_pcm(
-    f: IO[bytes], total_frames: int, file_bytes: int, pcm_out: Path, filename: str
+    f: IO[bytes],
+    total_frames: int,
+    file_bytes: int,
+    pcm_out: Path,
+    filename: str,
+    read_offset: int = _PLEXTOOLS_READ_OFFSET,
 ) -> int:
-    """Copy the audio region to *pcm_out*; return the number of pad bytes added.
+    """Copy the audio to *pcm_out*, offset-corrected; return the pad bytes added.
 
     The copy is verbatim — PXI stores s16le, the byte order the RBI PCM block
-    wants.  The stored audio can stop short of the lead-out by a partial sector
-    (see the module docstring); the tail is zero-filled to the declared length so
-    the PCM block and the TOC agree, because every downstream consumer slices the
-    PCM using the TOC.
+    wants — but it does not start at the audio origin.  The stored audio is raw
+    (module docstring), and the rest of the pipeline expects the PCM block to be
+    offset-corrected, so the read starts ``read_offset`` samples in.  That leaves
+    the same number of samples missing at the far end, which are zero-filled: the
+    PCM block and the TOC must agree on length because every downstream consumer
+    slices the PCM using the TOC.  **This pad is expected and benign**, not a
+    defect signal — it is the tail of the disc arriving one read-offset short, and
+    it was measured silent on the reference disc.
 
-    The shortfall is checked **before** anything is written and capped at one
-    sector.  Unbounded padding would turn a truncated or half-copied file into a
-    structurally perfect container — right TOC, right disc ID, hundreds of
-    megabytes of silence — reported as a success with one warning line.  Silence
-    is also what a file that was never fully written produces, so a short file
-    has to fail rather than import (``tools/write_smoke.py``'s reasoning,
-    inverted).
+    Truncation is a different thing and is checked **before** anything is written:
+    the raw region must hold the whole declared lead-out exactly, because the
+    origin is derived from that same length.  Unbounded padding would turn a
+    truncated or half-copied file into a structurally perfect container — right
+    TOC, right disc ID, hundreds of megabytes of silence — reported as a success
+    with one warning line.  Silence is also what a file that was never fully
+    written produces, so a short file has to fail rather than import
+    (``tools/write_smoke.py``'s reasoning, inverted).
     """
     want = total_frames * _CDDA_SECTOR_BYTES
-    available = max(file_bytes - _AUDIO_OFFSET, 0)
-    shortfall = want - available
-    if shortfall > _MAX_TAIL_PAD_BYTES:
+    raw_available = max(file_bytes - _AUDIO_OFFSET, 0)
+    if raw_available < want:
         msg = (
-            f"{filename}: audio region holds {available} bytes but the lead-out"
-            f" declares {want} — short by {shortfall}, past the {_MAX_TAIL_PAD_BYTES}-byte"
-            " limit; the file looks truncated"
+            f"{filename}: audio region holds {raw_available} bytes but the lead-out"
+            f" declares {want} — short by {want - raw_available}; the file looks"
+            " truncated"
         )
         raise PXIError(msg)
 
     written = 0
-    f.seek(_AUDIO_OFFSET)
+    f.seek(_AUDIO_OFFSET + read_offset * _BYTES_PER_SAMPLE)
     with open(pcm_out, "wb") as out:
         while written < want:
             chunk = f.read(min(_CHUNK_BYTES, want - written))
@@ -474,9 +504,12 @@ def import_pxi(
 ) -> tuple[RBIDisc, int]:
     """Import a PlexTools ``.pxi`` disc image as master-mode RBI.
 
-    Returns ``(disc, FLAG_MASTER_MODE)``.  When *prov* is given, any tail
-    padding applied to reach the declared lead-out is recorded there as
-    ``pxi_tail_padded`` so the fabricated samples stay identifiable.
+    Returns ``(disc, FLAG_MASTER_MODE)``.  When *prov* is given, the read offset
+    assumed for the writing drive is recorded as ``pxi_read_offset`` and the tail
+    padding that offset costs as ``pxi_tail_padded``, so both the assumption and
+    the fabricated samples stay identifiable in the container.  The pad is the
+    routine consequence of offset-correcting a raw image, not a damage signal —
+    truncation raises instead.
 
     *report* receives the human-readable notes.  It defaults to ``print``;
     under the TUI the caller passes a sink that appends to the output region,
@@ -490,7 +523,7 @@ def import_pxi(
     Raises :class:`PXIError` for images this parser does not understand:
     multi-session, non-consecutive or non-ascending tracks, a gap in the index
     table, a lead-out that the index table does not reach, or an audio region
-    short by more than one sector.
+    that does not hold the whole declared lead-out.
     """
     say = report or print
     disc, has_cdtext, total_frames = _parse_pxi(pxi_path)
@@ -501,8 +534,13 @@ def import_pxi(
             f, total_frames, pxi_path.stat().st_size, pcm_out, pxi_path.name
         )
 
+    if prov is not None:
+        prov["pxi_read_offset"] = str(_PLEXTOOLS_READ_OFFSET)
     if pad:
-        say(f"  Tail: audio ran {pad} bytes short of the lead-out; zero-filled")
+        say(
+            f"  Offset: +{_PLEXTOOLS_READ_OFFSET} samples applied;"
+            f" {pad} bytes zero-filled at the lead-out"
+        )
         log.debug("%s: tail zero-filled by %d bytes", pxi_path.name, pad)
         if prov is not None:
             prov["pxi_tail_padded"] = str(pad)

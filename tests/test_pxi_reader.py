@@ -394,13 +394,22 @@ def test_cdtext_for_a_different_disc_is_discarded(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_pcm_is_copied_verbatim_from_the_audio_origin(
+def test_pcm_starts_one_read_offset_into_the_audio_region(
     simple: Path, tmp_path: Path
 ) -> None:
+    """The stored audio is raw, so the copy begins ``read_offset`` samples in.
+
+    Checked against the file's own bytes rather than a recomputed expectation:
+    the fixture fills each sector with its own index, so a copy that started at
+    the wrong place would still be the right length and the wrong content.
+    """
     out = tmp_path / "out.pcm"
     import_pxi(simple, out)
-    expected = simple.read_bytes()[pxi_reader._AUDIO_OFFSET :]
-    assert out.read_bytes() == expected
+    shift = pxi_reader._PLEXTOOLS_READ_OFFSET * pxi_reader._BYTES_PER_SAMPLE
+    raw = simple.read_bytes()
+    body = out.read_bytes()
+    assert body[:-shift] == raw[pxi_reader._AUDIO_OFFSET + shift :]
+    assert body[-shift:] == bytes(shift)
 
 
 def test_pcm_length_matches_the_declared_leadout(simple: Path, tmp_path: Path) -> None:
@@ -409,26 +418,29 @@ def test_pcm_length_matches_the_declared_leadout(simple: Path, tmp_path: Path) -
     assert out.stat().st_size == (SIMPLE_LEADOUT - LEAD_IN) * SECTOR
 
 
-def test_a_short_tail_is_zero_filled_and_recorded_in_provenance(
-    tmp_path: Path,
+def test_offset_correction_pads_the_tail_and_records_both_facts(
+    simple: Path, tmp_path: Path
 ) -> None:
-    """The real sample stops 120 bytes short of a whole final sector.
+    """A *complete* image still pads, and that is the expected outcome.
 
-    Padding keeps the PCM and the TOC agreeing — every consumer slices the PCM
-    using the TOC — but the fabricated samples must stay identifiable.
+    Shifting a raw image forward by the read offset leaves the same number of
+    samples missing at the lead-out end.  Padding keeps the PCM and the TOC
+    agreeing — every consumer slices the PCM using the TOC — so both the
+    fabricated samples and the offset that caused them stay identifiable.
+
+    This inverts the older expectation, which read the 120 bytes as a shortfall
+    in the file.  They were the head samples the offset discards (N7).
     """
-    path = build_pxi(
-        tmp_path,
-        records=SIMPLE_RECORDS,
-        leadout=SIMPLE_LEADOUT,
-        audio_frames=SIMPLE_LEADOUT - LEAD_IN - 1,
-    )
     out = tmp_path / "out.pcm"
     prov: dict[str, str] = {}
-    import_pxi(path, out, prov)
-    assert prov == {"pxi_tail_padded": str(SECTOR)}
+    import_pxi(simple, out, prov)
+    shift = pxi_reader._PLEXTOOLS_READ_OFFSET * pxi_reader._BYTES_PER_SAMPLE
+    assert prov == {
+        "pxi_read_offset": str(pxi_reader._PLEXTOOLS_READ_OFFSET),
+        "pxi_tail_padded": str(shift),
+    }
     assert out.stat().st_size == (SIMPLE_LEADOUT - LEAD_IN) * SECTOR
-    assert out.read_bytes()[-SECTOR:] == bytes(SECTOR)
+    assert out.read_bytes()[-shift:] == bytes(shift)
 
 
 def test_a_truncated_image_is_refused_rather_than_padded(tmp_path: Path) -> None:
@@ -449,32 +461,27 @@ def test_a_truncated_image_is_refused_rather_than_padded(tmp_path: Path) -> None
         import_pxi(path, out)
 
 
-def test_the_pad_limit_is_one_sector(tmp_path: Path) -> None:
-    """One short final sector passes; one byte more does not."""
-    frames = SIMPLE_LEADOUT - LEAD_IN
-    ok = build_pxi(
-        tmp_path,
-        records=SIMPLE_RECORDS,
-        leadout=SIMPLE_LEADOUT,
-        audio_frames=frames - 1,
-        name="ok.pxi",
-    )
-    import_pxi(ok, tmp_path / "ok.pcm")  # exactly one sector short: allowed
+def test_an_audio_region_short_by_a_single_byte_is_refused(
+    simple: Path, tmp_path: Path
+) -> None:
+    """The raw region must hold the whole lead-out exactly — no tolerance.
 
-    too_short = tmp_path / "short.pxi"
-    too_short.write_bytes(ok.read_bytes()[:-1])  # one byte further
+    The old reader allowed a shortfall of up to one sector, because the reference
+    image appeared to be 120 bytes short.  It was not: the origin was wrong.  With
+    the origin measured from the file's own arithmetic there is no legitimate
+    shortfall left, so the tolerance that hid a truncated copy is gone.
+    """
+    short = tmp_path / "short.pxi"
+    short.write_bytes(simple.read_bytes()[:-1])
     with pytest.raises(PXIError, match="looks truncated"):
-        import_pxi(too_short, tmp_path / "short.pcm")
-
-
-def test_a_complete_image_records_no_padding(simple: Path, tmp_path: Path) -> None:
-    prov: dict[str, str] = {}
-    import_pxi(simple, tmp_path / "out.pcm", prov)
-    assert prov == {}
+        import_pxi(short, tmp_path / "short.pcm")
 
 
 def test_a_padding_import_touches_neither_the_terminal_nor_a_warning(
-    tmp_path: Path, caplog: pytest.LogCaptureFixture, capsys: pytest.CaptureFixture[str]
+    simple: Path,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     """Both notes go to the sink; nothing reaches stdout, stderr or a WARNING.
 
@@ -485,17 +492,11 @@ def test_a_padding_import_touches_neither_the_terminal_nor_a_warning(
     check searched for the string ``log.warning`` and matched the docstring
     explaining why there isn't one.
     """
-    path = build_pxi(
-        tmp_path,
-        records=SIMPLE_RECORDS,
-        leadout=SIMPLE_LEADOUT,
-        audio_frames=SIMPLE_LEADOUT - LEAD_IN - 1,
-    )
     lines: list[str] = []
     capsys.readouterr()  # discard anything banked before this point
 
     with caplog.at_level("WARNING"):
-        import_pxi(path, tmp_path / "out.pcm", {}, lines.append)
+        import_pxi(simple, tmp_path / "out.pcm", {}, lines.append)
 
     captured = capsys.readouterr()
     assert captured.out == ""
