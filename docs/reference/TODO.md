@@ -6,7 +6,11 @@
 
 Both raised by kgr at the close of 2026-08-03. N1a and N1b resolved 2026-08-04;
 N1d settled and N1c superseded 2026-08-05; **N3, N4 and N5 implemented 2026-08-06**.
-**Open: N2, N6 (queued 2026-08-07) and N8 (queued 2026-08-10). N7 answered 2026-08-11.** (N1e is withdrawn
+**Open: N2, N6 (queued 2026-08-07) and N8 (queued 2026-08-10). N7 answered 2026-08-11.**
+**Reconciled 2026-08-12** — N2 is down to `progress-map-plan.md` §6 steps 5–6 (the
+Q lane and the track marker both shipped 2026-08-08); N6's prior question is
+answered by kgr and the item is unblocked but unimplemented; N7's residue is a
+policy call. N8 is unchanged. (N1e is withdrawn
 in full — retained below as evidence, not a plan. Its deletion list must not be
 actioned.)
 
@@ -817,9 +821,14 @@ progress bar**
 > genuine gap is the **Q lane** — `ReadStats.subq_ok` proves AccuDisc runs the
 > per-sector CRC and discards only the position — asked as a parallel `subq_map`
 > in outbound §148, along with the question that can invalidate the design if
-> answered late: **does Q lag the audio, as C2 does?** The per-track marker is
-> the left-hand status text and has been there all along; the ruler row was an
+> answered late: **does Q lag the audio, as C2 does?** ~~The per-track marker is
+> the left-hand status text and has been there all along~~; the ruler row was an
 > addition, and kgr dropped it.
+>
+> **Amended 2026-08-12 — "has been there all along" is wrong.** The track number
+> was *shipped with the Q lane* (`bd1b5eb`), read from the TOC
+> `_read_disc_binding` already fetches, so it costs no extra command and no
+> second spin-up. `progress-map-plan.md` §6.4 is the authority and says so.
 >
 > **C2 lane + frontier SHIPPED 2026-08-08.** `disc_map.py`, `TerminalUI.set_map`,
 > `accudisc_reader._census_c2` / `read_disc_c2(map_cb=…)`, 33 new tests. Q lag
@@ -829,9 +838,28 @@ progress bar**
 > on `ReadResult`), so the C2 lane is computed in the sink instead — no loss,
 > since the states the sink cannot see need reread machinery this path does not
 > use. The C API already takes a caller-supplied buffer, so the amended ask is a
-> **binding** change that serves `status_map` and `subq_map` alike. Remaining:
+> **binding** change that serves `status_map` and `subq_map` alike. ~~Remaining:
 > the Q lane (blocked on that ask — never DIY, see the zero-fill trap), the
-> recovery-ladder rendering, and the static post-CTDB map.
+> recovery-ladder rendering, and the static post-CTDB map.~~
+>
+> **Amended 2026-08-12 — the Q lane is SHIPPED and the ask was answered.**
+> AccuDisc 0.5.0 delivered both capabilities; measured today the binding
+> publishes `features = {caller_map_buffers, speed_bands, speed_honoured,
+> subq_map}` against library 0.9.0. Landed as `bd1b5eb` (Q lane + track number)
+> and `cbd1b7a` (Q-lane calibration — Q's healthy baseline is a few per cent,
+> not zero, so the two lanes carry different severity bands). `NO_POSITION`
+> counts as healthy (~1% interleave would otherwise flag every cell on a clean
+> disc); `NO_AUDIO` counts as damage, because the lane answers "is the
+> subchannel intact here". A binding without the capability draws one lane and
+> says so — it never draws Q as healthy.
+>
+> **Genuinely remaining — `progress-map-plan.md` §6, steps 5 and 6 only:**
+> 1. **Recovery-ladder rendering** (§2) — our own work, nothing blocks it.
+> 2. **A static map after CTDB repair**, via the pre/post diff (§5) — explicitly
+>    a sketch, not a promise.
+>
+> Do not re-derive this list from here: §6 of the plan is the authority and it
+> is current. This entry is a copy and drifted once already.
 
 Two halves of one design. The track-number status to the left of the progress bar
 was lost in the AccuDisc switch and never reimplemented. And per AccuDisc's preview,
@@ -867,10 +895,51 @@ same PROV dict as `release_selection`, which `_record_pressing_outcome` writes
 recording which is which. Every N5 container carries `match_confidence=0.550`
 beside `release_selection=manual`, computed before the manual choice existed.
 
-**The prior question is kgr's**: is `match_confidence` a pre-menu *hint* (its
+~~**The prior question is kgr's**~~: is `match_confidence` a pre-menu *hint* (its
 2026-06-20 role — informational, never skips the menu) or a record of what the
 container ended up believing? All three fix options below are unreachable at line
 2137 regardless of which is chosen, so this is not a scoring-table question yet.
+
+> **ANSWERED by kgr 2026-08-12 — and it answers a third way, not one of the two.**
+>
+> 1. **`match_distance` runs *after* the menu** on the non-auto path. The auto
+>    path is unchanged (no menu ran, so there is nothing to wait for).
+> 2. **`release_selection=manual` ⇒ `match_confidence=1.000`.**
+>
+> kgr's reasoning, which is what settles the framing: *the purpose of
+> `match_confidence` is to say how confident the automatic **guess** is, and a
+> manual selection is not a guess — it is a certainty.* So the key keeps its
+> 2026-06-20 meaning (it scores the guess) while being **recorded at the moment
+> that meaning is finally determined**. The old defect was never that the number
+> described the wrong thing; it was that it was written before the guess could be
+> superseded, leaving `match_confidence=0.550` beside `release_selection=manual`
+> in every N5 container — two keys describing two moments with nothing saying so.
+>
+> **This is not option (1), (2) or (3).** Option (1) bumped `manual` to a rung
+> above 0.50 inside the MB branch; kgr's rule short-circuits the scorer entirely
+> at 1.000, so the "how MB found it" axis never runs on a manual pick and option
+> (1)'s weakness (a user-confirmed duration match still reading 0.20) cannot
+> arise. It is closest to option (2) in *shape* — confirmation is its own axis —
+> but it is a **replacement** rather than an additive contributor.
+>
+> **Two consequences to handle when implementing, both already recorded below.**
+> - Moving the score after the menu **brings `mb_duration_match` (+0.20) to
+>   life.** It is unreachable today because stage-7 routes through
+>   `strip_pressing_mbid`, nulling the id before a pre-menu scorer could see it.
+>   Under the new ordering the branch can fire, so it needs to be *correct*, not
+>   merely present — it has never executed on real data.
+> - `rejected` still has no home. kgr's rule covers `manual` and leaves
+>   `auto_tiebreak` at today's 0.30, but `release_selection=rejected` is negative
+>   evidence about the candidate *list* and nothing reads it. Not a blocker —
+>   flag it rather than invent a value.
+>
+> **Cheap, because nothing reads the score back.** `match_confidence` /
+> `match_recommendation` are write-only tree-wide; the one live consumer is the
+> printed `match_dist.summary()` line, which is pre-menu **by design** and earns
+> its place there. So the printed line stays where it is and only the *stored*
+> key moves — they stop being the same number, which is the point.
+>
+> **Status: unblocked, not implemented.** No code queued as of 2026-08-12.
 
 **Nothing reads the score back.** Tree-wide, `match_confidence` /
 `match_recommendation` are write-only: two writes in `cdda2img.py`, a man-page
@@ -1030,11 +1099,23 @@ AccuDisc pushed `make install` + a wheel + `accudisc 0.4.0` on 2026-07-29. Nothi
 below can start until the library and binding are actually installed here, because
 every step assumes the binding resolves without our `tools/` shim.
 
-1. **[C2I] Install and verify.** `cmake --build build --target wheel` produces a
-   `cp310-abi3-linux_x86_64` wheel; install it alongside their `make install`. The
-   wheel's RUNPATH is the configured install prefix, so wheel and install belong
-   together — installing one against a different prefix reproduces the failure the
-   staging split exists to prevent.
+> **UNBLOCKED 2026-08-12 — kgr ran AccuDisc's installer (artefacts dated 17:11).**
+> Measured, not assumed: `/usr/local/lib64/libaccudisc.so.0 -> .so.0.9.0`; the
+> wheel directory holds `accudisc-0.9.0-cp310-abi3-linux_x86_64.whl` **and only
+> that** (0.4.0 and 0.5.0 are gone, so `install.sh`'s version-sort now has one
+> candidate); the pipx venv carries binding 0.9.0 resolving to the *installed*
+> library; `doctor` reports it `ok` with no shim warning. The gate at the head of
+> this block is therefore lifted — but read each item below, because two of them
+> were **not** waiting on the install and are still open.
+
+1. ~~**[C2I] Install and verify.**~~ — **DONE 2026-08-12.** `cmake --build build
+   --target wheel` produces a `cp310-abi3-linux_x86_64` wheel; install it
+   alongside their `make install`. The wheel's RUNPATH is the configured install
+   prefix, so wheel and install belong together — installing one against a
+   different prefix reproduces the failure the staging split exists to prevent.
+   Verified end to end: `cdda2img doctor` names
+   `~/.local/pipx/venvs/cdda2img/.../accudisc` 0.9.0 → `/usr/local/lib64/libaccudisc.so.0`,
+   i.e. binding and library from the same install rather than the build tree.
 2. **[C2I] Set `ACCUDISC_REQUIRE_INSTALLED=1` in whatever installs the binding.**
    Their discovery order is `ACCUDISC_INCLUDE_DIR`+`ACCUDISC_LIB_DIR` → `pkg-config`
    → their checkout. `pkg-config` wins **when it answers**, and on a machine that has
@@ -1079,12 +1160,31 @@ every step assumes the binding resolves without our `tools/` shim.
    `tools/accudisc/pybinding`, delete `_binding_search_path()`, and declare `accudisc`
    as a real dependency. `cffi` then arrives as *its* dependency and the stopgap line
    in our dev group goes.
-   **The completion signal is now visible** (`80384ba`, prompted by §co.4): `doctor`
+   ~~**The completion signal is now visible** (`80384ba`, prompted by §co.4): `doctor`
    reports the binary that will actually run, the `libaccudisc` it links, and any
    `$PATH` install it shadows. Today that reads `tools/accudisc/accudisc` →
    `build/src/libaccudisc.so.0`, *shadowing* `/usr/local/bin/accudisc` — two different
    artefacts (`991cb02` vs `cf1a248`, different `RUNPATH`s). This item is done when
-   that line names the install and the shadow line is gone.
+   that line names the install and the shadow line is gone.~~
+
+   **Amended 2026-08-12 — that completion signal no longer exists, so it was
+   replaced rather than evaluated.** Since the CLI retirement `doctor` deliberately
+   does **not** report the `accudisc` binary at all (CLAUDE.md: a line saying `ok`
+   about an artefact this application never executes is the defect the binary line
+   was added to fix, inverted). Confirmed in today's output — the AccuDisc group
+   shows `cffi` and `accudisc (binding)` with a `libaccudisc ->` sub-line, and no
+   binary or shadow line. "The shadow line is gone" is now **unfalsifiable**: it is
+   satisfied by the check having been deleted. A signal that cannot fail is not a
+   signal.
+
+   **New completion signal, reachable and failing today:**
+   `uv run python -c "import accudisc"` succeeds in the dev checkout *without*
+   `_binding_search_path()` appending the shim. Measured 2026-08-12: it raises
+   `ModuleNotFoundError`, so the shim is still load-bearing for the checkout even
+   though the pipx install is clean. **Status: the install half is done, the
+   checkout half is not.** Closing it means installing the binding into the dev
+   venv (or declaring `accudisc` a real dependency, which is the item's own plan)
+   before the two symlinks and `_binding_search_path()` can go.
 4. **[C2I] Packaging.** `pipx install .` + `pipx inject cdda2img <accudisc binding>`
    is proven end-to-end (binding active, `transport: binding`, real archive rendered).
    A `make install` target should wrap those two commands rather than hand-rolling a
@@ -1123,10 +1223,24 @@ every step assumes the binding resolves without our `tools/` shim.
    declines to remove, exit 1). Sent to AccuDisc as §130; the two open questions there
    (is the layout frozen; `ACCUDISC_PC_WHEELDIR` appears never `set()`) do not block us
    because the glob needs no pkg-config.
-   **Still open here:** the `disc_ab.py` precondition above, and AccuDisc's §cq.2
+   ~~**Still open here:** the `disc_ab.py` precondition above, and AccuDisc's §cq.2
    remedy for it — build the A/B wheel with `-DACCUDISC_INSTALL_RPATH` pointed at the
    build tree, in a **separate throwaway tree**, and never let that wheel leave the
-   machine or become the one Keith installs.
+   machine or become the one Keith installs.~~
+
+   **Amended 2026-08-12 — MOOT. Both A/B instruments were deleted 2026-08-01.**
+   `tools/disc_ab.py` and `tools/binding_ab.py` went with the CLI retirement, so
+   there is no two-carrier measurement left for a library skew to invalidate and
+   nothing to pin. Item 4 has no open work.
+
+   **The finding survives the instrument and is the reason to keep this block.**
+   Under `pipx install` + `pipx inject`, the injected wheel's RUNPATH is the
+   *install* prefix while a `tools/` symlink keeps its target on the build tree —
+   two `libaccudisc.so.0`s, fine for running and fatal for measuring. That
+   generalises to any future instrument comparing two paths into AccuDisc, and it
+   is the `binding_ab.py` error a second time with a packaging decision as the
+   trigger instead of a default flip (`feedback_control_relative_to_environment`:
+   re-ask "can this instrument still fail?" whenever a default or a path moves).
 4a. **[C2] `doctor` should keep growing with the package's data files.** The
    **Package data** group added 2026-07-31 checks the recovery profiles only. It exists
    because `doctor` reported *21 ok, 0 warnings* on an install where `rip` aborted at
@@ -1142,9 +1256,31 @@ every step assumes the binding resolves without our `tools/` shim.
    rip with the vendor path disarmed is a different configuration, so any bench run
    straddling a rebuild compares two configurations while looking like one series.
 
+   **Amended 2026-08-12 — half done, and the remaining half rides on item 3, not
+   on AccuDisc.** The install half is satisfied: `getcap /usr/local/bin/accudisc`
+   reports `cap_sys_rawio=ep` (a real file, not a symlink — `getcap` on a symlink
+   prints nothing and exits 0, which would have read as a negative). But the
+   binary *actually invoked* is still the build-tree one, because
+   `tools/recovery_bench.py` is the last CLI consumer and reaches it through the
+   shim. That inode carries the capability **today**
+   (`~/Git/accudisc/build/cli/accudisc`, `cap_sys_rawio=ep`) — which is exactly
+   the fragile state this item describes rather than the resolution of it, since
+   the next rebuild drops it silently and a bench run straddling that rebuild
+   still compares two configurations. **Do not close this until item 3 closes**
+   or `recovery_bench` is pointed at the install.
+
 #### Then, and only then
 
-6. **[C2I] Retire the subprocess transport entirely** (Keith's ruling, 2026-07-29).
+6. ~~**[C2I] Retire the subprocess transport entirely**~~ — **DONE 2026-08-01**
+   (`f8f1b38`, "retire the CLI — the API is the only transport"). Kept below for
+   the reasoning, which outlived the task. Everything the item lists as "removes"
+   is gone, and `test_no_module_outside_the_seam_imports_accudisc` did become
+   trivially true and was kept, as planned. The sequencing worry ("retiring before
+   the install lands leaves cdda2img unrunnable anywhere the binding is missing")
+   was resolved the other way: a missing binding is now **fatal by design**, and
+   so is an ABI mismatch. Original item:
+
+   **[C2I] Retire the subprocess transport entirely** (Keith's ruling, 2026-07-29).
    Sequencing is load-bearing — retiring before the install lands leaves cdda2img
    unrunnable anywhere the binding is missing. Removes: the subprocess arm of
    `accudisc_read()`, `_run_write_subprocess`, `CDDA2IMG_ACCUDISC_TRANSPORT`,
@@ -1282,6 +1418,28 @@ every step assumes the binding resolves without our `tools/` shim.
     vs H2 (`RECOVERED` simply false). Discriminator handed to them and device-free:
     they report **10 flagged map bytes for 9 corrupt sectors** — where the tenth sits
     separates the two.
+
+    *(There is no item 12; the list has always jumped 11 → 13. Noted 2026-08-12 so
+    the gap is not mistaken for a lost entry.)*
+15. **[C2I] `speed_bands` shipped and nobody has looked at it** — noted 2026-08-12,
+    no work queued. The binding now publishes `features = {caller_map_buffers,
+    speed_bands, speed_honoured, subq_map}`, and `SpeedRung` carries
+    `bands_cx` alongside `measured_cx` / `min_cx` / `max_cx` / `equiv_x` /
+    `verdict`. Two things it touches, neither audited:
+    - **The standing ladder-policy question** (`accudisc_reader.py` docstring,
+      and CLAUDE.md's "do NOT replace `drive_speed.admitted_ladder` with the
+      binding's"). Our rules 2 and 3 exist for drives whose page 2A does not
+      report; per-band rates are a *third* kind of evidence and may make rule 3
+      (bare `measured`) redundant. That would be a policy change with its own
+      evidence, so it is a measurement first, not an edit.
+    - **A prediction we currently owe AccuDisc.** Outbound §169 argues their
+      ABBA ceiling of 42,09x uses an *address* reference their own band model
+      contradicts, and offers a falsifiable test: under a fixed-radius reference
+      the 40x rung on Tracy is capped near 31,4x and its **outer band** should
+      flatten there rather than climb toward 40. `bands_cx` is that quantity, so
+      the test may be runnable here rather than waiting on their reply. Their
+      measured 23,68x at req=40 is a whole-disc average and is **not** the
+      quantity — the outer band alone is.
 
 ### ✅ DONE 2026-07-30 — Dependency pre-flight: `cdda2img doctor` + a runtime gate
 
