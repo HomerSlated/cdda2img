@@ -1032,8 +1032,33 @@ broke the tie was an instrument sensitive to the quantity in dispute.
   sentinel is confirmed by the two that do not.
 - **Does anything occupy `0x305-0x8000`? NO — the question dissolved.** That boundary
   was one disc's CD-Text *end*: `0x0B + 2 + 758 = 0x305` exactly. A disc with more
-  CD-Text writes further (Tracy Chapman, 848). No structure, no ISRC table; ISRCs
-  parse as absent on every image. `0x85BF-0x60003` remains zero throughout.
+  CD-Text writes further (Tracy Chapman, 848). No structure, no ISRC table; ~~ISRCs
+  parse as absent on every image.~~ `0x85BF-0x60003` remains zero throughout.
+
+  > **CORRECTED 2026-08-12 — "ISRCs parse as absent on every image" is wrong.**
+  > The scoped claim (nothing in `0x305-0x8000`) stands; the general clause does
+  > not. **The PXI carries per-track ISRCs**, found while searching the header for
+  > a drive-offset field. On the 12-track disc, twelve values pass
+  > `validators.validate_isrc`, at `0x805B + n * 0x48`, alongside its MCN at
+  > `0x804C`:
+  >
+  > ```
+  > 0x0805B  BED018901375     0x080A3  BED019001477
+  > 0x080EB  BED018901377     ...      0x08373  BED018901386
+  > ```
+  >
+  > Zero-filled on the other three, consistent with those discs carrying none.
+  > **`pxi_reader` does not read them** — a real metadata loss on discs that have
+  > them, since ISRC is one of the few objective identifiers we trust.
+  >
+  > **Deliberately NOT parsed yet, for the format's own documented reason.**
+  > `0x48` is `2 x 36`, so the stride assumes **two index records per track** —
+  > precisely the assumption this format punishes. Every image we hold has exactly
+  > two, so "72-byte per-track stride" and "12 bytes before every *even* index
+  > record" fit the data identically and predict different things on a disc with
+  > INDEX >= 02. Resolving it needs the same disc the last bullet is waiting for,
+  > which makes these one item and not two. Filing a guess as a parser would bake
+  > the coincidence in.
 - **More than two index records per track? STILL UNTESTED.** No image has an
   INDEX >= 02, so `index_points` has never executed on real data.
 
@@ -1045,6 +1070,53 @@ limitation rather than a silent accident, but it is unresolved policy: hardcode,
 prompt, take a CLI flag, or store raw and correct downstream. kgr's call. A rip on a
 non-+30 drive would confirm the mechanism, and is the one part of the original part 2
 still worth doing.
+
+> **DECIDED 2026-08-12 — leave the importer as-is (kgr).** `+30` stays hardcoded
+> and the limitation stays documented; nothing ships until a `.pxi` from a second
+> drive exists to test against. Two candidate mechanisms were costed and are on
+> file if that changes: AccurateRip detection at import with `+30` as fallback
+> (the method that settled this item; verified on 3 of our 4 images, needs
+> network), or a `--pxi-read-offset` flag. Neither was built.
+>
+> **A proposal was tested and refuted on the way — record it so it is not
+> retried.** The idea: *"the PCM truncation size effectively IS the offset"*,
+> reusing the reverse-engineering step. It cannot work, for two reasons that are
+> worth separating.
+>
+> 1. **There is no truncation.** Measured across all four images:
+>    `size - lead_out * 2352 = 0x60003` **exactly**, whole sectors on every one.
+>    Residue is identically zero.
+> 2. **The 120 bytes were circular.** They existed only against the *assumed*
+>    origin `0x6007B`, which was itself found by byte-matching our own
+>    **+30-corrected** rip — so the shortfall was `offset * 4` *by construction*.
+>    Fed back as a detector it returns the number that produced it.
+>
+> The structural reason behind both: **a raw dump of N sectors is `N * 2352`
+> bytes whatever the drive's read window is.** The offset changes *which* samples
+> land in those bytes, never how many. So no size-derived test can recover it —
+> and a `.pxi` from a `+667` drive would report `0` and silently break the
+> AR-verified path. This is the same shape as the original N7 error one level up:
+> a quantity derived from an assumption cannot then test that assumption.
+>
+> **"The offset is probably stored in the file" — searched, not found.** One drive
+> wrote all four images, so a stored drive field must be **byte-identical across
+> all four**; that filter cuts the search to 81 non-zero constant bytes in the
+> 393,219-byte header. Looking for `30 / -30 / 120 / -120 / 60 / 12` at every
+> constant position in ten integer encodings (u8, i8, u16, i16, u32, i32; LE and
+> BE) returns **0 hits**. The non-zero constants are the `PXI` magic, `11 03` at
+> `0x04`, `11 11` at `0x07` / `0x801F` / `0x8023`, and 24 bytes of `0x99` at
+> `0x802F` before the track-count byte. None is offset-shaped. There is also **no
+> drive identity string** anywhere — the only ASCII in the header is CD-Text, the
+> MCN and the ISRCs above — so the AccurateRip drive database cannot be consulted
+> either.
+>
+> **What that does and does not establish.** It is a genuine negative, not
+> silence: the probe would have fired had the value been present in those forms.
+> It does **not** exclude BCD, a scaled representation, or an index into a
+> PlexTools-internal drive table. And the ceiling is structural — with one drive,
+> a constant field is indistinguishable from any other constant, so further
+> searching is worth less than one image from a second drive. That single artefact
+> would resolve this, the ISRC stride, and the INDEX >= 02 question together.
 
 **Instrument:** `tools/pxi_probe.py` (origin arithmetic, header-fill boundary,
 `--ar` offset discrimination). Images at
