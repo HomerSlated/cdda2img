@@ -67,7 +67,7 @@ import logging
 import struct
 from collections.abc import Callable
 from pathlib import Path
-from typing import IO
+from typing import IO, NamedTuple
 
 from cdda2img.cdtext import CDTextBlock, parse_cdtext
 from cdda2img.rbi_format import FLAG_MASTER_MODE, RBIDisc, RBITocEntry
@@ -375,6 +375,116 @@ def _build_disc(
 # ---------------------------------------------------------------------------
 
 
+class OffsetCandidate(NamedTuple):
+    """One sample offset at which the stored audio agrees with AccurateRip."""
+
+    offset: int
+    tracks_matched: int
+    total_tracks: int
+
+
+class OffsetResolution(NamedTuple):
+    """The read offset to apply, and how it was arrived at."""
+
+    offset: int
+    source: str
+    detail: str
+
+
+#: Supplies the *confirmed* AccurateRip offsets for an image, given the parsed
+#: disc, the file, and the measured audio origin.  ``None`` means "no evidence"
+#: (offline, or the disc is not in the database) — distinct from an empty list,
+#: which means the disc IS in AccurateRip and nothing verifies.  Injected rather
+#: than imported so this module stays free of the network and of ``numpy``; the
+#: same reason ``report`` is a sink rather than a ``print``.
+OffsetCandidateSource = Callable[[RBIDisc, Path, int], list[OffsetCandidate] | None]
+
+
+def _resolve_read_offset(
+    candidates: list[OffsetCandidate] | None,
+    prior: int = _PLEXTOOLS_READ_OFFSET,
+) -> OffsetResolution:
+    """Choose the read offset to apply, given AccurateRip's verifying offsets.
+
+    **Never picks by proximity to zero, and never takes the top candidate.**
+    Both are wrong here, measured on the four images we hold:
+
+    - ``detect_offset``'s own docstring disowns the proximity tiebreak for
+      anything but verifying an already-corrected rip, because a widely-pressed
+      disc verifies at several offsets at once — one per pressing cohort.
+    - Taking ``matches[0]`` picks **+1573** on our 12-track image, where the true
+      drive offset ``+30`` ranks second.  Both are fully confirmed; ranking does
+      not separate a drive offset from a pressing cohort.
+    - A plausibility band does not either: Tracy Chapman yields 13 confirmed
+      offsets of which **10** fall inside +/-1500 (-639, -651, -817, -1288,
+      -1303, -1315, -1239, +1188 ...).  A cohort is free to land next to zero.
+
+    What *does* separate them is the N7 discriminator: **a drive offset is common
+    across images, a cohort differs per image.**  That cannot be evaluated from
+    one file — but it has already been evaluated, over four images and one drive,
+    and its answer is *prior*.  So the prior enters as **evidence**, not as a
+    fallback, and AccurateRip's role is to confirm or contradict it:
+
+    ``accuraterip_confirmed``
+        The prior is among the confirmed offsets.  Use it.  This is the expected
+        outcome for a `.pxi` from the drive the prior describes, and it holds on
+        all four images we have.
+    ``accuraterip_sole``
+        AccurateRip confirms exactly one offset and it is not the prior.  There
+        is no cohort ambiguity to fear, so the evidence wins — this is the case
+        that makes the whole feature worth having, and it is announced loudly.
+    ``assumed_ambiguous``
+        Several offsets verify and the prior is not among them.  Genuine
+        ambiguity with no drive evidence: **decline**, keep the prior, and record
+        every candidate.  Guessing here would silently store audio aligned to
+        another pressing.
+    ``assumed``
+        No evidence at all — offline, or the disc is not in AccurateRip.
+    ``assumed_unverified``
+        The disc is in AccurateRip and nothing verifies, at any offset.  That is
+        a statement about the *audio*, not the offset, so it changes nothing
+        about which offset to apply — but it is worth recording, because it is
+        also what a damaged or mis-parsed image looks like.
+    """
+    if candidates is None:
+        return OffsetResolution(prior, "assumed", "no AccurateRip evidence")
+    if not candidates:
+        return OffsetResolution(
+            prior, "assumed_unverified", "in AccurateRip, verifies at no offset"
+        )
+
+    listed = ", ".join(f"{c.offset:+d}" for c in candidates)
+    for c in candidates:
+        if c.offset == prior:
+            others = len(candidates) - 1
+            return OffsetResolution(
+                prior,
+                "accuraterip_confirmed",
+                f"{c.tracks_matched}/{c.total_tracks} tracks"
+                + (
+                    f"; {others} other offset(s) also verify: {listed}"
+                    if others
+                    else ""
+                ),
+            )
+
+    if len(candidates) == 1:
+        only = candidates[0]
+        return OffsetResolution(
+            only.offset,
+            "accuraterip_sole",
+            f"sole verifying offset {only.offset:+d}"
+            f" ({only.tracks_matched}/{only.total_tracks} tracks);"
+            f" the assumed {prior:+d} does NOT verify",
+        )
+
+    return OffsetResolution(
+        prior,
+        "assumed_ambiguous",
+        f"{len(candidates)} offsets verify and {prior:+d} is not among them: {listed}",
+    )
+
+
 def _write_pcm(
     f: IO[bytes],
     total_frames: int,
@@ -501,15 +611,24 @@ def import_pxi(
     pcm_out: Path,
     prov: dict[str, str] | None = None,
     report: Callable[[str], None] | None = None,
+    offset_candidates: OffsetCandidateSource | None = None,
 ) -> tuple[RBIDisc, int]:
     """Import a PlexTools ``.pxi`` disc image as master-mode RBI.
 
     Returns ``(disc, FLAG_MASTER_MODE)``.  When *prov* is given, the read offset
-    assumed for the writing drive is recorded as ``pxi_read_offset`` and the tail
-    padding that offset costs as ``pxi_tail_padded``, so both the assumption and
-    the fabricated samples stay identifiable in the container.  The pad is the
-    routine consequence of offset-correcting a raw image, not a damage signal —
-    truncation raises instead.
+    applied is recorded as ``pxi_read_offset``, how it was arrived at as
+    ``pxi_offset_source``, every verifying offset as ``pxi_offset_candidates``,
+    and the tail padding the offset costs as ``pxi_tail_padded`` — so the
+    assumption, the evidence for it and the fabricated samples all stay
+    identifiable in the container.  The pad is the routine consequence of
+    offset-correcting a raw image, not a damage signal — truncation raises
+    instead.
+
+    *offset_candidates* supplies AccurateRip's verifying offsets so the read
+    offset can be **measured rather than assumed**; without it the module prior
+    is used unchanged.  See :func:`_resolve_read_offset` for why the prior is
+    treated as evidence and why neither the top candidate nor the one nearest
+    zero is taken.
 
     *report* receives the human-readable notes.  It defaults to ``print``;
     under the TUI the caller passes a sink that appends to the output region,
@@ -529,16 +648,38 @@ def import_pxi(
     disc, has_cdtext, total_frames = _parse_pxi(pxi_path)
     say(f"  CD-Text: {'YES' if has_cdtext else 'NO'}")
 
+    candidates = None
+    if offset_candidates is not None:
+        candidates = offset_candidates(disc, pxi_path, _AUDIO_OFFSET)
+    res = _resolve_read_offset(candidates)
+
     with open(pxi_path, "rb") as f:
         pad = _write_pcm(
-            f, total_frames, pxi_path.stat().st_size, pcm_out, pxi_path.name
+            f,
+            total_frames,
+            pxi_path.stat().st_size,
+            pcm_out,
+            pxi_path.name,
+            res.offset,
         )
 
     if prov is not None:
-        prov["pxi_read_offset"] = str(_PLEXTOOLS_READ_OFFSET)
+        prov["pxi_read_offset"] = str(res.offset)
+        prov["pxi_offset_source"] = res.source
+        if candidates is not None:
+            prov["pxi_offset_candidates"] = ",".join(
+                f"{c.offset:+d}" for c in candidates
+            )
+    # The two outcomes that are not the routine one get a line of their own: a
+    # detected offset changes the audio, and a declined ambiguity means the
+    # audio rests on an assumption AccurateRip did not back.
+    if res.source == "accuraterip_sole":
+        say(f"  Offset: DETECTED {res.offset:+d} samples — {res.detail}")
+    elif res.source == "assumed_ambiguous":
+        say(f"  Offset: assuming {res.offset:+d} samples — {res.detail}")
     if pad:
         say(
-            f"  Offset: +{_PLEXTOOLS_READ_OFFSET} samples applied;"
+            f"  Offset: {res.offset:+d} samples applied ({res.source});"
             f" {pad} bytes zero-filled at the lead-out"
         )
         log.debug("%s: tail zero-filled by %d bytes", pxi_path.name, pad)

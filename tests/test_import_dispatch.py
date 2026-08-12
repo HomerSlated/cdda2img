@@ -72,7 +72,9 @@ def test_each_file_format_reaches_its_own_reader(
     source.write_bytes(b"")
     seen: dict[str, object] = {}
 
-    def _fake(path: Path, pcm_out: Path, *args: object) -> tuple[RBIDisc, int]:
+    def _fake(
+        path: Path, pcm_out: Path, *args: object, **kw: object
+    ) -> tuple[RBIDisc, int]:
         seen["path"] = path
         seen["pcm_out"] = pcm_out
         return _disc(), FLAG_MASTER_MODE
@@ -133,7 +135,13 @@ def test_pxi_is_handed_the_provenance_dict_it_records_padding_into(
     source = tmp_path / "album.pxi"
     source.write_bytes(b"")
 
-    def _fake(path: Path, pcm_out: Path, prov: dict[str, str] | None = None, *args):
+    def _fake(
+        path: Path,
+        pcm_out: Path,
+        prov: dict[str, str] | None = None,
+        *args,
+        **kw,
+    ):
         assert prov is not None
         prov["pxi_tail_padded"] = "120"
         return _disc(), FLAG_MASTER_MODE
@@ -167,6 +175,12 @@ def test_every_reader_is_handed_a_sink_that_reaches_the_tui(
     the wrong place and the previous frame is never erased — one orphaned
     progress bar per stray write (reported by kgr 2026-08-10: three bars for
     two stray writes plus the live one).
+
+    The sink is identified as the **last positional argument**, which is a
+    convention this test enforces across all five formats.  Optional injected
+    dependencies (``import_pxi``'s ``offset_candidates``) must therefore be
+    passed by keyword — otherwise they displace the sink and this test fails
+    with a `TypeError` rather than a missing line, which is how it was found.
     """
     source = tmp_path / f"album{suffix}"
     source.write_bytes(b"")
@@ -178,7 +192,7 @@ def test_every_reader_is_handed_a_sink_that_reaches_the_tui(
         def add_output(self, text: str) -> None:
             lines.append(text)
 
-    def _fake(path: Path, pcm_out: Path, *args: object):
+    def _fake(path: Path, pcm_out: Path, *args: object, **kw: object):
         sink = args[-1]
         assert callable(sink), f"{attr} was not handed a report sink"
         cast("Callable[[str], None]", sink)("  CD-Text: YES")
@@ -220,7 +234,9 @@ def test_a_directory_is_dispatched_to_the_ddp_reader(
     source.mkdir()
     seen: dict[str, object] = {}
 
-    def _fake(path: Path, pcm_out: Path, *args: object) -> tuple[RBIDisc, int]:
+    def _fake(
+        path: Path, pcm_out: Path, *args: object, **kw: object
+    ) -> tuple[RBIDisc, int]:
         seen["path"] = path
         return _disc(), FLAG_MASTER_MODE
 

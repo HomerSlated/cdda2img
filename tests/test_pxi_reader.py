@@ -437,6 +437,7 @@ def test_offset_correction_pads_the_tail_and_records_both_facts(
     shift = pxi_reader._PLEXTOOLS_READ_OFFSET * pxi_reader._BYTES_PER_SAMPLE
     assert prov == {
         "pxi_read_offset": str(pxi_reader._PLEXTOOLS_READ_OFFSET),
+        "pxi_offset_source": "assumed",
         "pxi_tail_padded": str(shift),
     }
     assert out.stat().st_size == (SIMPLE_LEADOUT - LEAD_IN) * SECTOR
@@ -542,3 +543,99 @@ def test_build_disc_defaults_the_performer_to_the_album_artist() -> None:
     groups = [[(150, 0), (150, 400)]]
     disc = _build_disc(groups, 1, None, None)
     assert disc.tracks[0].performer == ""
+
+
+# ---------------------------------------------------------------------------
+# Read-offset resolution (N7)
+# ---------------------------------------------------------------------------
+#
+# The policy exists because neither of the two obvious rules works, and both
+# failures were measured on the four real images rather than reasoned about:
+# `matches[0]` picks +1573 on the 12-track disc where +30 ranks second, and a
+# plausibility band admits 10 of Tracy Chapman's 13 confirmed offsets. These
+# tests encode the outcomes, so a later "simplification" back to either rule
+# fails here instead of silently storing audio aligned to another pressing.
+
+
+def _cand(
+    offset: int, matched: int = 11, total: int = 11
+) -> pxi_reader.OffsetCandidate:
+    return pxi_reader.OffsetCandidate(offset, matched, total)
+
+
+def test_no_accuraterip_evidence_keeps_the_prior() -> None:
+    res = pxi_reader._resolve_read_offset(None)
+    assert res.offset == pxi_reader._PLEXTOOLS_READ_OFFSET
+    assert res.source == "assumed"
+
+
+def test_in_the_database_but_verifying_nowhere_is_not_the_same_as_no_evidence() -> None:
+    """`[]` is a statement about the audio; `None` is silence from the network.
+
+    Both keep the prior, so the offset is unaffected — but they must stay
+    distinguishable in PROV, because an image that verifies at no offset at all
+    is also what damage and a mis-parse look like.
+    """
+    res = pxi_reader._resolve_read_offset([])
+    assert res.offset == pxi_reader._PLEXTOOLS_READ_OFFSET
+    assert res.source == "assumed_unverified"
+    assert res.source != pxi_reader._resolve_read_offset(None).source
+
+
+def test_the_prior_among_the_candidates_is_confirmation_not_coincidence() -> None:
+    res = pxi_reader._resolve_read_offset([_cand(30), _cand(-639), _cand(-1303)])
+    assert res.offset == 30
+    assert res.source == "accuraterip_confirmed"
+    assert "2 other offset" in res.detail
+
+
+def test_the_top_ranked_candidate_is_not_taken_when_the_prior_also_verifies() -> None:
+    """Measured on the 12-track image: +1573 ranks FIRST and +30 second.
+
+    Both are fully confirmed, so ranking cannot separate a drive offset from a
+    pressing cohort. Taking the head of the list would have applied +1573.
+    """
+    res = pxi_reader._resolve_read_offset([_cand(1573, 11, 12), _cand(30, 11, 12)])
+    assert res.offset == 30
+
+
+def test_a_sole_verifying_offset_overrides_the_prior() -> None:
+    """The case the feature exists for: evidence with no ambiguity to fear."""
+    res = pxi_reader._resolve_read_offset([_cand(667)])
+    assert res.offset == 667
+    assert res.source == "accuraterip_sole"
+    assert "does NOT verify" in res.detail
+
+
+def test_several_candidates_without_the_prior_declines_rather_than_guesses() -> None:
+    """Ambiguity with no drive evidence: keep the prior, record every candidate.
+
+    Picking the nearest to zero here (-634) is the heuristic detect_offset's own
+    docstring disowns, and it would silently store audio aligned to a different
+    pressing.
+    """
+    res = pxi_reader._resolve_read_offset([_cand(1573), _cand(-634), _cand(-1967)])
+    assert res.offset == pxi_reader._PLEXTOOLS_READ_OFFSET
+    assert res.source == "assumed_ambiguous"
+    assert "+1573" in res.detail and "-634" in res.detail
+
+
+def test_a_detected_offset_reaches_the_pcm_and_the_provenance(
+    simple: Path, tmp_path: Path
+) -> None:
+    """End to end: a supplied sole candidate must move the bytes, not just PROV.
+
+    Guards the seam itself — a resolution that is recorded but never passed to
+    the copy would leave every assertion above true and the audio unchanged.
+    """
+    out = tmp_path / "out.pcm"
+    prov: dict[str, str] = {}
+    import_pxi(simple, out, prov, None, lambda _d, _p, _o: [_cand(7, 11, 11)])
+    assert prov["pxi_read_offset"] == "7"
+    assert prov["pxi_offset_source"] == "accuraterip_sole"
+    assert prov["pxi_offset_candidates"] == "+7"
+    shift = 7 * pxi_reader._BYTES_PER_SAMPLE
+    raw = simple.read_bytes()
+    body = out.read_bytes()
+    assert body[:-shift] == raw[pxi_reader._AUDIO_OFFSET + shift :]
+    assert body[-shift:] == bytes(shift)

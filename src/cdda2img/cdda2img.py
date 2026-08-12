@@ -20,6 +20,7 @@ if TYPE_CHECKING:
     from cdda2img.field_resolver import FieldProposal
     from cdda2img.lookup_result import DiscMeta
     from cdda2img.mb_lookup import MBPrepopResult
+    from cdda2img.pxi_reader import OffsetCandidate as PXIOffsetCandidate
     from cdda2img.rbi_format import RipInfo
     from cdda2img.recovery_profile import ResolvedStrategy
     from cdda2img.rip_log import RipLogBuilder
@@ -1023,6 +1024,61 @@ def info_image(source: Path) -> None:
         raise ValueError(_unsupported_source_msg(source))
 
 
+def _pxi_offset_candidates(
+    disc: RBIDisc, pxi_path: Path, origin: int
+) -> list[PXIOffsetCandidate] | None:
+    """AccurateRip's confirmed offsets for a `.pxi`'s stored audio.
+
+    The seam that lets `pxi_reader` measure the writing drive's read offset
+    instead of assuming it, without importing the network or ``numpy`` itself.
+    Only **confirmed** matches are returned: an unconfirmed candidate is one the
+    frame-450 prefilter nominated and no full-track checksum agreed with, and
+    ABBA *Gold* has one of those at an offset where all 19 tracks pass the probe
+    and not one passes the checksum — exactly the systematic false positive that
+    must never reach a decision about which samples to store.
+
+    ``None`` (no evidence) and ``[]`` (in the database, nothing verifies) are
+    deliberately different returns: the first is silence from the network, the
+    second is a statement about the audio.  `_resolve_read_offset` records them
+    as different provenance and they must not be collapsed.
+
+    The audio is memory-mapped at *origin* rather than read: a disc is 400-800 MB
+    and ``detect_offset``'s prefilter touches a few kB per track, so nothing like
+    the whole image is ever paged in — and nothing is written, which keeps this
+    clear of the scratch-scope rule.
+    """
+    from cdda2img.pxi_reader import OffsetCandidate
+
+    try:
+        import numpy as np
+
+        from cdda2img.accuraterip import detect_offset, fetch_ar_responses
+        from cdda2img.cddb import compute_cddb_disc_id
+
+        lsns = [t.start_frame + t.pregap_frames for t in disc.tracks]
+        last = disc.tracks[-1]
+        disc_last = last.start_frame + last.pregap_frames + last.duration_frames - 1
+        cddb_id = int(compute_cddb_disc_id(lsns, disc_last), 16)
+
+        responses, _transport, _b3 = fetch_ar_responses(lsns, disc_last, cddb_id)
+        if not responses:
+            return None
+        frames = np.memmap(pxi_path, dtype="<u4", mode="r", offset=origin)
+        frames = frames[: (disc_last + 1) * (2352 // 4)]
+        matches = detect_offset(frames, lsns, disc_last, responses)
+    except Exception as exc:
+        # Never fail an import over a lookup: without evidence the reader falls
+        # back to its measured prior, which is what it did before this existed.
+        log.debug("PXI offset probe failed: %s", exc)
+        return None
+
+    return [
+        OffsetCandidate(m.offset, m.tracks_matched, m.total_tracks)
+        for m in matches
+        if m.confirmed
+    ]
+
+
 def _import_source(
     source: Path, temp: TempFiles, ui: TerminalUI | None
 ) -> tuple[RBIDisc, str, dict[str, str]]:
@@ -1093,7 +1149,17 @@ def _import_source(
         from cdda2img.pxi_reader import import_pxi
 
         provenance["ripper"] = "pxi"
-        disc, _ = import_pxi(source, temp.pcm_file, provenance, say)
+        # The offset supplier goes by KEYWORD: every reader's report sink is its
+        # last positional argument, and test_import_dispatch pins that shape for
+        # all five formats at once. An optional injected dependency must not
+        # displace it.
+        disc, _ = import_pxi(
+            source,
+            temp.pcm_file,
+            provenance,
+            say,
+            offset_candidates=_pxi_offset_candidates,
+        )
         return disc, sanitize_title(disc.album) or source.stem, provenance
 
     raise ValueError(_unsupported_source_msg(source))
