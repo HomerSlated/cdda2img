@@ -1071,12 +1071,41 @@ prompt, take a CLI flag, or store raw and correct downstream. kgr's call. A rip 
 non-+30 drive would confirm the mechanism, and is the one part of the original part 2
 still worth doing.
 
-> **DECIDED 2026-08-12 — leave the importer as-is (kgr).** `+30` stays hardcoded
-> and the limitation stays documented; nothing ships until a `.pxi` from a second
-> drive exists to test against. Two candidate mechanisms were costed and are on
-> file if that changes: AccurateRip detection at import with `+30` as fallback
-> (the method that settled this item; verified on 3 of our 4 images, needs
-> network), or a `--pxi-read-offset` flag. Neither was built.
+> ~~**DECIDED 2026-08-12 — leave the importer as-is (kgr).**~~ **SUPERSEDED the
+> same day: kgr called for AccurateRip detection per import. SHIPPED `72c2fa1`.**
+> The offset is now measured, and the interesting part is not the detection but
+> the **choice among its answers**, which had to be measured too:
+>
+> ```
+>   disc A (12 tr)    +1573, +30, -634            <- +30 ranks SECOND
+>   disc B (19 tr)    +30, -1710, -645, -1979, +2482
+>   disc C/D (11 tr)  +30 and twelve others, TEN of them inside +/-1500
+> ```
+>
+> So `matches[0]` installs a pressing cohort as a drive offset on disc A, and a
+> plausibility band is no better — a cohort is free to land next to zero. Neither
+> rank nor magnitude separates the two. The resolver therefore treats the **prior
+> as evidence** (it is the N7 cross-image discriminator, already evaluated) and
+> lets AccurateRip confirm or contradict it; five outcomes in
+> `pxi_offset_source`: `accuraterip_confirmed`, `accuraterip_sole`,
+> `assumed_ambiguous` (declines rather than guesses), `assumed`,
+> `assumed_unverified`. Only **confirmed** matches count — ABBA *Gold* has an
+> offset where the frame-450 prefilter hits 19/19 and no full-track checksum
+> agrees.
+>
+> **CTDB was deliberately not wired.** It inherits the same pressing cohorts (the
+> −669 twin appears in both databases), so it cannot disambiguate what AR cannot,
+> and it would add a second network dependency plus the image-domain conversion
+> this project has already got wrong in both directions.
+>
+> Acceptance: all four images import **byte-identical** to the previous code, all
+> resolving `accuraterip_confirmed` at `+30`. That test caught a real bug the unit
+> tests structurally could not — they inject a fake supplier, so the live one had
+> never executed.
+>
+> **Still open, unchanged:** no `.pxi` from a second drive exists, so
+> `accuraterip_sole` — the branch that makes this feature worth having — has never
+> fired on real data.
 >
 > **A proposal was tested and refuted on the way — record it so it is not
 > retried.** The idea: *"the PCM truncation size effectively IS the offset"*,
