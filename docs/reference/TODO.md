@@ -1117,6 +1117,42 @@ still worth doing.
 > a constant field is indistinguishable from any other constant, so further
 > searching is worth less than one image from a second drive. That single artefact
 > would resolve this, the ISRC stride, and the INDEX >= 02 question together.
+>
+> **The writer agrees, and explains why (kgr's idea, 2026-08-12).** Strings from
+> `PTPXL.exe` (PlexTools Professional XL 3.x, 2007) put the offset in a
+> **`CDriveInfo`** block — between `Current Firmware: %s`, `Access Time:` and
+> `Interface: %s`, ending at `DriveInfo.txt`:
+>
+> ```
+>   0x4629c8  -%d bytes            <- the %s below
+>   0x4629d4  %d bytes
+>   0x462830  CDriveInfo
+>   0x462a80  Audio Write Offset: %s
+>   0x462a98  Audio Read Offset : %s
+>   0x462ab0  DriveInfo.txt
+> ```
+>
+> So PlexTools models the offset as a **property of the drive**, listed with
+> firmware and interface and exported to a drive report — not as a property of
+> the image. Two things follow.
+>
+> - **It expresses offsets in BYTES**, not samples. The PX-716A's `+30 samples`
+>   is `120 bytes` in PlexTools' own units — the exact number this whole item
+>   chased. `120` was in the search set above and returned nothing.
+> - **`Due to the offsets the last track can be different`** (`0x45fbe4`) sits in
+>   the *Disc Copy* log beside `Verifying Track %d` and
+>   `include: UPC: %s ISRC: %s CD+G: %s`. Plextor documented our tail-pad effect
+>   twenty years ago, as a read-vs-write offset consequence on the last track.
+>   (That same string is independent corroboration for the ISRC field above —
+>   PlexTools does capture UPC and ISRC.)
+>
+> **Strings show what is displayed, not what is serialised**, so this is not proof
+> — a binary header field need not have a string near it. The header search is the
+> direct evidence; this supplies the missing *why*, and the two are independent.
+> Working conclusion: **the offset is not in the file because PlexTools never
+> considered it part of one.** It reads it from the drive at runtime (Plextor
+> drives report it over a vendor command), which is exactly the information a
+> `.pxi` carried to another machine loses.
 
 **Instrument:** `tools/pxi_probe.py` (origin arithmetic, header-fill boundary,
 `--ar` offset discrimination). Images at
