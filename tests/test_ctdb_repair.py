@@ -612,3 +612,76 @@ def test_the_map_covers_the_whole_pcm_not_just_the_ctdb_window():
     after[0] = 0xFF  # sector 0 — before any plausible bounds[0]
     got = C._repaired_sector_map(bytes(before), bytes(after))
     assert got[0] == 1
+
+
+def test_the_report_draws_two_aligned_rows_when_a_damage_map_was_captured(capsys):
+    """kgr's pairing, as ROWS rather than lanes.
+
+    `disc_map._GLYPH` defines the two-lane vocabulary as filled = healthy, which
+    the repair lane inverts — a rewritten region is good news and would draw as
+    the half that "did not survive". Sharing a row therefore states the opposite
+    of the truth in mono, under NO_COLOR, and in a piped log, where the glyph is
+    the only channel. The one-row constraint belongs to the LIVE map, which
+    shares a line with the progress bar; this is a static report.
+    """
+    from cdda2img.cdda2img import _print_ctdb_repair_map
+
+    dmg, rep = bytearray(1000), bytearray(1000)
+    dmg[100:150] = b"\x01" * 50
+    rep[100:150] = b"\x01" * 50
+
+    _print_ctdb_repair_map(bytes(rep), bytes(dmg))
+    lines = [ln for ln in capsys.readouterr().out.splitlines() if ln.strip()]
+
+    assert len(lines) == 3, lines
+    assert "Read damage" in lines[1] and "50 sector(s)" in lines[1]
+    assert "Parity repairs" in lines[2] and "50 sector(s)" in lines[2]
+    # Column alignment is the whole point of two rows: a reader compares them
+    # vertically, which only works if the maps start at the same column and are
+    # bucketed to the same width.
+    assert lines[1].index("█") == lines[2].index("█")
+
+
+def test_no_damage_map_omits_the_row_rather_than_drawing_it_clean(capsys):
+    """An unmeasured lane is never rendered as healthy — the standing rule that
+    kept a DIY Q lane out of the live map for the same reason."""
+    from cdda2img.cdda2img import _print_ctdb_repair_map
+
+    rep = bytearray(1000)
+    rep[10:20] = b"\x01" * 10
+
+    _print_ctdb_repair_map(bytes(rep), None)
+    lines = [ln for ln in capsys.readouterr().out.splitlines() if ln.strip()]
+
+    assert len(lines) == 2, lines
+    assert "Read damage" not in "".join(lines)
+    assert "Parity repairs" in lines[1]
+
+
+def test_nothing_is_printed_when_no_repair_happened(capsys):
+    """`repaired_sectors` is None on every failure path. Drawing an empty report
+    there would assert a repair took place and did nothing."""
+    from cdda2img.cdda2img import _print_ctdb_repair_map
+
+    _print_ctdb_repair_map(None, b"\x01" * 100)
+    _print_ctdb_repair_map(b"", b"\x01" * 100)
+    assert capsys.readouterr().out == ""
+
+
+def test_mismatched_map_lengths_are_clamped_so_the_columns_still_align(capsys):
+    """`cells_from_damage` derives its bucket size from each map's own length, so
+    two maps of different lengths put cell i over different sectors and the
+    vertical comparison silently misaligns. They should already agree — but
+    "should" is not a reason to skip the clamp."""
+    from cdda2img.cdda2img import _print_ctdb_repair_map
+
+    dmg = bytes(bytearray([1] * 50 + [0] * 950))
+    rep = bytes(bytearray([1] * 50 + [0] * 450))  # half as long
+
+    _print_ctdb_repair_map(rep, dmg)
+    lines = [ln for ln in capsys.readouterr().out.splitlines() if ln.strip()]
+
+    assert lines[1].index("█") == lines[2].index("█")
+    # Both counts are reported over the SAME clamped prefix, so they are
+    # comparable rather than each being right about a different disc.
+    assert "50 sector(s)" in lines[1] and "50 sector(s)" in lines[2]

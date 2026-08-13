@@ -519,6 +519,37 @@ gates exist.
    array the size of the PCM (816 MB) on top of the two buffers already resident,
    and this machine's `/tmp` lesson makes that the wrong default to reach for.
 
+   **Amended the same day — paired with the read's C2 damage map, as two ROWS.**
+   kgr asked for the pairing (the repair map alone is not legible: a coloured
+   cell is *good* news, so "all blue" reads as success when it means nothing was
+   repaired). The row count is the part that changed on inspection. `_GLYPH`
+   defines the two-lane vocabulary as **filled = healthy**, which the repair lane
+   inverts — so sharing one row states the opposite of the truth in mono, under
+   `NO_COLOR`, and in a piped log, where the glyph is the only channel there is.
+   The one-row constraint belongs to the **live** map, which shares a line with
+   the progress bar; a static end-of-rip report has vertical space for free.
+
+   ```
+     CTDB parity repair:
+       Read damage     ███████████▒▒███████████████▒███████████████  700 sector(s)
+       Parity repairs  ███████████▒▒█████████████████████████▒█████  340 sector(s)
+   ```
+
+   Bucketed to the same width from per-sector maps of the same disc, so the rows
+   are column-aligned and readable against each other: marked above and clear
+   below is damage parity did not rewrite; clear above and marked below is a
+   repair the drive never flagged. The damage row is **omitted** when no map was
+   captured rather than drawn clean — the same rule that kept a DIY Q lane out of
+   the live map.
+
+   **This required retaining the damage map past the read** (`_rip_disc_stage`
+   now returns it; `map_cb` became unconditional, so a `--no-tui` rip captures it
+   too — the rendering was the reason for the gate, never the capture).
+   `ui.set_map(None)` still fires: it releases the *renderer's* reference so it
+   stops polling a finished read, which is not the same as the data ceasing to be
+   interesting. That retention is also **step 5's prerequisite**, which is why
+   the two jobs are cheaper together than apart.
+
 Step 3 was deliberately ahead of step 2 in dependency terms, and that held: the
 useful half needed no one's permission.
 

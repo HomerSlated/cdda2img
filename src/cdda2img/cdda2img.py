@@ -1903,20 +1903,43 @@ def _emit_mb_provenance(
         provenance["mb_rejected_inconsistent"] = str(mb_result.rejected_inconsistent)
 
 
-def _print_ctdb_repair_map(repaired_sectors: bytes | None) -> None:
-    """Draw where on the disc CTDB parity actually rewrote audio (§5 of the plan).
+def _print_ctdb_repair_map(
+    repaired_sectors: bytes | None, disc_damage: bytes | None = None
+) -> None:
+    """Draw what CTDB parity rewrote, against where the drive struggled (§5).
 
     A **result** map, not a progress bar, and the distinction is the whole design
     decision: CTDB repair does zero extra reads and finishes in ~0.8 s, so
-    animating it would be theatre. This is drawn once, after the fact, and says
-    "here is what the parity fixed".
+    animating it would be theatre. This is drawn once, after the fact.
 
-    Coloured cells are cells the repair **changed**. The severity ramp therefore
-    reads as *how much of this region needed rewriting*, which is the same shape
-    as the C2 lane's ramp but the opposite news — so the caption says so rather
-    than leaving the colour to be read as damage that remains. Nothing remains:
-    a map only exists on the success path, where both gates passed over every
-    word a repair can touch.
+    **Two ROWS, not two lanes** (kgr asked for the pairing, 2026-08-13; the row
+    count is the part that changed on inspection). Pairing the read's C2 damage
+    with the repairs is right — where the drive struggled is the backdrop the
+    repairs have to be read against, and neither is very interesting alone. But
+    they must not share a row.
+
+    ``disc_map._GLYPH`` defines the two-lane vocabulary as **filled = healthy**,
+    which the repair lane inverts: a rewritten region is *good* news and would
+    draw as the half that "did not survive". In colour that is merely confusing;
+    in mono, under ``NO_COLOR``, or in a piped log — where the glyph is the only
+    channel there is — it states the opposite of the truth. The one-row
+    constraint exists because the live map shares a line with the progress bar,
+    and this is a static end-of-rip report, so it does not apply here. Vertical
+    space is the cheap way out and it keeps each row in the vocabulary it was
+    designed for.
+
+    The rows are bucketed to the same width from per-sector maps of the same
+    disc, so they are column-aligned and can be read against each other: a column
+    marked on the top row and clear on the bottom is damage parity did not
+    rewrite; clear on top and marked below is a repair the drive never flagged.
+
+    Both rows are C2-calibrated (:data:`disc_map.RAMP_BANDS`) — a zero healthy
+    baseline is right for "sectors the drive flagged" and for "sectors parity
+    changed" alike, unlike the Q lane, which needed its own bands.
+
+    The damage row is omitted entirely when no map was captured, rather than
+    drawn as clean: the ordinary rule that an unmeasured lane is never rendered
+    as healthy.
     """
     if not repaired_sectors:
         return
@@ -1926,13 +1949,30 @@ def _print_ctdb_repair_map(repaired_sectors: bytes | None) -> None:
     from cdda2img import disc_map
 
     width = max(16, min(shutil.get_terminal_size((80, 24)).columns - 4, 120))
-    cells = disc_map.cells_from_damage(
-        repaired_sectors, frontier=len(repaired_sectors), width=width
-    )
     n = len(repaired_sectors) - repaired_sectors.count(0)
-    row = disc_map.render(cells, colour=disc_map.colour_enabled(sys.stdout))
-    print(f"  CTDB repair map — {n} sector(s) rewritten by parity:")
-    print(f"  {row}")
+
+    damage = disc_damage
+    if damage is not None and len(damage) != len(repaired_sectors):
+        # Bucket boundaries are derived from each map's own length, so two maps
+        # of different lengths put cell i over different sectors and the pairing
+        # silently misaligns. Truncate both to the common prefix instead: the
+        # two are per-sector maps of the same disc and should already agree, so
+        # a difference is small, but "should" is not a reason to skip the clamp.
+        keep = min(len(damage), len(repaired_sectors))
+        damage, repaired_sectors = damage[:keep], repaired_sectors[:keep]
+
+    colour = disc_map.colour_enabled(sys.stdout)
+
+    def _row(sectors: bytes) -> str:
+        cells = disc_map.cells_from_damage(sectors, frontier=len(sectors), width=width)
+        return disc_map.render(cells, colour=colour)
+
+    label = max(len("Read damage"), len("Parity repairs"))
+    print("  CTDB parity repair:")
+    if damage is not None:
+        flagged = len(damage) - damage.count(0)
+        print(f"    {'Read damage':<{label}}  {_row(damage)}  {flagged} sector(s)")
+    print(f"    {'Parity repairs':<{label}}  {_row(repaired_sectors)}  {n} sector(s)")
 
 
 def _store_match_distance(provenance: dict[str, str], disc: RBIDisc) -> None:
@@ -2922,8 +2962,13 @@ def _rip_disc_stage(
     cfg: Config,
     ui: TerminalUI | None = None,
     read_speed: int | None = None,
-) -> tuple[RipInfo, str, Path | None]:
-    """Read the disc, returning (info, rip_type, c2_path).
+) -> tuple[RipInfo, str, Path | None, bytes | None]:
+    """Read the disc, returning (info, rip_type, c2_path, disc_damage).
+
+    *disc_damage* is the read's per-sector C2 damage map, one byte per sector,
+    retained past the read so a later stage can draw against it (the CTDB repair
+    map, and the recovery ladder). ``None`` only if the reader never handed the
+    lanes over, which means the read did not start.
 
     **One engine, one pass (M1/M2/M4).** A single AccuDisc ``read`` captures audio +
     C2 error-pointer bitmap + raw P-W subchannel, plus the ``fulltoc``/``cdtext``
@@ -2975,6 +3020,14 @@ def _rip_disc_stage(
                 detail=f"({done}/{total})",
             )
 
+    # The read's per-sector C2 damage map, KEPT past the read. `ui.set_map(None)`
+    # below releases the *renderer's* reference so it stops polling a finished
+    # read; it does not mean the data stops being interesting. Where the drive
+    # struggled is exactly the backdrop a repair map has to be read against — a
+    # cell that was damaged and was NOT repaired is the one worth a human's
+    # attention, and neither map alone can show that.
+    captured: list[ReadLanes] = []
+
     def _map_cb(lanes: ReadLanes) -> None:
         # The progress bar becomes the disc map for the length of the read: the
         # lanes are handed over at allocation, filled by the reader as sectors
@@ -2983,6 +3036,7 @@ def _rip_disc_stage(
         # cfg.c2_recovery = "off" suppresses only the bitmap *file*. Gating here
         # would blank the map for anyone using that escape hatch, and a blank map
         # is indistinguishable from a clean disc.
+        captured.append(lanes)
         phase.begin(lanes)
         if ui is not None:
             ui.set_map(
@@ -2999,7 +3053,11 @@ def _rip_disc_stage(
             output_fulltoc=fulltoc_file,
             read_speed=read_speed,
             progress_cb=_cb if ui is not None else None,
-            map_cb=_map_cb if ui is not None else None,
+            # Unconditional, where it used to be gated on a TUI. The handover is
+            # what yields the damage map, and a `--no-tui` rip has exactly as
+            # much use for a repair map afterwards as an interactive one. The
+            # *rendering* stays gated; the capture never was the reason for it.
+            map_cb=_map_cb,
         )
     finally:
         # Release the buffer on the failure path too — the renderer holds a
@@ -3007,6 +3065,7 @@ def _rip_disc_stage(
         # a frozen frontier on screen that reads as a stalled drive.
         if ui is not None:
             ui.set_map(None)
+    disc_damage = bytes(captured[0].damage) if captured else None
     try:
         from cdda2img.subq_toc import build_rip_info
 
@@ -3021,7 +3080,7 @@ def _rip_disc_stage(
         # nothing left to build a disc from, and no second engine to ask.
         msg = f"disc metadata assembly failed: {exc}"
         raise RuntimeError(msg) from exc
-    return info, "accudisc", (c2_file if want_c2 else None)
+    return info, "accudisc", (c2_file if want_c2 else None), disc_damage
 
 
 def _drive_supports_c2(device: str) -> bool:
@@ -3437,7 +3496,7 @@ def rip_image(  # noqa: C901
         track_preview = _start_track_preview(device, temp.base, ui, enabled=preview)
 
         c2_file = temp.pcm_file.with_suffix(".c2")
-        info, rip_type, c2_path = _rip_disc_stage(
+        info, rip_type, c2_path, disc_damage = _rip_disc_stage(
             device,
             temp.pcm_file,
             c2_file,
@@ -3538,7 +3597,7 @@ def rip_image(  # noqa: C901
                 # verifies. Both are inside the one pause, so the TUI is torn
                 # down and rebuilt once rather than twice (N8's stray-write
                 # mechanism — anything printed outside a pause strands a frame).
-                _print_ctdb_repair_map(_ctdb.repaired_sectors)
+                _print_ctdb_repair_map(_ctdb.repaired_sectors, disc_damage)
                 print_ar_report(ar_verify.tracks, read_offset=read_offset)
                 if ui is not None:
                     ui.resume()
