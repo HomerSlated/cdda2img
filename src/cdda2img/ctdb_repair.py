@@ -105,6 +105,66 @@ class CtdbRepairResult:
     rip that took that path stays identifiable afterwards; a repair that hides
     which claim it rests on is exactly what AccuDisc's two-buffer return exists
     to prevent."""
+    repaired_sectors: bytes | None = None
+    """One byte per sector of the whole PCM, non-zero where the repair actually
+    changed at least one byte. ``None`` on every failure path, because nothing
+    was written and there is nothing to diff.
+
+    Measured from the buffers rather than reported by the decoder, deliberately:
+    this is the repair's *effect*, which is the same reason the CRC and AR gates
+    exist rather than trusting the self-report. It is also the only per-position
+    quantity available — ``corrections`` / ``erasure_columns`` are counts, and
+    the API returns repaired audio rather than a correction list, so a per-sector
+    answer cannot be derived from the report at all.
+
+    Feeds the result map (`progress-map-plan.md` §5). See
+    :func:`_repaired_sector_map` for why there is no "unrepairable" companion."""
+
+
+#: Sectors compared per numpy pass in :func:`_repaired_sector_map`. Bounds the
+#: temporary to ~9.6 MB; a whole-disc comparison in one shot would allocate a
+#: boolean array the size of the PCM (816 MB on a full disc) on top of the two
+#: buffers already resident, which is the sort of thing that costs a reboot here.
+_DIFF_CHUNK_SECTORS = 4096
+
+
+def _repaired_sector_map(before: bytes, after: bytes) -> bytes:
+    """One byte per sector: 1 where the repair changed at least one byte, else 0.
+
+    This is `progress-map-plan.md` §5 option (1) — derive the positions locally
+    from the pre/post buffers rather than asking AccuDisc for them. It needs no
+    API change, costs no extra I/O (both buffers are already in hand at the
+    commit point), and measures what the repair *did* rather than what it says it
+    did.
+
+    **There is deliberately no "unrepairable" companion map, and the reason is
+    structural rather than an omission.** The plan sketched three lanes —
+    ``undamaged / repaired / unrepairable`` — but that third lane is empty on the
+    only path where any map can be drawn. A map requires a write-back; the
+    write-back happens only after the CTDB per-track CRC gate *and* (when asked)
+    the AccurateRip gate have both passed; and the CRC gate covers
+    ``[bounds[0], bounds[-1])``, which is every word a repair can touch. So a
+    drawable map is by construction a map of a fully successful repair. On the
+    failure paths nothing is written, ``before == after``, and there is nothing
+    to diff — which is why this returns ``None`` there rather than an all-zero
+    map that would read as "repaired nothing" instead of "did not repair".
+
+    Compares the whole PCM, not just ``[bounds[0], bounds[-1])``: the window is
+    where a repair is *allowed* to write, so diffing only inside it would make a
+    write outside it invisible — and that is precisely the bug worth seeing.
+    """
+    n = min(len(before), len(after)) // _FRAME
+    if n <= 0:
+        return b""
+    out = bytearray(n)
+    for start in range(0, n, _DIFF_CHUNK_SECTORS):
+        stop = min(start + _DIFF_CHUNK_SECTORS, n)
+        lo, hi = start * _FRAME, stop * _FRAME
+        a = np.frombuffer(before, dtype=np.uint8, count=hi - lo, offset=lo)
+        b = np.frombuffer(after, dtype=np.uint8, count=hi - lo, offset=lo)
+        rows = (a != b).reshape(stop - start, _FRAME)
+        out[start:stop] = rows.any(axis=1).astype(np.uint8).tobytes()
+    return bytes(out)
 
 
 def _lookup_url(bounds: list[int]) -> str:
@@ -492,10 +552,12 @@ def _repair_and_verify(
             used_c2=used_c2,
         )
 
+    changed = _repaired_sector_map(pcm, out)
     pcm_path.write_bytes(out)
     return CtdbRepairResult(
         True,
         "repaired",
+        repaired_sectors=changed,
         entry_id=sel.entry.id,
         ctdb_offset=sel.offset,
         corrections=report.corrections,

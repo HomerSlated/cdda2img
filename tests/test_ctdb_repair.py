@@ -519,3 +519,96 @@ def test_a_column_at_full_erasure_capacity_returns_the_weaker_buffer() -> None:
     assert r.unverified_columns == 1
     assert r.unverified_columns <= r.repaired_columns, "a subset, not a parallel count"
     assert bytes(r.audio_unverified) == original, "the damage is undone exactly"
+
+
+# ---------------------------------------------------------------------------
+# §E — the repaired-sector map (progress-map-plan.md §5, N2 step 6)
+#
+# Positions are DERIVED from the pre/post buffers, not reported by the decoder:
+# the API returns repaired audio rather than a correction list, so there is no
+# per-position quantity in the report to read. That also makes this a
+# measurement of the repair's effect rather than its self-report — the same
+# reason the CRC and AR gates exist.
+# ---------------------------------------------------------------------------
+
+_F = C._FRAME
+
+
+def test_the_map_marks_exactly_the_sectors_whose_bytes_changed():
+    before = bytearray(_F * 5)
+    after = bytearray(before)
+    after[_F * 1] ^= 0xFF  # first byte of sector 1
+    after[_F * 3 + _F - 1] ^= 0x01  # LAST byte of sector 3
+
+    got = C._repaired_sector_map(bytes(before), bytes(after))
+
+    assert list(got) == [0, 1, 0, 1, 0]
+
+
+def test_a_change_in_the_final_byte_of_a_sector_is_not_missed():
+    """The boundary a reshape gets wrong. A per-sector `any` that sliced
+    `[lo:hi-1]`, or an off-by-one in the chunk stride, still passes the test
+    above (which touches byte 0 of sector 1) and fails here."""
+    before = bytearray(_F * 2)
+    after = bytearray(before)
+    after[-1] = 0xFF
+
+    assert list(C._repaired_sector_map(bytes(before), bytes(after))) == [
+        0,
+        1,
+    ]
+
+
+def test_the_chunk_boundary_is_not_a_blind_spot():
+    """Damage placed exactly either side of the chunk stride.
+
+    `_DIFF_CHUNK_SECTORS` exists to bound memory, and a chunked loop is where an
+    off-by-one hides: the sectors at `chunk-1` and `chunk` are the two a wrong
+    stride drops or double-counts. Sized to span three chunks so a middle chunk
+    is fully interior.
+    """
+    chunk = C._DIFF_CHUNK_SECTORS
+    n = chunk * 2 + 3
+    before = bytearray(_F * n)
+    after = bytearray(before)
+    marked = {0, chunk - 1, chunk, chunk * 2 - 1, chunk * 2, n - 1}
+    for s in marked:
+        after[s * _F] = 0xAA
+
+    got = C._repaired_sector_map(bytes(before), bytes(after))
+
+    assert len(got) == n
+    assert {i for i, v in enumerate(got) if v} == marked
+
+
+def test_identical_buffers_map_to_all_zero_which_is_why_failure_returns_none():
+    """An all-zero map and "no map" are different claims and must stay so.
+
+    A failed repair writes nothing, so `before == after` and a diff would yield
+    all zeros — indistinguishable from a successful repair that changed nothing.
+    `CtdbRepairResult.repaired_sectors` is therefore `None` on every failure
+    path, and this test states the reason rather than leaving it to the
+    docstring: "repaired nothing" and "did not repair" must not render alike.
+    """
+    buf = bytes(_F * 4)
+    assert set(C._repaired_sector_map(buf, buf)) == {0}
+
+
+def test_a_trailing_partial_sector_is_dropped_rather_than_reported():
+    """`min(len) // _FRAME` truncates. A partial sector cannot be characterised
+    as repaired-or-not, and inventing a cell for it would put a colour on the
+    outer edge of the disc — where damage concentrates and a false mark is worst."""
+    before = bytes(_F * 3 + 17)
+    after = bytearray(before)
+    after[-1] = 0xFF
+    assert len(C._repaired_sector_map(before, bytes(after))) == 3
+
+
+def test_the_map_covers_the_whole_pcm_not_just_the_ctdb_window():
+    """A write outside [bounds[0], bounds[-1]) is the bug most worth seeing, so
+    the diff must not be narrowed to the window the repair is allowed to touch."""
+    before = bytearray(_F * 4)
+    after = bytearray(before)
+    after[0] = 0xFF  # sector 0 — before any plausible bounds[0]
+    got = C._repaired_sector_map(bytes(before), bytes(after))
+    assert got[0] == 1

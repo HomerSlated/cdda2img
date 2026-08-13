@@ -907,10 +907,19 @@ progress bar**
 > subchannel intact here". A binding without the capability draws one lane and
 > says so — it never draws Q as healthy.
 >
-> **Genuinely remaining — `progress-map-plan.md` §6, steps 5 and 6 only:**
+> ~~**Genuinely remaining — `progress-map-plan.md` §6, steps 5 and 6 only:**~~
 > 1. **Recovery-ladder rendering** (§2) — our own work, nothing blocks it.
-> 2. **A static map after CTDB repair**, via the pre/post diff (§5) — explicitly
->    a sketch, not a promise.
+>    **STILL OPEN 2026-08-13.** Needs a fourth cell state (`REREADING`) and a
+>    decision about what a later attempt does to a cell an earlier one flagged
+>    (§2's proposal: last-write-wins, since the committed audio is whichever
+>    attempt matched). That is a design act, not just wiring, which is why it did
+>    not go with step 6.
+> 2. ~~**A static map after CTDB repair**, via the pre/post diff (§5) — explicitly
+>    a sketch, not a promise.~~ — **DONE 2026-08-13.** See
+>    `progress-map-plan.md` §6.6 for the detail. Headline: the sketch's three
+>    lanes collapsed to one, because "unrepairable" is empty by construction on
+>    the only path where a map can be drawn — the write-back is gated on a CRC
+>    check that covers every word a repair can touch.
 >
 > Do not re-derive this list from here: §6 of the plan is the authority and it
 > is current. This entry is a copy and drifted once already.

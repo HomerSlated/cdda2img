@@ -1903,6 +1903,38 @@ def _emit_mb_provenance(
         provenance["mb_rejected_inconsistent"] = str(mb_result.rejected_inconsistent)
 
 
+def _print_ctdb_repair_map(repaired_sectors: bytes | None) -> None:
+    """Draw where on the disc CTDB parity actually rewrote audio (§5 of the plan).
+
+    A **result** map, not a progress bar, and the distinction is the whole design
+    decision: CTDB repair does zero extra reads and finishes in ~0.8 s, so
+    animating it would be theatre. This is drawn once, after the fact, and says
+    "here is what the parity fixed".
+
+    Coloured cells are cells the repair **changed**. The severity ramp therefore
+    reads as *how much of this region needed rewriting*, which is the same shape
+    as the C2 lane's ramp but the opposite news — so the caption says so rather
+    than leaving the colour to be read as damage that remains. Nothing remains:
+    a map only exists on the success path, where both gates passed over every
+    word a repair can touch.
+    """
+    if not repaired_sectors:
+        return
+    import shutil
+    import sys
+
+    from cdda2img import disc_map
+
+    width = max(16, min(shutil.get_terminal_size((80, 24)).columns - 4, 120))
+    cells = disc_map.cells_from_damage(
+        repaired_sectors, frontier=len(repaired_sectors), width=width
+    )
+    n = len(repaired_sectors) - repaired_sectors.count(0)
+    row = disc_map.render(cells, colour=disc_map.colour_enabled(sys.stdout))
+    print(f"  CTDB repair map — {n} sector(s) rewritten by parity:")
+    print(f"  {row}")
+
+
 def _store_match_distance(provenance: dict[str, str], disc: RBIDisc) -> None:
     """Write the container's ``match_confidence`` / ``match_recommendation`` (N6).
 
@@ -3500,6 +3532,13 @@ def rip_image(  # noqa: C901
                 )
                 if ui is not None:
                     ui.pause()
+                # The repair map goes ABOVE the AR report, because it is the
+                # evidence and the report is the verdict: the reader wants to see
+                # what parity rewrote before being told whether the result now
+                # verifies. Both are inside the one pause, so the TUI is torn
+                # down and rebuilt once rather than twice (N8's stray-write
+                # mechanism — anything printed outside a pause strands a frame).
+                _print_ctdb_repair_map(_ctdb.repaired_sectors)
                 print_ar_report(ar_verify.tracks, read_offset=read_offset)
                 if ui is not None:
                     ui.resume()

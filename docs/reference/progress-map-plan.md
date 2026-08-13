@@ -493,8 +493,31 @@ gates exist.
    rip. `set_map(status_width=…)` now takes the widest text the read can ever
    show, computed rather than measured. The bench had this (`status_width()`);
    production did not.
-5. Recovery-ladder rendering (§2), which is our own work.
-6. CTDB result map via the pre/post diff (§5).
+5. Recovery-ladder rendering (§2), which is our own work. **Still open.**
+6. ~~CTDB result map via the pre/post diff (§5).~~ — **DONE 2026-08-13.**
+   `ctdb_repair._repaired_sector_map` diffs the pre/post buffers at the commit
+   point (where both are already in hand, so no extra I/O), carried on
+   `CtdbRepairResult.repaired_sectors`; `cdda2img._print_ctdb_repair_map` draws
+   it once, above the AR re-verify report and inside the same `ui.pause()`.
+
+   **The three-lane sketch collapsed to one lane on inspection, and the reason is
+   structural.** §5 proposed `undamaged / repaired / unrepairable`. The third
+   lane is empty on the only path where a map can be drawn at all: a map requires
+   a write-back, the write-back requires the CTDB per-track CRC gate (and, when
+   asked, the AR gate) to pass, and the CRC gate covers `[bounds[0], bounds[-1])`
+   — every word a repair can touch. So a drawable map is by construction a map of
+   a *fully successful* repair. Recorded rather than quietly dropped, because
+   "we chose not to build it" and "it cannot be non-empty" are different claims.
+
+   Consequence worth keeping: on the failure paths `repaired_sectors` is `None`,
+   **not** an all-zero map. Nothing is written there, so a diff would be all
+   zeros — indistinguishable from a successful repair that changed nothing.
+   "Repaired nothing" and "did not repair" must not render alike, and a test
+   states that rather than the docstring alone.
+
+   The diff is chunked at 4096 sectors: a whole-disc `a != b` allocates a boolean
+   array the size of the PCM (816 MB) on top of the two buffers already resident,
+   and this machine's `/tmp` lesson makes that the wrong default to reach for.
 
 Step 3 was deliberately ahead of step 2 in dependency terms, and that held: the
 useful half needed no one's permission.
