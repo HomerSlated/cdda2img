@@ -109,3 +109,50 @@ def build_match_distance(disc: RBIDisc, prov: dict[str, str]) -> MatchDistance:
         rec = MatchRecommendation.NONE
 
     return MatchDistance(score=score, contributors=contributors, recommendation=rec)
+
+
+def final_match_distance(disc: RBIDisc, prov: dict[str, str]) -> MatchDistance:
+    """The score to STORE, computed after the metadata menu has closed (N6).
+
+    :func:`build_match_distance` scores *the automatic guess*. This scores *what
+    the container ended up believing*, and the two are different numbers taken at
+    different moments. Before N6 they were the same call: the score was computed
+    at ``cdda2img.py:2321`` and the menu ran at ``:2349``, so every container from
+    the N5 alternatives menu carried ``match_confidence=0.550`` beside
+    ``release_selection=manual`` — two keys describing two moments with nothing
+    saying which was which.
+
+    **A manual selection short-circuits to 1.000.** kgr's ruling, 2026-08-13:
+
+        the purpose of ``match_confidence`` is to say how confident the automatic
+        *guess* is, and a manual selection is not a guess — it is a certainty.
+
+    So the key keeps its 2026-06-20 meaning and is merely recorded at the moment
+    that meaning is finally determined. Note this **replaces** the scorer rather
+    than adding to it: the "how MB found it" axis never runs on a manual pick, so
+    a user-confirmed duration match cannot read 0.20.
+
+    ``release_selection`` takes four values and only two are handled here:
+
+    ``manual``
+        1.000. The user held the disc and picked.
+    ``unique`` / ``auto_tiebreak`` / absent
+        Fall through to :func:`build_match_distance` unchanged.
+    ``rejected``
+        **Also falls through, and this is a known gap, not an oversight.** The
+        user said none of the listed pressings match; ``PressingScreen`` keeps the
+        automatic pick anyway ("The automatic pick is kept, but flagged as
+        unconfirmed") and does *not* clear ``mb_release_id``. So a rejected disc
+        still scores ``mb_disc_id_multi`` at 0.30 — identical to an *un-reviewed*
+        ``auto_tiebreak``, which loses the fact that a human looked and said no.
+        ``rejected`` is negative evidence about the candidate *list* and nothing
+        reads it. kgr's ruling covers ``manual`` and deliberately leaves this
+        open: flag it rather than invent a value (TODO N6).
+    """
+    if prov.get("release_selection") == "manual":
+        return MatchDistance(
+            score=1.0,
+            contributors={"user_confirmed": 1.0},
+            recommendation=MatchRecommendation.STRONG,
+        )
+    return build_match_distance(disc, prov)

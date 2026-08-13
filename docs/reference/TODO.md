@@ -2,6 +2,60 @@
 
 ## Open
 
+### 📋 QUEUED — kgr's TODO cleanup rulings, 2026-08-13
+
+Recorded verbatim on receipt so they survive a context compaction. **Work order set
+by kgr: N6, then N2, then N8 first; then work back through this list.** Nothing
+below is actioned yet except where noted.
+
+1. **Item 9 (B-7 alternatives UI) is DONE** — remove it from LIVE. kgr, 2026-08-13.
+   Verify against what N5 shipped before striking, and say which commit closed it.
+2. **Item 10 (B-4 post-soak) — recheck, "probably stale too".** Check whether the
+   legacy merge chain and `test_shadow_equivalence` still exist before assuming
+   there is work here.
+3. **Anything touching the shim is REJECTED** — done 2026-08-13 (`994bc9a`, LIVE
+   item 3 deleted). Listed here so the ruling is visible from the cleanup block:
+   do not reopen, and see CLAUDE.md "This is DESIGN, not debt".
+4. **Re-evaluate every media-blocked item for urgency** — items 7 (a real burn,
+   needs a blank CD-R), 8 (static-Q, needs a denser disc), and the standing "one
+   `.pxi` from a second drive" ask. kgr: unlikely to be available **for months**.
+   Decide whether each stays LIVE, moves to a parked section, or is dropped —
+   an item that cannot progress for months is not a live item.
+5. **Item 15 (`speed_bands`) needs a full explainer before any work.** kgr's
+   question: *"What is this feature actually needed for, and how will it be
+   implemented, because right now it just looks like a feature that serves no
+   purpose other than justifying a large number of tests?"* Answer both, or drop
+   the item. Do not write tests for it in the meantime.
+6. **Item 14 (AccuDisc RECOVERED, 9/9) — was it ever replicated?** kgr: *"if it
+   was just a one-off mid-development anomaly, I'd rather not waste any time on
+   it."* Establish what produced the discrepancy and whether it reproduced on
+   current AccuDisc. If it did not, close it and tell them why.
+7. **Item 13 (master vs remaster) is RESOLVED by kgr, 2026-08-13:**
+   > *"Everything ripped and imported is a master. Everything created from files
+   > is a remaster."*
+   So `FLAG_MASTER_MODE` is a pure function of PROV `mode` — which is the
+   two-writers-for-one-fact case the item already identified. Derive it in one
+   place. The AccurateRip gating discussion is closed with it (it was the part
+   that made the bit depend on the network). **`--silence` stays** and its choice
+   still wants recording, in PROV rather than a header bit. `rbi_spec.md` defines
+   bit 2, so **spec before code**; the bit's value does not change, only its
+   meaning, so no format bump.
+8. **NEW — audit every PROV key.** kgr: *"If there are multiple redundant PROV
+   keys, they need to be consolidated. In fact we should probably audit all PROV
+   keys, to determine what's useful and what's pointless."* Note two findings
+   already banked that belong in it: `match_confidence` / `match_recommendation`
+   are **write-only** tree-wide (N6), and `release_selected_via` is retained only
+   because existing containers and `match_distance` read it while
+   `release_tied_after` is the honest quantity (N4). Expect more of the same.
+9. **NEW — `ortools` (LIVE item 11) wants a design discussion, not a lazy
+   import.** kgr: *"That's a huge amount of bloat just for one function. We wrote
+   an entire replacement for cdrdao and cd-paranoia, I'm sure we can write one
+   knapsack function."* So the destination is **replace**, not "make optional" —
+   which changes the item: `depcheck`'s "declared optional" notion is no longer
+   needed, and the acceptance test becomes *does our solver reproduce CP-SAT's
+   batching on the corpus*, which needs the current results banked **before** the
+   dependency goes.
+
 ### 🔴 NEXT SESSION
 
 Both raised by kgr at the close of 2026-08-03. N1a and N1b resolved 2026-08-04;
@@ -939,7 +993,45 @@ container ended up believing? All three fix options below are unreachable at lin
 > its place there. So the printed line stays where it is and only the *stored*
 > key moves — they stop being the same number, which is the point.
 >
-> **Status: unblocked, not implemented.** No code queued as of 2026-08-12.
+> ~~**Status: unblocked, not implemented.** No code queued as of 2026-08-12.~~
+>
+> **IMPLEMENTED 2026-08-13.** `match_distance.final_match_distance` is the
+> post-menu scorer (`manual` → 1.000, contributor `user_confirmed`, replacing the
+> table rather than adding to it); `cdda2img._store_match_distance` is the single
+> writer of both PROV keys and is called after `run_metadata_menu` on **both**
+> pipelines. The pre-menu `build_match_distance` call stays exactly where it was
+> and is now printed-only.
+>
+> **The create path was kept symmetric rather than skipped.** It passes no
+> `provenance=` to the menu, so `_record_pressing_outcome` never runs there and
+> `release_selection` is never written — the recompute is a no-op today unless the
+> menu changed `mb_release_id`. Made identical anyway: the two call sites have
+> drifted before, and one shape is cheaper to keep true than two.
+>
+> **Both consequences handled.**
+> - `mb_duration_match` (+0.20) is now reachable and is tested for being
+>   *correct*, not merely present — 0.20 rather than the 0.50 unique rung, and a
+>   guard-order test proving `duration_match_release` still outranks
+>   `release_selected_via` when a disc carries both.
+> - `rejected` was left alone, as ruled. Measured while implementing:
+>   `PressingScreen` (`menu_state.py:1165`) keeps the automatic pick and does
+>   **not** clear `mb_release_id` — its banner says so — so a rejected disc scores
+>   the same 0.30 as an *un-reviewed* `auto_tiebreak`. `manual` and `rejected` are
+>   now maximally separated (1.000 vs 0.30) while `rejected` and `auto_tiebreak`
+>   are indistinguishable by score. Pinned as **current** behaviour by
+>   `test_rejected_and_auto_tiebreak_are_indistinguishable_by_score`, which names
+>   the decision if anyone later closes it.
+>
+> **The tests that matter are the two AST guards**, because N6's defect was
+> *ordering* and no unit test on the scorer can see it: one pins that the two PROV
+> keys have exactly one writer, the other that in every function running the menu
+> the store happens after it (discovering both pipelines by construction, so a
+> third is covered without anyone remembering). Verified against a negative
+> control — both fail on the pre-N6 code shape.
+>
+> Docs updated: `docs/flow/metadata-pipeline.md` and the man page's
+> **match confidence** section, which now tells a user the printed and stored
+> numbers are deliberately different.
 
 **Nothing reads the score back.** Tree-wide, `match_confidence` /
 `match_recommendation` are write-only: two writes in `cdda2img.py`, a man-page

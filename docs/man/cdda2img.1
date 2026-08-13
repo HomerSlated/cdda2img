@@ -722,6 +722,20 @@ that summarises how many independent signals agreed on the disc's identity.
 The score is additive and is written as
 .B match_confidence
 in the RBI provenance block.
+.PP
+The score shown on screen is computed
+.I before
+the metadata menu opens, and describes how confident the automatic guess is.
+The value written to the provenance block is computed
+.I after
+the menu closes, and describes what the container ended up believing. These
+are deliberately two different numbers. If you confirm a pressing by hand, the
+stored
+.B match_confidence
+is
+.BR 1.000 ,
+because a manual selection is not a guess; the score components below then do
+not apply.
 .SS Score components
 Each signal contributes a fixed weight when present:
 .TP

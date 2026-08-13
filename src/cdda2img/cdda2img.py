@@ -842,9 +842,9 @@ def create_image(
             from cdda2img.match_distance import build_match_distance
             from cdda2img.metadata_menu import run_metadata_menu
 
+            # N6: printed hint only — the stored keys are written after the menu,
+            # exactly as on the import/rip path. See `_finalize_import`.
             match_dist = build_match_distance(disc, provenance)
-            provenance["match_confidence"] = f"{match_dist.score:.3f}"
-            provenance["match_recommendation"] = match_dist.recommendation.value
             # Menu shown unless --auto; confidence is informational (see
             # _finalize_import for the same policy). A failed §10.4 AcoustID gate
             # additionally suppresses --auto (warn-only) — a no-op in create,
@@ -857,6 +857,15 @@ def create_image(
             disc = run_metadata_menu(
                 disc, source_wavs=source_wavs, tui=tui, auto_apply=auto_apply
             )
+            # N6, and deliberately symmetric with `_finalize_import` rather than
+            # skipped. `create` passes no `provenance=` to the menu, so
+            # `_record_pressing_outcome` never runs and `release_selection` is
+            # never written here — the recompute is therefore a no-op today
+            # unless the menu changed `disc.mb_release_id`, in which case the
+            # stored score follows it, which is the point. Keeping the two call
+            # sites the same shape is worth more than saving one call: they have
+            # drifted before.
+            _store_match_distance(provenance, disc)
             album_art = to_album_art(_art_raw) if _art_raw is not None else None
 
             raw_titles = [re.sub(r"^\d{1,2}[-. ]+", "", p.stem) for p in batch]
@@ -1894,6 +1903,33 @@ def _emit_mb_provenance(
         provenance["mb_rejected_inconsistent"] = str(mb_result.rejected_inconsistent)
 
 
+def _store_match_distance(provenance: dict[str, str], disc: RBIDisc) -> None:
+    """Write the container's ``match_confidence`` / ``match_recommendation`` (N6).
+
+    Call this **after** the metadata menu has closed, on both the create and the
+    import/rip paths. It is the only writer of those two keys.
+
+    The split it enforces is the whole of N6. ``build_match_distance`` is called
+    once *before* the menu to print a hint — how good the automatic guess is,
+    which is what an operator about to review the guess wants to see — and
+    :func:`~cdda2img.match_distance.final_match_distance` is called once *after*,
+    to record what the container ended up believing. Those are two numbers about
+    two moments; before 2026-08-13 they were one call, and every container from
+    the N5 alternatives menu carried ``match_confidence=0.550`` beside
+    ``release_selection=manual``.
+
+    Nothing reads either key back — they are write-only tree-wide, with the one
+    live consumer being the printed ``summary()`` line, which is pre-menu **by
+    design** and is not this. So moving the write costs nothing and is not
+    load-bearing for any decision; it is a provenance-honesty fix.
+    """
+    from cdda2img.match_distance import final_match_distance
+
+    final = final_match_distance(disc, provenance)
+    provenance["match_confidence"] = f"{final.score:.3f}"
+    provenance["match_recommendation"] = final.recommendation.value
+
+
 def _note_corroboration_target(
     provenance: dict[str, str], checked_release_id: str | None, disc: RBIDisc
 ) -> None:
@@ -2316,11 +2352,15 @@ def _finalize_import(
     _r11_corroborate_with_discogs_master(disc, provenance)
 
     # Compute match confidence after all lookup signals are baked into prov.
+    #
+    # N6: this call is the PRINTED HINT and nothing else. It scores the automatic
+    # guess, before a human has seen it, which is exactly what the operator wants
+    # on screen — "here is how good my guess is, now look at it". The keys that go
+    # into the container are written after the menu closes, by
+    # `_store_match_distance` below, and are a different number by design.
     from cdda2img.match_distance import build_match_distance
 
     match_dist = build_match_distance(disc, provenance)
-    provenance["match_confidence"] = f"{match_dist.score:.3f}"
-    provenance["match_recommendation"] = match_dist.recommendation.value
     # The interactive menu is shown unless --auto (or config auto=true). Match
     # confidence is informational only — it is surfaced as a hint but never
     # skips the menu on its own (user decision, 2026-06-20). A failed §10.4
@@ -2356,6 +2396,13 @@ def _finalize_import(
         provenance=provenance,
     )
     _note_corroboration_target(provenance, mb_result.selected_release_id, disc)
+    # N6: NOW store the score, against the post-menu disc and provenance. Sited
+    # after `_note_corroboration_target` rather than straight after the menu —
+    # that helper writes only `corroborated_release`, which is not a contributor,
+    # so the position is not load-bearing today, but "everything the menu phase
+    # writes has been written" is a cheaper invariant to keep than a per-key
+    # audit each time a helper is added here.
+    _store_match_distance(provenance, disc)
     if ui is not None:
         ui.resume()
 
