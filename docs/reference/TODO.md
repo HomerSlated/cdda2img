@@ -908,12 +908,18 @@ progress bar**
 > says so — it never draws Q as healthy.
 >
 > ~~**Genuinely remaining — `progress-map-plan.md` §6, steps 5 and 6 only:**~~
-> 1. **Recovery-ladder rendering** (§2) — our own work, nothing blocks it.
->    **STILL OPEN 2026-08-13.** Needs a fourth cell state (`REREADING`) and a
->    decision about what a later attempt does to a cell an earlier one flagged
->    (§2's proposal: last-write-wins, since the committed audio is whichever
->    attempt matched). That is a design act, not just wiring, which is why it did
->    not go with step 6.
+> **N2 IS COMPLETE, 2026-08-13.** Both steps below are done; the plan's §6 is the
+> authority for detail. Nothing in N2 is outstanding.
+> 1. ~~**Recovery-ladder rendering** (§2) — our own work, nothing blocks it.~~
+>    — **DONE 2026-08-13.** `disc_map.REREADING` with its own hue and glyph (a
+>    change of kind, not a rung of the damage ramp);
+>    `cells_from_damage(active=…)`; `_RecoveryMap` in `cdda2img.py`. §2's
+>    last-write-wins adopted, but the clear fires only on an **AccurateRip
+>    match** — positive evidence rather than "assume the reread was clean" — so a
+>    track that never matches keeps its damage. The real obstacle turned out to
+>    be the frontier: `_build_map` derives it from `prog`, which during recovery
+>    measures one *track*, so `set_map(active=…)` forces the frontier to the
+>    whole map or the disc collapses to a sliver and redraws per attempt.
 > 2. ~~**A static map after CTDB repair**, via the pre/post diff (§5) — explicitly
 >    a sketch, not a promise.~~ — **DONE 2026-08-13.** See
 >    `progress-map-plan.md` §6.6 for the detail. Headline: the sketch's three

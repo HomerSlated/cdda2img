@@ -3240,6 +3240,79 @@ def _read_track_window(
     return corrected
 
 
+def _track_sector_window(
+    track_lsns: list[int], idx: int, disc_last_lsn: int
+) -> tuple[int, int]:
+    """``[start, end)`` sectors of track *idx* (0-based), for the recovery map.
+
+    The last track runs to the lead-out, so its end comes from *disc_last_lsn*
+    rather than a following entry. Module level rather than a closure only
+    because the loop it came from sits on the C901 limit.
+    """
+    lo = track_lsns[idx]
+    hi = track_lsns[idx + 1] if idx + 1 < len(track_lsns) else disc_last_lsn + 1
+    return lo, hi
+
+
+class _RecoveryMap:
+    """The whole-disc map kept on screen while the AR ladder repairs one track.
+
+    ``progress-map-plan.md`` §2: the user should see a repair *in context* rather
+    than a bar that restarts per attempt. So the rip's own damage map stays up,
+    with the track under repair drawn as ``REREADING`` and everything either side
+    of it still showing what the first pass found.
+
+    Holds a mutable **copy** of the rip's damage map. This is the one place
+    something other than the reader writes to a map, and copying keeps the rip's
+    own record of what the drive reported intact for the CTDB report drawn later.
+
+    Inert (every method a no-op) without a TUI or without a captured map, so the
+    caller needs no branches — which is the other reason this is a class: the
+    loop was at C901 14 with the branches inline.
+    """
+
+    def __init__(
+        self, ui: TerminalUI | None, disc_damage: bytes | None, status_width: int
+    ) -> None:
+        self._ui = ui if disc_damage else None
+        self._buf = bytearray(disc_damage) if disc_damage else None
+        self._sw = status_width
+
+    def arm(self, lo: int, hi: int) -> None:
+        """Make ``[lo, hi)`` the live region. Re-armed per track."""
+        if self._ui is None or self._buf is None:
+            return
+        # `status_width` is the widest banner across ALL tracks, not this one:
+        # map geometry is pinned at the first frame, so a later two-digit track
+        # number would be truncated for the rest of the ladder. Same trap the Q
+        # lane hit in review.
+        self._ui.set_map(self._buf, status_width=self._sw, active=(lo, hi))
+
+    def clear(self, lo: int, hi: int) -> None:
+        """Mark ``[lo, hi)`` undamaged — call only on an AccurateRip match.
+
+        Last-write-wins over whatever earlier attempts left (§2's proposal), and
+        here the last write is an AR match: positive evidence that the track's
+        audio is now correct, whatever C2 said during the first pass. So the
+        clear is a claim we can defend rather than "assume the reread was clean".
+
+        A track that never matches keeps its damage, deliberately — the ladder
+        exhausted every pass x speed and the original audio was kept, so drawing
+        it clean would assert a repair that did not happen.
+        """
+        if self._buf is not None:
+            self._buf[lo:hi] = bytes(hi - lo)
+
+    def release(self) -> None:
+        """Drop the renderer's reference once the ladder is over.
+
+        A map with a live region and no reader behind it reads as a stalled
+        repair — the same reason the first-pass map is released in a ``finally``.
+        """
+        if self._ui is not None:
+            self._ui.set_map(None)
+
+
 def _recover_failed_tracks(
     device: str,
     failed_tracks: list,
@@ -3252,6 +3325,7 @@ def _recover_failed_tracks(
     n_passes: int,
     read_offset: int,
     ui: TerminalUI | None,
+    disc_damage: bytes | None = None,
 ) -> dict[int, str]:
     """Re-read each AR-failed track across the drive's speed ladder until it matches.
 
@@ -3288,13 +3362,29 @@ def _recover_failed_tracks(
     status_line = [""]
     prog_cb = _recovery_status_cb(ui, status_line)
 
+    # The whole-disc map stays on screen for the whole ladder, with only the
+    # track under repair live (progress-map-plan.md §2).
+    disc_map_view = _RecoveryMap(
+        ui,
+        disc_damage,
+        max(
+            (
+                len(f"Recover track {r.track} ({total_attempts}/{total_attempts})")
+                for r in failed_tracks
+            ),
+            default=0,
+        ),
+    )
+
     with pcm_file.open("r+b") as pcm_fh:
         for result in failed_tracks:
             t = result.track  # 1-indexed
             idx = t - 1
+            lo, hi = _track_sector_window(track_lsns, idx, disc_last_lsn)
 
             if ui is None:
                 print(f"  Recovering track {t}…")
+            disc_map_view.arm(lo, hi)
 
             matched = False
             for attempt, speed in enumerate(speeds, 1):
@@ -3333,10 +3423,12 @@ def _recover_failed_tracks(
                     pcm_fh.write(src)
                     outcomes[t] = f"matched@{speed}X"
                     matched = True
+                    disc_map_view.clear(lo, hi)
                     break
 
             if not matched:
                 outcomes[t] = "unrecovered"  # keep the original audio
+    disc_map_view.release()
     return outcomes
 
 
@@ -3672,6 +3764,7 @@ def rip_image(  # noqa: C901
                     recovery_passes,
                     read_offset,
                     ui,
+                    disc_damage,
                 )
                 recovery_outcomes.update(outcomes)
                 # No restore here any more. The ladder leaves the drive at its last

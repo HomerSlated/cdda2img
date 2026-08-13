@@ -27,6 +27,12 @@ from typing import NamedTuple
 UNREAD = 0
 OK = 1
 ERR = 2
+#: Being re-read right now (the AR recovery ladder). Ordered ABOVE ``ERR`` so
+#: :func:`_worse` and the ``max`` in the dual renderer both prefer it: while a
+#: region is under active repair, "we are working on this" is the more useful
+#: thing to say about it than the damage that put it there — and the damage is
+#: still on screen either side of it.
+REREADING = 3
 
 
 class Cell(NamedTuple):
@@ -101,6 +107,11 @@ class Palette:
     # Four shades of ONE hue, faintest first. The ramp encodes severity, and a
     # ramp that drifts across hues reads as a change of kind, not of degree.
     err_ramp: tuple[int, int, int, int]
+    #: The region the recovery ladder is re-reading. A THIRD hue, because this is
+    #: a change of kind rather than of degree — it is not a worse error, it is
+    #: work in progress — and it must not be mistaken for a rung of `err_ramp`.
+    #: Yellow sits clear of both the blue OK and the orange ramp in luminance.
+    rereading: int = 226
 
 
 # Blue/orange, not green/red: red/green dichromacy affects ~8% of men, and this
@@ -116,6 +127,11 @@ RESET = "\033[0m"
 _READ_OK = "█"
 _READ_ERR = "▒"
 _UNREAD = "░"
+
+#: U+2593 DARK SHADE — the region the ladder is re-reading. Denser than
+#: `_READ_ERR` and denser than `_UNREAD`, so in mono the three shades order as
+#: unread < damaged < being-worked-on < intact, and none of them is blank.
+_REREADING = "▓"
 
 #: U+2580 UPPER HALF BLOCK. Top half takes the foreground colour, bottom half
 #: the background — two independent lanes on one text row at full horizontal
@@ -165,6 +181,7 @@ def cells_from_damage(
     width: int,
     *,
     bands: tuple[float, ...] = RAMP_BANDS,
+    active: tuple[int, int] | None = None,
 ) -> list[Cell]:
     """Bucket a per-sector damage map into *width* cells.
 
@@ -177,6 +194,14 @@ def cells_from_damage(
     :data:`RAMP_BANDS` for C2, :data:`SUBQ_RAMP_BANDS` for Q. The two lanes have
     different healthy baselines — zero versus a few per cent — so one table
     cannot serve both without drawing one of them wrong.
+
+    *active* is a ``[lo, hi)`` sector range currently being re-read — the AR
+    recovery ladder's track window. Cells that **intersect** it render as
+    :data:`REREADING` regardless of their damage, so the whole-disc map stays on
+    screen with one region live, rather than the bar restarting per attempt.
+    Intersection rather than containment: a track window is usually a few cells
+    wide but can be narrower than one cell, and a repair the map declines to draw
+    because it did not fill a bucket is the wrong way round.
 
     ``per`` is derived from *width*, so a caller that changes width mid-read
     re-buckets every cell and the map appears to rewrite its own history. Pin the
@@ -195,6 +220,14 @@ def cells_from_damage(
         # and their damage is invisible — and the outer edge is where damage
         # concentrates, so the dropped sectors are the ones most worth drawing.
         hi = total if c == width - 1 else min((c + 1) * per, total)
+        if active is not None and lo < active[1] and hi > active[0]:
+            # Tested BEFORE the frontier check: during recovery the whole disc
+            # has already been read, so an active cell is never unread — but a
+            # caller that passes a partial frontier should still see the live
+            # region, since "we are re-reading here" is true whatever the
+            # frontier says about the first pass.
+            out.append(Cell(REREADING))
+            continue
         if lo >= frontier or hi <= lo:
             out.append(Cell(UNREAD))
             continue
@@ -224,6 +257,8 @@ def _colour_of(cell: Cell, pal: Palette) -> int:
         return pal.unread
     if cell.state == OK:
         return pal.ok
+    if cell.state == REREADING:
+        return pal.rereading
     return pal.err_ramp[cell.level] if cell.level >= 0 else pal.err_ramp[-1]
 
 
@@ -325,4 +360,6 @@ def _render_dual(cells: list[Cell], q_cells: list[Cell], pal: Palette) -> str:
 def _one_lane_glyph(cell: Cell) -> str:
     if cell.state == UNREAD:
         return _UNREAD
+    if cell.state == REREADING:
+        return _REREADING
     return _READ_OK if cell.state == OK else _READ_ERR

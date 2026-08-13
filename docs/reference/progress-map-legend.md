@@ -38,6 +38,7 @@ says **which lane**.
 | <img src="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI0NCIgaGVpZ2h0PSIxOCI+PHJlY3Qgd2lkdGg9IjQ0IiBoZWlnaHQ9IjE4IiBmaWxsPSIjQUY4NzAwIiBzdHJva2U9IiM4ODgiIHN0cm9rZS13aWR0aD0iMSIvPjwvc3ZnPg==" alt="brown" /> | 136 | `#AF8700` | damage, band 1 |
 | <img src="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI0NCIgaGVpZ2h0PSIxOCI+PHJlY3Qgd2lkdGg9IjQ0IiBoZWlnaHQ9IjE4IiBmaWxsPSIjRDc4NzAwIiBzdHJva2U9IiM4ODgiIHN0cm9rZS13aWR0aD0iMSIvPjwvc3ZnPg==" alt="orange" /> | 172 | `#D78700` | damage, band 2 |
 | <img src="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI0NCIgaGVpZ2h0PSIxOCI+PHJlY3Qgd2lkdGg9IjQ0IiBoZWlnaHQ9IjE4IiBmaWxsPSIjRkZBRjAwIiBzdHJva2U9IiM4ODgiIHN0cm9rZS13aWR0aD0iMSIvPjwvc3ZnPg==" alt="bright orange" /> | 214 | `#FFAF00` | damage, band 3 — worst |
+| <img src="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI0NCIgaGVpZ2h0PSIxOCI+PHJlY3Qgd2lkdGg9IjQ0IiBoZWlnaHQ9IjE4IiBmaWxsPSIjRkZGRjAwIiBzdHJva2U9IiM4ODgiIHN0cm9rZS13aWR0aD0iMSIvPjwvc3ZnPg==" alt="yellow" /> | 226 | `#FFFF00` | **being re-read** — the recovery ladder is working on this region |
 
 Blue/orange rather than green/red: red–green dichromacy affects roughly 8% of
 men, and this pair also stays distinct in greyscale because the two hues differ
@@ -134,10 +135,18 @@ log), the map degrades to **shape**, so it still reads in a text file:
 | `▄` | C2 intact, Q damaged |
 | `▒` | neither lane intact |
 | `░` | not read yet |
+| `▓` | **being re-read** — the recovery ladder is working here |
 
 Shape carries *where* and *which lane*, but never *how much*: severity lives in
 colour alone, so the four bands collapse into one glyph. `░` is deliberately not
 blank — "no damage found" must never look like "not looked at".
+
+`▓` covers **both** lanes at once: it is not a lane verdict but a statement that
+this region is under active repair, so it replaces whatever the lanes said until
+the attempt finishes. The three shades order `░` < `▒` < `▓` < `█` — unread,
+damaged, being-worked-on, intact — and none of them is blank. Its colour is a
+third hue rather than a rung of the damage ramp, because it is a change of *kind*
+and not of degree: not a worse error, work in progress.
 
 When the engine cannot supply a Q verdict at all (a binding older than AccuDisc
 0.5.0), the map draws **C2 alone** — `█` / `▒` / `░` — rather than drawing Q as

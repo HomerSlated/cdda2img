@@ -332,3 +332,76 @@ def test_the_default_calibration_is_c2() -> None:
     damage = bytearray(1000)
     damage[:20] = b"\x01" * 20
     assert disc_map.cells_from_damage(damage, 1000, 1)[0].level == 2
+
+
+# ---------------------------------------------------------------------------
+# REREADING — the AR recovery ladder's live region (progress-map-plan.md §2)
+# ---------------------------------------------------------------------------
+
+
+def test_the_active_range_draws_as_rereading_over_whatever_the_damage_said():
+    """The point of the state: while a region is under repair, "we are working on
+    this" is more useful than the damage that put it there — and the damage is
+    still on screen either side of it."""
+    damage = bytearray(1000)
+    damage[400:600] = b"\x01" * 200
+
+    cells = disc_map.cells_from_damage(damage, 1000, 10, active=(400, 600))
+
+    assert [c.state for c in cells] == [
+        disc_map.OK,
+        disc_map.OK,
+        disc_map.OK,
+        disc_map.OK,
+        disc_map.REREADING,
+        disc_map.REREADING,
+        disc_map.OK,
+        disc_map.OK,
+        disc_map.OK,
+        disc_map.OK,
+    ]
+
+
+def test_a_track_narrower_than_one_cell_still_marks_that_cell():
+    """Intersection, not containment. A track window is usually a few cells wide
+    but can be far narrower than one, and a repair the map declines to draw
+    because it did not fill a bucket is the wrong way round."""
+    cells = disc_map.cells_from_damage(bytearray(1000), 1000, 10, active=(455, 456))
+    assert [i for i, c in enumerate(cells) if c.state == disc_map.REREADING] == [4]
+
+
+def test_the_active_region_beats_the_unread_frontier():
+    """Checked before the frontier, so a caller passing a partial frontier still
+    sees the live region: "we are re-reading here" is true whatever the frontier
+    says about the first pass. During recovery the frontier is the whole map
+    anyway — `TerminalUI.set_map` forces it, because `prog` then measures one
+    track and would otherwise shrink the disc to a sliver per attempt."""
+    cells = disc_map.cells_from_damage(bytearray(1000), 0, 10, active=(400, 600))
+    states = [c.state for c in cells]
+    assert states.count(disc_map.REREADING) == 2
+    assert states.count(disc_map.UNREAD) == 8
+
+
+def test_rereading_has_its_own_hue_and_glyph_not_a_ramp_rung():
+    """A change of kind, not of degree. If REREADING shared the error ramp it
+    would read as a worse error rather than as work in progress, and the mono
+    glyph must not collide with damaged/unread/intact either."""
+    pal = disc_map.CB
+    rr = disc_map._colour_of(disc_map.Cell(disc_map.REREADING), pal)
+    assert rr not in pal.err_ramp
+    assert rr not in (pal.ok, pal.unread)
+
+    glyphs = {
+        disc_map._one_lane_glyph(disc_map.Cell(s))
+        for s in (disc_map.UNREAD, disc_map.OK, disc_map.ERR, disc_map.REREADING)
+    }
+    assert len(glyphs) == 4, glyphs
+    assert " " not in glyphs, "blank means unread; nothing else may look unread"
+
+
+def test_no_active_range_is_unchanged_behaviour():
+    damage = bytearray(1000)
+    damage[400:600] = b"\x01" * 200
+    assert disc_map.cells_from_damage(damage, 1000, 10) == disc_map.cells_from_damage(
+        damage, 1000, 10, active=None
+    )

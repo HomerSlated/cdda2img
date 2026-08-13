@@ -287,3 +287,93 @@ def test_recovery_tui_status_is_per_attempt(
     assert statuses[0] == ("Recover track 2 (1/9)", 0.0)
     assert statuses[1][0] == "Recover track 2 (1/9)"
     assert statuses[1][1] == pytest.approx(0.5)  # 5/10 sectors
+
+
+# ---------------------------------------------------------------------------
+# _RecoveryMap — the whole-disc map kept live across the ladder (N2 step 5)
+# ---------------------------------------------------------------------------
+
+
+class _FakeUI:
+    """Records set_map calls. The real TerminalUI needs a tty fd."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple] = []
+
+    def set_map(self, damage, *, subq=None, status_width=0, active=None) -> None:
+        self.calls.append((damage, status_width, active))
+
+
+def _recovery_map(**kw):
+    from cdda2img.cdda2img import _RecoveryMap
+
+    return _RecoveryMap(**kw)
+
+
+def test_the_recovery_map_copies_so_the_rips_own_record_survives():
+    """The one place something other than the reader writes to a map. The CTDB
+    report is drawn later from the rip's damage map, so clearing a recovered
+    track must not edit what the drive actually reported."""
+    original = bytes(b"\x01" * 100)
+    ui = _FakeUI()
+    m = _recovery_map(ui=ui, disc_damage=original, status_width=8)
+
+    m.arm(0, 100)
+    m.clear(0, 50)
+
+    assert original == b"\x01" * 100, "the caller's map was mutated"
+    handed, _, _ = ui.calls[0]
+    assert bytes(handed[:50]) == bytes(50)
+    assert bytes(handed[50:]) == b"\x01" * 50
+
+
+def test_arming_hands_over_the_live_region_and_a_pinned_width():
+    ui = _FakeUI()
+    m = _recovery_map(ui=ui, disc_damage=b"\x00" * 100, status_width=23)
+
+    m.arm(10, 20)
+    m.arm(60, 70)
+
+    assert [c[2] for c in ui.calls] == [(10, 20), (60, 70)]
+    assert {c[1] for c in ui.calls} == {23}, (
+        "width must be the widest banner across ALL tracks — map geometry is "
+        "pinned at the first frame, so a later two-digit track number would be "
+        "truncated for the rest of the ladder"
+    )
+
+
+def test_release_drops_the_renderers_reference():
+    """A map with a live region and no reader behind it reads as a stalled repair."""
+    ui = _FakeUI()
+    m = _recovery_map(ui=ui, disc_damage=b"\x00" * 10, status_width=4)
+    m.arm(0, 5)
+    m.release()
+    assert ui.calls[-1][0] is None
+
+
+def test_the_map_is_inert_without_a_ui_or_without_a_captured_map():
+    """Both are ordinary states — `--no-tui`, or a read that never handed the
+    lanes over — and neither may raise or leave the caller branching."""
+    ui = _FakeUI()
+    for kw in (
+        {"ui": None, "disc_damage": b"\x01" * 10},
+        {"ui": ui, "disc_damage": None},
+        {"ui": ui, "disc_damage": b""},
+    ):
+        m = _recovery_map(status_width=4, **kw)
+        m.arm(0, 5)
+        m.clear(0, 5)
+        m.release()
+    assert ui.calls == [], "no map was captured, so nothing should be drawn"
+
+
+def test_the_last_track_window_runs_to_the_lead_out():
+    """A following entry does not exist for the last track, so its end comes from
+    disc_last_lsn. Getting this wrong leaves the final track — the outer edge,
+    where damage concentrates — permanently outside the live region."""
+    from cdda2img.cdda2img import _track_sector_window
+
+    lsns = [0, 1000, 2000]
+    assert _track_sector_window(lsns, 0, 4999) == (0, 1000)
+    assert _track_sector_window(lsns, 1, 4999) == (1000, 2000)
+    assert _track_sector_window(lsns, 2, 4999) == (2000, 5000)

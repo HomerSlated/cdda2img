@@ -493,7 +493,36 @@ gates exist.
    rip. `set_map(status_width=…)` now takes the widest text the read can ever
    show, computed rather than measured. The bench had this (`status_width()`);
    production did not.
-5. Recovery-ladder rendering (§2), which is our own work. **Still open.**
+5. ~~Recovery-ladder rendering (§2), which is our own work.~~ — **DONE
+   2026-08-13**, on the damage-map retention that step 6 needed anyway.
+
+   `disc_map.REREADING` is the fourth cell state, with **its own hue and its own
+   glyph** rather than a rung of the error ramp: it is a change of kind, not of
+   degree — not a worse error, work in progress. `cells_from_damage(active=…)`
+   marks the cells a `[lo, hi)` sector range **intersects** (not contains: a
+   track window can be narrower than one cell, and a repair the map declines to
+   draw because it did not fill a bucket is the wrong way round).
+
+   **The frontier was the real problem, and it is why this could not just be
+   wired up.** `_build_map` derives `frontier = round(prog * len(damage))`, and
+   during recovery `prog` measures progress through one *track*. Left alone it
+   collapses the whole-disc map to a sliver and redraws it from the left on every
+   attempt — precisely the "bar that restarts per attempt" §2 set out to replace.
+   `set_map(active=…)` therefore forces `frontier = len(damage)`: an active
+   repair region means the first pass is long finished.
+
+   **§2's last-write-wins is adopted, with a stronger justification than "last".**
+   `_RecoveryMap.clear` zeroes a track's damage only on an **AccurateRip match** —
+   positive evidence the audio is now correct, whatever C2 said on the first
+   pass. So the clear is a defensible claim rather than "assume the reread was
+   clean", and a track that never matches keeps its damage, because the ladder
+   exhausted every pass x speed and the original audio was kept.
+
+   `_RecoveryMap` holds a **copy**: this is the one place something other than
+   the reader writes to a map, and the CTDB report is drawn later from the rip's
+   own record of what the drive reported. It is inert without a TUI or without a
+   captured map, so the loop needs no branches — which also kept
+   `_recover_failed_tracks` under the C901 limit it was already sitting on.
 6. ~~CTDB result map via the pre/post diff (§5).~~ — **DONE 2026-08-13.**
    `ctdb_repair._repaired_sector_map` diffs the pre/post buffers at the commit
    point (where both are already in hand, so no extra I/O), carried on

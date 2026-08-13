@@ -72,6 +72,7 @@ class TerminalUI:
         # reader; the rest is geometry pinned once, for the reason in _build().
         self._map: bytearray | None = None
         self._map_q: bytearray | None = None
+        self._map_active: tuple[int, int] | None = None
         self._map_cols = 0
         self._map_sw = 0
         self._map_dw = 0
@@ -142,6 +143,7 @@ class TerminalUI:
         *,
         subq: bytearray | None = None,
         status_width: int = 0,
+        active: tuple[int, int] | None = None,
     ) -> None:
         """Make the progress bar *be* the disc map, or put the plain bar back.
 
@@ -158,14 +160,27 @@ class TerminalUI:
         showing at the first frame would otherwise fix the column count forever
         and truncate every longer one.
 
+        *active* is a ``[lo, hi)`` sector range under active repair — the AR
+        recovery ladder's current track window. Passing it does two things, and
+        the second is the one that makes the first work: those cells draw as
+        ``REREADING``, **and the frontier is taken as the whole map** rather than
+        from ``prog``. During recovery ``prog`` measures progress through one
+        *track*, so the ordinary ``frontier = prog * len(damage)`` would collapse
+        the whole-disc map to a sliver and redraw it from the left on every
+        attempt — exactly the "bar that restarts per attempt" this replaces.
+
         Safe without a lock, and deliberately so: the reader is the only writer,
         each byte is written once, and the renderer only ever reads bytes below
         the frontier it was told about. A frame caught mid-chunk is a frame that
         renders slightly less of the disc, which is what "in progress" means.
+        The recovery caller is a second writer, but it writes only between
+        attempts (never during a read) and only zeroes — a frame catching a
+        half-cleared track shows a repair partly done, which it is.
         """
         with self._slk:
             self._map = damage
             self._map_q = subq
+            self._map_active = active
             # Geometry is pinned on the NEXT frame, once the terminal width is
             # known. Reset here so a second read re-pins rather than inheriting
             # the first one's layout.
@@ -263,6 +278,7 @@ class TerminalUI:
             output = list(self._output)
             damage = self._map
             damage_q = self._map_q
+            map_active = self._map_active
             map_cols = self._map_cols
             map_sw = self._map_sw
             map_dw = self._map_dw
@@ -284,6 +300,7 @@ class TerminalUI:
                 cols=cols,
                 damage=damage,
                 damage_q=damage_q,
+                active=map_active,
                 map_cols=map_cols,
                 map_sw=map_sw,
                 map_dw=map_dw,
@@ -326,6 +343,7 @@ class TerminalUI:
         cols: int,
         damage: bytearray,
         damage_q: bytearray | None,
+        active: tuple[int, int] | None,
         map_cols: int,
         map_sw: int,
         map_dw: int,
@@ -361,14 +379,21 @@ class TerminalUI:
 
         avail = max(0, cols - 12 - map_sw - (3 + map_dw))
         visible = max(0, min(map_cols, avail))
-        frontier = round(prog * len(damage))
+        # An active repair region means the first pass is long finished, so the
+        # frontier is the whole map: `prog` now measures one TRACK and would
+        # otherwise shrink the disc to a sliver and redraw it per attempt.
+        frontier = len(damage) if active else round(prog * len(damage))
         # Each lane gets its OWN severity calibration. C2's healthy baseline is
         # zero; Q's is a few per cent of CRC-bad frames on a perfectly good disc.
         # Sharing one table painted a clean Tracy Chapman entirely orange.
-        cells = disc_map.cells_from_damage(damage, frontier, map_cols)
+        cells = disc_map.cells_from_damage(damage, frontier, map_cols, active=active)
         q_cells = (
             disc_map.cells_from_damage(
-                damage_q, frontier, map_cols, bands=disc_map.SUBQ_RAMP_BANDS
+                damage_q,
+                frontier,
+                map_cols,
+                bands=disc_map.SUBQ_RAMP_BANDS,
+                active=active,
             )
             if damage_q is not None
             else None
