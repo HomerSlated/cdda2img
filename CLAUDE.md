@@ -114,6 +114,31 @@ Standalone utility scripts live in `tools/` (tracked, not part of the installed 
     checkout changes what `cdda2img rip` does with no action here. **A measurement run needs
     a quiet build tree**, agreed with them in advance — a rebuild mid-A/B silently compares
     two library versions.
+  - **This is DESIGN, not debt — do not "fix" it (kgr, 2026-08-13).** The dev tree
+    deliberately does **not** link against an installed AccuDisc, and a proposal to
+    retire the shim, declare `accudisc` a real dependency, or point any dev-tree
+    consumer at `/usr/local/bin/accudisc` should be refused rather than scheduled.
+    kgr's reasoning: *AccuDisc exists only as the hardware engine for this project;
+    it changes in response to our needs and we change in sync, so an install step
+    between every change is friction with no beneficiary.* **Two configurations
+    exist and both are correct** — the checkout tracks their HEAD through the
+    symlinks; an *installed* cdda2img uses an installed engine via `install.sh` +
+    `pipx inject` (measured: the injected wheel resolves `/usr/local/lib64/libaccudisc.so.0`).
+    A cold reader sees "resolves a private symlink instead of a package" and reads
+    debt; it was written up as a live TODO twice before being deleted.
+    Three things follow, each of which has been mistaken for a defect:
+    (1) `accudisc` is **never** a declared dependency — not on PyPI, so not in the
+    lockfile, so `uv sync` prunes any hand-installed copy, and declaring it would
+    fail every CI job at environment setup;
+    (2) a bare `import accudisc` in the checkout **raises `ModuleNotFoundError`**,
+    correctly — the package is not on `sys.path` until `_binding_search_path()`
+    puts it there, and the seam is the only thing that should need it;
+    (3) **keep every dev-tree consumer on the one build**. The build-tree CLI and
+    the shim binding both link `~/Git/accudisc/build/src/libaccudisc.so.0`; moving
+    either to the install puts a pinned snapshot beside a HEAD-tracking library and
+    silently makes any measurement compare two engine versions. (The A/B tools that
+    first motivated this property are gone, but the property still governs
+    `tools/recovery_bench.py` and any future instrument.)
 - **`tools/disc_ab.py` / `tools/binding_ab.py` — DELETED 2026-08-01.** Both existed to compare the binding against the CLI. kgr's ruling retired the CLI and, with it, the question: the CLI is built to the same API and cannot do anything the API does not define, so there is nothing to measure, and a disagreement would be an AccuDisc bug rather than a delta to characterise. Their banked result stands — Tracy, req=40, binding 112.69 s vs subprocess 112.75 s, PCM and C2 byte-identical, which is what closed AccuDisc's whole-disc-entry-point item.
 - **`tools/write_smoke.py`** — burns through `write_disc` onto a **CDEmu blank**
   (`cdemu create-blank --writer-id=WRITER-TOC --medium-type=cdr74`) and reads it back.

@@ -1293,10 +1293,99 @@ every step assumes the binding resolves without our `tools/` shim.
    proposes. So this item now needs `PKG_CONFIG_PATH` set explicitly (or the
    `.pc` installed somewhere `pc_path` covers) before the env var goes on;
    there is nothing left to wait for.
-3. **[C2I] Retire the shim.** Delete `tools/accudisc/accudisc` and
-   `tools/accudisc/pybinding`, delete `_binding_search_path()`, and declare `accudisc`
-   as a real dependency. `cffi` then arrives as *its* dependency and the stopgap line
-   in our dev group goes.
+
+   **Amended 2026-08-13 — the env var has no site in this tree, and the item's
+   real content is elsewhere.** Three measurements.
+
+   (a) **`ACCUDISC_REQUIRE_INSTALLED` is not ours to set.** It is consumed at
+   exactly one place in either tree — AccuDisc's `bindings/python/build_accudisc.py:108`
+   — and it guards *compiling* the cffi extension. We do not compile it:
+   `install.sh` globs a prebuilt wheel from `$PREFIX/share/accudisc/wheel/` and
+   `pipx inject`s it. "Set it in whatever installs the binding" therefore has no
+   target here; it belongs to whoever runs `cmake --target wheel` in AccuDisc's
+   checkout. The whole sequencing worry this item has carried since July is moot
+   for us.
+
+   (b) **What *is* ours: `install.sh` route (b) has never executed on this
+   machine.** `pcdir=$(pkg-config --variable=wheeldir accudisc)` yields empty
+   because the package is not found at all, so the wheel is located by route (c)'s
+   hardcoded `/usr/local/share/accudisc/wheel`. The install works — by fallback.
+   An untested search route in an installer is where a silent degraded install
+   comes from, and this one **cannot currently fail**, which is the same defect
+   class as the deleted completion signal in item 3. Seeding `PKG_CONFIG_PATH`
+   from the candidate prefixes before the probe makes it exercisable. Note
+   honestly that it changes **no outcome here** (route (c) already finds the same
+   wheel) and cannot help the case route (b) exists for — an unknown prefix like
+   `/opt` — because seeding a *guessed* prefix is self-defeating. It is hygiene,
+   not a live bug. Value: being able to test the route at all.
+
+   (c) **Correction to an earlier claim in this item's vicinity: there is one
+   `accudisc.pc`, not two.** `/usr/local/lib64 -> lib` (kgr, 2026-08-13:
+   `/lib`, `/lib64` and `/usr/lib64` are symlinks on this and every modern Linux),
+   so `/usr/local/lib/pkgconfig/accudisc.pc` and
+   `/usr/local/lib64/pkgconfig/accudisc.pc` are inode `14156013` with link count 1
+   — one file seen through two paths. `cmp` reported them identical because it was
+   comparing a file with itself. Use `stat -c %i`, not `cmp`, to answer "are these
+   the same file" (`feedback_silence_is_not_a_negative` records this exact trap and
+   it was walked into anyway). Consequence: `pc_path` resolves to
+   `/usr/lib/pkgconfig:/usr/share/pkgconfig`, so the miss is about the **prefix**
+   (`/usr/local`), not about `lib` vs `lib64` — that distinction is a red herring
+   on a merged-lib system. Listing both names in a seeded `PKG_CONFIG_PATH` is
+   still right, but only because they diverge on a genuinely split-lib system,
+   where AccuDisc's `libdir=${exec_prefix}/lib64` would be the real directory.
+3. ~~**[C2I] Retire the shim.**~~ — **DELETED 2026-08-13 by kgr's ruling. Do not
+   reinstate.** The item is retained as a heading only, because "the checkout
+   resolves a private symlink instead of an installed package" reads as obvious
+   debt to anyone arriving cold, and it is not.
+
+   > **kgr, 2026-08-13:** *"Do not link our dev tree to the production version of
+   > AccuDisc. AccuDisc only exists as the hardware engine for this project. It
+   > changes in response to our needs. If we link to the production version, that
+   > means I have to manually install it every time something changes, which is
+   > pointless. It's supposed to change, and we're supposed to change in sync."*
+
+   **The item's error was assuming there is one correct configuration.** There are
+   two, and both are correct:
+   - **The dev checkout tracks AccuDisc's HEAD**, through
+     `tools/accudisc/pybinding` → their `bindings/python`, whose cffi extension
+     carries `RUNPATH=~/Git/accudisc/build/src`. Their rebuild changes what
+     `cdda2img rip` does with no action here — which is the *point*, not a hazard.
+     The two projects co-develop; an install step between every change is friction
+     with no beneficiary.
+   - **An installed cdda2img uses an installed engine**, via `install.sh` +
+     `pipx inject`. Measured 2026-08-12 and correct:
+     `~/.local/pipx/venvs/cdda2img/…/accudisc/_accudisc.abi3.so` →
+     `/usr/local/lib64/libaccudisc.so.0`.
+
+   So the shim is **the mechanism that makes the co-development loop work**, not a
+   stopgap on the way to the install. `_binding_search_path()` appends (never
+   prepends), so a properly installed `accudisc` still wins and the shim retires
+   itself in exactly the configuration where it should.
+
+   **Consequences, recorded so they are not rediscovered as problems:**
+   - **`accudisc` will never be in `[project.dependencies]`.** It is not on PyPI,
+     so it cannot be in the lockfile, so `uv sync` prunes any hand-installed copy
+     (measured, and already documented against the `cffi` line in `pyproject.toml`
+     — `make check` uninstalled it once). Declaring it would kill all 7 CI jobs at
+     environment setup. This is settled, not pending.
+   - **`cffi` stays in the dev group permanently.** Its comment used to say the
+     line would go "when their package is installable"; that trigger never fires
+     for the dev tree. Comment corrected 2026-08-13.
+   - **CI never has the binding, by design.** `ty check` survives because the
+     import is function-local with `# ty: ignore[unresolved-import]`
+     (`accudisc_reader.py:204`); the tests survive because the seam is the only
+     importer and is mocked. Exactly one test is binding-gated
+     (`test_ctdb_repair.py:491`) and is local-only on purpose.
+   - **Open question, not actioned:** `doctor` reports a shim-only binding as
+     `WARN` with the remedy *"install AccuDisc's Python binding"* — advice that is
+     now wrong in a checkout and right in an install. The check does not currently
+     distinguish the two. Two tests pin today's behaviour
+     (`test_the_dev_shim_still_warns_rather_than_passing`,
+     `test_doctor_does_not_report_the_dev_shim_as_ok`). Left for kgr.
+
+   ~~Delete `tools/accudisc/accudisc` and `tools/accudisc/pybinding`, delete
+   `_binding_search_path()`, and declare `accudisc` as a real dependency. `cffi`
+   then arrives as *its* dependency and the stopgap line in our dev group goes.~~
    ~~**The completion signal is now visible** (`80384ba`, prompted by §co.4): `doctor`
    reports the binary that will actually run, the `libaccudisc` it links, and any
    `$PATH` install it shadows. Today that reads `tools/accudisc/accudisc` →
@@ -1314,14 +1403,24 @@ every step assumes the binding resolves without our `tools/` shim.
    satisfied by the check having been deleted. A signal that cannot fail is not a
    signal.
 
-   **New completion signal, reachable and failing today:**
+   ~~**New completion signal, reachable and failing today:**
    `uv run python -c "import accudisc"` succeeds in the dev checkout *without*
    `_binding_search_path()` appending the shim. Measured 2026-08-12: it raises
    `ModuleNotFoundError`, so the shim is still load-bearing for the checkout even
    though the pipx install is clean. **Status: the install half is done, the
    checkout half is not.** Closing it means installing the binding into the dev
    venv (or declaring `accudisc` a real dependency, which is the item's own plan)
-   before the two symlinks and `_binding_search_path()` can go.
+   before the two symlinks and `_binding_search_path()` can go.~~
+
+   **Withdrawn with the item, 2026-08-13.** The measurement stands — a bare
+   `import accudisc` in the checkout still raises `ModuleNotFoundError`, verified
+   again today — but it was never a *defect*. It is the shim doing its job: the
+   package is deliberately not on `sys.path` until the seam puts it there. A
+   signal is only a signal if the state it reports is one we want; this one
+   correctly reported a configuration kgr had chosen. **Chasing a completion
+   signal is not the same as checking whether the item should exist** — this one
+   was re-derived twice (2026-07-30, 2026-08-12) without either pass asking that
+   question.
 4. **[C2I] Packaging.** `pipx install .` + `pipx inject cdda2img <accudisc binding>`
    is proven end-to-end (binding active, `transport: binding`, real archive rendered).
    A `make install` target should wrap those two commands rather than hand-rolling a
@@ -1393,7 +1492,7 @@ every step assumes the binding resolves without our `tools/` shim.
    rip with the vendor path disarmed is a different configuration, so any bench run
    straddling a rebuild compares two configurations while looking like one series.
 
-   **Amended 2026-08-12 — half done, and the remaining half rides on item 3, not
+   ~~**Amended 2026-08-12 — half done, and the remaining half rides on item 3, not
    on AccuDisc.** The install half is satisfied: `getcap /usr/local/bin/accudisc`
    reports `cap_sys_rawio=ep` (a real file, not a symlink — `getcap` on a symlink
    prints nothing and exits 0, which would have read as a negative). But the
@@ -1404,7 +1503,38 @@ every step assumes the binding resolves without our `tools/` shim.
    the fragile state this item describes rather than the resolution of it, since
    the next rebuild drops it silently and a bench run straddling that rebuild
    still compares two configurations. **Do not close this until item 3 closes**
-   or `recovery_bench` is pointed at the install.
+   or `recovery_bench` is pointed at the install.~~
+
+   **Rewritten 2026-08-13 — the remedy in that amendment was wrong, and would have
+   caused the defect it claimed to fix.** "Point `recovery_bench` at the install"
+   was proposed here and rejected under kgr's item-3 ruling. It is also wrong on
+   its own terms. Measured today:
+
+   | artefact | links |
+   |---|---|
+   | `~/Git/accudisc/build/cli/accudisc` (what the bench runs) | `~/Git/accudisc/build/src/libaccudisc.so.0` |
+   | shim binding (what the seam imports) | `~/Git/accudisc/build/src/libaccudisc.so.0` |
+   | `/usr/local/bin/accudisc` (the proposed target) | `/usr/local/lib64/libaccudisc.so.0` |
+
+   The dev tree is **coherent today** — CLI and binding resolve one library build,
+   which is the property item 4 records as the reason a two-carrier instrument was
+   confound-free. Switching the bench to the install would put it on a pinned
+   snapshot while the binding tracked HEAD: two library builds behind one
+   instrument, and a bench run would silently compare two engine versions while
+   looking like one series. That is the `binding_ab.py` error a third time, and
+   this time it would have been *introduced by the fix for a
+   measurement-validity item*.
+
+   **The real statement of the item, then:** the capability must live on the inode
+   the bench actually executes — `~/Git/accudisc/build/cli/accudisc`. It carries
+   `cap_sys_rawio=ep` today, but nothing guarantees it after a rebuild, and the
+   failure is silent. **This is AccuDisc's build concern, not ours** (their
+   `ACCUDISC_SETCAP_ON_INSTALL` covers the install path only). Owner moves
+   **[K/AD] → [AD]**; our part is to say so and to state the consequence: a bench
+   run straddling a rebuild that dropped the capability compares two
+   configurations while looking like one. Ask them whether the build target can
+   setcap, or whether a pre-flight `getcap` check belongs in `recovery_bench`
+   itself — the latter is ours and is the cheaper backstop.
 
 #### Then, and only then
 

@@ -50,11 +50,19 @@ dev = [
     # Runtime dependency of AccuDisc's Python binding, not of cdda2img — an
     # API-mode cffi extension needs _cffi_backend to import, so a module that
     # built cleanly still dies at `from ._accudisc import ffi, lib` without it.
-    # Carried here only because their package is not yet installable (their
-    # build_accudisc.py sets an RPATH into their build tree; "install properly"
-    # is an open TODO there). When that lands, cffi arrives as its dependency
-    # and this line goes. Declared rather than hand-installed because `uv sync`
-    # prunes anything absent from the lockfile — `make check` uninstalled it.
+    #
+    # PERMANENT, as of kgr's ruling 2026-08-13 (TODO "LIVE" item 3). This line
+    # used to say it would go "when their package is installable" — that trigger
+    # will never fire, because the dev tree deliberately does NOT link against an
+    # installed AccuDisc. It resolves their build tree through the
+    # `tools/accudisc/pybinding` symlink so the two projects co-develop without a
+    # manual reinstall between every change. So `accudisc` is never a declared
+    # dependency, cffi never arrives as its transitive, and this line stays.
+    #
+    # Declared rather than hand-installed because `uv sync` prunes anything absent
+    # from the lockfile — `make check` uninstalled it. That same pruning is why
+    # `accudisc` itself cannot be hand-installed into the dev venv: it is not on
+    # PyPI, so it cannot be locked, so it would be removed on the next `uv run`.
     "cffi>=1.16",
 
     # Used by `tools/wayback/fetch.py` and by nothing under `src/`. It was in

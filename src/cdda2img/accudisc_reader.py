@@ -185,12 +185,24 @@ def _import_binding() -> tuple[Any | None, str]:
     missing attribute.
 
     The local symlink is **appended** to ``sys.path``, never prepended. A
-    properly installed ``accudisc`` must win over our machine-local shim, so that
-    the day AccuDisc close their "install properly" TODO this resolution retires
-    itself silently instead of shadowing the thing it was standing in for.
-    Appending is safe against the namespace trap above: a portion without
-    ``__init__.py`` does not end the scan, so a real package later on the path
-    still wins.
+    properly installed ``accudisc`` must win over our machine-local shim, so an
+    installed cdda2img is never shadowed by a checkout-relative path that happens
+    to resolve. Appending is safe against the namespace trap above: a portion
+    without ``__init__.py`` does not end the scan, so a real package later on the
+    path still wins.
+
+    **The shim is permanent, not a stopgap** (kgr's ruling, 2026-08-13; TODO LIVE
+    item 3, deleted there). This used to read "the day AccuDisc close their
+    'install properly' TODO this resolution retires itself" — that day will not
+    come for the dev tree, and it is not meant to. AccuDisc exists as this
+    project's hardware engine and changes in response to our needs, so the
+    checkout links their **build tree** and the two co-develop without a manual
+    reinstall between every change. Two configurations exist and both are correct:
+    a checkout resolves through the shim, an installed cdda2img resolves the
+    installed binding (``pipx inject``), and the append order is what keeps them
+    from colliding. Do not "fix" this by declaring ``accudisc`` a dependency —
+    besides the RPATH problem, it is not on PyPI, so ``uv sync`` would prune it
+    and CI would fail at environment setup.
     """
     extra = _binding_search_path()
     if extra is not None and extra not in sys.path:
