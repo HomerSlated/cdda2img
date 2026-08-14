@@ -108,7 +108,11 @@ This is an active prototype. A Rust reimplementation is planned once the design 
   - `--normalize` — EBU R128 normalisation at −18 LUFS on extracted FLACs
 - **Burn** — `burn` subcommand writes an RBI back to disc via AccuDisc (`--simulate` for a
   laser-off test write); supports per-drive
-  write offset from config, speed selection, and optional confirmation bypass (`--yes`)
+  write offset from config, speed selection, and optional confirmation bypass (`--yes`).
+  **Validated against a virtual (CDEmu) writer only** — byte-identical on a burn/read-back
+  round trip, which exercises the byte layout and TOC grammar but not laser timing, real
+  DAO lead-in or media quality. Treat burning to physical media as unproven and verify a
+  burned disc by ripping it back
 - **Virtual disc mount** — `mount` extracts a TOC+BIN scratch copy and loads it into a
   cdemu virtual slot; the mounted disc is then visible to cdrdao, whipper, or any other
   ripper for re-ripping, verification, or playback

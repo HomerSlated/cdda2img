@@ -448,6 +448,16 @@ Applies write offset correction to the disc stream before burning when a
 is configured for the drive in
 .BR [[drives]] .
 .PP
+.B NOTE:
+this path has so far been validated only against a
+.B virtual
+writer (CDEmu), where an image burned and read back is byte\-identical.
+That exercises the byte layout, the TOC grammar and the return path, but
+.B not
+laser timing, real DAO lead\-in, or media quality \(em none of which a virtual
+writer has. Burning to physical media should be treated as unproven, and a
+burned disc verified by ripping it back.
+.PP
 .BI "cdda2img burn " "[options] FILE.rbi"
 .TP
 .BI \-\-device " DEVICE"

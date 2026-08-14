@@ -125,7 +125,7 @@ def parse_args() -> argparse.Namespace:
               Note: import preserves source audio verbatim (s16be→s16le byte-swap only); no silence trim or gap insertion
               Accepts: cdrdao .toc file, or a DDP 2.0 image directory (must contain DDPID)
 
-            burn options:
+            burn options:  (validated on a virtual CDEmu writer only — see cdda2img(1))
               --device DEVICE       CD drive device (default: from config default_device, fallback /dev/sr0)
               --speed N             Burn speed in CD-DA drive units (default: 4)
               --write-offset N      Write offset override in samples (default: from config)
@@ -494,7 +494,9 @@ def parse_args() -> argparse.Namespace:
     )
 
     w_cmd = sub.add_parser(
-        "burn", help="Burn an RBI image to a blank CD-DA disc via AccuDisc"
+        "burn",
+        help="Burn an RBI image to a blank CD-DA disc via AccuDisc "
+        "(validated on a virtual writer only — see cdda2img(1))",
     )
     w_cmd.add_argument("rbi_file", type=Path, help="RBI file to burn")
     w_cmd.add_argument(

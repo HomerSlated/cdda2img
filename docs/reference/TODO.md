@@ -22,11 +22,16 @@ below is actioned yet except where noted.
 3. **Anything touching the shim is REJECTED** — done 2026-08-13 (`994bc9a`, LIVE
    item 3 deleted). Listed here so the ruling is visible from the cleanup block:
    do not reopen, and see CLAUDE.md "This is DESIGN, not debt".
-4. **Re-evaluate every media-blocked item for urgency** — items 7 (a real burn,
-   needs a blank CD-R), 8 (static-Q, needs a denser disc), and the standing "one
-   `.pxi` from a second drive" ask. kgr: unlikely to be available **for months**.
-   Decide whether each stays LIVE, moves to a parked section, or is dropped —
-   an item that cannot progress for months is not a live item.
+4. ~~**Re-evaluate every media-blocked item for urgency**~~ — **DONE 2026-08-14.**
+   Four items parked (7 burn, 8 static-Q, 14 RECOVERED, and the PXI second-drive
+   ask), under a new "⏸ PARKED — blocked on media or a second drive" heading with
+   the blocker, the reason no substitute exists, and the unblock condition per
+   item. **They are two asks, not four**: 14 and PXI need *any* second optical
+   drive, 7 and 8 need specific media — so one borrowed drive clears half the
+   bucket, which makes it the higher-value ask. One piece was split out and
+   **shipped** rather than parked (**7a**): nothing user-facing said `burn` had
+   never touched real media. Triage rule recorded for cheap re-triage: an item
+   stays LIVE if *any* part of it can move without the missing hardware.
 5. ~~**Item 15 (`speed_bands`) needs a full explainer before any work.**~~ —
    **answered and DROPPED 2026-08-14.** The feature is real (`bands_cx` verified
    on the binding) but it is **AccuDisc's**, and we consume nothing: the one
@@ -1318,6 +1323,14 @@ still worth doing.
 > `accuraterip_sole` — the branch that makes this feature worth having — has never
 > fired on real data.
 >
+> **PARKED 2026-08-14 (ruling 4)** — see "PARKED — blocked on media or a second
+> drive". Shares its blocker with item 14: *any* second optical drive clears both,
+> and no amount of further work on the four images we hold substitutes for it (the
+> ceiling is structural — one writer means a constant field cannot be told from
+> any other constant). The code ships with the assumption **explicit**
+> (`_PLEXTOOLS_READ_OFFSET`, `pxi_read_offset` in PROV), so parking leaves a known
+> limitation rather than a silent one.
+>
 > **A proposal was tested and refuted on the way — record it so it is not
 > retried.** The idea: *"the PCM truncation size effectively IS the offset"*,
 > reusing the reverse-engineering step. It cannot work, for two reasons that are
@@ -1820,13 +1833,54 @@ every step assumes the binding resolves without our `tools/` shim.
    was put and the trade taken, because the carrier question is settled on banked
    evidence (112.69 s vs 112.75 s, PCM and C2 byte-identical).
 
-#### Blocked on media
+#### ⏸ PARKED — blocked on media or a second drive (triaged 2026-08-14, kgr's ruling 4)
 
-7. **[K] A real burn.** `write_disc` is exercised only against a CDEmu virtual writer —
-   that proves the return path, byte layout and TOC grammar, not laser timing, DAO
-   lead-in or media quality. Needs a blank CD-R. `--simulate` needs one too.
-8. **[K] One-sided (pre-boundary) static-Q clustering** — needs a disc with a denser
-   static population than Tracy's 1314. See the dedicated item below.
+kgr: the media is *"unlikely to be available potentially for months"*, and **an item
+that cannot progress for months is not a live item**. All four below move out of
+LIVE. They are **not cancelled** — each is a real gap with a known instrument — but
+nothing here is schedulable, so keeping them in the working set only dilutes it.
+
+**The triage rule, stated so re-triage is cheap:** an item stays LIVE if *any* part
+of it can move without the missing hardware. Checked per item; where a part could
+move, it was split out rather than parked with the rest (see 7a).
+
+| # | blocked on | why it cannot be substituted | unblocks when |
+|---|---|---|---|
+| 7 | one blank CD-R | CDEmu proves the return path, not the laser | a blank CD-R |
+| 8 | a denser-static disc | Tracy's 1314 gives no power; more captures of the *same* disc do not add any | a disc with more static Q |
+| 14 | a second drive model | one drive cannot distinguish "pit unreadable here" from "pit gone" | any second drive |
+| PXI | a `.pxi` from a second drive | one writer means a constant field is indistinguishable from any other constant | one foreign `.pxi` |
+
+**They are not four independent asks — they are two.** Items 14 and PXI both need
+*any second optical drive* and nothing else; items 7 and 8 need specific **media**.
+So a single borrowed drive clears two of the four, which makes it the higher-value
+ask of the two and worth saying out loud when the opportunity arises.
+
+7. **[K, PARKED] A real burn.** `write_disc` is exercised only against a CDEmu virtual
+   writer — that proves the return path, byte layout and TOC grammar, not laser
+   timing, DAO lead-in or media quality. Needs a blank CD-R. `--simulate` needs one
+   too. (The original note said `--simulate` *"needs one too"*, i.e. that a blank
+   must be in the tray for a laser-off write. That is plausible and probably true
+   — `accudisc.h:283` documents `simulate` as *"run the full path with the laser
+   off"* — but it is **not** something we have measured, so it is left as the
+   item's own claim and was deliberately **not** propagated into user-facing
+   documentation on 7a. Untested is untested.)
+7a. ~~**[C2I] Say that `burn` is virtual-only.**~~ — **DONE 2026-08-14**, split out
+    of 7 by the triage rule. Checked first, and the gap was real: neither the man
+    page, the README, nor `--help` recorded that the burn path has never met real
+    media. `--simulate` was documented as *"validating the image and geometry
+    without consuming a blank disc"* — true, and reading as reassurance about a
+    path never exercised on a laser. Now stated in all three places (man page
+    `.SS burn` NOTE, README bullet, `burn` subcommand help + the mirrored epilog),
+    with the positive claim kept precise: CDEmu round-trips **byte-identically**,
+    which does exercise byte layout, TOC grammar and the return path — it is
+    laser timing, DAO lead-in and media quality that are unproven. This mattered
+    *more* once 7 was parked, not less, since the gap is now open-ended.
+8. **[K, PARKED] One-sided (pre-boundary) static-Q clustering** — needs a disc with a
+   denser static population than Tracy's 1314. See the dedicated item below, which
+   already rates it low priority on its own merits: the decile result (§12.9.3) says
+   more about the population being physical than a boundary test can. **Park with
+   no regret** — this is the weakest of the four even once unblocked.
 
 #### Independent of all the above
 
@@ -2079,6 +2133,11 @@ every step assumes the binding resolves without our `tools/` shim.
     > a wrong *answer*. AccuDisc: *"Ask Keith. We are not touching hardware."*
     > So this is blocked on the second drive, the same blocker as the standing
     > `.pxi` ask — months away per kgr. **Park it; do not close it.**
+    >
+    > **Parked 2026-08-14 under ruling 4**, in the same bucket as items 7 and 8
+    > (see "PARKED — blocked on media or a second drive"). Note this and the PXI
+    > ask need *any second optical drive* and nothing else — one borrowed drive
+    > clears both, which is why that is the higher-value ask of the two kinds.
     >
     > *One unblocked thread worth a nudge*: §bk.3 committed AccuDisc to
     > redocumenting `ACCUDISC_MAP_RECOVERED` **regardless of which hypothesis
