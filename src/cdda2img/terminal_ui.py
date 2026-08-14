@@ -33,12 +33,14 @@ Output region:
 
 from __future__ import annotations
 
+import logging
 import shutil
 import sys
 import termios
 import threading
 import tty
 from enum import Enum, auto
+from typing import TextIO
 
 from cdda2img import disc_map
 
@@ -46,6 +48,89 @@ SPINNER = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
 _FULL = "█"
 _EMPTY = "░"
 _MAX_OUTPUT_LINES = 20
+
+# The TUI that is currently RUNNING, if any. Set by start(), cleared by stop().
+# This exists so the log handler can be installed **once, at the entry point**
+# (CLAUDE.md: no global logging mutation inside src/) while still finding a TUI
+# that is created much later, deep inside rip_image/import_image.
+_ACTIVE: TerminalUI | None = None
+_ACTIVE_LOCK = threading.Lock()
+
+
+def active_ui() -> TerminalUI | None:
+    """The running TUI, or None. Thread-safe; the renderer runs on its own thread."""
+    with _ACTIVE_LOCK:
+        return _ACTIVE
+
+
+class TuiLogHandler(logging.Handler):
+    """The **one** terminal sink for log records (N8).
+
+    The defect this closes: ``_frame`` repaints by rewinding ``_prev_height - 1``
+    lines, where ``_prev_height`` is the TUI's model of its own region. A write
+    the TUI did not make moves the cursor without updating that model, so the
+    next rewind lands short and the previous frame is never erased — one
+    stranded progress bar per stray write. At default verbosity every
+    ``log.warning`` in the tree does exactly that, because the root logger has no
+    handlers and ``logging.lastResort`` writes it straight to stderr.
+
+    **Being the only handler is the mechanism, not a detail.** Routing records to
+    the TUI while another handler still writes them to stderr would fix nothing;
+    the stray write is what corrupts, and its content is irrelevant. So this
+    handler owns the decision per record: a running TUI gets it through
+    :meth:`TerminalUI.add_output`, and everything else falls through to the
+    stream. Installing it also disables ``lastResort`` for free — that fires only
+    when the root logger has no handlers at all.
+
+    Consequences worth stating rather than discovering:
+
+    * **A paused TUI routes to the stream.** ``pause()`` clears the region and
+      zeroes ``_prev_height``, so the terminal is genuinely the caller's again
+      and a write cannot corrupt anything. Holding records back until resume
+      would reorder them against the interactive output they belong beside.
+    * **The output region keeps only the last** :data:`_MAX_OUTPUT_LINES`
+      **lines.** A run emitting more warnings than that shows the most recent
+      ones and silently drops the rest — the same window every other TUI line
+      lives in, but records are the one kind of output where a short set reads
+      identically to a clean run. It is the right trade at WARNING (a rip
+      emitting 20+ is already abnormal) and it is a trade, not a free win.
+    * **The reentrancy guard is for the renderer thread, not for us.**
+      ``add_output`` does not log, but it sets ``_tick``, which wakes the
+      renderer; anything the renderer touches that logs would re-enter here from
+      a second thread. The guard is thread-local so one thread's recursion
+      cannot mute another thread's records.
+    """
+
+    def __init__(self, stream: TextIO | None = None) -> None:
+        super().__init__()
+        self._stream = stream
+        self._busy = threading.local()
+
+    @property
+    def stream(self) -> TextIO:
+        # Resolved per write, never captured at construction: pytest's capsys and
+        # the pty harness both replace sys.stderr after this object exists.
+        return self._stream if self._stream is not None else sys.stderr
+
+    def emit(self, record: logging.LogRecord) -> None:
+        if getattr(self._busy, "on", False):
+            return
+        self._busy.on = True
+        try:
+            msg = self.format(record)
+            ui = active_ui()
+            if ui is not None and not ui.is_paused():
+                ui.add_output(msg)
+            else:
+                print(msg, file=self.stream)
+        except Exception:
+            self.handleError(record)
+        finally:
+            self._busy.on = False
+
+    def handleError(self, record: logging.LogRecord) -> None:
+        """Swallow. The default writes a traceback to stderr — which is the very
+        stray write this class exists to prevent, arriving at the worst moment."""
 
 
 class _St(Enum):
@@ -92,12 +177,25 @@ class TerminalUI:
         tty.setcbreak(self._fd)
         with self._lock:
             self._st = _St.RUNNING
+        # Claim the log route BEFORE the renderer draws its first frame: a
+        # warning emitted in the gap would otherwise reach stderr and strand the
+        # frame that is about to be drawn.
+        global _ACTIVE
+        with _ACTIVE_LOCK:
+            _ACTIVE = self
         self._idle.clear()
         self._thread = threading.Thread(target=self._loop, daemon=True)
         self._thread.start()
         return self
 
     def stop(self) -> None:
+        global _ACTIVE
+        with _ACTIVE_LOCK:
+            # Only ever release our OWN claim. Two TUIs are not a supported
+            # arrangement, but clearing unconditionally would let a stopped one
+            # silently mute a live one's records.
+            if _ACTIVE is self:
+                _ACTIVE = None
         with self._lock:
             if self._st == _St.STOPPED:
                 return

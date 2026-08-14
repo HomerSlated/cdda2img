@@ -4373,20 +4373,56 @@ def _run_startup_checks(args: argparse.Namespace) -> None:
                 print("  Run `cdda2img setup --validate-catalogue` to repair it.")
 
 
+def _install_log_handler(*, verbose: bool) -> None:
+    """Route every log record through one handler, at the CLI entry point (N8).
+
+    **This is the only place in the tree that mutates global logging state**, per
+    CLAUDE.md. It runs here rather than in ``TerminalUI.start()`` because the TUI
+    is constructed deep inside ``rip_image``/``import_image``; the handler finds
+    it later through :func:`terminal_ui.active_ui`, so the mutation stays at the
+    entry point while the route stays live for the TUI's whole lifetime.
+
+    It replaces ``basicConfig``, and the replacement is the fix rather than a
+    tidy-up. ``basicConfig`` installs a ``StreamHandler`` on stderr; at default
+    verbosity it installs nothing at all and ``logging.lastResort`` — itself a
+    WARNING-level stderr handler — takes over. Either way a record reaches the
+    terminal behind the TUI's back and strands a frame. One handler that decides
+    per record where the output goes cannot double up, and installing *any*
+    handler retires ``lastResort``, which only fires on an empty handler list.
+
+    ``--verbose`` needs no special case here, which is the point of doing it this
+    way. It sets the root **level** and the format; where records go is still the
+    handler's single decision, so the firehose lands in the TUI's output region
+    when one is running and on stderr when one is not. (``args.verbose`` never
+    reaches the pipelines — it is consumed here — so making the TUI conditional
+    on it would have meant threading a new parameter through the call chain.)
+    """
+    import logging
+
+    from cdda2img.terminal_ui import TuiLogHandler
+
+    handler = TuiLogHandler()
+    root = logging.getLogger()
+    if verbose:
+        handler.setFormatter(
+            logging.Formatter(
+                "%(asctime)s %(levelname)-5s %(name)s: %(message)s", datefmt="%H:%M:%S"
+            )
+        )
+        root.setLevel(logging.DEBUG)
+    else:
+        # Two spaces, to sit with the pipeline's own status lines. No timestamp:
+        # at default verbosity these are notices to an operator watching a rip,
+        # not a trace to correlate after the fact.
+        handler.setFormatter(logging.Formatter("  %(levelname)s: %(message)s"))
+    root.addHandler(handler)
+
+
 def main() -> None:
     from cdda2img.recovery_profile import ProfileError
 
     args = parse_args()
-    if args.verbose:
-        # CLI entry only — keeps the library boundary clean per the
-        # CLAUDE.md "no global logging mutation in library" rule.
-        import logging
-
-        logging.basicConfig(
-            level=logging.DEBUG,
-            format="%(asctime)s %(levelname)-5s %(name)s: %(message)s",
-            datefmt="%H:%M:%S",
-        )
+    _install_log_handler(verbose=args.verbose)
     # Validate the config once, before anything touches a drive or the network
     # (accudisc-migration-plan.md §9.6). `setup` is exempt: it is the tool for
     # repairing a broken config, so refusing to start on one would be a trap with

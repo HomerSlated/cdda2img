@@ -60,8 +60,11 @@ below is actioned yet except where noted.
 
 Both raised by kgr at the close of 2026-08-03. N1a and N1b resolved 2026-08-04;
 N1d settled and N1c superseded 2026-08-05; **N3, N4 and N5 implemented 2026-08-06**.
-**Open: N2, N6 (queued 2026-08-07) and N8 (queued 2026-08-10). N7 answered 2026-08-11.**
-**Reconciled 2026-08-12** — N2 is down to `progress-map-plan.md` §6 steps 5–6 (the
+**Open: none. N7 answered 2026-08-11; N6 and N2 implemented 2026-08-13; N8
+implemented 2026-08-14.** That closes kgr's work order of 2026-08-13 ("N6, N2 and
+N8, in that order. Then we'll work back through the above list") — the QUEUED
+block at the head of this section is what comes next.
+**Reconciled 2026-08-12** — N2 was down to `progress-map-plan.md` §6 steps 5–6 (the
 Q lane and the track marker both shipped 2026-08-08); N6's prior question is
 answered by kgr and the item is unblocked but unimplemented; N7's residue is a
 policy call. N8 is unchanged. (N1e is withdrawn
@@ -1294,8 +1297,55 @@ still worth doing.
 `--ar` offset discrimination). Images at
 `/mnt/aladdin/Storage/Install/Burning/Images/Plextools/`.
 
-#### N8. **[C2I] Any `log` record emitted while the TUI is live orphans a progress
-bar** — QUEUED 2026-08-10, found while fixing the import readers
+#### ~~N8. **[C2I] Any `log` record emitted while the TUI is live orphans a progress
+bar**~~ — QUEUED 2026-08-10, **IMPLEMENTED 2026-08-14**
+
+> **Done.** `terminal_ui.TuiLogHandler` is now the single terminal sink for log
+> records, installed once by `cdda2img._install_log_handler` at the CLI entry
+> point and finding the TUI — created much later, inside `rip_image` /
+> `import_image` — through the `terminal_ui.active_ui()` registry that
+> `start()`/`stop()` maintain. That keeps the one global logging mutation at the
+> entry point, as CLAUDE.md requires, without the handler having to exist before
+> the thing it routes to.
+>
+> **The three open questions in this item are answered by measurement, not
+> taste.** *Where*: at the entry point, because `args.verbose` is consumed in
+> `main()` and never reaches the pipelines, so making the TUI conditional on it
+> would have meant threading a new parameter through the call chain — checked,
+> not assumed. *What level*: WARNING, because `logging.lastResort` **is** a
+> WARNING-level stderr handler and the root logger starts empty at level
+> WARNING, so WARNING+ is exactly the set of records that reaches the terminal
+> today and therefore exactly the set that corrupts the frame; INFO and DEBUG
+> are already dropped before they get there. *`--verbose`*: no special case, and
+> that is the point of the design. It sets the root level and the format;
+> *where* a record goes stays the handler's single decision, so the firehose
+> lands in the TUI's output region when one is running and on stderr when one is
+> not. `basicConfig` is gone — being the **only** handler is the mechanism,
+> since routing to the TUI while a second handler still writes to stderr would
+> fix nothing, and installing any handler retires `lastResort` for free.
+>
+> Two consequences recorded rather than discovered: a **paused** TUI routes to
+> the stream (`pause()` zeroes `_prev_height`, so the terminal is the caller's
+> again, and holding records back would reorder them against the interactive
+> output they belong beside); and the output region keeps only the last
+> `_MAX_OUTPUT_LINES = 20` lines, so a run emitting more warnings than that
+> drops the earliest — a real trade, acceptable at WARNING where 20+ is already
+> an abnormal run, and stated in the docstring rather than left to be found.
+>
+> **The pty harness this item asked for exists** (`tests/test_tui_logging.py`),
+> and its negative control does the work the item wanted it to. The naive probe
+> the item suggested — grep for a `\r\x1b[J` where `\x1b[<n>A\r\x1b[J` was needed
+> — is not discriminating, because `_frame` legitimately emits the short form
+> whenever it drew a single line. The assertion is on the **rewind distance
+> against the lines really on screen**: a frame that drew N lines must be rewound
+> by N-1, and a stray write adds newlines the TUI never counted. Measured, the
+> control reproduces the defect exactly — the record lands glued to the progress
+> line (`25.0%a stray record\r\n`) and the next rewind is 0 where 1 was needed —
+> and with the handler every rewind matches. 11 tests.
+>
+> Not done, deliberately: the seven `log.warning`/`log.info` call sites in
+> `accudisc_reader` and `subq_toc` are untouched, per this item's own
+> instruction. The defect was the missing route, not the records.
 
 **Mechanism, measured under a pty 2026-08-10.** `TerminalUI._frame` repaints by
 rewinding `_prev_height - 1` lines and erasing to the screen bottom, where

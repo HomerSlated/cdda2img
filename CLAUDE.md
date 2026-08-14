@@ -294,10 +294,30 @@ orphans plus the live one). The same applies to `log` records — PXI's tail-pad
 is a `report` call plus `log.debug`, *not* `log.warning`, because at default verbosity no
 handler is installed and a warning falls through to `logging.lastResort` on stderr with
 identical effect. The durable record is `pxi_tail_padded` in PROV, which outlives any log
-line. **The general case is unfixed and filed as TODO N8**: any module's `log.warning`
-during a TUI phase does this, and `accudisc_reader`/`subq_toc` hold several on the rip
-path. Verified under a pty with a negative control — the old code path reproduces the
-orphan, so the probe can fail:
+line. **The general case was TODO N8 and is FIXED (2026-08-14).** `terminal_ui.TuiLogHandler`
+is the single terminal sink for log records: installed once by `cdda2img._install_log_handler`
+at the CLI entry point (so the one global logging mutation stays where CLAUDE.md requires it)
+and finding the TUI — built much later inside `rip_image`/`import_image` — through the
+`terminal_ui.active_ui()` registry that `start()`/`stop()` maintain. **Being the only handler
+is the mechanism**: routing to the TUI while a second handler still wrote to stderr would fix
+nothing, since the stray write corrupts regardless of content, and installing *any* handler
+retires `logging.lastResort` for free. `basicConfig` is therefore gone. The filter level is
+WARNING because that is measured, not chosen — `lastResort` **is** a WARNING-level stderr
+handler and the root logger starts empty at level WARNING, so WARNING+ is exactly the set
+that reaches the terminal and therefore exactly the set that corrupts a frame. `--verbose`
+needs no special case (it sets the root level and format; *where* a record goes is still the
+handler's one decision) — which matters because `args.verbose` is consumed in `main()` and
+never reaches the pipelines, so gating the TUI on it would have meant a new parameter through
+the whole call chain. Two trades are stated rather than left to be found: a **paused** TUI
+routes to the stream (`pause()` zeroes `_prev_height`, so the terminal is the caller's again,
+and holding records would reorder them against the interactive output they belong beside), and
+the output region keeps only the last 20 lines, so a run emitting more warnings than that drops
+the earliest. Verified under a pty with a negative control — the old code path reproduces the
+orphan, so the probe can fail. **The naive probe does not work**: `_frame` legitimately emits
+`\r\x1b[J` whenever it drew one line, so the assertion is on the *rewind distance against the
+lines really on screen* (a frame that drew N must rewind N-1), not on which escape appeared.
+The seven `log.warning`/`log.info` sites in `accudisc_reader`/`subq_toc` were deliberately
+**not** touched — the defect was the missing route, not the records:
 - **DDP 2.0** (`ddp_reader.py:import_ddp()`): parses DDPID (MCN), PQDESCR (timing + ISRC), CDTEXT.BIN; PCM (TRACK*.DAT) is already s16le — no byte-swap
 - **cdrdao TOC+BIN** (`cdrdao_reader.py`): parses `.toc` text via `toc_parser.py`; byte-swaps s16be BIN → s16le WAV via `convert_cdrdao_bin_to_wav()`
 - **Nero NRG** (`nrg_reader.py:import_nrg()`): parses NER5 (64-bit offsets) and NERO (32-bit) DAOX/DAOI track blocks, CDTX (CD-Text), MTYP; PCM is s16le — no byte-swap
