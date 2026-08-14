@@ -12,12 +12,13 @@ below is actioned yet except where noted.
    against the tree: `7299a2d` closed the per-field half (propose-then-skip),
    `9167e61` the per-record half (N5's pressing menu). See item 9 below.
 2. ~~**Item 10 (B-4 post-soak) — recheck, "probably stale too".**~~ — **rechecked
-   2026-08-14: NOT stale, and it under-counts its own scope.** All three claimed
-   roles are live across **seven** production call sites, plus a fourth consumer
-   the item never listed (`MBPrepopResult.disc`). Two of the roles are rewrites
-   rather than deletions, and one is the never-fail guard that stops a resolver
-   bug turning a completed rip into a lost one. **One ruling for kgr**, with a
-   recommendation to split the item. See item 10 below.
+   2026-08-14: not stale, but PARKED as won't-do.** kgr: *"high risk with zero
+   benefits."* All three claimed roles are live across **seven** production call
+   sites, plus a fourth consumer the item never listed (`MBPrepopResult.disc`);
+   two roles are rewrites rather than deletions and one is the guard that stops a
+   resolver bug turning a completed rip into a lost one. The warning now lives on
+   `_merge_into_disc`'s own docstring, where an editor will actually meet it.
+   See item 10 below.
 3. **Anything touching the shim is REJECTED** — done 2026-08-13 (`994bc9a`, LIVE
    item 3 deleted). Listed here so the ruling is visible from the cleanup block:
    do not reopen, and see CLAUDE.md "This is DESIGN, not debt".
@@ -1849,8 +1850,34 @@ every step assumes the binding resolves without our `tools/` shim.
    machinery is live, not shelved. N4 (`release_selected_via` naming the wrong
    rung) was the PROV-string defect this item's second half existed to retire,
    and it is recorded under ruling 8's PROV audit.
-10. **[C2I] B-4 post-soak cleanup** — delete the legacy merge chain. Needs the two
-    mid-pipeline consumers decoupled first; retires `test_shadow_equivalence`.
+10. ~~**[C2I] B-4 post-soak cleanup** — delete the legacy merge chain.~~
+    **PARKED — WON'T DO, kgr 2026-08-14:** *"high risk with zero benefits."*
+    Needed the two mid-pipeline consumers decoupled first; would have retired
+    `test_shadow_equivalence`.
+
+    > **Do not reopen this as a cleanup task.** The risk/benefit is settled and
+    > the direction was decided *after* the roles were enumerated below, not
+    > before. Three things follow.
+    >
+    > 1. **The "post-soak cleanup" framing is retired with it.** A future reader
+    >    finding a legacy merge chain beside a resolver will read strangler-pattern
+    >    debt and reach for the deletion; the roles table below is why that is
+    >    wrong. The chain is **four jobs sharing one code path**, and three of them
+    >    are load-bearing.
+    > 2. **The one residual benefit, stated so it is not rediscovered as a
+    >    surprise.** "Zero benefits" is right about *runtime* — nothing gets
+    >    faster, smaller or more correct. What the tangle does cost is **future
+    >    edit safety**: roles 1/2/4 mean a change to merge semantics silently
+    >    changes what Discogs and stage-7 *search for*, and that failure is
+    >    invisible (a lookup that stops matching, never an error). That bill only
+    >    arrives if someone edits `_merge_into_disc`, which nothing currently
+    >    plans. Parking is therefore the right call **and** the reason to leave a
+    >    warning at the function itself rather than only in this file — done, see
+    >    its docstring.
+    > 3. **Roles 5 and 6 are kept deliberately, not by neglect.** The never-fail
+    >    fallback stops a resolver bug turning a completed rip into a lost one; the
+    >    oracle is the only non-tautological check that the B-4 flip did not change
+    >    committed output. Neither has an expiry date.
 
     > **B-4 is the metadata TRUST MODEL (`_merge_into_disc` → `field_resolver`),
     > not the AccuDisc engine** — nothing here touches a drive, a disc, or the

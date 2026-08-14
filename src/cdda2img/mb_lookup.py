@@ -770,7 +770,34 @@ def lookup_isrc(isrc: str) -> list[DiscMeta]:
 
 
 def _merge_into_disc(meta: DiscMeta, disc: RBIDisc) -> RBIDisc:
-    """Return a new RBIDisc with None/empty/unknown fields filled from *meta*."""
+    """Return a new RBIDisc with None/empty/unknown fields filled from *meta*.
+
+    **This function is NOT dead code, and it has four callers doing four
+    different jobs.** Since the B-4 flip it decides no committed field value —
+    ``field_resolver`` does that, and this fold's output is discarded on the
+    success path — so it reads like leftover strangler-pattern scaffolding. It
+    is not. Deleting it, or changing what it fills, reaches all of:
+
+    1. **Discogs search context** (``cdda2img._prepopulate_from_discogs``) —
+       ``_albums_match(disc.album, hit.album)`` gates the barcode hit against the
+       *merged* album.
+    2. **Stage-7 seed** (``cdda2img._run_metadata_lookups``) — the duration
+       matcher fires only ``if disc.album or disc.artist``, i.e. on merged state.
+    3. **``MBPrepopResult.disc``** (four sites in this module) — consumed as
+       ``disc = mb_result.disc``, upstream of 1 and 2.
+    4. **Never-fail fallback + equivalence oracle** (``cdda2img.py``) — the fold's
+       final disc is committed if the resolver raises, and is the only
+       non-tautological check that the flip did not change committed output.
+
+    Roles 1-3 make this an *input* to later lookups, and that is the trap: a
+    change to what gets filled silently changes what those lookups **search
+    for**. The failure is a lookup that quietly stops matching, never an
+    exception — rips keep succeeding with worse metadata.
+
+    Untangling this was TODO item 10 and is **parked, won't do** (kgr,
+    2026-08-14: *"high risk with zero benefits"*). The decision was taken with
+    the roles above enumerated, so re-deriving them is not new information.
+    """
     from cdda2img.validators import validate_isrc
 
     _unknown = "Unknown Artist"
