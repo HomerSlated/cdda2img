@@ -744,8 +744,12 @@ def test_unresolved_without_a_damage_map_draws_no_after_row(capsys, monkeypatch)
     _print_ctdb_repair_map(bytes(rep), None, resolved=False)
     lines = _report_lines(capsys)
 
-    assert len(lines) == 2, lines
-    assert "After" not in "".join(lines)
+    # Three lines, but the third is a refusal rather than a map: emitting two
+    # where every other run emits three reads as truncated output.
+    assert len(lines) == 3, lines
+    assert "not shown" in lines[2] and "no C2 map" in lines[2]
+    assert "█" not in lines[2]
+    assert "clean" not in "".join(lines)
 
 
 def test_nothing_is_printed_when_no_repair_happened(capsys):

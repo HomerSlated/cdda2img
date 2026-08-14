@@ -1911,6 +1911,42 @@ _CTDB_MAP_MAX_COLS = 120
 _CTDB_MAP_MIN_COLS = 16
 
 
+def _ctdb_report_rows(
+    damage: bytes | None, repaired: bytes, *, resolved: bool
+) -> tuple[list[tuple[str, bytes, str]], str]:
+    """The report's rows as ``(label, per-sector map, suffix)``, plus any note.
+
+    Split out of :func:`_print_ctdb_repair_map` to keep it under the complexity
+    gate, and it earns the split: everything here is *what to claim*, everything
+    left there is *how wide to draw it*. The two were tangled and the second is
+    where the bug was.
+
+    The "before" row prefers the read's own C2 map, so it is continuous with the
+    live map the user just watched. Without one it falls back to what parity
+    rewrote — measured, but a lower **bound** on the damage, so the suffix names
+    which quantity is being counted rather than quietly swapping one for the
+    other under an unchanged label.
+    """
+    if damage is not None:
+        before, note = damage, f"{len(damage) - damage.count(0)} flagged"
+    else:
+        before = repaired
+        note = f"{len(before) - before.count(0)} repaired"
+    rows: list[tuple[str, bytes, str]] = [("Before", before, note)]
+
+    if resolved:
+        return [*rows, ("After", bytes(len(before)), "clean")], ""
+    if damage is not None:
+        residual = bytes(0 if r else d for d, r in zip(damage, repaired))
+        left = f"{len(residual) - residual.count(0)} remain"
+        return [*rows, ("After", residual, left)], ""
+    # The repair committed, AR still disagrees, and there is no C2 map to
+    # localise what is left. There is no truthful "after" row to draw — but
+    # silently emitting two lines where every other run emits three reads as
+    # truncated output rather than as a refusal, so the block says why.
+    return rows, "After   not shown — AR still disagrees and no C2 map was captured"
+
+
 def _print_ctdb_repair_map(
     repaired_sectors: bytes | None,
     disc_damage: bytes | None = None,
@@ -1980,25 +2016,7 @@ def _print_ctdb_repair_map(
         if not repaired_sectors:
             return
 
-    # The "before" row prefers the read's own C2 map, so it is continuous with
-    # the live map the user just watched. Without one it falls back to what
-    # parity rewrote — measured, but a lower bound on the damage, so the suffix
-    # names which quantity is being counted rather than quietly swapping it.
-    if damage is not None:
-        before, note = damage, f"{len(damage) - damage.count(0)} flagged"
-    else:
-        before = repaired_sectors
-        note = f"{len(before) - before.count(0)} repaired"
-    rows: list[tuple[str, bytes, str]] = [("Before", before, note)]
-
-    if resolved:
-        rows.append(("After", bytes(len(before)), "clean"))
-    elif damage is not None:
-        residual = bytes(0 if r else d for d, r in zip(damage, repaired_sectors))
-        rows.append(("After", residual, f"{len(residual) - residual.count(0)} remain"))
-    # else: the repair committed, AR still disagrees, and there is no C2 map to
-    # localise what is left. There is no truthful "after" row to draw, so the
-    # "before" row stands alone rather than being invented.
+    rows, note_line = _ctdb_report_rows(damage, repaired_sectors, resolved=resolved)
 
     label_w = max(len(lbl) for lbl, _, _ in rows)
     note_w = max(len(note) for _, _, note in rows)
@@ -2015,12 +2033,18 @@ def _print_ctdb_repair_map(
     if width < _CTDB_MAP_MIN_COLS:
         for lbl, _, txt in rows:
             print(f"     {lbl:<{label_w}}  {txt}")
-        return
-
-    colour = disc_map.colour_enabled(sys.stdout)
-    for lbl, sectors, txt in rows:
-        cells = disc_map.cells_from_damage(sectors, frontier=len(sectors), width=width)
-        print(f"     {lbl:<{label_w}}  {disc_map.render(cells, colour=colour)}  {txt}")
+    else:
+        colour = disc_map.colour_enabled(sys.stdout)
+        for lbl, sectors, txt in rows:
+            cells = disc_map.cells_from_damage(
+                sectors, frontier=len(sectors), width=width
+            )
+            bar = disc_map.render(cells, colour=colour)
+            print(f"     {lbl:<{label_w}}  {bar}  {txt}")
+    if note_line:
+        # Sliced, not wrapped: the whole point of the budget above is that no
+        # line this function emits can exceed the terminal.
+        print(f"     {note_line}"[:cols])
 
 
 def _store_match_distance(provenance: dict[str, str], disc: RBIDisc) -> None:
