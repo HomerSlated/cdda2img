@@ -12,10 +12,12 @@ below is actioned yet except where noted.
    against the tree: `7299a2d` closed the per-field half (propose-then-skip),
    `9167e61` the per-record half (N5's pressing menu). See item 9 below.
 2. ~~**Item 10 (B-4 post-soak) — recheck, "probably stale too".**~~ — **rechecked
-   2026-08-14: NOT stale.** `test_shadow_equivalence.py` and the legacy chain
-   both still exist and `_merge_into_disc` has live `mb_lookup` call sites. The
-   item now carries **one ruling for kgr**: deleting the oracle retires the only
-   non-tautological check on the B-4 flip. See item 10 below.
+   2026-08-14: NOT stale, and it under-counts its own scope.** All three claimed
+   roles are live across **seven** production call sites, plus a fourth consumer
+   the item never listed (`MBPrepopResult.disc`). Two of the roles are rewrites
+   rather than deletions, and one is the never-fail guard that stops a resolver
+   bug turning a completed rip into a lost one. **One ruling for kgr**, with a
+   recommendation to split the item. See item 10 below.
 3. **Anything touching the shim is REJECTED** — done 2026-08-13 (`994bc9a`, LIVE
    item 3 deleted). Listed here so the ruling is visible from the cleanup block:
    do not reopen, and see CLAUDE.md "This is DESIGN, not debt".
@@ -1850,23 +1852,81 @@ every step assumes the binding resolves without our `tools/` shim.
 10. **[C2I] B-4 post-soak cleanup** — delete the legacy merge chain. Needs the two
     mid-pipeline consumers decoupled first; retires `test_shadow_equivalence`.
 
+    > **B-4 is the metadata TRUST MODEL (`_merge_into_disc` → `field_resolver`),
+    > not the AccuDisc engine** — nothing here touches a drive, a disc, or the
+    > CLI-vs-binding question, which was settled and deleted 2026-08-01. Asked by
+    > kgr 2026-08-14, and the confusion is structural rather than careless: both
+    > used a "shadow" arm against an oracle, so the *shape* is identical and only
+    > the subsystem differs. Worth keeping straight because they resolve in
+    > opposite directions — the CLI A/B died because the **question** dissolved
+    > (the CLI is built to the same API and cannot do what the API does not
+    > define, so a disagreement would be an AccuDisc bug, not a delta), whereas
+    > B-4's arms are two genuinely independent implementations of our own merge,
+    > where a disagreement would be a real finding. Verified: `grep` for
+    > `accudisc|CLI|subprocess|binding` in `tests/test_shadow_equivalence.py`
+    > returns nothing.
+
     > **Rechecked 2026-08-14 (kgr's ruling 2, "probably stale too"). It is NOT
-    > stale** — measured, not assumed. `tests/test_shadow_equivalence.py` still
-    > exists, and `_merge_into_disc` has **live** call sites in `mb_lookup`
-    > (:1228, :1438, :1493, :1612) *plus* the oracle role at `cdda2img.py:2420`
-    > (`_shadow_out["merged"] = merged  # legacy oracle`). That dual role is the
-    > actual content of the item: the "two mid-pipeline consumers" are the
-    > `mb_lookup` sites that mutate the disc mid-pipeline, which is a different
-    > job from retiring the oracle.
+    > stale, and the item under-counts its own scope.** All three claimed roles
+    > are live, and there is a **fourth consumer the note never listed**. Seven
+    > production call sites, enumerated:
     >
-    > **The question for kgr, because it is a judgement and not a fact.**
-    > Deleting the oracle retires the only **non-tautological** check that the
-    > B-4 flip did not change committed output — the test deliberately compares
-    > the resolver's disc against the legacy merge, because comparing against
-    > `shadow["disc"]` would compare the returned disc with itself. A safety net
-    > with no expiry date is not obviously "post-soak". Ruling wanted: delete the
-    > chain as planned, or keep the oracle indefinitely and close the item as
-    > *won't do*.
+    > | role | sites | what breaks without it |
+    > |---|---|---|
+    > | **1. Search context** (Discogs album-match) | `cdda2img.py:1375` | `_albums_match(disc.album, hit.album)` gates the barcode hit; without a merged album the gate has nothing to compare |
+    > | **2. Search context** (stage-7 seed) | `cdda2img.py:2369` | stage 7 fires only `if disc.album or disc.artist`, i.e. on merged state |
+    > | **3. CDDB last-merge** | `cdda2img.py:2376` | feeds the same `merged` that becomes oracle + fallback |
+    > | **4. MB → `MBPrepopResult.disc`** | `mb_lookup.py:1228, 1438, 1493, 1612` | consumed at `cdda2img.py:2263` (`disc = mb_result.disc`) — **the un-listed fourth consumer**, and it is upstream of roles 1–3 |
+    > | **5. Never-fail fallback** | `cdda2img.py:2390` (`committed = merged`) | a resolver exception commits `merged`; today `log.warning("trust resolver failed; using legacy merge fallback")` |
+    > | **6. Equivalence oracle** | `cdda2img.py:2420` | `_shadow_out["merged"]`; 5 tests in one file |
+    >
+    > **Impact of removing them, role by role.**
+    > * **Roles 1, 2 and 4 are not deletions, they are rewrites.** The mutated
+    >   disc is *input* to later lookups, so the chain cannot simply be dropped —
+    >   each consumer needs an explicit search-context value threaded to it
+    >   instead. This is the "decouple the two consumers first" prerequisite, and
+    >   it is really four sites across two modules. Delete without decoupling and
+    >   Discogs' album gate and stage-7's trigger both go dark — **silently**, as
+    >   a lookup that stops matching rather than an error.
+    > * **Role 5 is a real behaviour change, not bookkeeping.** The `except` at
+    >   `cdda2img.py:2409` exists because *metadata is best-effort and must never
+    >   abort a rip*. The comment argues C2 "cannot fire on the live domain", but
+    >   the guard deliberately catches `Exception`, not `C2`. Remove the fallback
+    >   and any resolver bug turns a completed rip into a lost one — the audio is
+    >   already on disk by then.
+    > * **Role 6 is the judgement call** (below).
+    >
+    > **Why removal was ever on the table — the item's title is misleading, and
+    > kgr caught it (2026-08-14: "if all of these components are so essential,
+    > why is their removal even being considered? this would completely break the
+    > code").** He is right that a naive deletion breaks the pipeline. The reason
+    > "delete the legacy merge chain" got written is that the chain's **primary**
+    > role really is dead: since the B-4 flip it no longer decides a single
+    > committed field value — the resolver does, and `merged` is thrown away on
+    > the success path. In *that* sense it is redundant, which is what the
+    > strangler pattern predicts and what "post-soak cleanup" meant.
+    >
+    > What the item missed is that the chain **accrued three side roles it was
+    > never written for** — search context, crash fallback, test oracle — and
+    > those are load-bearing. So the debt is real but it is not dead code: it is
+    > *one code path doing four unrelated jobs*, three of which need a home before
+    > the fourth can go. **Re-title this item "decouple the merge chain's four
+    > consumers", not "delete it".** Anyone reading the old title and acting on it
+    > deletes a working pipeline.
+    >
+    > **The ruling kgr owes, because it is a judgement and not a fact.** Deleting
+    > the oracle retires the only **non-tautological** check that the B-4 flip did
+    > not change committed output — the test compares the resolver's disc against
+    > the legacy merge precisely because comparing against `shadow["disc"]` would
+    > compare the returned disc with itself. A safety net with no expiry date is
+    > not obviously "post-soak". Options: (a) delete the chain as planned, letting
+    > `test_parallel_pre_menu` / B0 `test_merge_characterization` carry the guard
+    > — a conscious step down, not silent erosion; (b) keep the oracle
+    > indefinitely and close the item *won't do*; (c) **split the item** — do the
+    > decoupling (roles 1/2/4), which is genuine debt with a silent failure mode,
+    > and keep roles 5/6, which are cheap and load-bearing. (c) is the
+    > recommendation: it removes the tangle without giving up either the crash
+    > guard or the only real check on the flip.
 11. **[C2I] Make `ortools` optional.** The remainder of the dependency-hygiene item
     (`textual` and `wayback` closed 2026-07-30, below). It is the heaviest wheel in
     the set and serves exactly one thing — the `best` batching strategy — through a
