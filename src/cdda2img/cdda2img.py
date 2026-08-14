@@ -1903,43 +1903,61 @@ def _emit_mb_provenance(
         provenance["mb_rejected_inconsistent"] = str(mb_result.rejected_inconsistent)
 
 
+# Widest map this report will draw, and the narrowest worth drawing at all.
+# The cap is cosmetic — a full-width bar on a 200-column terminal is harder to
+# read, not easier. The floor is NOT cosmetic: below it we print counts and no
+# bars, because a bar that will not fit must never be emitted (see below).
+_CTDB_MAP_MAX_COLS = 120
+_CTDB_MAP_MIN_COLS = 16
+
+
 def _print_ctdb_repair_map(
-    repaired_sectors: bytes | None, disc_damage: bytes | None = None
+    repaired_sectors: bytes | None,
+    disc_damage: bytes | None = None,
+    *,
+    resolved: bool = True,
 ) -> None:
-    """Draw what CTDB parity rewrote, against where the drive struggled (§5).
+    """Draw the disc before and after CTDB parity repaired it (§5).
 
     A **result** map, not a progress bar, and the distinction is the whole design
     decision: CTDB repair does zero extra reads and finishes in ~0.8 s, so
     animating it would be theatre. This is drawn once, after the fact.
 
-    **Two ROWS, not two lanes** (kgr asked for the pairing, 2026-08-13; the row
-    count is the part that changed on inspection). Pairing the read's C2 damage
-    with the repairs is right — where the drive struggled is the backdrop the
-    repairs have to be read against, and neither is very interesting alone. But
-    they must not share a row.
+    **Before/after, not damage/repairs** (kgr, 2026-08-14). The first shipped
+    version paired the read's C2 damage with what parity rewrote, on the reasoning
+    that where the drive struggled is the backdrop the repairs are read against.
+    That answered a question nobody asked. The one the user has is *"is the disc
+    fixed?"*, and a damage row that still shows the original damage after a
+    successful repair answers "no" in the only vocabulary the row has. The map
+    the user watched during the read is the "before"; this draws the "after".
 
-    ``disc_map._GLYPH`` defines the two-lane vocabulary as **filled = healthy**,
-    which the repair lane inverts: a rewritten region is *good* news and would
-    draw as the half that "did not survive". In colour that is merely confusing;
-    in mono, under ``NO_COLOR``, or in a piped log — where the glyph is the only
-    channel there is — it states the opposite of the truth. The one-row
-    constraint exists because the live map shares a line with the progress bar,
-    and this is a static end-of-rip report, so it does not apply here. Vertical
-    space is the cheap way out and it keeps each row in the vocabulary it was
-    designed for.
+    **"After: clean" is earned, not assumed.** ``repair_whole_disc`` writes the
+    PCM back only after ``verify_ctdb`` *and* ``verify_ar`` both pass
+    (:mod:`ctdb_repair`), so on the only path that reaches this function every
+    track CTDB called damaged now verifies against both references. *resolved*
+    carries the one case that gate does not cover: AR and CTDB are different
+    reference populations, so a track can still fail AR while passing the
+    per-track CRC that admitted the repair. Then the "after" row shows what is
+    left — ``damage & ~repaired`` — and the recovery ladder runs next.
 
-    The rows are bucketed to the same width from per-sector maps of the same
-    disc, so they are column-aligned and can be read against each other: a column
-    marked on the top row and clear on the bottom is damage parity did not
-    rewrite; clear on top and marked below is a repair the drive never flagged.
+    Deriving that residual is right **only** in the unresolved branch. When AR
+    verifies, residual C2 flags are refuted evidence: C2 over-flags, so drawing
+    them would paint phantom damage the gate has already disproved, directly
+    above an AR report saying every track is OK.
 
     Both rows are C2-calibrated (:data:`disc_map.RAMP_BANDS`) — a zero healthy
-    baseline is right for "sectors the drive flagged" and for "sectors parity
-    changed" alike, unlike the Q lane, which needed its own bands.
+    baseline is right here, unlike the Q lane, which needed its own bands.
 
-    The damage row is omitted entirely when no map was captured, rather than
-    drawn as clean: the ordinary rule that an unmeasured lane is never rendered
-    as healthy.
+    **Width.** Every column on the line is budgeted, because this row cannot clip
+    the way the live map does (:meth:`TerminalUI._build_map` subtracts the whole
+    line's furniture and then clips to ``avail``). The first version subtracted 4
+    from the terminal width while the line carried 33 columns of label and
+    suffix, and emitted a 153-column line under a cap that claimed to fit 120.
+    A wrap here is cosmetic — ``pause()`` zeroes ``_prev_height`` before we
+    print, so the repaint model cannot be corrupted by it — but it is still the
+    difference between a report and a mess. Below :data:`_CTDB_MAP_MIN_COLS`
+    there is no honest bar, so the counts are printed alone; a floor that forces
+    a wider bar than fits is the original bug with a different constant.
     """
     if not repaired_sectors:
         return
@@ -1948,31 +1966,61 @@ def _print_ctdb_repair_map(
 
     from cdda2img import disc_map
 
-    width = max(16, min(shutil.get_terminal_size((80, 24)).columns - 4, 120))
-    n = len(repaired_sectors) - repaired_sectors.count(0)
-
-    damage = disc_damage
+    # `or None` folds an empty capture into "no map": a zero-length damage map
+    # is the absence of evidence, not evidence of a clean disc.
+    damage = disc_damage or None
     if damage is not None and len(damage) != len(repaired_sectors):
         # Bucket boundaries are derived from each map's own length, so two maps
-        # of different lengths put cell i over different sectors and the pairing
-        # silently misaligns. Truncate both to the common prefix instead: the
+        # of different lengths put cell i over different sectors and the rows
+        # silently misalign. Truncate both to the common prefix instead: the
         # two are per-sector maps of the same disc and should already agree, so
         # a difference is small, but "should" is not a reason to skip the clamp.
         keep = min(len(damage), len(repaired_sectors))
         damage, repaired_sectors = damage[:keep], repaired_sectors[:keep]
+        if not repaired_sectors:
+            return
+
+    # The "before" row prefers the read's own C2 map, so it is continuous with
+    # the live map the user just watched. Without one it falls back to what
+    # parity rewrote — measured, but a lower bound on the damage, so the suffix
+    # names which quantity is being counted rather than quietly swapping it.
+    if damage is not None:
+        before, note = damage, f"{len(damage) - damage.count(0)} flagged"
+    else:
+        before = repaired_sectors
+        note = f"{len(before) - before.count(0)} repaired"
+    rows: list[tuple[str, bytes, str]] = [("Before", before, note)]
+
+    if resolved:
+        rows.append(("After", bytes(len(before)), "clean"))
+    elif damage is not None:
+        residual = bytes(0 if r else d for d, r in zip(damage, repaired_sectors))
+        rows.append(("After", residual, f"{len(residual) - residual.count(0)} remain"))
+    # else: the repair committed, AR still disagrees, and there is no C2 map to
+    # localise what is left. There is no truthful "after" row to draw, so the
+    # "before" row stands alone rather than being invented.
+
+    label_w = max(len(lbl) for lbl, _, _ in rows)
+    note_w = max(len(note) for _, _, note in rows)
+    cols = shutil.get_terminal_size((80, 24)).columns
+    # 5 indent + label + 2 gap, bar, 2 gap + suffix. The suffix column is sized
+    # across BOTH rows so the two bars get one width and stay column-aligned —
+    # the same trap the live map has for its status banner.
+    width = min(_CTDB_MAP_MAX_COLS, cols - (5 + label_w + 2) - 2 - note_w)
+
+    # 3/5 indentation matches print_ar_report, which prints f"   {line}" over a
+    # report whose own body is indented 2. This block sits between two AR
+    # reports, so being one column out is maximally visible.
+    print("   CTDB parity repair:")
+    if width < _CTDB_MAP_MIN_COLS:
+        for lbl, _, txt in rows:
+            print(f"     {lbl:<{label_w}}  {txt}")
+        return
 
     colour = disc_map.colour_enabled(sys.stdout)
-
-    def _row(sectors: bytes) -> str:
+    for lbl, sectors, txt in rows:
         cells = disc_map.cells_from_damage(sectors, frontier=len(sectors), width=width)
-        return disc_map.render(cells, colour=colour)
-
-    label = max(len("Read damage"), len("Parity repairs"))
-    print("  CTDB parity repair:")
-    if damage is not None:
-        flagged = len(damage) - damage.count(0)
-        print(f"    {'Read damage':<{label}}  {_row(damage)}  {flagged} sector(s)")
-    print(f"    {'Parity repairs':<{label}}  {_row(repaired_sectors)}  {n} sector(s)")
+        print(f"     {lbl:<{label_w}}  {disc_map.render(cells, colour=colour)}  {txt}")
 
 
 def _store_match_distance(provenance: dict[str, str], disc: RBIDisc) -> None:
@@ -3689,7 +3737,16 @@ def rip_image(  # noqa: C901
                 # verifies. Both are inside the one pause, so the TUI is torn
                 # down and rebuilt once rather than twice (N8's stray-write
                 # mechanism — anything printed outside a pause strands a frame).
-                _print_ctdb_repair_map(_ctdb.repaired_sectors, disc_damage)
+                _print_ctdb_repair_map(
+                    _ctdb.repaired_sectors,
+                    disc_damage,
+                    # `ar_verify` was recomputed just above, so the "after" row
+                    # rests on the post-repair verdict rather than on the gate
+                    # that admitted the repair. The two can disagree: AR and
+                    # CTDB are different reference populations, and a track can
+                    # fail one while passing the other.
+                    resolved=not _ar_has_partial_mismatch(ar_verify.tracks),
+                )
                 print_ar_report(ar_verify.tracks, read_offset=read_offset)
                 if ui is not None:
                     ui.resume()

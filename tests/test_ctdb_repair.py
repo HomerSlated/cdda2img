@@ -8,6 +8,7 @@ coincide. Every geometry fixture here therefore uses ``bounds[0] != 0``.
 
 from __future__ import annotations
 
+import re
 import zlib
 from pathlib import Path
 
@@ -614,48 +615,137 @@ def test_the_map_covers_the_whole_pcm_not_just_the_ctdb_window():
     assert got[0] == 1
 
 
-def test_the_report_draws_two_aligned_rows_when_a_damage_map_was_captured(capsys):
-    """kgr's pairing, as ROWS rather than lanes.
+_ANSI = re.compile(r"\x1b\[[0-9;]*m")
 
-    `disc_map._GLYPH` defines the two-lane vocabulary as filled = healthy, which
-    the repair lane inverts — a rewritten region is good news and would draw as
-    the half that "did not survive". Sharing a row therefore states the opposite
-    of the truth in mono, under NO_COLOR, and in a piped log, where the glyph is
-    the only channel. The one-row constraint belongs to the LIVE map, which
-    shares a line with the progress bar; this is a static report.
+
+_MAP_GLYPHS = "█▓▒░"
+
+
+def _report_lines(capsys) -> list[str]:
+    """Captured report, colour stripped, blank lines dropped."""
+    return [
+        _ANSI.sub("", ln) for ln in capsys.readouterr().out.splitlines() if ln.strip()
+    ]
+
+
+def _bar_span(line: str) -> tuple[int, int]:
+    """(start column, width) of the map on *line*.
+
+    Locating the bar by its first "█" is what the damage/repairs version could
+    get away with, because both rows drew the same pattern. Rows that differ —
+    which is now the point — make that the first *healthy* cell instead, so it
+    silently measures the content rather than the geometry.
     """
+    hits = [i for i, ch in enumerate(line) if ch in _MAP_GLYPHS]
+    assert hits, f"no map on {line!r}"
+    return hits[0], len(hits)
+
+
+def test_the_report_draws_before_and_after_with_after_clean(capsys, monkeypatch):
+    """kgr, 2026-08-14: before/after, not damage/repairs.
+
+    The question the user has after a repair is "is the disc fixed?". The first
+    version paired C2 damage with the repairs, which left the damage row still
+    showing the original damage after a successful repair — answering "no" in
+    the only vocabulary the row has.
+
+    "clean" is earned rather than assumed: `repair_whole_disc` writes the PCM
+    back only after `verify_ctdb` AND `verify_ar` both pass, so every track CTDB
+    called damaged verifies against both references by the time we draw this.
+    """
+    monkeypatch.setenv("COLUMNS", "120")
     from cdda2img.cdda2img import _print_ctdb_repair_map
 
     dmg, rep = bytearray(1000), bytearray(1000)
     dmg[100:150] = b"\x01" * 50
     rep[100:150] = b"\x01" * 50
 
-    _print_ctdb_repair_map(bytes(rep), bytes(dmg))
-    lines = [ln for ln in capsys.readouterr().out.splitlines() if ln.strip()]
+    _print_ctdb_repair_map(bytes(rep), bytes(dmg), resolved=True)
+    lines = _report_lines(capsys)
 
     assert len(lines) == 3, lines
-    assert "Read damage" in lines[1] and "50 sector(s)" in lines[1]
-    assert "Parity repairs" in lines[2] and "50 sector(s)" in lines[2]
-    # Column alignment is the whole point of two rows: a reader compares them
-    # vertically, which only works if the maps start at the same column and are
-    # bucketed to the same width.
-    assert lines[1].index("█") == lines[2].index("█")
+    assert "Before" in lines[1] and "50 flagged" in lines[1]
+    assert "After" in lines[2] and "clean" in lines[2]
+    # The after row is entirely healthy: no ramp glyph survives anywhere in it.
+    assert set(lines[2].split()[1]) == {"█"}, lines[2]
+    # Column alignment is the whole point of two rows — a reader compares them
+    # vertically, which needs one start column and one width, not just one start.
+    assert _bar_span(lines[1]) == _bar_span(lines[2])
 
 
-def test_no_damage_map_omits_the_row_rather_than_drawing_it_clean(capsys):
-    """An unmeasured lane is never rendered as healthy — the standing rule that
-    kept a DIY Q lane out of the live map for the same reason."""
+def test_unresolved_draws_the_residual_instead_of_claiming_clean(capsys, monkeypatch):
+    """AR and CTDB are different reference populations, so a track can still fail
+    AR while passing the per-track CRC that admitted the repair. The gate that
+    committed the audio cannot see that; the post-repair AR verify can."""
+    monkeypatch.setenv("COLUMNS", "120")
+    from cdda2img.cdda2img import _print_ctdb_repair_map
+
+    dmg, rep = bytearray(1000), bytearray(1000)
+    dmg[100:150] = b"\x01" * 50  # flagged
+    rep[100:120] = b"\x01" * 20  # only part of it rewritten
+
+    _print_ctdb_repair_map(bytes(rep), bytes(dmg), resolved=False)
+    lines = _report_lines(capsys)
+
+    assert "50 flagged" in lines[1]
+    # 50 flagged - 20 rewritten = 30 still flagged. Never "clean".
+    assert "30 remain" in lines[2], lines[2]
+    assert "clean" not in lines[2]
+
+
+def test_resolved_never_draws_residual_c2_flags(capsys, monkeypatch):
+    """The residual is right ONLY when AR still disagrees. C2 over-flags, so once
+    AR verifies, unrewritten flags are refuted evidence — drawing them would
+    paint phantom damage directly above a report saying every track is OK."""
+    monkeypatch.setenv("COLUMNS", "120")
+    from cdda2img.cdda2img import _print_ctdb_repair_map
+
+    dmg, rep = bytearray(1000), bytearray(1000)
+    dmg[100:150] = b"\x01" * 50
+    rep[100:120] = b"\x01" * 20  # 30 sectors flagged but never rewritten
+
+    _print_ctdb_repair_map(bytes(rep), bytes(dmg), resolved=True)
+    lines = _report_lines(capsys)
+
+    assert "clean" in lines[2]
+    assert set(lines[2].split()[1]) == {"█"}, lines[2]
+
+
+def test_no_damage_map_sources_before_from_the_repairs_and_says_so(capsys, monkeypatch):
+    """Without a C2 capture there is no "before" in the vocabulary the live map
+    used, so the row falls back to what parity rewrote — measured, but a lower
+    bound on the damage. The suffix names the quantity rather than quietly
+    swapping one for the other under an unchanged label."""
+    monkeypatch.setenv("COLUMNS", "120")
     from cdda2img.cdda2img import _print_ctdb_repair_map
 
     rep = bytearray(1000)
     rep[10:20] = b"\x01" * 10
 
-    _print_ctdb_repair_map(bytes(rep), None)
-    lines = [ln for ln in capsys.readouterr().out.splitlines() if ln.strip()]
+    _print_ctdb_repair_map(bytes(rep), None, resolved=True)
+    lines = _report_lines(capsys)
+
+    assert len(lines) == 3, lines
+    assert "10 repaired" in lines[1], lines[1]
+    assert "flagged" not in lines[1]
+    assert "clean" in lines[2]
+
+
+def test_unresolved_without_a_damage_map_draws_no_after_row(capsys, monkeypatch):
+    """Nothing truthful to draw: the repair committed, AR still disagrees, and
+    there is no C2 map to localise what is left. The before row stands alone
+    rather than an after row being invented."""
+    monkeypatch.setenv("COLUMNS", "120")
+    from cdda2img.cdda2img import _print_ctdb_repair_map
+
+    rep = bytearray(1000)
+    rep[10:20] = b"\x01" * 10
+
+    _print_ctdb_repair_map(bytes(rep), None, resolved=False)
+    lines = _report_lines(capsys)
 
     assert len(lines) == 2, lines
-    assert "Read damage" not in "".join(lines)
-    assert "Parity repairs" in lines[1]
+    assert "After" not in "".join(lines)
 
 
 def test_nothing_is_printed_when_no_repair_happened(capsys):
@@ -668,20 +758,85 @@ def test_nothing_is_printed_when_no_repair_happened(capsys):
     assert capsys.readouterr().out == ""
 
 
-def test_mismatched_map_lengths_are_clamped_so_the_columns_still_align(capsys):
+def test_mismatched_map_lengths_are_clamped_so_the_columns_still_align(
+    capsys, monkeypatch
+):
     """`cells_from_damage` derives its bucket size from each map's own length, so
     two maps of different lengths put cell i over different sectors and the
     vertical comparison silently misaligns. They should already agree — but
     "should" is not a reason to skip the clamp."""
+    monkeypatch.setenv("COLUMNS", "120")
     from cdda2img.cdda2img import _print_ctdb_repair_map
 
     dmg = bytes(bytearray([1] * 50 + [0] * 950))
     rep = bytes(bytearray([1] * 50 + [0] * 450))  # half as long
 
-    _print_ctdb_repair_map(rep, dmg)
-    lines = [ln for ln in capsys.readouterr().out.splitlines() if ln.strip()]
+    _print_ctdb_repair_map(rep, dmg, resolved=True)
+    lines = _report_lines(capsys)
 
-    assert lines[1].index("█") == lines[2].index("█")
-    # Both counts are reported over the SAME clamped prefix, so they are
-    # comparable rather than each being right about a different disc.
-    assert "50 sector(s)" in lines[1] and "50 sector(s)" in lines[2]
+    assert _bar_span(lines[1]) == _bar_span(lines[2])
+    assert "50 flagged" in lines[1]
+
+
+@pytest.mark.parametrize("cols", [40, 60, 80, 100, 124, 130, 153, 160, 200])
+def test_every_line_fits_the_terminal(capsys, monkeypatch, cols):
+    """THE regression test, and the one the first version had no equivalent of.
+
+    That version budgeted `terminal_width - 4` for the bar while the line also
+    carried a 20-column label prefix and a 13-column suffix, so it emitted a
+    153-column line under a cap that claimed to fit 120 — wrapping on every
+    terminal narrower than 153, including the ones the cap was protecting.
+
+    The live map is immune because it subtracts the whole line's furniture and
+    then clips to `avail`; a one-shot report has to get the budget right up
+    front. Asserting the rendered width directly is what makes the class of bug
+    untestable-by-inspection go away.
+    """
+    monkeypatch.setenv("COLUMNS", str(cols))
+    from cdda2img.cdda2img import _print_ctdb_repair_map
+
+    dmg, rep = bytearray(200000), bytearray(200000)
+    dmg[1000:9000] = b"\x01" * 8000  # six-figure counts widen the suffix
+    rep[1000:9000] = b"\x01" * 8000
+
+    _print_ctdb_repair_map(bytes(rep), bytes(dmg), resolved=True)
+    for ln in _report_lines(capsys):
+        assert len(ln) <= cols, f"{len(ln)} > {cols}: {ln!r}"
+
+
+def test_a_terminal_too_narrow_for_a_bar_prints_counts_only(capsys, monkeypatch):
+    """A floor that forces a bar wider than fits is the original bug with a
+    different constant, so below the minimum there is simply no bar."""
+    monkeypatch.setenv("COLUMNS", "24")
+    from cdda2img.cdda2img import _print_ctdb_repair_map
+
+    dmg, rep = bytearray(1000), bytearray(1000)
+    dmg[100:150] = b"\x01" * 50
+    rep[100:150] = b"\x01" * 50
+
+    _print_ctdb_repair_map(bytes(rep), bytes(dmg), resolved=True)
+    lines = _report_lines(capsys)
+
+    assert len(lines) == 3, lines
+    assert "█" not in "".join(lines)
+    assert "50 flagged" in lines[1] and "clean" in lines[2]
+    for ln in lines:
+        assert len(ln) <= 24, ln
+
+
+def test_indentation_matches_the_accuraterip_report(capsys, monkeypatch):
+    """This block is printed between two AR reports, so being one column out is
+    maximally visible. `print_ar_report` emits f"   {line}" over a body whose own
+    lines are indented 2, giving 3 for the header and 5 for the rows."""
+    monkeypatch.setenv("COLUMNS", "120")
+    from cdda2img.cdda2img import _print_ctdb_repair_map
+
+    rep = bytearray(1000)
+    rep[10:20] = b"\x01" * 10
+
+    _print_ctdb_repair_map(bytes(rep), None, resolved=True)
+    out = capsys.readouterr().out.splitlines()
+
+    assert out[0].startswith("   C") and not out[0].startswith("    ")
+    for ln in out[1:]:
+        assert ln.startswith("     ") and not ln.startswith("      "), ln

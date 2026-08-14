@@ -571,6 +571,59 @@ gates exist.
    captured rather than drawn clean — the same rule that kept a DIY Q lane out of
    the live map.
 
+   **Superseded 2026-08-14 on the first live run — before/after, not
+   damage/repairs.** The pairing above answers "where did the drive struggle and
+   what did parity touch?". The question the user actually has is *"is the disc
+   fixed?"*, and a damage row that still shows the original damage **after a
+   successful repair** answers "no" in the only vocabulary the row has. kgr had
+   already said what he expected, on 2026-08-13: *"Either the final map still
+   shows errors, in which case we move on to a CTDB parity repair, or it's all
+   blue (or white, if mono), and we're done."* Two rows were the right call for
+   the glyph-inversion reason recorded above; the two *quantities* were wrong.
+
+   ```
+      CTDB parity repair:
+        Before  ████▒███████████████████████████████████████████████  1 flagged
+        After   ████████████████████████████████████████████████████  clean
+   ```
+
+   The map the user watched during the read **is** the "before", so sourcing that
+   row from the C2 damage map keeps it continuous with what they just saw;
+   without a C2 capture it falls back to what parity rewrote, and the suffix
+   names which quantity is being counted rather than swapping one for the other
+   under an unchanged label.
+
+   "After: clean" is **earned, not assumed**: `repair_whole_disc` writes the PCM
+   back only after `verify_ctdb` *and* `verify_ar` both pass, so on the only path
+   that reaches the renderer every track CTDB called damaged verifies against
+   both references. The gate does not cover everything, though — AR and CTDB are
+   different reference populations, so a track can still fail AR while passing
+   the per-track CRC that admitted the repair. `resolved=` carries the post-repair
+   AR verdict; when it is false the "after" row draws the residual
+   (`damage & ~repaired`) and the recovery ladder runs next. Deriving that
+   residual in the *resolved* branch would be wrong in the opposite direction:
+   C2 over-flags, so unrewritten flags are refuted evidence once AR verifies, and
+   drawing them would paint phantom damage directly above a report saying every
+   track is OK.
+
+   **The width budget was also wrong, and this is the reusable part.** The first
+   version sized the bar as `terminal_width - 4` while the line carried a
+   20-column label prefix and a 13-column suffix — emitting a **153-column line**
+   under a `min(…, 120)` cap that read like a guard and was cosmetic. It wrapped
+   on every terminal narrower than 153, including the ones the cap was supposedly
+   protecting. The live map never had this bug because it subtracts the whole
+   line's furniture and then **clips** (`visible = min(map_cols, avail)`); a
+   one-shot report has no pinning requirement and so no clip, which means it has
+   to get the budget right up front. Note the floor is the same trap wearing a
+   different constant: `max(16, …)` forces a bar wider than fits on a narrow
+   terminal, so below the minimum the report prints counts and no bars.
+
+   Worth recording why the wrap was cosmetic rather than corrupting: `pause()`
+   calls `_clear_region()`, which zeroes `_prev_height`, so the TUI has
+   disclaimed the region before any of this is printed. Inside a *live* frame the
+   same wrap would be the N8 stray-write mechanism — `_prev_height` counts
+   **logical** lines and the rewind would land short.
+
    **This required retaining the damage map past the read** (`_rip_disc_stage`
    now returns it; `map_cb` became unconditional, so a `--no-tui` rip captures it
    too — the rendering was the reason for the gate, never the capture).
