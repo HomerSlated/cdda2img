@@ -8,11 +8,14 @@ Recorded verbatim on receipt so they survive a context compaction. **Work order 
 by kgr: N6, then N2, then N8 first; then work back through this list.** Nothing
 below is actioned yet except where noted.
 
-1. **Item 9 (B-7 alternatives UI) is DONE** — remove it from LIVE. kgr, 2026-08-13.
-   Verify against what N5 shipped before striking, and say which commit closed it.
-2. **Item 10 (B-4 post-soak) — recheck, "probably stale too".** Check whether the
-   legacy merge chain and `test_shadow_equivalence` still exist before assuming
-   there is work here.
+1. ~~**Item 9 (B-7 alternatives UI) is DONE**~~ — **struck 2026-08-14**, verified
+   against the tree: `7299a2d` closed the per-field half (propose-then-skip),
+   `9167e61` the per-record half (N5's pressing menu). See item 9 below.
+2. ~~**Item 10 (B-4 post-soak) — recheck, "probably stale too".**~~ — **rechecked
+   2026-08-14: NOT stale.** `test_shadow_equivalence.py` and the legacy chain
+   both still exist and `_merge_into_disc` has live `mb_lookup` call sites. The
+   item now carries **one ruling for kgr**: deleting the oracle retires the only
+   non-tautological check on the B-4 flip. See item 10 below.
 3. **Anything touching the shim is REJECTED** — done 2026-08-13 (`994bc9a`, LIVE
    item 3 deleted). Listed here so the ruling is visible from the cleanup block:
    do not reopen, and see CLAUDE.md "This is DESIGN, not debt".
@@ -21,15 +24,20 @@ below is actioned yet except where noted.
    `.pxi` from a second drive" ask. kgr: unlikely to be available **for months**.
    Decide whether each stays LIVE, moves to a parked section, or is dropped —
    an item that cannot progress for months is not a live item.
-5. **Item 15 (`speed_bands`) needs a full explainer before any work.** kgr's
-   question: *"What is this feature actually needed for, and how will it be
-   implemented, because right now it just looks like a feature that serves no
-   purpose other than justifying a large number of tests?"* Answer both, or drop
-   the item. Do not write tests for it in the meantime.
-6. **Item 14 (AccuDisc RECOVERED, 9/9) — was it ever replicated?** kgr: *"if it
-   was just a one-off mid-development anomaly, I'd rather not waste any time on
-   it."* Establish what produced the discrepancy and whether it reproduced on
-   current AccuDisc. If it did not, close it and tell them why.
+5. ~~**Item 15 (`speed_bands`) needs a full explainer before any work.**~~ —
+   **answered and DROPPED 2026-08-14.** The feature is real (`bands_cx` verified
+   on the binding) but it is **AccuDisc's**, and we consume nothing: the one
+   concrete use was a test they refuted three ways from data in hand, then
+   withdrew the bench measurement themselves ("*it cannot settle it*",
+   "*Nothing owed*"). See item 15 below. **Do not queue tests for it.**
+6. ~~**Item 14 (AccuDisc RECOVERED, 9/9) — was it ever replicated?**~~ —
+   **answered 2026-08-14: not a one-off, but hardware-blocked, so it moves under
+   ruling 4 rather than being closed.** Diagnosed to a mechanism (§bk.2: a stable
+   concealed error reads as OK, its marginal neighbour as RECOVERED) with one
+   unexplained asymmetry (always +1, never −1). The discriminator is a **two-drive
+   test** and AccuDisc will not touch hardware. One unblocked nudge for them: the
+   `RECOVERED` redocumentation they committed to in §bk.3 has still not landed
+   (`accudisc.h:1351`, checked). See item 14 below.
 7. **Item 13 (master vs remaster) is RESOLVED by kgr, 2026-08-13:**
    > *"Everything ripped and imported is a master. Everything created from files
    > is a remaster."*
@@ -55,6 +63,96 @@ below is actioned yet except where noted.
    needed, and the acceptance test becomes *does our solver reproduce CP-SAT's
    batching on the corpus*, which needs the current results banked **before** the
    dependency goes.
+
+   > ### Design discussion held 2026-08-14 — measurements, and a recommendation
+   >
+   > **It is bin packing, not knapsack**, and the distinction decides the design.
+   > Knapsack maximises value in one fixed container; this minimises the *number*
+   > of containers under two constraints (≤80 min, ≤99 tracks). Bin packing has a
+   > free lower bound — `max(ceil(total/80), ceil(n/99))` — and that is what makes
+   > a solver mostly unnecessary: when a greedy packing *meets* the bound it is
+   > provably optimal, with no search and nothing to trust.
+   >
+   > **Q1 — scope, and how much of it we use.** `ortools` is the whole Google OR
+   > suite: CP-SAT, the routing/vehicle library, MathOpt, GLOP/PDLP, SCIP and
+   > HiGHS MIP backends, graph and set-cover algorithms, all protobuf-wired.
+   > Installed: **79 MB**, of which `libortools.so.9` is 31.6 MB, `libscip.so.10`
+   > 13.2 MB and `libhighs.so.1` 5.0 MB — the two MIP backends alone are 18 MB we
+   > never call. We use **one model** in one function (`input_selector.batch_best`,
+   > ~35 lines): booleans, linear constraints, `Minimize(sum(y))`. As a share of
+   > shipped bytes our usage rounds to zero; the honest statement is that we use
+   > one solver family out of six and the boolean-linear subset of that.
+   >
+   > **The transitive cost is larger than the package.** `ortools` alone requires
+   > **pandas (51 MB)** — `Required-by: ortools`, and *nothing in `src/`, `tests/`
+   > or `tools/` imports pandas* — plus protobuf/absl (~2 MB). Total removable:
+   > **≈132 MB of a 594 MB venv (22%)**. `numpy` stays; it is ours.
+   >
+   > **The number that actually matters is startup, not disk.** Measured with
+   > `-X importtime`: `import cdda2img.cdda2img` costs **338.8 ms**, of which
+   > **`ortools` is 259.6 ms (77%)** and **pandas alone is 159.1 ms (47%)**. The
+   > import is module-level in `input_selector`, so every `list`, `test`,
+   > `extract` and `rip` pays it — for a strategy that is **not the default**
+   > (`--strategy` defaults to `aatc`; `best` is opt-in).
+   >
+   > **Q2 — how much work, and what it buys.** Pure Python, ~100 lines, one
+   > session. **Not C.** kgr's premise — *"I suspect it's highly computationally
+   > expensive"* — does not survive measurement: First-Fit-Decreasing packs
+   > **n=500 in 591 µs** in interpreted Python. The AccuDisc analogy does not
+   > carry: AccuDisc is C because it does real-time SCSI I/O with C2 pointers at
+   > 40×, where a missed deadline loses data; this is arithmetic over a list of
+   > floats, run once per `create`. C would add a build system, an API, bindings
+   > and CI for a routine that already finishes in under a millisecond.
+   >
+   > | n | FFD (pure Python) | CP-SAT | ratio |
+   > |---|---|---|---|
+   > | 25 | 7 µs | 10.8 ms | 1468× |
+   > | 100 | 44 µs | 37.2 ms | 856× |
+   > | 250 | 169 µs | 377.5 ms | 2233× |
+   > | 500 | 591 µs | 1927.3 ms | 3263× |
+   >
+   > Same disc count in every row. Expected gain: **−132 MB, −260 ms on every
+   > invocation, ~10³× faster packing.**
+   >
+   > **The quality loss, stated as a number rather than a footnote.** FFD meets
+   > the lower bound — i.e. is *provably optimal* — in **100% of trials at n≤25,
+   > 98.8% at n=50, 99.0% at n=100, 96.8% at n=250, 93.5% at n=500, 91.0% at
+   > n=1000** (400 trials each, realistic lognormal track lengths). On 40 sampled
+   > inputs where FFD *did* miss, CP-SAT beat it on **7**, always by exactly one
+   > disc — so roughly **1–2% of realistic inputs lose a single disc**. Two
+   > measured facts shrink that further and belong in the decision: (a) the 30 s
+   > cap means today's code **already** returns FEASIBLE-not-optimal at scale —
+   > one n=500 solve took **25.1 s**, against the cap — so the optimality
+   > guarantee is nominal exactly where it would matter; and (b) FFD also replaces
+   > `batch_aatc` (**next-fit** — the weakest greedy there is) as the fallback,
+   > which today wastes **3% of discs** (261 of 8469 at n=500) whenever CP-SAT
+   > times out or is absent. Net, the change probably *improves* the average
+   > outcome while giving up a guarantee on a slice.
+   >
+   > **Design to build next session.** (1) FFD under both constraints. (2) Compute
+   > the lower bound; if FFD meets it, return — **provably optimal, certificate
+   > included**. (3) Only on a gap, a time-boxed improvement pass (suggest 200 ms):
+   > alternative orderings, then local search (move/swap between bins) targeting
+   > the bound. **How much of the 1–2% step 3 recovers is unmeasured** — that is
+   > the experiment to run, not an assumption to ship; the gap-case generator in
+   > the bench script below is the fixture. (4) Bank CP-SAT's batching on a corpus
+   > **before** removing the dependency, per the acceptance test above.
+   >
+   > **Ruling (i) — SETTLED 2026-08-14: pure Python, not C.** kgr, on being shown
+   > the 591 µs figure and the AccuDisc-analogy argument: *"I agree 100% with your
+   > conclusions."* He had opened by proposing C with an API; the measurement
+   > changed the decision, so do **not** re-open this as "AccuDisc is C, so this
+   > should be" — the reason AccuDisc is C (real-time SCSI at 40×) is exactly the
+   > reason this is not.
+   >
+   > **Ruling (ii) — still open, kgr's call.** `--strategy best` is documented as
+   > *"global bin-packing to minimise total number of discs"*; afterwards it is
+   > *"provably optimal when FFD meets the lower bound, best-effort otherwise"*.
+   > That is a user-visible claim change in `--help` and the man page — rename,
+   > reword, or accept.
+   >
+   > Measurements reproducible from `bench_pack.py` / `bench_gap.py` (session
+   > scratch, deleted per the scope rule — the numbers above are the artefact).
 
 ### 🔴 NEXT SESSION
 
@@ -1729,21 +1827,46 @@ every step assumes the binding resolves without our `tools/` shim.
 
 #### Independent of all the above
 
-9. **[C2I] B-7 menu alternatives UI** — the confirmed destination for the trust model.
-   The §11.5 prerequisite is half-shipped (`Resolution.contenders` + `skipped`,
-   `6154526`); what remains is routing the adapter's invalid-ISRC / "Unknown Artist"
-   drops through `skipped`, which needs propose-then-skip instead of filter-first.
-   **Wants a design conversation before code.**
-   **Design conversation started 2026-08-05 — see the "B-7 design input" block under
-   N1e**: kgr's proposal is to feed the per-candidate MB `disambiguation` strings
-   (plus each candidate's MB→Discogs link) into the alternatives menu. Note the
-   **granularity gap** recorded there — `contenders`/`skipped` are per-*field*,
-   whereas five pressings agreeing on every field and differing only in
-   `disambiguation` are alternatives of a *record*, one level up. That gap may be
-   why B-7 has stalled. N4 (`release_selected_via` naming the wrong rung) is
-   exactly the PROV-string defect B-7's second half exists to retire.
+9. ~~**[C2I] B-7 menu alternatives UI**~~ — **DONE. Struck 2026-08-14** on kgr's
+   ruling of 2026-08-13, after verifying against the tree rather than the notes.
+   **Both halves shipped, in different commits, which is why it read as stalled
+   from either side alone.** The item's own diagnosis was the *granularity gap*:
+   `contenders`/`skipped` are per-**field**, while five pressings differing only
+   in `disambiguation` are alternatives of a **record**, one level up. Those were
+   never one piece of work.
+   - Per-field, `7299a2d`: `resolver_adapter.Skip` with reason codes
+     (`_R_INVALID_ISRC` at :419, `_R_ABSTAIN` at :359-360, `_R_EMPTY` at :296),
+     and the `"Unknown Artist"` sentinel **proposed** at `_SENTINEL_TRUST` rather
+     than filtered — i.e. propose-then-skip, exactly what the item asked for.
+   - Per-record, `9167e61` (N5): `menu_state.PressingScreen` /
+     `PressingDetailScreen`, with `85dafda` and `efb968e` behind it.
+
+   `7299a2d`'s subject says **"unwired"**, which is stale: the B-4 flip has since
+   landed — `test_shadow_equivalence`'s own docstring records that
+   `_run_metadata_lookups` now returns the resolver's committed disc — so the
+   machinery is live, not shelved. N4 (`release_selected_via` naming the wrong
+   rung) was the PROV-string defect this item's second half existed to retire,
+   and it is recorded under ruling 8's PROV audit.
 10. **[C2I] B-4 post-soak cleanup** — delete the legacy merge chain. Needs the two
     mid-pipeline consumers decoupled first; retires `test_shadow_equivalence`.
+
+    > **Rechecked 2026-08-14 (kgr's ruling 2, "probably stale too"). It is NOT
+    > stale** — measured, not assumed. `tests/test_shadow_equivalence.py` still
+    > exists, and `_merge_into_disc` has **live** call sites in `mb_lookup`
+    > (:1228, :1438, :1493, :1612) *plus* the oracle role at `cdda2img.py:2420`
+    > (`_shadow_out["merged"] = merged  # legacy oracle`). That dual role is the
+    > actual content of the item: the "two mid-pipeline consumers" are the
+    > `mb_lookup` sites that mutate the disc mid-pipeline, which is a different
+    > job from retiring the oracle.
+    >
+    > **The question for kgr, because it is a judgement and not a fact.**
+    > Deleting the oracle retires the only **non-tautological** check that the
+    > B-4 flip did not change committed output — the test deliberately compares
+    > the resolver's disc against the legacy merge, because comparing against
+    > `shadow["disc"]` would compare the returned disc with itself. A safety net
+    > with no expiry date is not obviously "post-soak". Ruling wanted: delete the
+    > chain as planned, or keep the oracle indefinitely and close the item as
+    > *won't do*.
 11. **[C2I] Make `ortools` optional.** The remainder of the dependency-hygiene item
     (`textual` and `wayback` closed 2026-07-30, below). It is the heaviest wheel in
     the set and serves exactly one thing — the `best` batching strategy — through a
@@ -1843,10 +1966,87 @@ every step assumes the binding resolves without our `tools/` shim.
     they report **10 flagged map bytes for 9 corrupt sectors** — where the tenth sits
     separates the two.
 
+    > **Answered 2026-08-14 (kgr's ruling 6: "was it ever replicated? if it was
+    > just a one-off mid-development anomaly, I'd rather not waste any time").
+    > It is not a one-off — but it IS hardware-blocked, so it moves to the parked
+    > bucket under ruling 4 rather than being closed.**
+    >
+    > *What produced it*: AccuDisc diagnosed a mechanism, §bk.2. Sector N carries
+    > a **stable** concealed error — every read returns the same wrong bytes, so
+    > the verify pass sees `diff == 0`, calls it confirmed and writes
+    > `ACCUDISC_MAP_OK`. Sector N+1 carries a **marginal** defect from the same
+    > physical damage region, is unstable across reads, so `consensus()` fires and
+    > it ends up `RECOVERED`. Two adjacent sectors, one damage region, opposite
+    > sides of the stability threshold. It needs no off-by-one and predicts what
+    > we measured: flag adjacent to the corruption, always state 4, C2 silent.
+    >
+    > *The hole they state plainly*: it does not explain why the stable one is
+    > always the **lower**-numbered. 9/9 with the flag at +1 and never −1 is the
+    > one feature the mechanism does not derive, so H1-local stays open beside it.
+    >
+    > *Replication*: the 9/9 is internally consistent but has **not** been re-run
+    > on current AccuDisc. The discriminator is §bk.4's **two-drive test** — a
+    > different model reading LBA 113043 correctly means the pit is readable and
+    > the PX-716A's consensus is the failure; every drive returning the same 22
+    > bytes means the pit is gone and `RECOVERED` is the wrong *label* rather than
+    > a wrong *answer*. AccuDisc: *"Ask Keith. We are not touching hardware."*
+    > So this is blocked on the second drive, the same blocker as the standing
+    > `.pxi` ask — months away per kgr. **Park it; do not close it.**
+    >
+    > *One unblocked thread worth a nudge*: §bk.3 committed AccuDisc to
+    > redocumenting `ACCUDISC_MAP_RECOVERED` **regardless of which hypothesis
+    > wins**, on our phrasing that "RECOVERED is simply the wrong label for
+    > concealed". Checked 2026-08-14: `accudisc.h:1351` still reads
+    > `/* problem seen, clean/agreeing copy won */` — the exact wording they
+    > agreed to change, 19 days on. Device-free, costs them one line.
+
     *(There is no item 12; the list has always jumped 11 → 13. Noted 2026-08-12 so
     the gap is not mistaken for a lost entry.)*
-15. **[C2I] `speed_bands` shipped and nobody has looked at it** — noted 2026-08-12,
-    no work queued. The binding now publishes `features = {caller_map_buffers,
+15. ~~**[C2I] `speed_bands` shipped and nobody has looked at it**~~ — **DROPPED
+    2026-08-14.** kgr's ruling 5 asked *"What is this feature actually needed for,
+    and how will it be implemented, because right now it just looks like a feature
+    that serves no purpose other than justifying a large number of tests?"* —
+    answer both or drop the item. Both answered; the answer is drop.
+
+    > **It is real, and it is theirs.** `bands_cx` / `bands_x` do exist — verified
+    > on the installed binding, `SpeedRung` carries `bands_cx bands_x equiv_x
+    > max_cx max_x measured_cx measured_x min_cx min_x monotonic reported_x
+    > requested_x spread_cx verdict`. So the feature is not vapour. But **we
+    > consume none of it**, and the two candidate reasons to start both fail:
+    >
+    > **Bullet 2 (the prediction we "owed" them) is dead — refuted, not
+    > unfinished.** AccuDisc's §2026-08-12a kills our §169 test three independent
+    > ways, every one checkable from data already in hand, no hardware:
+    > (a) the address and radius framings differ on Tracy by **0,415%** while the
+    > model's own accuracy is **1,22%** — a discriminator four times finer than
+    > the instrument's noise floor is not a discriminator; (b) *"under the address
+    > framing nothing imposes that cap"* is false — it imposes the same cap to
+    > **0,02x** (31,43x vs 31,41x); (c) **the band we named does not sample the
+    > radius we named** — Tracy's 40x outer window sits at LBA 108588, r = 40,31 mm,
+    > never within 6 mm of the lead-out, and it measured 27,67x against 27,49x
+    > predicted. They then withdrew the bench measurement *themselves*: *"I am not
+    > proposing the bench measurement, because it cannot settle it"* — the three
+    > control laws overlap, and **74% of the residual is ignorance of the vendor's
+    > reference disc**, i.e. *"a missing vendor constant, not a missing
+    > measurement: no amount of bench time narrows it."* Their reply ends
+    > **"Nothing owed."** There is nothing here to run and nothing outstanding.
+    >
+    > **Bullet 1 (ladder policy) does not need it either.** CLAUDE.md already
+    > rules that `drive_speed.admitted_ladder` is *our policy* and must not be
+    > replaced by the binding's, and that rules 2/3 exist for drives whose page 2A
+    > does not report — a **drive** property, which per-band rates do not
+    > supersede. Adopting band evidence would be a policy change requiring its own
+    > evidence, and no evidence is asking for it.
+    >
+    > **The only thing that survives is an opportunistic ask, not a work item**:
+    > if the corpus ever turns up a PX-716 datasheet quoting an RPM or a reference
+    > disc, grab it — that one line closes the residual that no bench run can.
+    > Recorded here and in `CLAUDE.local.md`'s research notes; **do not queue
+    > tests for `speed_bands`.**
+
+    Original text retained below as the evidence for the drop:
+
+    The binding now publishes `features = {caller_map_buffers,
     speed_bands, speed_honoured, subq_map}`, and `SpeedRung` carries
     `bands_cx` alongside `measured_cx` / `min_cx` / `max_cx` / `equiv_x` /
     `verdict`. Two things it touches, neither audited:
