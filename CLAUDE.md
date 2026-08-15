@@ -164,13 +164,40 @@ Standalone utility scripts live in `tools/` (tracked, not part of the installed 
   tools that shelled out to it — `tools/ctdb_repair.py` and `tools/toc_parity.py` — were
   **retargeted to AccuDisc 2026-07-24** (via `cdda2img.accudisc_reader`), so nothing in
   the tree references `c2read` any more.
-- **`tools/measure_write_offset.py`** — burn-and-read-back write offset measurement.
-  Generates a synthetic test signal, burns it via `accudisc write`, reads it back via `accudisc read`,
-  and measures where the known pulses landed. Accumulates cycles per drive in
-  `rips/write_offset_<drive-slug>.toml`. Run from project root:
+- **`tools/measure_write_offset.py` — a 12-line DEPRECATION STUB, not a tool.** It
+  prints a pointer to `cdda2img setup --write-offset` and exits 1. This entry
+  described it as live until 2026-08-15, with a `rips/write_offset_<drive-slug>.toml`
+  results path and an `accudisc write` subprocess — all three wrong, and the
+  subprocess claim contradicted the seam rule two sections down. Burn-and-read-back
+  write-offset measurement lives in **`src/cdda2img/write_offset.py`**, driven by
+  `setup.py:_section_write_offset`, with results at
+  `$XDG_DATA_HOME/cdda2img/write_offset_<slug>.toml` (`write_offset.results_path`) and
+  scratch under `write_offset_work/`. Sign convention is in that module's docstring:
+  `W = found − expected`, positive means the drive burns *late*, and the correction is
+  `apply_offset(pcm, W)` — the same single function the read side uses.
   ```
-  uv run python tools/measure_write_offset.py --device /dev/sr0 --read-offset 30
+  uv run python -m cdda2img setup --write-offset --device /dev/sr0
   ```
+  **Measurements were run in May–June 2026** — against `/dev/sr1` (CDEmu) and the
+  PX-716A — producing `rips/write_offset_plextor-dvdr-px-716a.toml` and
+  `rips/write_offset_cdemu-cd-rom.toml`. Those results files are **gone** (the backups
+  holding them predate the retention window); the working set survives in
+  `rips/write_offset/` (`ripped.bin`, `test.wav`, the TOCs). **Do not conclude from an
+  empty `$XDG_DATA_HOME/cdda2img/` that nothing was ever measured** — that path is
+  where the *current* code writes, and it only became the results location when the
+  logic moved out of `tools/` into `src/`. An absence at the new path is evidence about
+  the path, not about the history; this session made exactly that error and kgr
+  corrected it from shell history.
+  - **A round trip measures the COMBINED offset, `W + R` — one equation, two
+    unknowns.** The tool took `--read-offset` as an *input* for this reason
+    (`--device /dev/sr1 --read-offset 0`), and `private/research/drive_write_offsets.md`
+    states the same rule independently: *write offset = combined offset − read offset*,
+    which "requires burning an offset test CD and comparing with a known-offset read
+    drive". So the read offset **cannot** be derived from a single-drive round trip.
+    It can be derived with a *second* device whose offset is known (burn on A, read on
+    a known-zero B), which is one more reason the parked "any second optical drive" ask
+    is the highest-value hardware request. The only device-independent characterisation
+    available is `accuraterip.detect_offset` on a pressed, AR-verified disc.
 
 - **`install.sh`** (repo root, shipped) — the four install steps plus verification:
   `pipx install`, `pipx inject` of AccuDisc's binding wheel, man page, `file(1)` magic

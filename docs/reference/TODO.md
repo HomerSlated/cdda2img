@@ -166,10 +166,11 @@ below is actioned yet except where noted.
 
 Both raised by kgr at the close of 2026-08-03. N1a and N1b resolved 2026-08-04;
 N1d settled and N1c superseded 2026-08-05; **N3, N4 and N5 implemented 2026-08-06**.
-**Open: none. N7 answered 2026-08-11; N6 and N2 implemented 2026-08-13; N8
-implemented 2026-08-14.** That closes kgr's work order of 2026-08-13 ("N6, N2 and
-N8, in that order. Then we'll work back through the above list") — the QUEUED
-block at the head of this section is what comes next.
+**Open: N9 (raised 2026-08-15).** N7 answered 2026-08-11; N6 and N2 implemented
+2026-08-13; N8 implemented 2026-08-14. That closes kgr's work order of 2026-08-13
+("N6, N2 and N8, in that order. Then we'll work back through the above list") — the
+QUEUED block at the head of this section is what comes next, and N9 is new work
+raised alongside it.
 **Reconciled 2026-08-12** — N2 was down to `progress-map-plan.md` §6 steps 5–6 (the
 Q lane and the track marker both shipped 2026-08-08); N6's prior question is
 answered by kgr and the item is unblocked but unimplemented; N7's residue is a
@@ -181,6 +182,266 @@ N5's remaining work is validation, not code: the alternatives menu is covered by
 fixtures built to the reference disc's measured shape, but every container on the
 shelf is the same album, so a differing tie size and a blank `disambiguation` have
 never been exercised on real hardware. kgr's step 8 stands.
+
+#### N9. `rip --read-offset N` — an override for a drive in neither catalogue nor config (2026-08-15)
+
+**Raised by kgr 2026-08-15. Not implemented; this item is the specification.**
+
+**PROMOTED the same day, from convenience to dependency.** kgr's interim ownership
+decision (§171 in the AccuDisc correspondence) routes an unresolved-offset drive
+through AccuDisc printing every conflicting value and asking the user to *"rerun the
+command, explicitly passing their chosen offset"*. This flag **is** that exit. Without
+it AccuDisc's refusal is a dead end, so N9 is now on the critical path for the
+consolidation and no longer competes with the measurement path in the last paragraph
+below — it is needed regardless of how that is settled.
+
+A drive that is in neither `[[drives]]` nor the AccurateRip catalogue gets
+`read_offset = 0`, printed as `+0 samples (drive not in AccurateRip catalog)`
+(`cdda2img.py:2699`), and **nothing can override it**. `setup --read-offset` looks
+like the escape hatch and is not: it is `action="store_true"` (`cdda2img.py:586`) —
+a wizard *section selector*, and the section it runs is the same AccurateRip lookup
+that just missed. So the one path that needs a manual answer is the one path that
+cannot be given one.
+
+Add `rip --read-offset N` (int) as rung 0 of `_resolve_drive_offsets`, above the
+config entry: a flag is a deliberate act and should outrank a stored value.
+
+**Copy `burn --write-offset`'s shape, including the part that is easy to get wrong.**
+`burn` already has this flag (`cdda2img.py:515`) and gates it on
+`if write_offset_override is not None` (`cdda2img.py:4115`), **not** on truthiness.
+`--read-offset 0` must mean *force zero* — a real request on a drive whose catalogue
+entry is wrong — and a truthiness test would silently fall through to the catalogue
+and do the opposite of what was asked. Named here so it is not reintroduced.
+
+**Three decisions for kgr, not the implementer:**
+
+1. **Does an override persist to `[[drives]]`?** The AccurateRip rung persists via
+   `save_drive_read_offset`. Recommend **no**: an override is what you use while
+   sweeping candidate values, and persisting a guess is how a wrong offset becomes
+   permanent. `setup --read-offset` stays the way to commit a value.
+2. **PROV.** `drive_read_offset` is written at `cdda2img.py:3914` with no record of
+   where the number came from. Every comparable assumption in this tree stays
+   identifiable — `mcn_source=barcode_derived`, `pxi_read_offset`, `recovery_source`.
+   An override that leaves no trace is the defect class this project keeps fixing.
+   Suggest `drive_read_offset_source=cli|config|accuraterip|default`.
+3. **Flag-name collision.** `rip --read-offset N` (int) beside `setup --read-offset`
+   (bool) is legal — different subparsers — but it is one flag name with two
+   meanings. Either accept it or rename the setup flag `--detect-read-offset`.
+
+**The risk is lower than it looks, and the reason already ships.** A wrong manual
+offset is not silent: `_diagnose_ar_total_miss` (`cdda2img.py:3208`) fires on an
+all-tracks AccurateRip miss and emits `ar_offset_candidates` / `ar_offset_suggests`,
+naming the delta from the offset actually used. That is precisely the failure mode a
+hand-entered offset produces, and it is already diagnosed.
+
+**Weigh the flag against the measurement path before building it.**
+`accuraterip.detect_offset` already derives a read offset *from the audio itself*,
+and is already wired for exactly this situation in `pxi_reader`
+(`_pxi_offset_candidates`, `cdda2img.py:1038`) — a source carrying no drive identity.
+For an unknown drive, ripping a known disc and letting AccurateRip say which offset
+verifies is empirical and drive-specific, where a manual flag is a guess. That argues
+for `setup --read-offset` growing a second rung (catalogue, then measure-from-a-disc)
+rather than the flag being the whole answer. kgr may want both — the flag for
+sweeping, the measurement for committing — but the choice should be made knowing the
+measurement code exists.
+
+**Related, measured, and not yet a decision:** `eac_drives.read_offset` holds 257
+offsets that no query reads (only `write_offset` is selected, `drive_info.py:526`).
+102 of them are for drives absent from AccurateRip entirely — the same gap this item
+addresses, from the data side. See N9a below.
+
+#### N9a. EAC read offsets: measured, unqueried, and NOT dormant (2026-08-15)
+
+**Investigation only — no decision made.** kgr asked why the column exists. Answer:
+it is load-bearing at *import* time and unconsulted at *lookup* time, which is a
+different thing from unused, and the import role is doing real work today.
+
+`import_eac_drives_xml` (`drive_info.py:378`) treats a `read_offset` disagreement
+between an incoming entry and a stored row as an **entry-level conflict**: the whole
+`<drive>` element is excluded from the import and routed to `offsets_check.xml` for
+review. Measured on the shipped data — **all 3 conflicts in
+`private/research/incoming/offsets_check.xml` are read-offset conflicts**, and two of
+them are conflicts on that field *alone* (Phillips CDD-3600 stored +1263 vs incoming
++1566, no write offset either side; Yamaha CRW4260 stored 169 vs incoming +171 while
+the write offsets agree). No write offset was lost to a read-offset conflict in this
+dataset. So the column earns its place as the most discriminating conflict key even
+if it is never read back.
+
+**Measured coverage and agreement** (`~/.data/cdda2img/drive_offsets.db`; note
+`XDG_DATA_HOME` is `~/.data` here, *not* `~/.local/share`):
+
+| quantity | value |
+|---|---|
+| `ar_drives` rows | 4878 (3951 at ≥3 submissions, 927 below) |
+| `eac_drives` rows | 265 (257 with a read offset, 112 with a write offset) |
+| EAC rows matching an AR row on brand+model | 128 — **115 agree, 13 differ** |
+| EAC rows matching on model but not brand | 27 (naming mismatch, 20/27 agree) |
+| EAC rows absent from AR entirely | **102** — real coverage, all vintage drives |
+| EAC rows matching a **low-confidence** (<3 submissions) AR row | 12 |
+
+Two conclusions worth keeping:
+
+- **The 115/128 agreement is the evidence that both catalogues share one sign and
+  unit convention.** If they differed by sign, or by bytes-vs-samples, agreement
+  would be near zero rather than 90%. Do not assume this — it was measured, and it is
+  what makes any cross-use legitimate.
+- **The weak link is the matcher, not the data.** `find_drive_offset` (AR,
+  `drive_info.py:297`) is `WHERE ar_name = ?` — exact. `find_drive_write_offset`
+  (EAC, `drive_info.py:526`) is `INSTR` substring, which is how `Plextor PX-116A`
+  matches AR's `PX-116A2` — **a different drive**. That imprecision is harmless today
+  because the write side only *logs a suggestion*. A read-side `find_drive_read_offset`
+  reusing that query verbatim would be **auto-applying** a fuzzy match. At least one
+  of the 13 "disagreements" above is this artefact rather than a data conflict.
+
+If this is ever wired up, the ordering that follows from the numbers is
+**corroboration first, coverage second**: the 12 rows matching a low-confidence AR
+entry are the case where `_resolve_drive_offsets` currently prompts the user with no
+second evidence at all, and an independent catalogue turns that blind prompt into an
+auto-apply (agree) or a warned one (differ). The 102-drive coverage gain is real but
+they are 1990s/2000s drives, so its worth depends entirely on kgr's drive population.
+
+#### N9b. Offset ownership — where the three-way conversation stands (2026-08-15)
+
+**kgr holds the decision; nothing is committed.** Correspondence §170/§171 out,
+`2026-08-15a/b/c` in. AccuDisc's position, which they have said they would sign up to:
+
+| kgr's point | AccuDisc | note |
+|---|---|---|
+| 2 — one compiled table, no online drive lookups | **workable** | the ban does **not** break point 3 |
+| 3 — AccuDisc measures write offsets | **yes** | combined primary, derived write secondary, labelled with the R subtracted |
+| 6 — derive read offset from a round trip | **drop** | redundant / impossible / unavailable — see below |
+| 7 — per-source submission counts + combined total | **reshape** | presence flags + `ar_submissions`; no combined total |
+| 8 — offset + separate sign field | **one signed int32** | a separate sign is two representations of one fact |
+| `detect_offset` | **keep** | disc-keyed, so it never fell under a drive-keyed ban |
+
+**Point 6 is dead and the reason generalises.** A single-drive round trip measures
+`W + R`: one equation, two unknowns. Decomposing needs one term supplied from
+outside. Point 3 has one — R, from 6.087 catalogue rows. Point 6 would need W, and
+**there is no write-offset corpus anywhere**. The two measurements are therefore not
+mirror images: *point 3 has a subtrahend and point 6 does not.* The two-drive route
+(burn on A, read on a characterised B) is real but needs two **physical** drives and
+this machine has one — CDEmu cannot read a pressed disc.
+
+**A correction we made and should not repeat.** §171 claimed `detect_offset` was
+load-bearing for point 3 — that banning online lookups would leave nothing to
+characterise a reference drive. **Wrong at step three**: a reference drive is
+characterised *from the table* (the PX-716A is `+30` in REDUMP, corroborated by AR),
+so point 3's arithmetic runs offline, on one drive, today. `detect_offset` is
+load-bearing only for the **bootstrap** case — a drive in none of the three
+catalogues — which kgr's point 5 already routes to "warn and suggest zero".
+
+**Two costs that land on us if point 2 goes ahead:**
+1. **Our AR ingest must stop discarding the vendor/model split.** `_normalize_ar_name`
+   joins `"VENDOR MODEL"` with a space at import (0 of 4.878 rows retain the ` - `
+   separator). An INQUIRY-shaped consolidated table needs that boundary preserved, so
+   the ingest has to be rewritten rather than re-pointed.
+2. **N9 becomes a dependency** (above). AccuDisc will not accept a passed-in offset at
+   all — under "one site for the shift" they have no consumer for one, and an input
+   parameter is how an apply creeps back in. So the conflict rerun happens entirely on
+   our side. Their one stated exception: point 3's measurement legitimately takes a
+   read offset as *input*, because it is the subtrahend in `W = (W+R) − R` — offset
+   consumed as arithmetic on a drive measurement, not applied to audio.
+
+**Worth keeping**: the lost `write_offset_cdemu-cd-rom.toml` run had `W = 0, R = 0` by
+construction, so it characterised **no drive** — it was a *harness control*, evidence
+the tool reports zero when the true answer is zero. That is worth rebuilding as a
+regression test; losing the results file cost nothing.
+
+#### N9d. LIVE — kgr is hand-building an exclusion dictionary; the plan is SUSPENDED until it lands (2026-08-15)
+
+**This supersedes the merge design in N9b and everything AccuDisc and we specified on
+2026-08-15. AccuDisc has been told to hold (§173).** Not because the design is wrong,
+but because it is specified against an input that is being replaced.
+
+**The problem.** A large fraction of both corpora carry no usable product identifier:
+
+```
+  - 52X32X52 CD-RW      +97    15   100%
+  - ATAPI CDROM 48X     +691    4   100%
+  IDE-DVD - ROM 16x     +691   63   100%
+  COMBO - BCO5232IM      +6     5   100%
+```
+
+These are probably faithful transcriptions of what the firmware returns. kgr's
+objection is that **a generic identifier cannot bear an authoritative offset** — many
+unrelated drives report `52X32X52 CD-RW`, they will not share an offset, and a table
+answering for that string asserts something that cannot be true of all of them. The
+failure is silent and lands on audio. kgr, verbatim: *"They probably concluded that a
+bogus entry is better than no entry. I disagree."* It is the same **prefer no answer
+to a wrong one** rule this project already applies to metadata (R3), reached from a
+different direction.
+
+**Method (kgr's, in progress).** Read the full 9.504-row dump by hand; build a
+dictionary of every term that is *not* a product identifier — marketing words
+(`COMBO`), type/interface prefixes (`DVDRAM`, `DVD+-RW`, `IDE-DVD`, `ATAPI`), speed
+strings (`52X32X52`, `16x`); filter those terms out. What remains is the genuine
+identifier, or nothing. Entries reducing to nothing are **dropped**, and the docs will
+say plainly that a drive whose firmware will not identify itself cannot be
+offset-corrected from a table.
+
+**Then ours:** apply the dictionary to the original data to drop bogus entries,
+consolidate duplicates, reformat consistently, and produce the usable database.
+
+**Inputs already generated** (regenerate with `tools/offset_dump_all.py` and
+`tools/offset_exclusives.py`):
+
+| file | rows |
+|---|---|
+| `private/research/incoming/offsets_all_raw.tsv` | 9.504 — both corpora, verbatim, no dedup/alias |
+| `private/research/incoming/offsets_redump_only.tsv` | 63 |
+| `private/research/incoming/offsets_accuraterip_only.tsv` | 275 |
+
+**Do not lose these two results while the plan is held** — both are independent of
+the cleaning: the vendor aliases (`HL-DT-ST`→`LG Electronics` 649/650,
+`MATSHITA`→`PANASONIC` 375/375, both all-agreeing) and the submission-max resolution
+rule.
+
+**Two live consequences.** (1) The AR page's **fourth column** is a per-row agreement
+percentage (`100%`) that `_parse_drive_offsets_html` discards; AccuDisc already parses
+it as `ar_agree_pct`. It may resolve the duplicate-row question better than
+submission-weighting. (2) The **vendor/product boundary is in the source and
+unambiguous** (`ASUS     - SDRW-08U9M-U`); `_normalize_ar_name` computes the split and
+then throws it away by rejoining. AccuDisc's ask for the split needs neither
+`DriveOffsets.bin` nor a re-scrape — only that the normaliser return the pair it
+already has.
+
+**Context kgr flagged for the docs:** redump's wiki was wiped by a former staff member
+(two accounts: `forum.redump.org/topic/73199/`, `forum.redump.info/viewtopic.php?t=66358`);
+the drive-compatibility page is resurrected at
+`https://wiki.redump.info/Optical_Disc_Drive_Compatibility:_CD`.
+
+#### N9c. Three traps in `ar_drives` that produced three wrong findings (2026-08-15)
+
+All three were mine, all three were caught by AccuDisc re-measuring, and all three
+are the kind a future session re-derives from scratch. **The production code is
+correct in every case — the errors were in throwaway analysis that bypassed it.**
+
+1. **`ar_drives` legitimately holds DUPLICATE `ar_name` rows** — 4.878 rows, 4.799
+   distinct names, 79 duplicates, because AccurateRip lists some drives twice at
+   different offsets with very different submission counts (`PIONEER BD-RW BDR-206`
+   is `+667/1065` **and** `+0/4`). There is no UNIQUE constraint and there should not
+   be. `find_drive_offset` resolves it correctly with
+   `ORDER BY submissions DESC LIMIT 1` (`drive_info.py:296-300`), and its docstring
+   names the scenario. **Any ad-hoc analysis must apply the same rule**: a
+   `{name: row}` dict comprehension silently keeps whichever row SQLite returned
+   last, which is the *minority* row for exactly the contested drives. That artefact
+   is what produced the "AccurateRip agrees with REDUMP's LAST occurrence, 8/8"
+   claim in correspondence §170 — an artefact on our side matching an artefact on
+   theirs. Submission-weighted, **7 of the 8 flip**, and the answer then agrees with
+   REDUMP's *first*-listed value. Adopting last-match-wins would have turned seven
+   right answers into wrong ones. **Retracted in §173.**
+2. **AccurateRip's vendor string for LG drives is `LG Electronics`** (703 rows), not
+   `LG` (33 rows, mostly `LG (KOR)`). An alias table mapping REDUMP's `HL-DT-ST` to
+   `LG` matches nothing and looks like evidence that the two corpora hold different
+   drives. With the correct target it recovers **649 of 650, all agreeing**.
+3. **31-character `ar_name` values are not truncated.** 31 = 14 (`LG Electronics`)
+   + 1 + 16, and 16 is the SCSI INQUIRY product field width. All 184 rows at 31
+   chars start with `LG Electronics `. A pile-up at the maximum is a sound
+   truncation heuristic in general but cannot distinguish a cut from a field that is
+   genuinely that wide — and here the width has an independent explanation that
+   predicts 16 exactly. The models are present in full (`LG Electronics BD-RE
+   GGW-H10N +667`), so the scrape is **not** lossy and the `DriveOffsets.bin` switch
+   rests on format quality alone, not on data loss.
 
 #### ~~N1a. Tracy Chapman track 8 no longer reports a failure — is the repair now
 invisible, or did it not happen?~~ — **RESOLVED 2026-08-04. It did not happen.**
