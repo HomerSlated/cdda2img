@@ -393,19 +393,48 @@ consolidate duplicates, reformat consistently, and produce the usable database.
 | `private/research/incoming/offsets_redump_only.tsv` | 63 |
 | `private/research/incoming/offsets_accuraterip_only.tsv` | 275 |
 
-**Do not lose these two results while the plan is held** — both are independent of
-the cleaning: the vendor aliases (`HL-DT-ST`→`LG Electronics` 649/650,
-`MATSHITA`→`PANASONIC` 375/375, both all-agreeing) and the submission-max resolution
-rule.
+**The two results we asked not to lose are SAFE, in AccuDisc's tree** (their
+`2026-08-16a` §3) — in code rather than in a message, which is where they were least
+likely to evaporate: the vendor aliases at `tools/gen_offsets.py:86-90` (`HL-DT-ST`→
+`LG ELECTRONICS` 649/650, `MATSHITA`→`PANASONIC` 375/375, each carrying its evidence)
+and submission-max resolution at `:174-192`. **The ordering is what makes the rule
+correct**: AccurateRip is resolved against *its own* counts **first**, and only the
+survivor is offered to the merge — resolving across sources first reintroduces exactly
+the duplicate-row artefact both sides hit (N9c trap 1).
 
-**Two live consequences.** (1) The AR page's **fourth column** is a per-row agreement
-percentage (`100%`) that `_parse_drive_offsets_html` discards; AccuDisc already parses
-it as `ar_agree_pct`. It may resolve the duplicate-row question better than
-submission-weighting. (2) The **vendor/product boundary is in the source and
-unambiguous** (`ASUS     - SDRW-08U9M-U`); `_normalize_ar_name` computes the split and
-then throws it away by rejoining. AccuDisc's ask for the split needs neither
-`DriveOffsets.bin` nor a re-scrape — only that the normaliser return the pair it
-already has.
+**One live consequence** (the second is closed, below). The AR page's **fourth column**
+is a per-row agreement percentage (`100%`) that `_parse_drive_offsets_html` discards;
+AccuDisc already parses it as `ar_agree_pct`. It may resolve the duplicate-row question
+better than submission-weighting.
+
+**CLOSED — the vendor/product split is no longer owed to AccuDisc** (their
+`2026-08-16a` §4). The observation stands (the boundary is unambiguous in the source,
+`ASUS     - SDRW-08U9M-U`, and `_normalize_ar_name` computes it then throws it away by
+rejoining) but they no longer depend on it: `tools/fetch_ar_offsets.py:56` returns the
+pair from their own scrape. Change it only if it serves our side. **Their splitter rule
+is worth copying if we ever do**: the separator must have whitespace on **both** sides,
+without which `HL-DT-ST` splits into `("HL", "DT-ST …")` — a vendor that does not exist,
+keyed against nothing, and silently absent from every lookup.
+
+**AccuDisc's side is further along than §173 assumed** (their `2026-08-16a` §1 — our
+§173 §4 called their `2026-08-15d` §5 list "unstarted"; it was committed before kgr
+suspended the plan, as their `24ac59e` / 0.10.0, 16 files, 42/42 tests, local only).
+Of kgr's eight points, **1, 2, 4, 5, 7 and 8 are implemented and committed**, **6 is
+dropped** on his instruction, and **3 (measuring write offsets) is the only one not
+started** — and point 3 is independent of the cleaning, since a burn-and-read-back does
+not care which rows exist in the table. **The record shape already exists**, so it is
+not ours to co-design: `accudisc_offset_info` in `include/accudisc/accudisc.h`,
+`ACCUDISC_ERR_AMBIGUOUS` (-14), `ACCUDISC_OFFSET_NONE = INT32_MIN`, a device-free
+`accudisc offset [--vendor V --product P]` CLI, and `accudisc.offset_for()` in the
+binding. **The hold still stands** — they confirmed they are not extending it,
+re-generating the table, or touching the merge rules while the input contract is being
+replaced.
+
+One coupling they flagged rather than let us discover: `tests/test_offsets.c` asserts on
+three real drives — `PLEXTOR DVDR PX-716A`, `TEAC DW-224E-CN`, `PIONEER BD-RW BDR-206`.
+All three carry genuine model numbers and should survive the cleaning. **If one does
+not, the failure is the test working**, and reads as the row set having changed, not as
+the portal breaking.
 
 **Context kgr flagged for the docs:** redump's wiki was wiped by a former staff member
 (two accounts: `forum.redump.org/topic/73199/`, `forum.redump.info/viewtopic.php?t=66358`);
