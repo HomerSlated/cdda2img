@@ -426,9 +426,12 @@ not care which rows exist in the table. **The record shape already exists**, so 
 not ours to co-design: `accudisc_offset_info` in `include/accudisc/accudisc.h`,
 `ACCUDISC_ERR_AMBIGUOUS` (-14), `ACCUDISC_OFFSET_NONE = INT32_MIN`, a device-free
 `accudisc offset [--vendor V --product P]` CLI, and `accudisc.offset_for()` in the
-binding. **The hold still stands** — they confirmed they are not extending it,
-re-generating the table, or touching the merge rules while the input contract is being
-replaced.
+binding. ~~**The hold still stands**~~ — **LIFTED by kgr directly, 2026-08-16**, to
+AccuDisc rather than by relay (their `2026-08-16b`): *"Yes, the offsets plan is
+un-suspended."* System had relayed the transfer in `2026-08-16c` §7; AccuDisc **received
+but did not adopt** it, on the grounds that a decision relayed by a third party does not
+lift a suspension kgr set directly. That was the correct reading — the transfer was real
+but our TODO recorded it as settled a few hours before it actually was.
 
 One coupling they flagged rather than let us discover: `tests/test_offsets.c` asserts on
 three real drives — `PLEXTOR DVDR PX-716A`, `TEAC DW-224E-CN`, `PIONEER BD-RW BDR-206`.
@@ -476,18 +479,31 @@ Output is 1:1 row-aligned with the input (9.504 in, 9.504 out, 9.148 non-empty).
    System agree exactly on the raw layer at 11, and — after two rounds of mutual
    correction — on every figure below, each side having measured independently:
 
-   | | conflicts | introduced | internal | cross-corpus |
-   |---|---|---|---|---|
-   | case-sensitive | 25 | 14 | 13 | 1 |
-   | case-folded | 27 | 16 | 15 | 1 |
+   **CORRECTED 2026-08-16** (System `2026-08-16g`, AccuDisc `2026-08-16b`; re-verified
+   here against the rows before adopting). An earlier version of this table claimed
+   `iHAS124` as the one cross-corpus row and 13/15 internal. Both were wrong:
 
-   **`iHAS124` is the ONLY genuine Redump-vs-AR disagreement** (`AR +6` /
-   `Redump +48`) under either policy. System's first pass reported 2 cross because the
-   test was "do the two offsets come from different source-sets", which fires whenever
-   one corpus contains both values; the correct test is **"does either corpus
-   self-contradict"**. The distinction matters because the label points at a remedy —
-   *cross* implies reconciling two tables, whereas a duplicate inside one corpus is
-   the case `find_drive_offset` already resolves by `ORDER BY submissions DESC`.
+   | | conflicts | introduced | cross-corpus | internal |
+   |---|---|---|---|---|
+   | case-sensitive | 25 | 14 | **0** | 14 |
+   | case-folded | 27 | 16 | **0** | 16 |
+   | pre-existing (raw) | 11 | — | **1** | 10 |
+
+   **`TEAC DW-224E-CN` is the one genuine Redump-vs-AR disagreement in the whole dump**
+   — `AR +102` (7 submissions) vs `Redump +120` (0), same key, same spelling, no
+   reduction involved. It sits in the **pre-existing** set, which *neither* side's
+   classifier covered: both ran over the introduced conflicts only, and the scope was
+   then dropped when the result was stated as a corpus-wide property. **The scope gap is
+   the error worth keeping; the count is downstream of it.**
+
+   **`iHAS124` was never a disagreement** — `ATA ATAPI IHAS124 +6` is AR-only and
+   `SATA ATAPI IHAS124 +48` is Redump-only: two raw keys that never meet, merged by the
+   dictionary's interface-token strip. Verified here: the eight *suffixed* variants are
+   shared and **8 agree / 0 disagree** (A–F `+6`, W and Y `+48`), so `+6/+48` is real
+   per-revision hardware variation that both corpora record identically — and that
+   **reduction destroys**. Third instance of the `ASUS DRW-24B1ST` trap (the suffix is
+   the discriminator); with the two below that is **one bug in three places**, not three
+   findings.
 3. **Redump and AccurateRip are NOT independent sources.** Four models —
    `DH60N +6/+12`, `GCE-8483B +0/+6`, `GH24NS95 +667/+6`, `GSA-E60L +102/+667` — carry
    the *identical* contradiction in both corpora, once under Redump's `HL-DT-ST` and
@@ -517,7 +533,68 @@ lookups in `drive_info.py` disagree about case. The read-offset path is
 `COLLATE NOCASE`** (`db.py:52`) — case-sensitive exact. The write-offset path is
 `INSTR(UPPER(?), UPPER(brand))` (`drive_info.py:525-533`) — case-insensitive substring.
 Neither is wrong alone; having both undocumented in one module is. Flagged, not changed,
-since ownership moved.
+since ownership moved. **AccuDisc shipped the fold on their side the same morning**
+(`2026-08-16b` §4, kgr's ruling: upper-case the table, upper-case the query), having
+first checked it was lossless — **of 5.888 rows, zero pairs differ only by case** — and
+enforced it in the *lookup* (`adsc_inquiry_normalize`) rather than trusting the
+generator.
+
+##### DONE 2026-08-16 — the five transferred/dead tools are deleted, by kgr's own hand
+
+kgr, via AccuDisc `2026-08-16b`: *"cdda2img should delete their corresponding tooling,
+as it's redundant on their end. That should not affect their pristine copies of
+third-party GitHub repos."* Plus: *"The Redump sources are not tooling."*
+
+**kgr ran the `rm` himself.** The instruction had reached this session only through
+another agent's correspondence, and an agent-initiated irreversible delete of *untracked*
+files on a relayed instruction was correctly refused — the two `.py`/`.tsv` files had no
+version control behind them at all until AccuDisc copied them. Verification below was
+complete beforehand, so the only thing missing was the authority.
+
+**Delete list — treated as EXHAUSTIVE** (AccuDisc `2026-08-16c` §3: *"delete those five
+files and nothing else on my say-so"*):
+
+| file | verified |
+|---|---|
+| `tools/name_reduce.py` | md5-identical in `accudisc/tools/` **and** `/var/tmp/accudisc-offsets-handover/` |
+| `tools/drive_name_terms.tsv` | same, both locations |
+| `tools/offset_dump_all.py` | md5-identical in `accudisc/tools/`; they reproduce our TSV byte-for-byte |
+| `tools/offset_exclusives.py` | md5-identical in `accudisc/tools/` |
+| `tools/import_eac_offsets.py` | dead since kgr dropped EAC (§172); **tracked**, so git history keeps it |
+
+Checked here before proposing: **no live code consumer of any of the five** — the only
+references are docs, generated artefacts, and each other. The first four were
+**untracked**, so until AccuDisc copied them the only copies in existence had no version
+control behind them; that is why the copies were verified first.
+
+**Do NOT delete — the keep list is ILLUSTRATIVE, not exhaustive** (their `2026-08-16c`
+§1, an urgent self-correction: their §2 enumeration was scoped to `tools/` and did not
+say so, so a broad reading of "offsets tooling" reaches our source tree):
+
+- **`src/cdda2img/write_offset.py` — the opposite of redundant.** It is the only working
+  write-offset measurement in *either* project, it is what `measure_write_offset.py`
+  deprecates in favour of, and it is kgr's point 3 — the one item that genuinely did not
+  transfer, because a burn-and-read-back is a procedure rather than a table.
+- `src/cdda2img/offset_correct.py`, `drive_info.py`, `accuraterip.py` (`detect_offset`);
+  `tests/test_offset_correct.py`, `test_fix_offset.py`, `test_resolve_drive_offsets.py`,
+  `tests/fixtures/driveoffsets_sample.html`; `docs/research/OFFSETS.md` and
+  `private/research/drive_write_offsets.md`.
+- `tools/fix_offset.py` (repairs a *rip's* offset — a consumer feature),
+  `tools/offset_rescue.py` (the AR offset sweep — a diagnostic),
+  `tools/measure_write_offset.py` (a deprecation stub, ours to retire on our own
+  schedule).
+- `private/code/redumper/` — **a symlink** to a pristine third-party checkout, protected
+  by kgr's third instruction; AccuDisc's build reads through it too.
+- `~/.data/cdda2img/drive_offsets.db` — the *application's* data store, not tooling.
+  `find_drive_offset` reads `ar_drives` at runtime.
+
+**One call-site judgment that is ours and not theirs**: dropping EAC retires the
+standalone *importer*, but **`eac_drives` is still live in `src/`** —
+`cdda2img.py:4131-4135` calls `find_drive_write_offset` during a burn. The table, its
+reader and its tests all stay; only `tools/import_eac_offsets.py` goes.
+
+Genuinely dead research residue, sweepable whenever: the EAC OffsetBase snapshots and
+`offsets_check.xml` under `private/research/incoming/`.
 
 #### N9c. Three traps in `ar_drives` that produced three wrong findings (2026-08-15)
 
