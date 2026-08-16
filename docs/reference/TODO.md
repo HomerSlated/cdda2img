@@ -166,7 +166,9 @@ below is actioned yet except where noted.
 
 Both raised by kgr at the close of 2026-08-03. N1a and N1b resolved 2026-08-04;
 N1d settled and N1c superseded 2026-08-05; **N3, N4 and N5 implemented 2026-08-06**.
-**Open: N9 (raised 2026-08-15).** N7 answered 2026-08-11; N6 and N2 implemented
+**Open: N9 (raised 2026-08-15; N9d TRANSFERRED to AccuDisc 2026-08-16 — the offset
+list is no longer ours, and N9's `rip --read-offset` is what remains here).**
+N7 answered 2026-08-11; N6 and N2 implemented
 2026-08-13; N8 implemented 2026-08-14. That closes kgr's work order of 2026-08-13
 ("N6, N2 and N8, in that order. Then we'll work back through the above list") — the
 QUEUED block at the head of this section is what comes next, and N9 is new work
@@ -347,7 +349,7 @@ construction, so it characterised **no drive** — it was a *harness control*, e
 the tool reports zero when the true answer is zero. That is worth rebuilding as a
 regression test; losing the results file cost nothing.
 
-#### N9d. LIVE — kgr is hand-building an exclusion dictionary; the plan is SUSPENDED until it lands (2026-08-15)
+#### N9d. TRANSFERRED to AccuDisc 2026-08-16 — the dictionary landed, and the offset list is no longer ours (see the closing block)
 
 **This supersedes the merge design in N9b and everything AccuDisc and we specified on
 2026-08-15. AccuDisc has been told to hold (§173).** Not because the design is wrong,
@@ -409,6 +411,84 @@ already has.
 (two accounts: `forum.redump.org/topic/73199/`, `forum.redump.info/viewtopic.php?t=66358`);
 the drive-compatibility page is resurrected at
 `https://wiki.redump.info/Optical_Disc_Drive_Compatibility:_CD`.
+
+##### RESOLUTION (2026-08-16) — dictionary built by the System agent; ownership moved to AccuDisc
+
+kgr's ruling, relayed via System `2026-08-16c` §7: **the offset list belongs to the
+AccuDisc agent.** This item is closed here and is not ours to finish. What follows is
+the handover state, because none of it is recoverable from the tree.
+
+**The dictionary exists, and it is UNTRACKED.** `tools/name_reduce.py` (the
+reducer/reporter) and `tools/drive_name_terms.tsv` (159 rules) both show `??` in
+`git status`, so **no clone or pull fetches them** — they must be copied file by file.
+Same for the generator's inputs: `tools/offset_dump_all.py` reads
+`private/code/redumper/offsets.ixx` and `~/.data/cdda2img/drive_offsets.db`, neither of
+which is reachable from the AccuDisc tree. Either the generator moves too, or AccuDisc
+consumes `offsets_all_raw.tsv` as an artefact.
+
+Rules are **token-scoped, not substitution-scoped** — each rule matches a whole token,
+so the file is order-independent and additive. Precedence is in the TSV header:
+`pre → split → [keep guard] → strip → token/regex → first → dedup → blank-if-all-kept`.
+Output is 1:1 row-aligned with the input (9.504 in, 9.504 out, 9.148 non-empty).
+
+**Three results that must survive the move**, none of them re-derivable by inspection:
+
+1. **The reduced name is a matching AID, never a KEY.** Match on the raw name first;
+   fall back to the reduced form only when the raw match fails *and* the reduced form
+   is **non-empty**. 187 distinct raw names reduce to empty, so a lookup treating `""`
+   as a key collides all of them — a silent wrong-answer generator, not an error.
+   Under that rule nothing is lost (all 3.501 raw matches survive) and 16 are gained.
+   The earlier "net-negative, 10 gained / 165 destroyed" framing (which the
+   `system-watch` skill still carries) is superseded: the 165 was right, the 10 was
+   **16**, and the loss only occurs if reduced matching *replaces* raw matching. All
+   165 destroyed matches are destroyed by blanking, not by mis-merging.
+2. **Reduction MERGES rows that disagree about the offset.** 11 raw-name conflicts
+   pre-exist; reduction raises that to 25 (case-sensitive) or 27 (case-folded). We and
+   System agree exactly on the raw layer at 11, and — after two rounds of mutual
+   correction — on every figure below, each side having measured independently:
+
+   | | conflicts | introduced | internal | cross-corpus |
+   |---|---|---|---|---|
+   | case-sensitive | 25 | 14 | 13 | 1 |
+   | case-folded | 27 | 16 | 15 | 1 |
+
+   **`iHAS124` is the ONLY genuine Redump-vs-AR disagreement** (`AR +6` /
+   `Redump +48`) under either policy. System's first pass reported 2 cross because the
+   test was "do the two offsets come from different source-sets", which fires whenever
+   one corpus contains both values; the correct test is **"does either corpus
+   self-contradict"**. The distinction matters because the label points at a remedy —
+   *cross* implies reconciling two tables, whereas a duplicate inside one corpus is
+   the case `find_drive_offset` already resolves by `ORDER BY submissions DESC`.
+3. **Redump and AccurateRip are NOT independent sources.** Four models —
+   `DH60N +6/+12`, `GCE-8483B +0/+6`, `GH24NS95 +667/+6`, `GSA-E60L +102/+667` — carry
+   the *identical* contradiction in both corpora, once under Redump's `HL-DT-ST` and
+   once under AR's `LG Electronics`. A hardware difference would not reproduce the same
+   pair of values under both spellings; this looks like one table seeded from the other
+   or both from a common third. **N9b and correspondence §172/§173 argue about AR-vs-
+   Redump exclusive sets on the assumption that they are separate authorities** — this
+   is a counterexample sitting in the data, and it means the distinct underlying
+   conflicts number 12, not 16.
+
+**Our contribution on the day, and the one live hazard it exposed.** We ran the
+corpus-split independently and reconciled a 25-vs-27 disagreement with System: it is
+**entirely a case-folding decision, not a data disagreement**. `name_reduce.py` does not
+normalise case; exactly 4 reduced forms exist in more than one casing and 2 of those
+disagree on offset — `AOpen DVD-ROM-AMH +691` vs `AOPEN DVD-ROM-AMH +102`, and
+`Plextor PX-W4012A +0` vs `PLEXTOR PX-W4012A +98`. (System's own `16c` §3 reports 5.326
+distinct forms while `16c` §6 reports `27 / 5.322`; the two denominators are the two
+case policies.) **27 is the number a consumer should care about**, because any real
+lookup must fold case — the string it matches comes from INQUIRY or sysfs and vendors
+are not consistent. Under a case-*sensitive* lookup those AOpen forms are silently two
+drives returning +691 and +102 with nothing reporting a conflict, which is worse than
+the conflict.
+
+Which surfaces a real inconsistency **in our own tree, still open**: the two offset
+lookups in `drive_info.py` disagree about case. The read-offset path is
+`WHERE ar_name = ?` (`drive_info.py:296-300`) against `ar_name TEXT NOT NULL` with **no
+`COLLATE NOCASE`** (`db.py:52`) — case-sensitive exact. The write-offset path is
+`INSTR(UPPER(?), UPPER(brand))` (`drive_info.py:525-533`) — case-insensitive substring.
+Neither is wrong alone; having both undocumented in one module is. Flagged, not changed,
+since ownership moved.
 
 #### N9c. Three traps in `ar_drives` that produced three wrong findings (2026-08-15)
 

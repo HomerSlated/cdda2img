@@ -254,14 +254,24 @@ makes the rule easy to forget.
    files, unused imports, ruff format, TOML/YAML validity, lock drift, ty). Do this
    *before* writing the commit message; if it fixes anything, the tests should be re-run
    to confirm nothing regressed.
-   - **It cannot see a file git does not know about.** `make check` is
-     `pre-commit run -a`, and `--all-files` enumerates *tracked* files, so a brand-new
-     module is skipped entirely and `make check` passes on it — then the commit hook
-     rejects it, because staging is what puts it in the set. Measured 2026-08-10: the
-     same one-line file with an en dash passed untracked and failed `RUF001` the moment
-     it was `git add`ed. **When a commit adds a new file, `git add -A` first and run
-     `make check` again** — this is the one gap between the two, and it fires exactly
-     when the code is newest.
+   - **Its two halves disagree about untracked files — know which half spoke.**
+     `make check` is `uv lock --locked` + `pre-commit run -a` + **`uv run ty check`**
+     (`Makefile:9-14`), and the last of those is not a pre-commit hook at all.
+     - **`pre-commit -a` cannot see a file git does not know about.** `--all-files`
+       enumerates *tracked* files, so a brand-new module is skipped entirely and that
+       half passes on it — then the commit hook rejects it, because staging is what
+       puts it in the set. Measured 2026-08-10: the same one-line file with an en dash
+       passed untracked and failed `RUF001` the moment it was `git add`ed. **When a
+       commit adds a new file, `git add -A` first and run `make check` again** — it
+       fires exactly when the code is newest.
+     - **`ty check` CAN see it.** It walks the working tree, not the index. Measured
+       2026-08-16: an untracked `tools/name_reduce.py` dropped in by the System agent
+       produced 7 `ty` diagnostics and failed `make check`, while every pre-commit hook
+       passed. So a red `make check` may be reporting a file that is not yours, is not
+       staged, and will never reach CI (which clones, and therefore never sees it).
+     **Read the failure before fixing it**: `pre-commit` names the hook, `ty` prints
+     `--> path:line`. A `ty`-only failure on an untracked path blocks neither
+     `git commit` (the hook runs on *staged* files) nor CI.
 2. **Write `private/COMMIT_MSG`** — the sync script reads this file directly.
 3. **Run `uv run python scripts/sync.py`** — runs `ruff format` + `ruff check --fix` as a
    pre-flight, stages all changes, commits using `COMMIT_MSG`, pushes to `origin/main`,
