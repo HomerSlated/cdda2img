@@ -3611,6 +3611,37 @@ def rip_image(  # noqa: C901
                 best_r = next(
                     (m.mb_release_id for m in matches if m.mb_release_id), None
                 )
+                # Disc-ID miss → stage 7. Without this the banner has no MBID at
+                # all, so `fetch_cover` returns None *immediately* (it needs a
+                # release or release-group id) and the preview silently renders
+                # nothing — which reads as a broken/absent art fetch rather than
+                # "MB does not know this disc ID". Measured 2026-08-18 on
+                # `Toca (20th Anniversary Edition)`: disc ID 404s, yet the very
+                # same rip embedded art seconds later from
+                # `caa:release-group:39957eb7…`, found by the stage-7 duration
+                # matcher in `_finalize_import`. The art was always reachable; only
+                # the banner could not reach it.
+                #
+                # Gated on a miss so the normal path pays nothing, and on an
+                # album/artist seed because that is stage 7's own precondition —
+                # here it comes from CD-Text via `_fast_scan_disc`, so a disc
+                # without CD-Text still shows no art, correctly.
+                if not (best_rg or best_r) and (disc_p.album or disc_p.artist):  # type: ignore[union-attr]
+                    from cdda2img.mb_lookup import duration_match_lookup
+
+                    dm = duration_match_lookup(disc_p)  # type: ignore[arg-type]
+                    if dm is not None:
+                        best_rg = dm.mb_release_group_id
+                        # C2: a duration match is NOT disc-ID-verified, so its
+                        # release id must not be treated as this pressing. It is
+                        # used here for art only, never merged into `disc` — the
+                        # banner's RBIDisc is a throwaway (`replace` below) and is
+                        # discarded when the worker returns.
+                        best_r = dm.mb_release_id
+                        if label == "(unknown)" and dm.album:
+                            label = (
+                                f"{dm.album} - {dm.artist}" if dm.artist else dm.album
+                            )
                 disc_for_art = replace(
                     disc_p,  # type: ignore[arg-type]
                     mb_release_group_id=best_rg,

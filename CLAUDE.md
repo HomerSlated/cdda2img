@@ -471,13 +471,31 @@ Full specification: `docs/reference/rbi_spec.md`.
   control: the includes are a constant, so a test that cannot fail on the reintroduced bug
   proves nothing. Every include list in `src/` was audited against the table the same day;
   `mb_lookup.py:733` was the only bad one.
-- **`/isrc` embeds no release-group and truncates its release list.** The response carries
-  `release-list count="353"` while returning **25** — the same silent-truncation signature
-  as the N3 AcoustID defect — and **zero** `release-group` elements, verified against the
-  raw XML. So `mb_release_group_id` is always `None` on an R4 result, which matters because
-  `strip_pressing_mbid` nulls `mb_release_id` and preserves the release-group id precisely
-  so the original-release lookup can use it. Recovering it costs one `/release` call per
-  tally *winner*, not per ISRC.
+- **`/isrc` embeds no release-group and truncates its release list — FIXED 2026-08-18 by
+  paging.** The response carries `release-list count="353"` while returning **25**, and
+  **zero** `release-group` elements. Same silent-truncation signature as the N3 AcoustID
+  defect and the same cause: **an embedded sub-list in an MB response is capped, a browse
+  is not.** Both halves bit R4 — the tally scored an arbitrary 25-release slice (the disc's
+  own release could be missing from every ISRC's list), and the absent group id matters
+  because `strip_pressing_mbid` nulls `mb_release_id` and *preserves* the group id so the
+  original-release lookup and the art fetch still have something to use.
+  `mb_lookup._browse_releases_for_recording` now pages it: measured 25→300 releases and
+  0→300 carrying group ids. It deliberately **mirrors rather than imports**
+  `acoustid_lookup`'s twin (that one also needs `media`, and sits behind the AcoustID
+  availability gate). Cost is one extra request per recording per page — R4 only fires when
+  MB does not know the disc, so one page is the norm. `_ISRC_MAX_RELEASE_PAGES` is a runaway
+  guard, **not** a result cap, and **logs at WARNING when it binds**.
+- **The pre-TUI banner's cover art has its own, narrower identification path.** It resolves
+  MBIDs from `lookup_disc_id` alone, so on a disc-ID miss `fetch_cover` returns `None`
+  *immediately* (it needs a release or release-group id) and the preview renders nothing —
+  which reads as a broken art fetch rather than "MB does not know this disc ID". The rest of
+  the pipeline is unaffected: the post-menu `fetch_cover` in `_finalize_import` sees whatever
+  stage 7 / AcoustID / the menu resolved. Measured 2026-08-18 on `Toca (20th Anniversary
+  Edition)`: disc ID 404s, yet the same rip embedded art from `caa:release-group:39957eb7…`
+  seconds later. The banner now falls back to `duration_match_lookup` on a miss, gated on an
+  album/artist seed (stage 7's own precondition, supplied here by CD-Text), so a disc with no
+  CD-Text still shows nothing — correctly. **Two art fetches at different pipeline stages see
+  different identification evidence; do not assume a missing preview means a missing cover.**
 - **Lookup caching (OPT-1/OPT-2)**: caching is process-lifetime only (`mb_lookup._DISC_ID_CACHE`, `album_art._COVER_CACHE`) — no persistence, no TTL, discarded on process exit. The former persistent R7 SQLite cache was removed; there is no longer a 30-day-TTL on-disk metadata cache.
 - **Network gating**: there is no global offline-mode flag. Each lookup module gates itself via its own `is_available()` (Discogs needs `DISCOGS_TOKEN`; AcoustID needs `fpcalc` on PATH + an AcoustID key; etc.). With caching now process-lifetime only, there is no way to reproduce a prior rip's network metadata offline across separate invocations.
 - **Deferred work**: tracked in `docs/reference/TODO.md` under the `## Open`

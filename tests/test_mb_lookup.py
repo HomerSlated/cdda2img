@@ -2412,3 +2412,108 @@ def test_lookup_isrc_survives_an_invalid_include():
         side_effect=musicbrainzngs.InvalidIncludeError("Bad includes: nope"),
     ):
         assert lookup_isrc("GBUM71029604") == []
+
+
+def test_lookup_isrc_pages_past_the_embedded_25_release_cap():
+    """The /isrc response embeds at most 25 releases and no release-group at all.
+
+    Regression guard for the N3-shaped defect: an embedded sub-list in an MB response
+    is silently capped while the count attribute reports the true total, so a caller
+    that trusts it scores an arbitrary slice. Measured 2026-08-18: 25 embedded vs 353
+    real. `lookup_isrc` must browse instead, and must NOT fall back to the embedded
+    list when a recording id is available.
+    """
+    from unittest.mock import patch
+
+    from cdda2img.mb_lookup import lookup_isrc
+
+    # 25 embedded releases, no release-group -- what /isrc really returns.
+    embedded = [{"id": f"emb-{i}", "title": "Truncated"} for i in range(25)]
+    isrc_resp = {
+        "isrc": {
+            "recording-list": [
+                {"id": "rec-1", "artist-credit": [], "release-list": embedded}
+            ]
+        }
+    }
+    # The browse serves the full set, with release-groups.
+    browsed = [
+        {"id": f"rel-{i}", "title": "Full", "release-group": {"id": f"rg-{i}"}}
+        for i in range(140)
+    ]
+
+    def fake_browse(recording, includes, limit, offset):
+        return {
+            "release-list": browsed[offset : offset + limit],
+            "release-count": len(browsed),
+        }
+
+    with (
+        patch("musicbrainzngs.get_recordings_by_isrc", return_value=isrc_resp),
+        patch("musicbrainzngs.browse_releases", side_effect=fake_browse) as br,
+    ):
+        results = lookup_isrc("GBUM71029604")
+
+    assert len(results) == 140, "must page past the 25-release embedded cap"
+    assert br.call_count == 2, "140 releases at 100/page is two requests"
+    # Every result carries the release-group id that the embedded list lacks --
+    # strip_pressing_mbid preserves it precisely so downstream can use it.
+    assert all(r.mb_release_group_id for r in results)
+    # The truncated embedded list must not leak in.
+    assert not any((r.mb_release_id or "").startswith("emb-") for r in results)
+
+
+def test_lookup_isrc_browse_failure_degrades_to_empty_not_raise():
+    """A failed browse costs one ISRC's contribution, never the tally or the rip."""
+    from unittest.mock import patch
+
+    import musicbrainzngs
+
+    from cdda2img.mb_lookup import lookup_isrc
+
+    isrc_resp = {
+        "isrc": {
+            "recording-list": [{"id": "rec-1", "artist-credit": [], "release-list": []}]
+        }
+    }
+    with (
+        patch("musicbrainzngs.get_recordings_by_isrc", return_value=isrc_resp),
+        patch(
+            "musicbrainzngs.browse_releases",
+            side_effect=musicbrainzngs.NetworkError("boom"),
+        ),
+    ):
+        assert lookup_isrc("GBUM71029604") == []
+
+
+def test_lookup_isrc_page_cap_warns_when_it_binds(caplog):
+    """A bound cap must be loud: a truncated set reads exactly like a complete one."""
+    import logging
+    from unittest.mock import patch
+
+    from cdda2img.mb_lookup import lookup_isrc
+
+    isrc_resp = {
+        "isrc": {
+            "recording-list": [{"id": "rec-1", "artist-credit": [], "release-list": []}]
+        }
+    }
+
+    # Server claims far more than the cap will fetch.
+    def fake_browse(recording, includes, limit, offset):
+        return {
+            "release-list": [
+                {"id": f"rel-{offset + i}", "release-group": {"id": "rg"}}
+                for i in range(limit)
+            ],
+            "release-count": 9999,
+        }
+
+    with (
+        patch("musicbrainzngs.get_recordings_by_isrc", return_value=isrc_resp),
+        patch("musicbrainzngs.browse_releases", side_effect=fake_browse),
+        caplog.at_level(logging.WARNING, logger="cdda2img.mb_lookup"),
+    ):
+        lookup_isrc("GBUM71029604")
+
+    assert any("page cap" in r.message for r in caplog.records)

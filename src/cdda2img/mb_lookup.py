@@ -720,6 +720,63 @@ def lookup_release_group(rg_id: str) -> list[DiscMeta]:
     return sorted(parsed, key=lambda m: m.release_date or "9999")
 
 
+# Paging for the recording->releases browse used by lookup_isrc. 100 is MB's own
+# per-request maximum. The page cap is a runaway guard, NOT a result cap: R4 calls this
+# once per ISRC-bearing track, so an uncapped walk over a heavily-reissued recording
+# (measured: 353 releases) would multiply across every track of the disc at 1 req/s.
+_ISRC_BROWSE_PAGE_SIZE = 100
+_ISRC_MAX_RELEASE_PAGES = 3
+
+
+def _browse_releases_for_recording(recording_id: str) -> list[dict]:
+    """Every release carrying *recording_id*, with its release-group embedded.
+
+    Mirrors ``acoustid_lookup._browse_releases_for_recording`` deliberately rather
+    than sharing it: that one also requests ``media`` (which its per-track gate needs
+    and this caller does not) and sits behind the AcoustID availability gate, so
+    importing it here would couple the ISRC tally to a module that may be absent. The
+    *reason* both exist is one fact worth stating wherever it applies — **an embedded
+    sub-list in an MB response is silently capped; a browse is not.**
+
+    Returns ``[]`` on any failure, which the caller treats as "this ISRC contributed
+    nothing" rather than aborting the whole tally.
+    """
+    releases: list[dict] = []
+    total = 0
+    for _page in range(_ISRC_MAX_RELEASE_PAGES):
+        try:
+            result = musicbrainzngs.browse_releases(
+                recording=recording_id,
+                includes=["release-groups"],
+                limit=_ISRC_BROWSE_PAGE_SIZE,
+                offset=len(releases),
+            )
+        except (
+            musicbrainzngs.ResponseError,
+            musicbrainzngs.NetworkError,
+            musicbrainzngs.InvalidIncludeError,
+        ) as exc:
+            log.debug("MB release browse for %s failed: %s", recording_id, exc)
+            return releases
+        batch = result.get("release-list") or []
+        releases.extend(batch)
+        total = result.get("release-count") or len(releases)
+        # An empty page terminates too: a server reporting a count larger than it
+        # will serve would otherwise spin to the cap on every recording.
+        if not batch or len(releases) >= total:
+            return releases
+
+    log.warning(
+        "MB release browse for %s hit the %d-page cap: %d of %d releases. "
+        "The ISRC tally for this track is scoring a truncated set.",
+        recording_id,
+        _ISRC_MAX_RELEASE_PAGES,
+        len(releases),
+        total,
+    )
+    return releases
+
+
 def lookup_isrc(isrc: str) -> list[DiscMeta]:
     """Look up releases on MusicBrainz by a single ISRC code.
 
@@ -736,13 +793,25 @@ def lookup_isrc(isrc: str) -> list[DiscMeta]:
     R4 and crashed here). It had been wrong since the module was written and only fires
     on the zero-disc-ID-match path, which is why it survived so long.
 
-    Consequence, deliberate: MB embeds **no** ``release-group`` in this response at all
-    — verified against the raw XML, 0 elements — so ``mb_release_group_id`` is always
-    ``None`` on an R4 result. That matters because ``strip_pressing_mbid`` nulls
-    ``mb_release_id`` and preserves the release-group id precisely so the
-    original-release lookup can use it; on this path there is nothing to preserve.
-    Recovering it costs one ``/release`` lookup per winner, not per ISRC — worth doing
-    only if the original-release lookup is seen to suffer.
+    **The releases come from a paged browse, not from the ``/isrc`` response** (fixed
+    2026-08-18). That response embeds at most **25** releases while advertising the
+    true total in ``release-list count`` — measured 353 vs 25 on one recording — and
+    embeds **no** ``release-group`` at all. Same silent-truncation signature as the N3
+    AcoustID defect, same cause: an embedded sub-list in an MB response is capped, a
+    browse is not.
+
+    Both halves bit R4. Truncation made the tally score an arbitrary 25-release slice,
+    so the disc's own release could be missing from every ISRC's list — the tally then
+    either returns None or converges on whatever popular reissue survived the cut. And
+    the absent release-group id matters because ``strip_pressing_mbid`` nulls
+    ``mb_release_id`` and *preserves* the group id, precisely so the original-release
+    lookup and the cover-art fetch still have something to work with.
+
+    Cost: one extra request per *recording*, per page. R4 fires only when MB does not
+    know the disc ID, so its recordings are typically sparsely released and one page is
+    the norm (about 2x this function's request count, not 4x); ``_ISRC_MAX_RELEASE_PAGES``
+    bounds the outlier and **logs at WARNING when it binds**, because a truncated set
+    reads exactly like a complete one.
 
     ``InvalidIncludeError`` is now caught as a **belt-and-braces** guard: the includes
     are a constant, so it cannot fire unless someone edits them, and a wrong include
@@ -768,7 +837,15 @@ def lookup_isrc(isrc: str) -> list[DiscMeta]:
     results: list[DiscMeta] = []
     for recording in recordings:
         artist = _artist_credit_name(recording.get("artist-credit") or [])
-        for release in recording.get("release-list") or []:
+        rec_id = recording.get("id")
+        # Fall back to the truncated embedded list only when there is no recording
+        # id to browse with — degrading to 25 beats losing the ISRC entirely.
+        releases = (
+            _browse_releases_for_recording(rec_id)
+            if rec_id
+            else (recording.get("release-list") or [])
+        )
+        for release in releases:
             rid = release.get("id")
             if not rid or rid in seen:
                 continue
