@@ -2362,3 +2362,53 @@ def test_disc_id_includes_exclude_annotation():
     includes = set(gd.call_args.kwargs["includes"])
     assert "annotation" not in includes
     assert "discids" not in includes  # the original F-003 offender
+
+
+def test_isrc_includes_exclude_release_groups():
+    """Regression guard, same family as ``test_disc_id_includes_exclude_annotation``
+    but a stricter failure. ``"release-groups"`` is not accepted by the ``/isrc``
+    resource — the server answers HTTP 400 ``"release-groups is not a valid inc
+    parameter for the isrc resource"`` — and ``musicbrainzngs`` rejects it
+    *client-side* first with ``InvalidIncludeError``, which is neither a
+    ``ResponseError`` nor a ``NetworkError`` and therefore escaped ``lookup_isrc``'s
+    ``except`` and aborted the entire rip (measured 2026-08-17 on a disc MB did not
+    know: `Toca (20th Anniversary Edition)`).
+
+    Read the includes off ``call_args``, never off the source text: the call is what
+    the server sees, and the previous form of this bug type-checked and read fine.
+    """
+    from unittest.mock import patch
+
+    from cdda2img.mb_lookup import lookup_isrc
+
+    with patch(
+        "musicbrainzngs.get_recordings_by_isrc", return_value={"isrc": {}}
+    ) as gr:
+        lookup_isrc("GBUM71029604")
+
+    includes = set(gr.call_args.kwargs["includes"])
+    assert "release-groups" not in includes
+    # The two that ARE valid for /isrc must survive: dropping "releases" would make
+    # the R4 tally silently score nothing rather than fail loudly.
+    assert "releases" in includes
+    assert "artists" in includes
+
+
+def test_lookup_isrc_survives_an_invalid_include():
+    """An include the client refuses must degrade THIS lookup, not kill the rip.
+
+    ``InvalidIncludeError`` is raised before any request is made, so it cannot be
+    caught by the network-error arms. The rip has already read the disc by this
+    point; losing one ISRC's metadata is recoverable, losing the rip is not.
+    """
+    from unittest.mock import patch
+
+    import musicbrainzngs
+
+    from cdda2img.mb_lookup import lookup_isrc
+
+    with patch(
+        "musicbrainzngs.get_recordings_by_isrc",
+        side_effect=musicbrainzngs.InvalidIncludeError("Bad includes: nope"),
+    ):
+        assert lookup_isrc("GBUM71029604") == []

@@ -726,15 +726,41 @@ def lookup_isrc(isrc: str) -> list[DiscMeta]:
     Returns a list of DiscMeta for releases that contain a recording with this ISRC.
     Results are basic (no per-track tracklist) due to the two-step lookup.
     Returns [] on network error.
+
+    **Do NOT add ``"release-groups"`` to the includes.** The ``/isrc`` resource does
+    not accept it — the server answers ``400 "release-groups is not a valid inc
+    parameter for the isrc resource"``, and ``musicbrainzngs`` refuses it client-side
+    first with ``InvalidIncludeError``. That exception is **not** a ``ResponseError``
+    or a ``NetworkError``, so it escaped the ``except`` below and killed the whole rip
+    (measured 2026-08-17: any disc unknown to MB with >= 3 ISRC-bearing tracks reaches
+    R4 and crashed here). It had been wrong since the module was written and only fires
+    on the zero-disc-ID-match path, which is why it survived so long.
+
+    Consequence, deliberate: MB embeds **no** ``release-group`` in this response at all
+    — verified against the raw XML, 0 elements — so ``mb_release_group_id`` is always
+    ``None`` on an R4 result. That matters because ``strip_pressing_mbid`` nulls
+    ``mb_release_id`` and preserves the release-group id precisely so the
+    original-release lookup can use it; on this path there is nothing to preserve.
+    Recovering it costs one ``/release`` lookup per winner, not per ISRC — worth doing
+    only if the original-release lookup is seen to suffer.
+
+    ``InvalidIncludeError`` is now caught as a **belt-and-braces** guard: the includes
+    are a constant, so it cannot fire unless someone edits them, and a wrong include
+    should degrade this one lookup rather than abort a rip that has already read the
+    disc.
     """
     _setup_useragent()
     log.debug("MusicBrainz ISRC lookup: %s", isrc)
     try:
         result = musicbrainzngs.get_recordings_by_isrc(
             isrc,
-            includes=["artists", "releases", "release-groups"],
+            includes=["artists", "releases"],
         )
-    except (musicbrainzngs.ResponseError, musicbrainzngs.NetworkError) as exc:
+    except (
+        musicbrainzngs.ResponseError,
+        musicbrainzngs.NetworkError,
+        musicbrainzngs.InvalidIncludeError,
+    ) as exc:
         log.debug("MusicBrainz ISRC lookup for %s failed: %s", isrc, exc)
         return []
     recordings = (result.get("isrc") or {}).get("recording-list") or []

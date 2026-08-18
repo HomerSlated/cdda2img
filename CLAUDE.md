@@ -458,6 +458,26 @@ Full specification: `docs/reference/rbi_spec.md`.
 - **MCN / ISRC validation (R13)**: MCN check digit (GS1 §1.3.1 Modulo-10) is enforced inside `barcode.normalize_barcode`; invalid inputs return None + log DEBUG (silent-drop pattern — routine when scanning third-party metadata, must not surface in normal rips). ISRCs from MB pass through `validators.validate_isrc` at ingress (`_parse_release`) and again at the merge sites (`_merge_into_disc`, `_overwrite_disc`); malformed values are dropped, not propagated.
 - **Original-release narrowing (R3)**: prefer no-answer over wrong-answer. A track-count mismatch against the disc's own MB release is positive evidence of upstream RG misidentification and falls through to fuzzy. Network failure during the verify is not evidence of mismatch — the answer stands. `_MIN_ISRC_AGREE=2` floor and strict-uniqueness tie semantics for the R1 disambiguator.
 - **MB rate limit (R15)**: pinned to 1 req/s in `_setup_useragent`. Don't silently inherit a future library default change.
+- **MB includes are per-ENDPOINT, and a bad one is not a network error.** `musicbrainzngs`
+  validates includes client-side against `VALID_INCLUDES[entity]` and raises
+  **`InvalidIncludeError`**, which is neither `ResponseError` nor `NetworkError` — so a
+  lookup that only catches those two lets it escape and **abort the whole rip**. Measured
+  2026-08-17: `lookup_isrc` had requested `"release-groups"` on the `/isrc` resource since
+  the module was written, and every disc unknown to MB with ≥3 ISRC-bearing tracks reached
+  R4 and crashed there. The table cuts both ways — `"annotation"` is *listed* for `discid`
+  and the server answers 400 (F-003), while `"release-groups"` is *not listed* for `isrc`
+  and the server agrees (`400 "not a valid inc parameter for the isrc resource"`). **Verify
+  a guard by reading `mock.call_args`, never the source text**, and give it a negative
+  control: the includes are a constant, so a test that cannot fail on the reintroduced bug
+  proves nothing. Every include list in `src/` was audited against the table the same day;
+  `mb_lookup.py:733` was the only bad one.
+- **`/isrc` embeds no release-group and truncates its release list.** The response carries
+  `release-list count="353"` while returning **25** — the same silent-truncation signature
+  as the N3 AcoustID defect — and **zero** `release-group` elements, verified against the
+  raw XML. So `mb_release_group_id` is always `None` on an R4 result, which matters because
+  `strip_pressing_mbid` nulls `mb_release_id` and preserves the release-group id precisely
+  so the original-release lookup can use it. Recovering it costs one `/release` call per
+  tally *winner*, not per ISRC.
 - **Lookup caching (OPT-1/OPT-2)**: caching is process-lifetime only (`mb_lookup._DISC_ID_CACHE`, `album_art._COVER_CACHE`) — no persistence, no TTL, discarded on process exit. The former persistent R7 SQLite cache was removed; there is no longer a 30-day-TTL on-disk metadata cache.
 - **Network gating**: there is no global offline-mode flag. Each lookup module gates itself via its own `is_available()` (Discogs needs `DISCOGS_TOKEN`; AcoustID needs `fpcalc` on PATH + an AcoustID key; etc.). With caching now process-lifetime only, there is no way to reproduce a prior rip's network metadata offline across separate invocations.
 - **Deferred work**: tracked in `docs/reference/TODO.md` under the `## Open`
