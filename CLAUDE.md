@@ -485,6 +485,18 @@ Full specification: `docs/reference/rbi_spec.md`.
   availability gate). Cost is one extra request per recording per page — R4 only fires when
   MB does not know the disc, so one page is the norm. `_ISRC_MAX_RELEASE_PAGES` is a runaway
   guard, **not** a result cap, and **logs at WARNING when it binds**.
+- **A digital-only release can NEVER have an MB disc ID, so a 404 there is correct rather
+  than a gap.** MusicBrainz attaches disc IDs to *physical* media only. Measured
+  2026-08-18 on the release stage 7 matched for `Toca (20th Anniversary Edition)`
+  (`6bc751d2-...`): `format='Digital Media'`, **`discids=0`**, yet the release itself is
+  fully populated (barcode, label, country, cover art). A CD-R burned from a download has
+  real Red Book geometry and therefore a computable disc ID, but nothing to match it
+  against - for that whole class of disc, `lookup_disc_id` is *structurally* dead and the
+  stage-7 duration matcher is the only rung that can identify it at all. So
+  `lookup_status_mb=empty` beside otherwise-complete metadata is an expected shape, not a
+  defect to chase. It is also what wakes the dormant code on the disc-ID-miss path: both
+  MB bugs fixed on 2026-08-17/18 had lain unfired since their modules were written, and a
+  burned-from-digital disc is what reached them.
 - **The pre-TUI banner's cover art has its own, narrower identification path.** It resolves
   MBIDs from `lookup_disc_id` alone, so on a disc-ID miss `fetch_cover` returns `None`
   *immediately* (it needs a release or release-group id) and the preview renders nothing —
