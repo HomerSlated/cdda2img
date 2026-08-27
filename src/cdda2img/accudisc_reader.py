@@ -740,6 +740,70 @@ def engine_version() -> str:
         return "accudisc (version unknown)"
 
 
+@dataclass(frozen=True)
+class DriveOffsetLookup:
+    """What AccuDisc's compiled table knows about one drive's READ offset.
+
+    A re-wrap of their ``DriveOffset`` rather than a pass-through, for the seam
+    rule: their type is defined in the binding, so handing it out would put an
+    ``accudisc``-owned class in the hands of modules that must not import
+    ``accudisc``. Only the fields a caller here consumes are carried across.
+
+    ``read_offset is None`` means the sources DISAGREE — it is not "unknown" and
+    it must never be flattened to 0. Applying a wrong offset shifts the audio
+    silently, which is why AccuDisc refuses to pick and surfaces every candidate
+    in ``candidates`` instead. That is the same trap as ``C2Verdict.UNVERIFIED``
+    mapping to False: a refusal to answer is not a weaker answer.
+    """
+
+    vendor: str
+    product: str
+    read_offset: int | None
+    sources: frozenset[str]
+    ar_submissions: int
+    ar_agree_pct: int
+    candidates: tuple[tuple[int, frozenset[str]], ...]
+    truncated: bool
+    generic_product: bool
+
+
+def drive_offset_lookup(vendor: str, product: str) -> DriveOffsetLookup | None:
+    """Read offset for the INQUIRY pair *(vendor, product)*, or ``None``.
+
+    Device-free: AccuDisc's table is compiled into the library, so this opens no
+    drive and needs no disc. ``None`` means no source holds the drive.
+
+    **The key is the product; the vendor only narrows.** A vendor matching no row
+    is not a rejection, so passing ``""`` still answers wherever the product is
+    unambiguous — deliberate on their side, because firmware reports that field
+    inconsistently (empty, the host adapter's ``SATA``, the OEM rather than the
+    badge). An empty *product* is the one hard refusal and returns ``None``.
+
+    Replaced the local AccurateRip catalogue (``drive_offsets.db``) on
+    2026-08-27: one consolidated table, maintained by AccuDisc, keyed the way the
+    drive actually identifies itself. Note that REDUMP and AccurateRip are **one
+    source, not two** — a row held by both means "unrevised since 2022", never
+    corroboration — so ``sources`` is provenance, not a confidence score.
+    """
+    module = _binding("drive offset lookup")
+    info = _call(
+        module, "drive offset lookup", lambda: module.offset_for(vendor, product)
+    )
+    if info is None:
+        return None
+    return DriveOffsetLookup(
+        vendor=info.vendor,
+        product=info.product,
+        read_offset=info.read_offset,
+        sources=frozenset(info.sources),
+        ar_submissions=info.ar_submissions,
+        ar_agree_pct=info.ar_agree_pct,
+        candidates=tuple((v, frozenset(s)) for v, s in info.values),
+        truncated=info.truncated,
+        generic_product=info.generic_product,
+    )
+
+
 def _log_read_caveats(stats: Any, what: str, module: Any = None) -> None:
     """Reconstruct the retired CLI's exit-3 verdict from ``ReadStats`` and log it.
 

@@ -386,14 +386,30 @@ def _write_config_dict(path: Path, raw: dict) -> None:
 # ── Drive sections ────────────────────────────────────────────────────────────
 
 
+def _print_offset_candidates(info) -> None:
+    """Report every candidate offset when the sources disagree. Saves nothing.
+
+    Picking one here would be the wizard guessing on the user's behalf, and a
+    wrong read offset shifts every future rip silently.
+    """
+    print("  The sources DISAGREE on this drive's read offset:")
+    for value, srcs in info.candidates:
+        print(f"    {value:+d} samples  ({'+'.join(sorted(srcs))})")
+    if info.truncated:
+        print("    … (more candidates than the library could return)")
+    print("  Nothing saved — add the one you trust as `read_offset` by hand.")
+
+
 def _section_read_offset(device: str | None) -> bool:
+    """Look the drive's read offset up in AccuDisc's table and offer to save it.
+
+    A lookup, not a measurement — which is the whole difference between this
+    section and :func:`_section_write_offset` below. The local AccurateRip
+    scrape this used to query was retired on 2026-08-27.
+    """
+    from cdda2img.accudisc_reader import drive_offset_lookup
     from cdda2img.config import load_config
-    from cdda2img.db import open_drive_offsets_db
-    from cdda2img.drive_info import (
-        ensure_drive_offsets,
-        find_drive_offset,
-        probe_drive_name,
-    )
+    from cdda2img.drive_info import probe_drive_inquiry, probe_drive_name
 
     cfg = load_config(strict=False)
     if device is None:
@@ -404,21 +420,34 @@ def _section_read_offset(device: str | None) -> bool:
     else:
         print(f"  Drive: {device} (name probe failed)")
 
-    try:
-        conn = open_drive_offsets_db(cfg)
-        ensure_drive_offsets(conn)
-        result = find_drive_offset(conn, drive_name) if drive_name else None
-        conn.close()
-    except Exception as exc:
-        print(f"  AccurateRip lookup failed: {exc}")
+    inquiry = probe_drive_inquiry(device)
+    if inquiry is None:
+        print("  Cannot read the drive's INQUIRY strings from sysfs.")
         return False
 
-    if result is None:
-        print("  Drive not found in AccurateRip catalogue.")
+    try:
+        info = drive_offset_lookup(*inquiry)
+    except RuntimeError as exc:
+        print(f"  AccuDisc offset lookup failed: {exc}")
+        return False
+
+    if info is None:
+        print("  Drive not found in AccuDisc's offset table.")
         return True
 
-    offset, confidence = result
-    print(f"  Read offset: {offset:+d} samples  (confidence: {confidence})")
+    if info.read_offset is None:
+        _print_offset_candidates(info)
+        return True
+
+    offset = info.read_offset
+    src = "+".join(sorted(info.sources)) or "unknown source"
+    print(
+        f"  Read offset: {offset:+d} samples"
+        f"  ({src}, {info.ar_submissions} AR submission(s),"
+        f" {info.ar_agree_pct}% agree)"
+    )
+    if info.generic_product:
+        print("  NB: this product string is generic; the vendor earned the match.")
 
     if not drive_name:
         return True

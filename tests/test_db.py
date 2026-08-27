@@ -10,7 +10,6 @@ from pathlib import Path
 
 import pytest
 
-from cdda2img.config import Config
 from cdda2img.db import (
     _BACKUP_TS_FMT,
     _backup_files,
@@ -18,7 +17,6 @@ from cdda2img.db import (
     _last_backup_time,
     _rotate_backups,
     ensure_backup,
-    open_drive_offsets_db,
     parse_frequency,
 )
 
@@ -198,87 +196,3 @@ def test_ensure_backup_logs_warning_on_bad_frequency(
 
     assert any("invalid database_backup_frequency" in r.message for r in caplog.records)
     assert len(_backup_files(db)) == 0
-
-
-# ---------------------------------------------------------------------------
-# open_drive_offsets_db — schema
-# ---------------------------------------------------------------------------
-
-
-def _cfg(tmp_path: Path) -> Config:
-    return Config(database_backups=0, database_backup_frequency="1d")
-
-
-def test_open_creates_db_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
-    cfg = _cfg(tmp_path)
-    conn = open_drive_offsets_db(cfg)
-    conn.close()
-    assert (tmp_path / "cdda2img" / "drive_offsets.db").exists()
-
-
-def test_schema_tables_exist(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
-    cfg = _cfg(tmp_path)
-    conn = open_drive_offsets_db(cfg)
-
-    tables = {
-        row[0]
-        for row in conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='table'"
-        ).fetchall()
-    }
-    conn.close()
-
-    assert "ar_drives" in tables
-    assert "fetch_log" in tables
-    assert "fetch_state" in tables
-    assert "eac_drives" in tables
-
-
-def test_schema_index_exists(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
-    cfg = _cfg(tmp_path)
-    conn = open_drive_offsets_db(cfg)
-
-    indexes = {
-        row[0]
-        for row in conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='index'"
-        ).fetchall()
-    }
-    conn.close()
-
-    assert "idx_ar_drives_name" in indexes
-
-
-def test_schema_idempotent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Opening twice must not raise (IF NOT EXISTS guards)."""
-    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
-    cfg = _cfg(tmp_path)
-    conn = open_drive_offsets_db(cfg)
-    conn.close()
-    conn2 = open_drive_offsets_db(cfg)
-    conn2.close()
-
-
-def test_row_factory_is_sqlite_row(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
-    cfg = _cfg(tmp_path)
-    conn = open_drive_offsets_db(cfg)
-    conn.execute("INSERT INTO fetch_state VALUES ('k', 'v')")
-    row = conn.execute("SELECT key, value FROM fetch_state").fetchone()
-    conn.close()
-    assert row["key"] == "k"
-    assert row["value"] == "v"
-
-
-def test_wal_journal_mode(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
-    cfg = _cfg(tmp_path)
-    conn = open_drive_offsets_db(cfg)
-    mode = conn.execute("PRAGMA journal_mode").fetchone()[0]
-    conn.close()
-    assert mode == "wal"

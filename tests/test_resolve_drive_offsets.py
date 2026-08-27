@@ -1,12 +1,18 @@
 """
 test_resolve_drive_offsets.py — unit tests for _resolve_drive_offsets() in cdda2img.py.
+
+Rung 2 stopped being a local SQLite scrape on 2026-08-27 and became a lookup into
+AccuDisc's compiled table, so these mock ``_lookup_drive_offset`` where they used
+to mock ``open_drive_offsets_db``. The behaviour under test is unchanged except
+for one genuinely new outcome: the table can now say *the sources disagree*,
+which the old one had no way to express.
 """
 
 from __future__ import annotations
 
-from pathlib import Path
-from unittest.mock import MagicMock, call, patch
+from unittest.mock import MagicMock, patch
 
+from cdda2img.accudisc_reader import DriveOffsetLookup
 from cdda2img.cdda2img import _resolve_drive_offsets
 from cdda2img.config import Config, DriveConfig
 
@@ -15,8 +21,29 @@ def _cfg(**kwargs) -> Config:
     return Config(**kwargs)
 
 
+def _info(
+    read_offset: int | None,
+    *,
+    submissions: int = 0,
+    sources: frozenset[str] = frozenset({"accuraterip"}),
+    candidates: tuple = (),
+    truncated: bool = False,
+) -> DriveOffsetLookup:
+    return DriveOffsetLookup(
+        vendor="PLEXTOR",
+        product="DVDR PX-716A",
+        read_offset=read_offset,
+        sources=sources,
+        ar_submissions=submissions,
+        ar_agree_pct=100,
+        candidates=candidates,
+        truncated=truncated,
+        generic_product=False,
+    )
+
+
 # ---------------------------------------------------------------------------
-# 1. cfg.drives hit — short-circuit: no DB opened
+# 1. cfg.drives hit — short-circuit: no lookup performed
 # ---------------------------------------------------------------------------
 
 
@@ -27,221 +54,292 @@ def test_uses_config_drives_when_name_matches() -> None:
         patch(
             "cdda2img.drive_info.probe_drive_name", return_value="PLEXTOR DVDR PX-716A"
         ),
-        patch("cdda2img.db.open_drive_offsets_db") as mock_db,
+        patch("cdda2img.cdda2img._lookup_drive_offset") as mock_lookup,
     ):
         result = _resolve_drive_offsets("/dev/sr0", cfg)
 
     assert result == (42, None, "PLEXTOR DVDR PX-716A")
-    mock_db.assert_not_called()
+    # Config is authoritative: the lookup must not even be attempted.
+    mock_lookup.assert_not_called()
 
 
 def test_uses_config_drives_returns_write_offset() -> None:
-    cfg = _cfg(drives=[DriveConfig("MY DRIVE", read_offset=30, write_offset=-30)])
-
-    with (
-        patch("cdda2img.drive_info.probe_drive_name", return_value="MY DRIVE"),
-        patch("cdda2img.db.open_drive_offsets_db") as mock_db,
-    ):
-        result = _resolve_drive_offsets("/dev/sr0", cfg)
-
-    assert result == (30, -30, "MY DRIVE")
-    mock_db.assert_not_called()
-
-
-def test_config_drives_ignores_non_matching_entries() -> None:
-    """Other drives in cfg.drives must not affect lookup for an unlisted drive."""
-    cfg = _cfg(drives=[DriveConfig("OTHER DRIVE", read_offset=7)])
-
-    conn_mock = MagicMock()
-    conn_mock.__enter__ = lambda s: s
-    conn_mock.__exit__ = MagicMock(return_value=False)
+    cfg = _cfg(
+        drives=[DriveConfig("PLEXTOR DVDR PX-716A", read_offset=30, write_offset=-30)]
+    )
 
     with (
         patch(
             "cdda2img.drive_info.probe_drive_name", return_value="PLEXTOR DVDR PX-716A"
         ),
-        patch("cdda2img.db.open_drive_offsets_db", return_value=conn_mock),
-        patch("cdda2img.drive_info.ensure_drive_offsets"),
-        patch("cdda2img.drive_info.find_drive_offset", return_value=None),
+        patch("cdda2img.cdda2img._lookup_drive_offset") as mock_lookup,
     ):
         result = _resolve_drive_offsets("/dev/sr0", cfg)
 
-    assert result == (0, None, "PLEXTOR DVDR PX-716A")  # not configured → read_offset=0
+    assert result == (30, -30, "PLEXTOR DVDR PX-716A")
+    mock_lookup.assert_not_called()
 
 
-# ---------------------------------------------------------------------------
-# 2. AccurateRip auto-apply (submissions >= 3)
-# ---------------------------------------------------------------------------
-
-
-def test_ar_auto_apply_high_confidence(tmp_path: Path) -> None:
-    cfg = _cfg()
-    conn_mock = MagicMock()
+def test_config_drives_ignores_non_matching_entries() -> None:
+    cfg = _cfg(drives=[DriveConfig("SOME OTHER DRIVE", read_offset=99)])
 
     with (
-        patch("cdda2img.drive_info.probe_drive_name", return_value="MY DRIVE"),
-        patch("cdda2img.db.open_drive_offsets_db", return_value=conn_mock),
-        patch("cdda2img.drive_info.ensure_drive_offsets"),
-        patch("cdda2img.drive_info.find_drive_offset", return_value=(30, 100)),
+        patch(
+            "cdda2img.drive_info.probe_drive_name", return_value="PLEXTOR DVDR PX-716A"
+        ),
+        patch("cdda2img.cdda2img._lookup_drive_offset", return_value=None),
+    ):
+        offset, write_offset, name = _resolve_drive_offsets("/dev/sr0", cfg)
+
+    assert offset == 0
+    assert write_offset is None
+    assert name == "PLEXTOR DVDR PX-716A"
+
+
+# ---------------------------------------------------------------------------
+# 2. AccuDisc table lookup
+# ---------------------------------------------------------------------------
+
+
+def test_auto_apply_high_confidence() -> None:
+    with (
+        patch(
+            "cdda2img.drive_info.probe_drive_name", return_value="PLEXTOR DVDR PX-716A"
+        ),
+        patch(
+            "cdda2img.cdda2img._lookup_drive_offset",
+            return_value=_info(30, submissions=99),
+        ),
+        patch("cdda2img.config.save_drive_read_offset"),
+    ):
+        offset, _wo, _name = _resolve_drive_offsets("/dev/sr0", _cfg())
+
+    assert offset == 30
+
+
+def test_auto_apply_saves_to_config() -> None:
+    with (
+        patch(
+            "cdda2img.drive_info.probe_drive_name", return_value="PLEXTOR DVDR PX-716A"
+        ),
+        patch(
+            "cdda2img.cdda2img._lookup_drive_offset",
+            return_value=_info(30, submissions=99),
+        ),
         patch("cdda2img.config.save_drive_read_offset") as mock_save,
     ):
-        result = _resolve_drive_offsets("/dev/sr0", cfg)
+        _resolve_drive_offsets("/dev/sr0", _cfg())
 
-    assert result == (30, None, "MY DRIVE")
-    mock_save.assert_called_once_with("MY DRIVE", 30)
+    mock_save.assert_called_once_with("PLEXTOR DVDR PX-716A", 30)
 
 
-def test_ar_auto_apply_saves_to_config(tmp_path: Path) -> None:
-    """Saving must use the resolved offset, not any prior config value."""
-    cfg = _cfg()
-    conn_mock = MagicMock()
-
+def test_prompt_accepted() -> None:
     with (
-        patch("cdda2img.drive_info.probe_drive_name", return_value="MY DRIVE"),
-        patch("cdda2img.db.open_drive_offsets_db", return_value=conn_mock),
-        patch("cdda2img.drive_info.ensure_drive_offsets"),
-        patch("cdda2img.drive_info.find_drive_offset", return_value=(30, 5)),
-        patch("cdda2img.config.save_drive_read_offset") as mock_save,
-    ):
-        result = _resolve_drive_offsets("/dev/sr0", cfg)
-
-    assert result == (30, None, "MY DRIVE")
-    assert mock_save.call_args == call("MY DRIVE", 30)
-
-
-# ---------------------------------------------------------------------------
-# 3. AccurateRip prompt accepted (submissions < 3, TTY=True)
-# ---------------------------------------------------------------------------
-
-
-def test_ar_prompt_accepted(tmp_path: Path) -> None:
-    cfg = _cfg()
-    conn_mock = MagicMock()
-
-    with (
-        patch("cdda2img.drive_info.probe_drive_name", return_value="MY DRIVE"),
-        patch("cdda2img.db.open_drive_offsets_db", return_value=conn_mock),
-        patch("cdda2img.drive_info.ensure_drive_offsets"),
-        patch("cdda2img.drive_info.find_drive_offset", return_value=(6, 2)),
-        patch("sys.stdin") as mock_stdin,
+        patch(
+            "cdda2img.drive_info.probe_drive_name", return_value="PLEXTOR DVDR PX-716A"
+        ),
+        patch(
+            "cdda2img.cdda2img._lookup_drive_offset",
+            return_value=_info(6, submissions=1),
+        ),
+        patch("sys.stdin.isatty", return_value=True),
         patch("builtins.input", return_value="y"),
-        patch("cdda2img.config.save_drive_read_offset") as mock_save,
+        patch("cdda2img.config.save_drive_read_offset"),
     ):
-        mock_stdin.isatty.return_value = True
-        result = _resolve_drive_offsets("/dev/sr0", cfg)
+        offset, _wo, _name = _resolve_drive_offsets("/dev/sr0", _cfg())
 
-    assert result == (6, None, "MY DRIVE")
-    mock_save.assert_called_once()
+    assert offset == 6
 
 
-# ---------------------------------------------------------------------------
-# 4. AccurateRip prompt rejected
-# ---------------------------------------------------------------------------
-
-
-def test_ar_prompt_rejected_returns_zero(tmp_path: Path) -> None:
-    cfg = _cfg()
-    conn_mock = MagicMock()
-
+def test_prompt_rejected_returns_zero() -> None:
     with (
-        patch("cdda2img.drive_info.probe_drive_name", return_value="MY DRIVE"),
-        patch("cdda2img.db.open_drive_offsets_db", return_value=conn_mock),
-        patch("cdda2img.drive_info.ensure_drive_offsets"),
-        patch("cdda2img.drive_info.find_drive_offset", return_value=(6, 2)),
-        patch("sys.stdin") as mock_stdin,
+        patch(
+            "cdda2img.drive_info.probe_drive_name", return_value="PLEXTOR DVDR PX-716A"
+        ),
+        patch(
+            "cdda2img.cdda2img._lookup_drive_offset",
+            return_value=_info(6, submissions=1),
+        ),
+        patch("sys.stdin.isatty", return_value=True),
         patch("builtins.input", return_value="n"),
         patch("cdda2img.config.save_drive_read_offset") as mock_save,
     ):
-        mock_stdin.isatty.return_value = True
-        result = _resolve_drive_offsets("/dev/sr0", cfg)
+        offset, _wo, _name = _resolve_drive_offsets("/dev/sr0", _cfg())
 
-    assert result == (0, None, "MY DRIVE")
+    assert offset == 0
     mock_save.assert_not_called()
 
 
-def test_ar_low_confidence_no_tty_returns_zero(tmp_path: Path) -> None:
-    """Non-TTY + low confidence: auto-reject without prompting."""
-    cfg = _cfg()
-    conn_mock = MagicMock()
+def test_low_confidence_no_tty_returns_zero() -> None:
+    """Without a TTY a thinly-evidenced offset is declined, not adopted.
 
+    Nobody is there to say no, so silence must not read as consent.
+    """
     with (
-        patch("cdda2img.drive_info.probe_drive_name", return_value="MY DRIVE"),
-        patch("cdda2img.db.open_drive_offsets_db", return_value=conn_mock),
-        patch("cdda2img.drive_info.ensure_drive_offsets"),
-        patch("cdda2img.drive_info.find_drive_offset", return_value=(6, 1)),
-        patch("sys.stdin") as mock_stdin,
+        patch(
+            "cdda2img.drive_info.probe_drive_name", return_value="PLEXTOR DVDR PX-716A"
+        ),
+        patch(
+            "cdda2img.cdda2img._lookup_drive_offset",
+            return_value=_info(6, submissions=1),
+        ),
+        patch("sys.stdin.isatty", return_value=False),
         patch("cdda2img.config.save_drive_read_offset") as mock_save,
     ):
-        mock_stdin.isatty.return_value = False
-        result = _resolve_drive_offsets("/dev/sr0", cfg)
+        offset, _wo, _name = _resolve_drive_offsets("/dev/sr0", _cfg())
 
-    assert result == (0, None, "MY DRIVE")
+    assert offset == 0
     mock_save.assert_not_called()
 
 
-# ---------------------------------------------------------------------------
-# 5. Drive not in AccurateRip catalog
-# ---------------------------------------------------------------------------
-
-
-def test_drive_not_in_catalog_returns_zero() -> None:
-    cfg = _cfg()
-    conn_mock = MagicMock()
-
+def test_drive_not_in_table_returns_zero() -> None:
     with (
-        patch("cdda2img.drive_info.probe_drive_name", return_value="UNKNOWN DRIVE"),
-        patch("cdda2img.db.open_drive_offsets_db", return_value=conn_mock),
-        patch("cdda2img.drive_info.ensure_drive_offsets"),
-        patch("cdda2img.drive_info.find_drive_offset", return_value=None),
+        patch(
+            "cdda2img.drive_info.probe_drive_name", return_value="PLEXTOR DVDR PX-716A"
+        ),
+        patch("cdda2img.cdda2img._lookup_drive_offset", return_value=None),
+    ):
+        offset, write_offset, name = _resolve_drive_offsets("/dev/sr0", _cfg())
+
+    assert offset == 0
+    assert write_offset is None
+    assert name == "PLEXTOR DVDR PX-716A"
+
+
+# ---------------------------------------------------------------------------
+# 3. Sources disagree — the outcome the old catalogue could not express
+# ---------------------------------------------------------------------------
+
+
+def test_ambiguous_offset_is_never_applied_and_never_saved() -> None:
+    """``read_offset is None`` means DISAGREE and must not collapse to a value.
+
+    The trap this guards is flattening a refusal into its neighbouring falsy
+    value: an offset of 0 is a real, applicable answer, while None is "we will
+    not say". Returning 0 here is correct only because it means "unshifted, and
+    you were told" -- what must never happen is SAVING it, which would bake the
+    guess into config as though it had been confirmed.
+    """
+    info = _info(
+        None,
+        candidates=((6, frozenset({"accuraterip"})), (48, frozenset({"redump"}))),
+        sources=frozenset({"accuraterip", "redump"}),
+    )
+    with (
+        patch(
+            "cdda2img.drive_info.probe_drive_name", return_value="PLEXTOR DVDR PX-716A"
+        ),
+        patch("cdda2img.cdda2img._lookup_drive_offset", return_value=info),
         patch("cdda2img.config.save_drive_read_offset") as mock_save,
     ):
-        result = _resolve_drive_offsets("/dev/sr0", cfg)
+        offset, write_offset, name = _resolve_drive_offsets("/dev/sr0", _cfg())
 
-    assert result == (0, None, "UNKNOWN DRIVE")
+    assert offset == 0
+    assert write_offset is None
+    assert name == "PLEXTOR DVDR PX-716A"
     mock_save.assert_not_called()
 
 
+def test_ambiguous_offset_reports_every_candidate(capsys) -> None:
+    """Both candidates must reach the user, or the refusal is unactionable."""
+    info = _info(
+        None,
+        candidates=((6, frozenset({"accuraterip"})), (48, frozenset({"redump"}))),
+    )
+    with (
+        patch(
+            "cdda2img.drive_info.probe_drive_name", return_value="PLEXTOR DVDR PX-716A"
+        ),
+        patch("cdda2img.cdda2img._lookup_drive_offset", return_value=info),
+    ):
+        _resolve_drive_offsets("/dev/sr0", _cfg())
+
+    out = capsys.readouterr().out
+    assert "DISAGREE" in out
+    assert "+6" in out
+    assert "+48" in out
+    assert "read_offset" in out  # tells the user how to settle it
+
+
 # ---------------------------------------------------------------------------
-# 6. sysfs probe fails — no DB opened
+# 4. Failure paths
 # ---------------------------------------------------------------------------
 
 
-def test_probe_fails_returns_zero_no_db() -> None:
-    cfg = _cfg()
-
+def test_probe_fails_returns_zero_without_lookup() -> None:
     with (
         patch("cdda2img.drive_info.probe_drive_name", return_value=None),
-        patch("cdda2img.db.open_drive_offsets_db") as mock_db,
+        patch("cdda2img.cdda2img._lookup_drive_offset") as mock_lookup,
     ):
-        result = _resolve_drive_offsets("/dev/sr99", cfg)
+        result = _resolve_drive_offsets("/dev/sr0", _cfg())
 
     assert result == (0, None, None)
-    mock_db.assert_not_called()
-
-
-# ---------------------------------------------------------------------------
-# save_drive_read_offset OSError is swallowed
-# ---------------------------------------------------------------------------
+    mock_lookup.assert_not_called()
 
 
 def test_save_drive_read_offset_oserror_does_not_propagate() -> None:
-    cfg = _cfg()
-    conn_mock = MagicMock()
-
+    """A config write failure must not fail the rip -- the offset still applies."""
     with (
-        patch("cdda2img.drive_info.probe_drive_name", return_value="MY DRIVE"),
-        patch("cdda2img.db.open_drive_offsets_db", return_value=conn_mock),
-        patch("cdda2img.drive_info.ensure_drive_offsets"),
-        patch("cdda2img.drive_info.find_drive_offset", return_value=(30, 10)),
+        patch(
+            "cdda2img.drive_info.probe_drive_name", return_value="PLEXTOR DVDR PX-716A"
+        ),
+        patch(
+            "cdda2img.cdda2img._lookup_drive_offset",
+            return_value=_info(30, submissions=99),
+        ),
         patch(
             "cdda2img.config.save_drive_read_offset",
-            side_effect=OSError("permission denied"),
+            side_effect=OSError("read-only fs"),
         ),
     ):
-        result = _resolve_drive_offsets("/dev/sr0", cfg)
+        offset, _wo, _name = _resolve_drive_offsets("/dev/sr0", _cfg())
 
-    assert result == (
-        30,
-        None,
-        "MY DRIVE",
-    )  # offset still returned despite save failure
+    assert offset == 30
+
+
+def test_lookup_failure_falls_through_to_zero() -> None:
+    """A RuntimeError from the seam warns and degrades; it does not abort.
+
+    _lookup_drive_offset swallows it, so this exercises the real helper rather
+    than the mock the other tests use.
+    """
+    with (
+        patch(
+            "cdda2img.drive_info.probe_drive_name", return_value="PLEXTOR DVDR PX-716A"
+        ),
+        patch(
+            "cdda2img.drive_info.probe_drive_inquiry",
+            return_value=("PLEXTOR", "DVDR PX-716A"),
+        ),
+        patch(
+            "cdda2img.accudisc_reader.drive_offset_lookup",
+            side_effect=RuntimeError("binding missing"),
+        ),
+    ):
+        offset, _wo, name = _resolve_drive_offsets("/dev/sr0", _cfg())
+
+    assert offset == 0
+    assert name == "PLEXTOR DVDR PX-716A"
+
+
+def test_lookup_receives_the_split_inquiry_pair() -> None:
+    """The vendor/product boundary must survive to the lookup.
+
+    Passing the joined "VENDOR MODEL" string as the product is the exact defect
+    the retired _normalize_ar_name embodied, and it would still return an answer
+    for some drives -- so this asserts the call, not the result.
+    """
+    mock_lookup = MagicMock(return_value=None)
+    with (
+        patch(
+            "cdda2img.drive_info.probe_drive_name", return_value="PLEXTOR DVDR PX-716A"
+        ),
+        patch(
+            "cdda2img.drive_info.probe_drive_inquiry",
+            return_value=("PLEXTOR", "DVDR PX-716A"),
+        ),
+        patch("cdda2img.accudisc_reader.drive_offset_lookup", mock_lookup),
+    ):
+        _resolve_drive_offsets("/dev/sr0", _cfg())
+
+    mock_lookup.assert_called_once_with("PLEXTOR", "DVDR PX-716A")

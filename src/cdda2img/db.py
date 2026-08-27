@@ -1,108 +1,36 @@
 """
-db.py — SQLite database management for cdda2img.
-
-Manages local data storage under $XDG_DATA_HOME/cdda2img/:
-    drive_offsets.db  — AccurateRip drive offset catalog + fetch state
+db.py — SQLite backup rotation, shared by the databases this project keeps.
 
 Public interface:
-    data_dir() -> Path
-    drive_offsets_db_path() -> Path
     parse_frequency(s) -> timedelta
     ensure_backup(db_path, max_count, frequency) -> None
-    open_drive_offsets_db(cfg) -> sqlite3.Connection
+
+**This module no longer owns a database.** It was built around
+``drive_offsets.db`` — the AccurateRip scrape and the EAC OffsetBase import —
+which was retired on 2026-08-27 when drive offsets became AccuDisc's: the read
+offset is a lookup into their compiled table and the write offset is measured
+per drive, with both results living in ``[[drives]]`` in the user's config.
+
+What is left is the backup machinery, which was never offsets-specific and is
+live for the *catalogue* database (``catalogue.py`` calls ``ensure_backup``).
+The ``database_backups`` / ``database_backup_frequency`` config keys that fed
+the retired opener are deliberately still accepted: ``CONFIG_SCHEMA`` treats an
+unknown key as an error, so dropping them would stop every existing config
+loading.
 """
 
 from __future__ import annotations
 
 import logging
-import os
 import re
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from cdda2img.config import Config
-
 log = logging.getLogger(__name__)
 
 _BACKUP_TS_FMT = "%Y%m%dT%H%M%S"
 _BACKUP_TS_RE = re.compile(r"\.\d{8}T\d{6}$")
-
-_PRAGMAS = (
-    "PRAGMA journal_mode=WAL",
-    "PRAGMA foreign_keys=ON",
-)
-
-# ar_drives: one row per (ar_name, offset) pair from the AccurateRip page.
-# A model name may appear more than once when multiple offsets have been
-# submitted (pick the row with the highest submissions count for matching).
-# fetch_state: key/value store for HTTP cache headers (Last-Modified, ETag)
-# so that conditional requests (If-Modified-Since / If-None-Match) can avoid
-# re-downloading the full page on every check.
-#
-# eac_drives: EAC OffsetBase catalog (eac-audio.de, archived 2004).
-# Authoritative for write offsets; read_offset here is informational only —
-# the ar_drives table (large, current AccurateRip data) is authoritative for
-# read offsets.  Uniqueness on (brand, model, firmware) is enforced at import
-# time, not by a DB constraint, so partial-null upgrades can be handled in
-# application code.
-_CREATE_TABLES = """\
-CREATE TABLE IF NOT EXISTS ar_drives (
-    id          INTEGER PRIMARY KEY,
-    ar_name     TEXT    NOT NULL,
-    offset      INTEGER NOT NULL,
-    submissions INTEGER NOT NULL
-);
-
-CREATE INDEX IF NOT EXISTS idx_ar_drives_name ON ar_drives(ar_name);
-
-CREATE TABLE IF NOT EXISTS fetch_log (
-    id            INTEGER PRIMARY KEY,
-    fetched_at    TEXT    NOT NULL,
-    http_status   INTEGER,
-    last_modified TEXT,
-    etag          TEXT,
-    row_count     INTEGER
-);
-
-CREATE TABLE IF NOT EXISTS fetch_state (
-    key   TEXT PRIMARY KEY,
-    value TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS eac_drives (
-    id               INTEGER PRIMARY KEY,
-    brand            TEXT    NOT NULL,
-    model            TEXT    NOT NULL,
-    firmware         TEXT,
-    accurate_stream  TEXT,
-    audio_caching    TEXT,
-    c2_error_retrieval TEXT,
-    read_command     TEXT,
-    read_offset      INTEGER,
-    eac_write        TEXT,
-    write_offset     INTEGER
-);
-
-CREATE INDEX IF NOT EXISTS idx_eac_drives_name ON eac_drives(brand, model);
-"""
-
-
-# ---------------------------------------------------------------------------
-# XDG paths
-# ---------------------------------------------------------------------------
-
-
-def data_dir() -> Path:
-    """Return $XDG_DATA_HOME/cdda2img/ (default: ~/.local/share/cdda2img/)."""
-    xdg = os.environ.get("XDG_DATA_HOME") or str(Path.home() / ".local" / "share")
-    return Path(xdg) / "cdda2img"
-
-
-def drive_offsets_db_path() -> Path:
-    """Return the path to the AccurateRip drive offset database."""
-    return data_dir() / "drive_offsets.db"
-
 
 # ---------------------------------------------------------------------------
 # Backup helpers
@@ -206,39 +134,3 @@ def ensure_backup(db_path: Path, max_count: int, frequency: str) -> None:
         return
     _create_backup(db_path)
     _rotate_backups(db_path, max_count)
-
-
-# ---------------------------------------------------------------------------
-# Schema
-# ---------------------------------------------------------------------------
-
-
-def _apply_schema(conn: sqlite3.Connection) -> None:
-    # PRAGMAs run outside executescript() because executescript() issues an
-    # implicit COMMIT first, which would interfere with any open transaction.
-    for pragma in _PRAGMAS:
-        conn.execute(pragma)
-    conn.executescript(_CREATE_TABLES)
-
-
-# ---------------------------------------------------------------------------
-# Public database opener
-# ---------------------------------------------------------------------------
-
-
-def open_drive_offsets_db(cfg: Config) -> sqlite3.Connection:
-    """Open (creating if necessary) the AccurateRip drive offset database.
-
-    Runs ensure_backup() before opening so a backup is taken before any
-    writes begin.  Returns a connection with sqlite3.Row factory and WAL
-    journal mode enabled.
-
-    The caller is responsible for closing the connection.
-    """
-    path = drive_offsets_db_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    ensure_backup(path, cfg.database_backups, cfg.database_backup_frequency)
-    conn = sqlite3.connect(path)
-    conn.row_factory = sqlite3.Row
-    _apply_schema(conn)
-    return conn

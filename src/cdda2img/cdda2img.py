@@ -2613,6 +2613,62 @@ def _finalize_import(
     return output
 
 
+def _lookup_drive_offset(device: str):  # -> DriveOffsetLookup | None
+    """AccuDisc's table entry for *device*, or None when it cannot be had.
+
+    Swallows a lookup failure into ``None`` deliberately. A missing binding is
+    fatal for a *rip*, but this runs before one and rung 3 still yields a usable
+    (if unshifted) read — refusing the disc because a metadata lookup failed
+    would be a worse trade than an offset the user is told was not applied.
+    """
+    from cdda2img.accudisc_reader import drive_offset_lookup
+    from cdda2img.drive_info import probe_drive_inquiry
+
+    inquiry = probe_drive_inquiry(device)
+    if inquiry is None:
+        return None
+    try:
+        return drive_offset_lookup(*inquiry)
+    except RuntimeError as exc:
+        log.warning("AccuDisc offset lookup failed: %s", exc)
+        return None
+
+
+def _accept_lookup_offset(offset: int, detail: str, submissions: int) -> bool:
+    """Whether to apply a looked-up read offset: auto, prompt, or decline.
+
+    Auto-applies above ``_MIN_AR_CONFIDENCE`` submissions, prompts a TTY below
+    it, and declines without one — a non-interactive run must not silently adopt
+    a thinly-evidenced offset just because nobody was there to say no.
+    """
+    import sys
+
+    if submissions >= _MIN_AR_CONFIDENCE:
+        return True
+    if not sys.stdin.isatty():
+        return False
+    answer = input(f"  AccuDisc: offset {offset:+d} ({detail}). Use? [y/N] ")
+    return answer.strip().lower() == "y"
+
+
+def _report_offset_disagreement(info, drive_name: str | None) -> None:
+    """Print every candidate offset and how to settle it. Applies nothing.
+
+    The sources disagree, AccuDisc deliberately refuses to pick, and so do we:
+    an offset applied wrongly shifts the audio silently, which is worse than an
+    unshifted rip the user knows is unshifted. The candidates are named so the
+    config entry can be written without a second lookup.
+    """
+    cands = ", ".join(f"{v:+d} ({'+'.join(sorted(s))})" for v, s in info.candidates)
+    more = ", …" if info.truncated else ""
+    print(_fmt_kv("Read offset", "+0 samples (sources DISAGREE — not applied)"))
+    print(f"   {'':13}candidates: {cands}{more}")
+    print(
+        f"   {'':13}choose one and add `read_offset = N` to a [[drives]]"
+        f' entry named "{drive_name}" in cdda2img.toml'
+    )
+
+
 def _resolve_drive_offsets(
     device: str, cfg
 ) -> tuple[
@@ -2625,24 +2681,27 @@ def _resolve_drive_offsets(
 
     Resolution order for *read_offset*:
       1. Per-drive entry in cfg.drives (user-confirmed; always takes precedence).
-      2. AccurateRip catalog (auto-applied when submissions >= _MIN_AR_CONFIDENCE;
-         prompts the user when confidence is lower).
+      2. AccuDisc's compiled offset table (auto-applied when submissions >=
+         _MIN_AR_CONFIDENCE; prompts the user when confidence is lower).
       3. 0 with a warning when the drive is not configured.
 
-    *write_offset* comes from cfg.drives only; ``None`` when not configured.
+    *write_offset* comes from cfg.drives only; ``None`` when not configured. It
+    is **measured**, not looked up — the published write-offset data is too
+    sparse to be worth a table — so a drive acquires one by running
+    ``setup --write-offset`` once, after which rung 1 supplies it forever.
 
     Confirmed read offsets are persisted to [[drives]] in cdda2img.toml so that
-    subsequent rips skip the catalog lookup entirely.
+    subsequent rips skip the lookup entirely.
+
+    Rung 2 was the local ``drive_offsets.db`` AccurateRip scrape until
+    2026-08-27. It is now AccuDisc's table, which is the same data better kept:
+    keyed on the INQUIRY pair the drive actually reports rather than on a
+    flattened ``"VENDOR MODEL"`` string, and able to say *the sources disagree*
+    instead of silently returning one of them.
     """
-    import sys
 
     from cdda2img.config import save_drive_read_offset
-    from cdda2img.db import open_drive_offsets_db
-    from cdda2img.drive_info import (
-        ensure_drive_offsets,
-        find_drive_offset,
-        probe_drive_name,
-    )
+    from cdda2img.drive_info import probe_drive_name
 
     drive_name = probe_drive_name(device)
     if drive_name is None:
@@ -2657,37 +2716,24 @@ def _resolve_drive_offsets(
             print(_fmt_kv("Read offset", f"{d.read_offset:+d} samples (from config)"))
             return d.read_offset, d.write_offset, drive_name
 
-    # 2. AccurateRip catalog lookup.
-    conn = open_drive_offsets_db(cfg)
-    try:
-        ensure_drive_offsets(conn)
-        ar = find_drive_offset(conn, drive_name)
-    finally:
-        conn.close()
+    # 2. AccuDisc's compiled offset table. Device-free: no drive is opened.
+    info = _lookup_drive_offset(device)
 
-    if ar is not None:
-        offset, submissions = ar
-        if submissions >= _MIN_AR_CONFIDENCE:
-            use_it = True
-        elif sys.stdin.isatty():
-            answer = (
-                input(
-                    f"  AccurateRip: offset {offset:+d} ({submissions} submission(s)). Use? [y/N] "
-                )
-                .strip()
-                .lower()
-            )
-            use_it = answer == "y"
-        else:
-            use_it = False
+    if info is not None and info.read_offset is None:
+        _report_offset_disagreement(info, drive_name)
+        return 0, None, drive_name
 
-        if use_it:
-            print(
-                _fmt_kv(
-                    "Read offset",
-                    f"{offset:+d} samples (AccurateRip, {submissions} submission(s))",
-                )
-            )
+    if info is not None and info.read_offset is not None:
+        offset, submissions = info.read_offset, info.ar_submissions
+        # `sources` is provenance, NOT a confidence score: REDUMP and AccurateRip
+        # are one source, so a row held by both means "unrevised since 2022"
+        # rather than two witnesses (AccuDisc 2026-08-27a §2.2). The count that
+        # carries evidence is AccurateRip's own submission tally, and 0 of them
+        # is a real answer for a REDUMP-only row — not a missing measurement.
+        src = "+".join(sorted(info.sources)) or "unknown source"
+        detail = f"{src}, {submissions} AR submission(s)"
+        if _accept_lookup_offset(offset, detail, submissions):
+            print(_fmt_kv("Read offset", f"{offset:+d} samples ({detail})"))
             try:
                 save_drive_read_offset(drive_name, offset)
             except OSError as exc:
@@ -2695,10 +2741,10 @@ def _resolve_drive_offsets(
             return offset, None, drive_name
 
     # 3. Drive not configured — warn and use 0.
-    if ar is None:
-        print(_fmt_kv("Read offset", "+0 samples (drive not in AccurateRip catalog)"))
+    if info is None:
+        print(_fmt_kv("Read offset", "+0 samples (drive not in AccuDisc's table)"))
     else:
-        print(_fmt_kv("Read offset", "+0 samples (AccurateRip match not applied)"))
+        print(_fmt_kv("Read offset", "+0 samples (offset found but not applied)"))
     return 0, None, drive_name
 
 
@@ -4158,23 +4204,20 @@ def burn_image(
                     )
                     break
             else:
-                from cdda2img import db as _db
-                from cdda2img.drive_info import find_drive_write_offset
-
-                _conn = _db.open_drive_offsets_db(cfg)
-                try:
-                    eac_wo = find_drive_write_offset(_conn, drive_name)
-                finally:
-                    _conn.close()
-                if eac_wo is not None:
-                    log.info(
-                        "EAC OffsetBase suggests write_offset=%d for %s;"
-                        " add `write_offset = %d` to the [[drives]] entry in"
-                        " ~/.config/cdda2img/cdda2img.toml to apply it",
-                        eac_wo,
-                        drive_name,
-                        eac_wo,
-                    )
+                # No config entry. There is no table to fall back to: the EAC
+                # OffsetBase suggestion that used to sit here was retired with
+                # the offsets database on 2026-08-27, published write-offset
+                # data being too sparse to be worth keeping. A write offset is
+                # MEASURED per drive and then lives in config, so the remedy is
+                # a one-off run rather than another lookup.
+                log.info(
+                    "No write offset configured for %s; burning uncorrected."
+                    " Measure it once with `cdda2img setup --write-offset"
+                    " --device %s`, which writes it to [[drives]] in"
+                    " ~/.config/cdda2img/cdda2img.toml",
+                    drive_name,
+                    device,
+                )
 
     ui: TerminalUI | None = None
     if sys.stdin.isatty():
