@@ -414,7 +414,7 @@ def test_pcm_starts_one_read_offset_into_the_audio_region(
 
 def test_pcm_length_matches_the_declared_leadout(simple: Path, tmp_path: Path) -> None:
     out = tmp_path / "out.pcm"
-    disc, _ = import_pxi(simple, out)
+    _disc, _ = import_pxi(simple, out)
     assert out.stat().st_size == (SIMPLE_LEADOUT - LEAD_IN) * SECTOR
 
 

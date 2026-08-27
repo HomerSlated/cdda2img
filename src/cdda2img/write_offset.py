@@ -43,6 +43,29 @@ _SAMPLE_WIDTH = 2  # bytes per channel per sample (s16)
 _FRAME_BYTES = _CHANNELS * _SAMPLE_WIDTH  # 4 bytes per stereo sample pair
 _SAMPLES_PER_FRAME = 588  # stereo sample pairs per CD frame (2352 / 4)
 
+# ── THE GEOMETRY IS A CROSS-PROJECT WIRE FORMAT — DO NOT CHANGE IT HERE ──────
+#
+# _DURATION, _PULSE_A, _PULSE_B and _PULSE_LEN are the same four numbers as
+# AccuDisc's ACCUDISC_WOFF_SAMPLES / _PULSE_A / _PULSE_B / _PULSE_LEN
+# (3_307_500 / 44_100 / 2_646_000 / 588), arrived at independently by both
+# projects and, since their 0.25.0, declared in their PUBLIC HEADER for exactly
+# this reason. Either side's locator can therefore measure a disc the other
+# burnt, because both are threshold detectors rather than matched filters —
+# measured 2026-08-27: their `write_offset_locate` found both pulses in our real
+# PX-716A capture and agreed with this module to the sample (-30, both pulses).
+#
+# That cross-check exists ONLY because the constants coincide. Had either side
+# picked 90 s, or put pulse B at 2 s, it would have been impossible rather than
+# harder — and it is currently the only validation of their locator that costs
+# no blank disc. Trimming the 75-second signal to save scratch space would break
+# it silently: nothing here fails, their locator simply stops finding pulse B.
+#
+# So changing one of these four is a BREAKING CHANGE for both projects and wants
+# a message on the correspondence channel before a commit. The seed below is
+# NOT part of the contract and may change freely — it is an implementation
+# detail, and their locator does not care what the burst contains.
+# ─────────────────────────────────────────────────────────────────────────────
+
 _DURATION_S = 75
 _DURATION = _DURATION_S * _SAMPLE_RATE  # 3_307_500 stereo sample pairs
 
@@ -51,7 +74,7 @@ _DURATION = _DURATION_S * _SAMPLE_RATE  # 3_307_500 stereo sample pairs
 _PULSE_A = 1 * _SAMPLE_RATE  # 44_100   (1.0 s)
 _PULSE_B = 60 * _SAMPLE_RATE  # 2_646_000 (60.0 s)
 _PULSE_LEN = 588  # one CD frame; sharp enough to locate precisely
-_PULSE_SEED = 42  # deterministic — same signal every run
+_PULSE_SEED = 42  # deterministic — same signal every run; NOT part of the contract
 
 _SEARCH_WINDOW = 8820  # ±samples around expected position when scanning
 _RMS_THRESHOLD = 500.0  # above noise floor, below any clipping artefact
