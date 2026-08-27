@@ -327,10 +327,25 @@ this machine has one — CDEmu cannot read a pressed disc.
 **A correction we made and should not repeat.** §171 claimed `detect_offset` was
 load-bearing for point 3 — that banning online lookups would leave nothing to
 characterise a reference drive. **Wrong at step three**: a reference drive is
-characterised *from the table* (the PX-716A is `+30` in REDUMP, corroborated by AR),
-so point 3's arithmetic runs offline, on one drive, today. `detect_offset` is
-load-bearing only for the **bootstrap** case — a drive in none of the three
-catalogues — which kgr's point 5 already routes to "warn and suggest zero".
+characterised *from the table* (the PX-716A is `+30` in REDUMP ~~, corroborated by
+AR~~ — see the correction below), so point 3's arithmetic runs offline, on one
+drive, today. `detect_offset` is load-bearing only for the **bootstrap** case — a
+drive in none of the three catalogues — which kgr's point 5 already routes to
+"warn and suggest zero".
+
+> **CORRECTION 2026-08-27 — "corroborated by AR" is not a second witness.**
+> AccuDisc's `2026-08-27a` §2.2 establishes by set comparison against redumper's
+> git history that REDUMP and AccurateRip are **one source, not two**: 4595 rows
+> each way, zero unique to either, differing only in marketing-vs-INQUIRY vendor
+> spellings. Their `TEAC DW-224E-CN` case names the direction — REDUMP's `+120`
+> *is* AccurateRip's own 2022 import, and AR has since corrected itself to `+102`.
+> This confirms the hypothesis already recorded at point 3 below (the four LG
+> models carrying an identical contradiction under two spellings); it was ours
+> first, but only as a counterexample, and their measurement is the proof.
+> **A row held by both means "unrevised since 2022", never corroboration.**
+> The `+30` itself is not in doubt — it is confirmed independently by
+> `accuraterip.detect_offset`, which is offset-sensitive by construction — but the
+> word "corroborated" describes evidence we do not have.
 
 **Two costs that land on us if point 2 goes ahead:**
 1. **Our AR ingest must stop discarding the vendor/model split.** `_normalize_ar_name`
