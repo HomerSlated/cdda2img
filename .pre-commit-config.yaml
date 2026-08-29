@@ -1,3 +1,8 @@
+# ``commit-msg`` is listed so a plain ``pre-commit install`` (what ``make install``
+# runs) installs BOTH hook types. Without it the message guard below is configured
+# and never invoked -- which is precisely the failure it exists to prevent.
+default_install_hook_types: [pre-commit, commit-msg]
+
 repos:
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: "v5.0.0"
@@ -20,3 +25,14 @@ repos:
       - id: ruff-check
         args: [ --exit-non-zero-on-fix ]
       - id: ruff-format
+
+  - repo: local
+    hooks:
+      # The rule "no session URL in a commit message" lived in prose and was
+      # enforced by nothing: scripts/ is git-ignored local tooling, and the hooks
+      # above are formatting only. The script checks; this tracked hook enforces.
+      - id: no-session-url
+        name: no Claude session URL or session trailer in the commit message
+        entry: python3 tools/check_commit_msg.py
+        language: system
+        stages: [commit-msg]

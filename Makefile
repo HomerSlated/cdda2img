@@ -12,11 +12,17 @@ check: ## Run code quality tools.
 	@uv run pre-commit run -a
 	@echo "🚀 Static type checking: Running ty"
 	@uv run ty check
+	@echo "🚀 Guarding the test count"
+	@uv run python tools/check_test_count.py
 
 .PHONY: test
 test: ## Test the code with pytest
 	@echo "🚀 Testing code: Running pytest"
 	@uv run python -m pytest --doctest-modules
+
+.PHONY: test-count
+test-count: ## Fail if the collected test count falls below the floor
+	@uv run python tools/check_test_count.py
 
 .PHONY: build
 build: clean-build ## Build wheel file

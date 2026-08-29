@@ -254,6 +254,16 @@ makes the rule easy to forget.
    files, unused imports, ruff format, TOML/YAML validity, lock drift, ty). Do this
    *before* writing the commit message; if it fixes anything, the tests should be re-run
    to confirm nothing regressed.
+   - **It has a third half now: `tools/check_test_count.py`** (`make test-count`), which
+     fails when collection drops below `FLOOR`. **It lives outside `tests/` deliberately**
+     — a test that counted tests would be collected from the tree it is checking, so the
+     one failure it exists to catch (a test file emptied or truncated by a bad edit) would
+     delete the check along with the evidence. AccuDisc truncated `test_binding.py` from
+     1942 lines to 260 on 2026-08-29 and **their suite still reported PASS**, because the
+     runner at the bottom of the file went with it. The invariant is that the count must be
+     observed to **rise**; "passed" is not the check. A *floor* rather than an exact count,
+     because an exact count fires on every legitimate addition and a check that fires on
+     ordinary work gets deleted rather than obeyed — bump `FLOOR` in the commit that earns it.
    - **Its two halves disagree about untracked files — know which half spoke.**
      `make check` is `uv lock --locked` + `pre-commit run -a` + **`uv run ty check`**
      (`Makefile:9-14`), and the last of those is not a pre-commit hook at all.
@@ -273,6 +283,19 @@ makes the rule easy to forget.
      `--> path:line`. A `ty`-only failure on an untracked path blocks neither
      `git commit` (the hook runs on *staged* files) nor CI.
 2. **Write `private/COMMIT_MSG`** — the sync script reads this file directly.
+   - **A tracked `commit-msg` hook enforces the no-session-URL rule**
+     (`tools/check_commit_msg.py`, wired through `.pre-commit-config.yaml`'s
+     `commit-msg` stage). It refuses a message containing a `claude.ai` URL or a
+     `Claude-Session` trailer; `Co-Authored-By` is unaffected and git-stripped `#`
+     comments are ignored. Until 2026-08-29 that rule was enforced by **nothing** —
+     `scripts/` is git-ignored local tooling (by design, and it stays that way), and
+     the other hooks are formatting only, so the rule existed in prose alone. The
+     split is the same one AccuDisc arrived at the same day: **the script checks, the
+     tracked hook enforces.** `default_install_hook_types` carries `commit-msg` so a
+     plain `pre-commit install` installs both types — without it the guard is
+     configured and never invoked, which is precisely the failure it exists to prevent.
+     (If `pre-commit install` refuses with "Cowardly refusing… `core.hooksPath` set",
+     unset it — it was pointing at git's own default, so unsetting changes nothing.)
 3. **Run `uv run python scripts/sync.py`** — runs `ruff format` + `ruff check --fix` as a
    pre-flight, stages all changes, commits using `COMMIT_MSG`, pushes to `origin/main`,
    and runs `backup.py backup` (timestamped tarball in `backups/`).
