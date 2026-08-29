@@ -1414,13 +1414,62 @@ and they remain valid independent of the run1/run2 stochastic-sampling caveats.
 2. **Capture cost: C2 is free, subchannel ~25%.** C2 rides the same READ CD as the
    PCM (~0% overhead — always take it); raw P–W sub is a separate, slower decode
    (~20× vs ~25× effective) — the price of the "one careful pass."
-3. **Recovery is audio-keyed; Q is not targetable.** *Targeted re-reads*
-   (`--verify`/`--c2-retries`/`--ladder`) fix **localized audio**, and only that.
-   *Whole-disc speed* is the **only** lever that moves Q — and only its
-   transient/speed-marginal part; residual Q (0.2 / 0.8 / 2.0% across the three
-   discs) is largely **static** physical damage and no re-read combo improved it
-   (Q carries a CRC but no error correction). "Slow the whole rip" and "re-read
-   these spans" answer *different* problems.
+3. **~~Recovery is audio-keyed; Q is not targetable.~~ RETRACTED 2026-08-29 —
+   re-reading recovers most of the damaged Q population, and the original
+   measurement could not have seen it.** This entry said targeted re-reads fix
+   localized audio "and only that", that whole-disc speed is "the **only** lever
+   that moves Q", and that residual Q "is largely **static** physical damage and
+   no re-read combo improved it". The first clause survives; the rest does not.
+
+   **Measured on Tracy Chapman, 11 whole-disc passes** (`tools/q_retest.py`,
+   Keith lifted the standing rule against damage/recovery tests for this
+   question specifically). Requests 4/8/24/32/40x, every pass 97.31-98.05%
+   whole-pass Q-ok so the §4 crater gate never fired:
+
+   ```
+   frames bad in ANY pass  : 7508
+   frames bad in EVERY pass: 1421
+   recovered by re-reading : 6087  (81.1%)
+   ```
+
+   **Fixed-speed re-reading works** — three passes at one setting, no speed
+   variation at all: 37.7% recovered at 8x, 46.1% at 32x, 49.7% at 40x. So
+   `R6`'s premise below ("same-speed consensus converges on the wrong answer")
+   does not hold for Q, whatever its merits for audio.
+
+   **Speed diversity helps on top, and the effect is real rather than an
+   artefact of sample size.** Every 3-pass combination, like for like: same-speed
+   triples recover 44.5% on average, mixed-speed triples 57.3%, and **150 of 162
+   mixed triples beat the best same-speed triple.** Both levers are genuine;
+   neither is "the only" one.
+
+   **Why the original said otherwise.** It rested on aggregate `subq_bad`, and
+   that statistic cannot answer this question: ~3200 bad on two passes is
+   equally consistent with the same 3200 frames failing twice (correlated, no
+   recovery possible) and with 6400 distinct frames each failing once
+   (independent, all recoverable). Only the per-frame INTERSECTION separates
+   them. Every pass here holds ~3200 bad frames and the aggregate barely moves,
+   so the old measurement looked stable while the underlying set was churning by
+   two thirds.
+
+   Two controls, because "recovery" has cheap false explanations. If each pass
+   drew ~3200 bad frames at random the intersection would be 0 and the union
+   15655; observed is 1421 and 7508, so the damage is **structured** — a hard
+   core plus a large marginal population. And a positional slip would move bad
+   frames wholesale, but the low-LBA fingerprint is stable across passes
+   (`[5, 39, 48, 51, 56]`), so the drive was reading the same place.
+
+   **What still stands:** a hard core exists (1421 frames, 0.87% of the disc,
+   bad in all 11 passes), Q has a CRC but no ECC, and "slow the whole rip" and
+   "re-read these spans" remain different operations. What was wrong is the
+   claim that the second one does nothing for Q.
+
+   The population is **heterogeneous** and should not be summarised by one
+   number. Of the frames damaged at least once, 32.6% fail exactly one pass in
+   eleven and 18.9% fail all eleven — and a single-`q` model cannot produce both
+   at once (at q=0.80 it predicts an all/any ratio of 0.086 against the 0.189
+   observed, i.e. the hard core is twice what one failure rate allows). Two
+   populations, not one.
 4. **Speed request ≠ achieved rate, and some rungs are Q-hazardous.** Two gaps:
    (a) *request → accepted ceiling* — the drive quantizes to discrete steps (req 16
    → ceiling 8; `page2a` = accepted ceiling); (b) *ceiling → throughput* — CAV makes
