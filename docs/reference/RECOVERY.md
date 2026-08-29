@@ -1076,38 +1076,64 @@ rests on.
 
 > **Note on this file.** `docs/reference/RECOVERY.md` is one document hardlinked
 > into both the cdda2img and AccuDisc repos — one inode, two paths, and git
-> enforces nothing about the relationship. Most editors save atomically (write
-> temp, rename over target), which replaces the directory entry with a **new
-> inode** and silently severs the link; `sed -i` does the same. The two repos then
-> hold look-alike files that diverge from the next edit onward. Edit in place
-> (`cat new > RECOVERY.md`) and verify immediately.
+> enforces nothing about the relationship.
 >
-> **Verify inode *identity*, not link count.** Compare the two paths:
+> **Since 2026-08-29 the kernel enforces it.** The inode is `chattr +i`
+> (immutable), so it cannot be edited, truncated, renamed or deleted through
+> either name, by any tool, including the atomic-save editors that severed it
+> repeatedly. The failure mode this note used to describe is now unreachable
+> rather than merely discouraged.
+>
+> **To change it:**
+>
+> ```sh
+> cp docs/reference/RECOVERY.md /tmp/rec           # 1. copy out
+> $EDITOR /tmp/rec                                 # 2. edit however you like
+> doas /usr/local/bin/hardedit /tmp/rec docs/reference/RECOVERY.md   # 3. put back
+> b3read docs/reference/RECOVERY.md                # 4. verify
+> ```
+>
+> `hardedit(1)` is `mv` that preserves the destination **inode**: it backs the
+> file up, clears `+i`, truncates and rewrites in place, appends a BLAKE3
+> trailer, and restores `+i`. Because the directory entry is never touched,
+> every hardlink sees the new content at once. Use the **absolute** path — the
+> `doas` `nopass` rule matches the command string as typed. `-n` dry-runs it.
+>
+> **The file now carries its own checksum.** `b3read(1)` verifies a fixed
+> 72-byte trailer (`"\nBlake3 "` + 64 hex) covering the payload before it; the
+> digest is taken by reading the file back after the write, so it attests what
+> reached the disk rather than what passed through memory. `cat` therefore
+> returns payload **plus** trailer — use `b3read -p` where the exact bytes
+> matter. Exit **1 is corrupt** and **2 is unstamped**; they are deliberately
+> different answers and should not be collapsed.
+>
+> **Verify inode *identity*, not link count**, when checking the link itself:
 >
 > ```sh
 > [ "$(stat -c %i A)" = "$(stat -c %i B)" ] && cmp -s A B
 > ```
 >
-> The earlier version of this note said "the link count must be **2**", which is
+> An earlier version of this note said "the link count must be **2**", which is
 > the wrong property — it answers *how many names does this inode have*, when the
 > question is *are these two names the same file*. A backup made with `ln`, or a
 > third repo taking the document, gives `links=3` and a perfectly correct link
 > then reports as severed. Corrected 2026-07-25 after the same defect was found
-> in the repair script written to enforce it (§12.8's class, instance #7);
-> AccuDisc's `CLAUDE.md` carried the identical wording and has been flagged.
+> in the repair script written to enforce it (§12.8's class, instance #7).
 > Treat the link count as information worth printing, not as the assertion.
 >
-> If the inodes differ the link is severed. **Do not simply `ln -f`** — that
-> destroys whatever is at the target path, which may be the other project's work.
-> Diff the peer copy first and merge anything unique before relinking.
-> `tools/relink_recovery_md.sh` does all of this: no-ops when already linked,
-> refuses and prints the offending lines when the peer has unique content,
-> requires `--force` to discard them, and verifies inode identity plus `cmp`
-> afterwards.
+> **If it is ever severed anyway**, `cdda2img/tools/relink_recovery_md.sh`
+> repairs it: it no-ops when already linked, refuses and prints the offending
+> lines when the peer holds unique content, needs `--force` to discard them, and
+> verifies inode identity plus `cmp` afterwards. Never plain `ln -f` — that
+> destroys whatever is at the target, which may be the other project's work.
 >
-> (Severed and repaired four times on 2026-07-25 alone; the first time it went
-> unnoticed and the copies had diverged by 45 lines. The severing is caused by the
-> editing tool, so no amount of author care prevents it — only the check does.)
+> (History, kept because it is the argument for the flag: severed and repaired
+> four times on 2026-07-25 alone — the first went unnoticed and the copies had
+> diverged by 45 lines — and again between 2026-08-09 and 2026-08-29, found only
+> when someone next tried to edit it. The severing was always caused by the
+> *tool*, never by the author, which is why every convention written here failed
+> and an inode flag did not. On 2026-08-29 a botched edit also truncated this
+> file to **zero bytes in both repos at once**; `+i` now refuses that too.)
 
 ### 12.1 What the bench does
 
@@ -1909,3 +1935,5 @@ which is the lead-in failing *first*).
 That set lets a future reader distinguish "we never checked" from "we checked
 thoroughly and this disc cannot be verified" — which is the only useful thing
 left to say about it.
+
+Blake3 d5a4a9ae8eb6b6f421b2f9f47c6007b44eb29c9899290964e10a2fbd700e9519
