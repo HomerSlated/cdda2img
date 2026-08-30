@@ -1087,11 +1087,25 @@ rests on.
 > **To change it:**
 >
 > ```sh
-> cp docs/reference/RECOVERY.md /tmp/rec           # 1. copy out
-> $EDITOR /tmp/rec                                 # 2. edit however you like
-> doas /usr/local/bin/hardedit /tmp/rec docs/reference/RECOVERY.md   # 3. put back
-> b3read docs/reference/RECOVERY.md                # 4. verify
+> b3read -p docs/reference/RECOVERY.md > /var/tmp/rec  # 1. extract payload
+> $EDITOR /var/tmp/rec                                 # 2. edit however you like
+> doas /usr/local/bin/hardedit /var/tmp/rec docs/reference/RECOVERY.md  # 3. put back
+> b3read docs/reference/RECOVERY.md                    # 4. verify
 > ```
+>
+> **Extract with `b3read -p`, never `cp`.** `cp` copies the trailer too, and
+> both repos' `.editorconfig` sets `insert_final_newline = true` with no
+> `*.md` override — any EditorConfig-aware save appends one byte, which shifts
+> the trailer outside `hardedit`'s fixed-offset detection window. `hardedit`
+> then can't recognise it, swallows the old trailer into the new payload, and
+> stamps a fresh trailer over the polluted result — and **`b3read` still
+> reports `OK`**, because it only checks the new trailer against whatever
+> payload is in front of it, not whether the payload/trailer boundary was
+> found correctly. Found by cdda2img 2026-08-29, confirmed by reproduction on
+> a throwaway file: `cp` + one appended newline → `b3read` says `OK`, but
+> `b3read -p` returns a payload with the *previous* trailer line embedded in
+> it. `b3read -p` output already ends in a newline, so `insert_final_newline`
+> is satisfied and changes nothing on a clean extract.
 >
 > `hardedit(1)` is `mv` that preserves the destination **inode**: it backs the
 > file up, clears `+i`, truncates and rewrites in place, appends a BLAKE3
@@ -1762,6 +1776,99 @@ was a saturated core in userspace, which never touches the SG_IO path. The two s
 the word "contention" and not the coupling, so this bounds the CPU-load path only. The
 `flock` rule stays exactly as strict as it is.
 
+### 12.10 The §4 delegation test, and a silent read-side governor found because of it — 2026-08-30
+
+A joint AccuDisc/cdda2img test, run live over the same drive and disc as this Part,
+to settle how the recovery ladder should be delegated: one call sweeping the whole
+speed ladder internally (shape A), or the caller looping single-rung calls itself
+(shape B). Span LBA [110000, 118000) on Tracy Chapman — picked for damage density
+(4.1x the disc-wide static-Q rate), not for size. Full per-pass JSON for every arm
+is in `/var/tmp/q_ab_*.json` at the time of writing; not committed, per the scratch
+rule this document already applies to capture data elsewhere.
+
+**Verdict: shape (A).** Reason is narrower than it first looked: not that batching
+calls is inherently faster (though it is — see below), but that it removes the
+caller's *opportunity* to skip a required step, because the step is not exposed
+separately to skip. A shape-(B) contract that mandated "probe the ladder, scoped to
+your span, before you loop" would centralise the same correct logic in the same
+function and be equally sound — the two agents independently defaulted to the wrong
+speed-dedup signal (page-2A echo) on their first attempt at this test, which is
+evidence the correct primitive is easy to miss from the header as written, not
+evidence that call-boundary granularity is what fixes it.
+
+**The reproducible number**: (A)'s single 5-rung sweep took 64.1s total; (B)'s five
+independent calls took 81.1s for the same work. Per-rung streaming times matched
+between the two independently-built harnesses to within 0.5s on every rung — so the
+16.6s gap is call-boundary overhead (open/setup/close, paid once in (A), five times
+in (B)), not a different drive session behaving differently.
+
+**Then a follow-up test found something else.** Running the ladder in reverse order
+(`[4,8,24,32,40]` instead of `[40,32,24,8,4]`) on the same span, 40x collapsed from
+8.4-8.9s (when read first) to 32.9-52.6s (when read last) — replicated twice, a
+3.8-6.1x slowdown. Every other rung was unaffected by position **once the position
+mapping was done correctly**: a 5-element reversal only swaps the two end rungs
+(40x<->4x, 32x<->8x) and leaves the middle one (24x) fixed. 24x still moved +9.3%
+despite not changing position at all, which rules position out as the explanation
+for that delta and, by the same reasoning, for 32x (+11.4%) and 4x (+5.2%) — three
+deltas the same size moving the same way, which is what a shared noise/drift source
+looks like, not a secondary effect. 8x moved the fourth way, -2.6%, the smallest of
+the four and the only one in the opposite direction — if anything that strengthens
+"no attributable position effect outside 40x" rather than complicating it, since a
+real secondary effect would need a reason 8x moved opposite to the other three. Only
+40x's change is real: two orders of magnitude larger than anything the noise floor in
+the other four rungs could produce, and it moved the same direction (slower when last)
+in both replicates. Zero hard errors and zero flagged sectors in every rung of
+every arm throughout — a pure throughput effect, never a data-quality one.
+
+**The mechanism, from Keith directly and confirmed firsthand by both agents
+independently before either built on it:** a silent, damage-reactive READ-speed
+governor — the servo does not make decisions, the governor is the only thing that
+does, and an unhonoured request has exactly two possible causes: a calling-function
+bug in the SET path, or the governor judging the request unserviceable from its own
+media analysis. The first branch was checked, not assumed: `requested_x ==
+honoured_x` held on all 15 rung-readings across every arm of this test, zero
+mismatches, so the SET was acknowledged correctly every time and the governor is
+what's left. It caps a 48x request to 40x whenever the media is CD-DA (the static
+ceiling this document and the header already note — `accudisc.h:2549`) but will
+*also* cap a 40x request down further — the header example given was to 32x — once
+it detects damage on the span being read. It works silently: nothing in the mode
+pages announces it, which is exactly why `speed_honoured_x` matching the request is
+consistent with either branch and cannot by itself distinguish them — the throughput
+measurement is what separates "acknowledged and delivered" from "acknowledged and
+throttled." The only way to see it is to measure real throughput, which is exactly
+what this test did without knowing that was what it was measuring. **This is a
+different governor from the one already in this codebase** —
+`accudisc_write_governor_get/_set` and `accudisc_features.governor_*`
+(`accudisc.h:1308`, `:2046-2060`) are explicitly the WRITE-side POWEREC governor;
+this is a read-side mechanism with no library exposure at all today. Consistent
+with, and one layer deeper than, the standing project finding that page 2A reports
+the request rather than the delivery (see
+[[plextor-speedread-subq]] and the CAV work three weeks prior).
+
+**Why it fits the data cleanly**: 40x-first ran before the drive had scanned this
+span's damage at any other speed and delivered near its true rate; 40x-last ran
+after the same 8000 sectors had already streamed three times at other speeds,
+giving the governor's damage-detection time to engage before the fastest, most
+precision-demanding request was attempted. No other rung on this span sits at or
+near the CD-DA ceiling, which is consistent with why none of them showed the
+effect — though that is inference from the pattern, not something separately
+confirmed, since the governor gives no direct readback.
+
+**Consequence for the recovery-ladder API (§4).** A caller cannot trust
+`speed_honoured_x` as evidence that a requested rung actually delivered at that
+rate — this test is now a second, independent demonstration of that, on top of the
+July CAV work. Whatever shape the ladder-sweep call takes, it has to measure real
+delivered throughput per rung rather than trust the drive's own echo, and it should
+probably surface governor suspicion (a rung whose delivered rate falls well short
+of its own burst-probed ceiling) as a first-class result field rather than leaving
+callers to reconstruct it the way this test did by accident.
+
+**Not yet done, not blocking anything above**: no direct readback of the governor's
+state exists, so nothing here confirms the mechanism beyond consistency with every
+observation collected. A targeted probe — re-measuring 40x's burst rate *between*
+each of the other rungs in a sequence, rather than only at the ends — would show
+when in the sequence the cap engages, if it ever becomes worth the drive time.
+
 ---
 
 ## Part XI — Offset detection: three mechanisms compared (2026-07-21)
@@ -1936,4 +2043,4 @@ That set lets a future reader distinguish "we never checked" from "we checked
 thoroughly and this disc cannot be verified" — which is the only useful thing
 left to say about it.
 
-Blake3 d5a4a9ae8eb6b6f421b2f9f47c6007b44eb29c9899290964e10a2fbd700e9519
+Blake3 cd370a9f20355d1cb4fa1736368ca00904ef2919fe7643dd4bfce00394f25380
