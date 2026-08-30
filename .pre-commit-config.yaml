@@ -17,6 +17,12 @@ repos:
         exclude: ^.devcontainer/devcontainer.json
         args: [--autofix, --no-sort-keys]
       - id: end-of-file-fixer
+        # docs/reference/RECOVERY.md ends in a fixed 72-byte BLAKE3 trailer
+        # with NO terminating newline. b3read(1) locates it at a known offset
+        # from EOF rather than by searching for the marker, so an appended
+        # byte moves the trailer and the document reads as corrupt. The hook
+        # cannot win this one -- the file format defines its own last byte.
+        exclude: ^docs/reference/RECOVERY\.md$
       - id: trailing-whitespace
 
   - repo: https://github.com/astral-sh/ruff-pre-commit
