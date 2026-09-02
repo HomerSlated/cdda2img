@@ -33,6 +33,23 @@ MAX_TRACKS: int = 99  # Red Book §3.1.2
 MAX_RUNTIME_SECONDS: int = 4800  # 80 minutes
 CD_FRAMES_PER_SECOND: int = 75  # Red Book frame rate
 
+SAMPLES_PER_CD_FRAME: int = PCM_SAMPLE_RATE // CD_FRAMES_PER_SECOND  # 588 pairs
+BYTES_PER_CD_FRAME: int = (
+    SAMPLES_PER_CD_FRAME * PCM_CHANNELS * (PCM_BIT_DEPTH // 8)
+)  # 2352
+
+
+def frames_for_samples(n_samples: int) -> int:
+    """CD frames occupied by *n_samples* stereo sample pairs, rounded UP.
+
+    A partial frame still occupies a whole one on the disc, so this is the
+    ceiling and never the truncation. Callers that STORE audio must pad to match
+    what they DECLARE; splitting those two rules across call sites is what
+    produced the create-pipeline boundary drift (rbi_spec §6.2.1).
+    """
+    return -(-n_samples // SAMPLES_PER_CD_FRAME)
+
+
 # ---------------------------------------------------------------------------
 # Header layout — byte offsets (all fields relative to file start)
 # ---------------------------------------------------------------------------

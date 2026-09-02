@@ -32,6 +32,7 @@ from cdda2img.container import (
     TempFiles,
     build_container,
     extract_data,
+    pad_pcm_to_declared_frames,
     resolve_temp_dir,
     wav_to_raw_pcm,
 )
@@ -52,8 +53,8 @@ from cdda2img.silence import trim_silence_cd_da
 from cdda2img.toc import (
     build_toc_entries,
     generate_toc,
-    get_track_durations,
     sanitize_title,
+    track_frame_durations,
 )
 from cdda2img.transcode import transcode_audio
 
@@ -804,7 +805,8 @@ def create_image(
             concat_wav(source_wavs, temp.pcm_pre)
             wav_to_raw_pcm(temp.pcm_pre, temp.pcm_file)
 
-            durations = get_track_durations(source_wavs)
+            durations, total_frames = track_frame_durations(source_wavs)
+            pad_pcm_to_declared_frames(temp.pcm_file, total_frames)
             disc = RBIDisc(
                 album=album, artist=artist, disc_number=disc_num, disc_total=disc_total
             )

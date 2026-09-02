@@ -11,7 +11,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - **`import`** — import a foreign disc image (cdrdao TOC+BIN, DDP 2.0 / GEAR Pro, Nero NRG, CloneCD CCD/IMG, or PlexTools PXI)
 - **`extract`** — extract to per-track FLAC + CUE, or a TOC + s16le WAV image, or both
 - **`list`** — list container sections and track index with offsets and checksums
-- **`test`** — verify all block checksums and structural invariants (27 checks, exits 1 on failure)
+- **`test`** — verify all block checksums and structural invariants (the spec's 31 validation rules, incl. §6.2.1 PCM-vs-TOC geometry; exits 1 on failure)
 - **`burn`** — burn an RBI back to a blank CD-DA disc via AccuDisc (`write --toc --bin`; `--simulate` for a laser-off test write)
 - **`mount`** — extract a TOC+BIN scratch copy and load it into a cdemu virtual slot
 - **`catalogue`** — browse the local disc catalogue (summary, search, per-disc detail)

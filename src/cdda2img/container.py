@@ -29,6 +29,7 @@ from cdda2img.rbi_format import (
     BLOCK_TYPE_RGDB,
     BLOCK_TYPE_RLOG,
     BLOCK_TYPE_TOC,
+    BYTES_PER_CD_FRAME,
     CD_FRAMES_PER_SECOND,
     DIR_ENTRY_SIZE,
     DIR_ENTRY_STRUCT,
@@ -1310,6 +1311,33 @@ def list_container(  # noqa: C901
 # ---------------------------------------------------------------------------
 
 
+def pad_pcm_to_declared_frames(pcm_file: Path, total_frames: int) -> None:
+    """Zero-pad *pcm_file* up to *total_frames* whole CD frames, in place.
+
+    A disc must end on a frame boundary, so the sub-frame remainder left by a
+    sample-exact concatenation is filled once, here, at the lead-out — never at
+    each track join, which would insert silence across every boundary and break
+    a gapless album (rbi_spec §6.2.1).
+
+    The bounds check is the point: it asserts the shortfall really is a sub-frame
+    tail before filling it. Without it this would silently zero-fill *any*
+    disagreement between stored audio and declared geometry into agreement,
+    which is the whole class of defect the invariant exists to catch.
+    """
+    declared = total_frames * BYTES_PER_CD_FRAME
+    stored = pcm_file.stat().st_size
+    if not 0 <= declared - stored < BYTES_PER_CD_FRAME:
+        msg = (
+            f"create: PCM is {stored} bytes but the TOC declares {total_frames} "
+            f"frames ({declared} bytes) — expected a shortfall of less than one "
+            f"frame ({BYTES_PER_CD_FRAME} bytes), got {declared - stored}"
+        )
+        raise RuntimeError(msg)
+    if declared != stored:
+        with open(pcm_file, "ab") as f:
+            f.write(bytes(declared - stored))
+
+
 def verify_container(rbi_file: Path) -> bool:  # noqa: C901
     """Validate an RBI file against the RBI format specification (27 rules).
 
@@ -1657,6 +1685,32 @@ def verify_container(rbi_file: Path) -> bool:  # noqa: C901
                 )
             else:
                 check("30. ART image_format is recognised (1 = JPEG)", True)
+
+    # Rule 31: PCM length matches the geometry the TOC declares (rbi_spec §6.2.1).
+    # Every consumer addresses audio as frame x 2352 from byte 0, so a PCM longer
+    # than the TOC declares has a tail no reader can reach, and one that is
+    # shorter sends every reader past its end.
+    if toc_entries and pcm_entries:
+        from cdda2img.toc_parser import parse_toc
+
+        with open(rbi_file, "rb") as f:
+            f.seek(toc_entries[0].offset)
+            toc_geom = parse_toc(f.read(toc_entries[0].length))
+        declared_frames = sum(
+            t.pregap_frames + t.duration_frames for t in toc_geom.tracks
+        )
+        declared_bytes = declared_frames * BYTES_PER_CD_FRAME
+        pcm_len = pcm_entries[0].length
+        check(
+            f"31. PCM length == TOC geometry ({declared_frames} frames x "
+            f"{BYTES_PER_CD_FRAME})",
+            pcm_len == declared_bytes,
+            f"TOC declares {declared_bytes} bytes, PCM block is {pcm_len} "
+            f"(delta {pcm_len - declared_bytes:+d}, "
+            f"{(pcm_len - declared_bytes) / (BYTES_PER_CD_FRAME * 75) * 1000:+.1f} ms)",
+        )
+    else:
+        print("  [SKIP] 31. PCM length == TOC geometry (missing TOC or PCM entry)")
 
     total = len(passed) + len(failed)
     print()

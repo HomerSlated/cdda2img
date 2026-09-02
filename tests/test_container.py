@@ -21,6 +21,7 @@ from cdda2img.container import (
     build_container,
     build_prov_block,
     extract_data,
+    pad_pcm_to_declared_frames,
     read_header,
     verify_container,
     wav_to_raw_pcm,
@@ -43,7 +44,7 @@ from cdda2img.rbi_format import (
     RBIDisc,
 )
 from cdda2img.replaygain import analyse, pack_rg_block, unpack_rg_block
-from cdda2img.toc import build_toc_entries, generate_toc, get_track_durations
+from cdda2img.toc import build_toc_entries, generate_toc, track_frame_durations
 from cdda2img.toc_parser import parse_toc
 from cdda2img.track_extract import collect_track_flac_paths
 from cdda2img.transcode import transcode_audio
@@ -86,7 +87,7 @@ def built_containers(tmp_path_factory, wav_tracks):
     disc = RBIDisc(
         album="Test Album", artist="Test Artist", disc_number=1, disc_total=1
     )
-    durations = get_track_durations(wav_tracks)
+    durations, _ = track_frame_durations(wav_tracks)
     disc.tracks = build_toc_entries(_EXAMPLE_TRACKS, durations, disc)
     toc_data = generate_toc(disc)
 
@@ -136,7 +137,7 @@ def test_list_renders_canonical_catalogue_fields(tmp_path, wav_tracks):
         catalog_number="CID U2 6",
         catalog="0042284229821",
     )
-    durations = get_track_durations(wav_tracks)
+    durations, _ = track_frame_durations(wav_tracks)
     disc.tracks = build_toc_entries(_EXAMPLE_TRACKS, durations, disc)
     toc_data = generate_toc(disc)
 
@@ -144,6 +145,7 @@ def test_list_renders_canonical_catalogue_fields(tmp_path, wav_tracks):
     pcm = tmp_path / "all.pcm"
     concat_wav(wav_tracks, concat)
     wav_to_raw_pcm(concat, pcm)
+    pad_pcm_to_declared_frames(pcm, sum(durations))
 
     prov = {"mode": "create", "source": "/test", "ripper": "file"}
     _add_release_provenance(prov, disc)  # write side: disc fields -> PROV keys
@@ -168,7 +170,7 @@ def test_list_prov_dumps_noncurated_keys(tmp_path, wav_tracks):
     from cdda2img.container import _list_prov
 
     disc = RBIDisc(album="A", artist="B")
-    durations = get_track_durations(wav_tracks)
+    durations, _ = track_frame_durations(wav_tracks)
     disc.tracks = build_toc_entries(_EXAMPLE_TRACKS, durations, disc)
     toc_data = generate_toc(disc)
 
@@ -176,6 +178,7 @@ def test_list_prov_dumps_noncurated_keys(tmp_path, wav_tracks):
     pcm = tmp_path / "all.pcm"
     concat_wav(wav_tracks, concat)
     wav_to_raw_pcm(concat, pcm)
+    pad_pcm_to_declared_frames(pcm, sum(durations))
 
     prov = {
         "mode": "rip",
@@ -196,7 +199,7 @@ def test_list_prov_no_block(tmp_path, wav_tracks):
     from cdda2img.container import _list_prov
 
     disc = RBIDisc(album="A", artist="B")
-    durations = get_track_durations(wav_tracks)
+    durations, _ = track_frame_durations(wav_tracks)
     disc.tracks = build_toc_entries(_EXAMPLE_TRACKS, durations, disc)
     toc_data = generate_toc(disc)
 
@@ -204,6 +207,7 @@ def test_list_prov_no_block(tmp_path, wav_tracks):
     pcm = tmp_path / "all.pcm"
     concat_wav(wav_tracks, concat)
     wav_to_raw_pcm(concat, pcm)
+    pad_pcm_to_declared_frames(pcm, sum(durations))
 
     rbi = tmp_path / "np.rbi"
     build_container(pcm, toc_data, disc, rbi, prov_data=None)
@@ -419,7 +423,8 @@ def test_master_mode_flag(tmp_path_factory, wav_tracks):
     wav_to_raw_pcm(concat, pcm)
 
     disc = RBIDisc(album="Test Album", artist="Test Artist")
-    durations = get_track_durations(wav_tracks)
+    durations, _ = track_frame_durations(wav_tracks)
+    pad_pcm_to_declared_frames(pcm, sum(durations))
     disc.tracks = build_toc_entries(_EXAMPLE_TRACKS, durations, disc)
     toc_data = generate_toc(disc)
 
@@ -542,7 +547,8 @@ def test_prov_block_absent_when_not_passed(tmp_path_factory, wav_tracks):
     wav_to_raw_pcm(tmp / "all.wav", pcm)
 
     disc = RBIDisc(album="Test Album", artist="Test Artist")
-    durations = get_track_durations(wav_tracks)
+    durations, _ = track_frame_durations(wav_tracks)
+    pad_pcm_to_declared_frames(pcm, sum(durations))
     disc.tracks = build_toc_entries(_EXAMPLE_TRACKS, durations, disc)
     toc_data = generate_toc(disc)
 
@@ -599,7 +605,8 @@ def test_arip_block_roundtrip(tmp_path_factory, wav_tracks):
     wav_to_raw_pcm(tmp / "all.wav", pcm)
 
     disc = RBIDisc(album="ARIP Test", artist="Test Artist")
-    durations = get_track_durations(wav_tracks)
+    durations, _ = track_frame_durations(wav_tracks)
+    pad_pcm_to_declared_frames(pcm, sum(durations))
     disc.tracks = build_toc_entries(_EXAMPLE_TRACKS, durations, disc)
     toc_data = generate_toc(disc)
 

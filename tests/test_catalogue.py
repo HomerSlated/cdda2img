@@ -542,9 +542,13 @@ _have_examples = pytest.mark.skipif(
 def built_rbi(tmp_path_factory):
     """Build a minimal v4 RBI from example MP3s once per module."""
     from cdda2img.concat import concat_wav
-    from cdda2img.container import build_container, wav_to_raw_pcm
+    from cdda2img.container import (
+        build_container,
+        pad_pcm_to_declared_frames,
+        wav_to_raw_pcm,
+    )
     from cdda2img.rbi_format import RBIDisc
-    from cdda2img.toc import build_toc_entries, generate_toc, get_track_durations
+    from cdda2img.toc import build_toc_entries, generate_toc, track_frame_durations
     from cdda2img.transcode import transcode_audio
 
     tmp = tmp_path_factory.mktemp("rbi_fixture")
@@ -557,13 +561,15 @@ def built_rbi(tmp_path_factory):
     disc = RBIDisc(
         album="Test Album", artist="Test Artist", disc_number=1, disc_total=1
     )
-    disc.tracks = build_toc_entries(_EXAMPLE_TRACKS, get_track_durations(wavs), disc)
+    durations, _ = track_frame_durations(wavs)
+    disc.tracks = build_toc_entries(_EXAMPLE_TRACKS, durations, disc)
     toc_data = generate_toc(disc)
 
     concat = tmp / "all.wav"
     pcm = tmp / "all.pcm"
     concat_wav(wavs, concat)
     wav_to_raw_pcm(concat, pcm)
+    pad_pcm_to_declared_frames(pcm, sum(durations))
 
     rbi = tmp / "test.rbi"
     build_container(

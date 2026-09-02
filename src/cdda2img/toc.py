@@ -12,9 +12,11 @@ from unidecode import unidecode
 
 from cdda2img.barcode import normalize_barcode
 from cdda2img.rbi_format import (
-    CD_FRAMES_PER_SECOND,
+    PCM_SAMPLE_RATE,
+    SAMPLES_PER_CD_FRAME,
     RBIDisc,
     RBITocEntry,
+    frames_for_samples,
     timestamp_from_frames,
 )
 
@@ -107,14 +109,47 @@ def sanitize_title(text: str, field: str = "title") -> str:
     return escape_toc_string(fold_cdtext(text, field))
 
 
-def get_track_durations(wav_files: list[Path]) -> list[int]:
-    """Return CD frame counts (1/75 s) for each WAV file."""
-    durations = []
+def track_frame_durations(wav_files: list[Path]) -> tuple[list[int], int]:
+    """Per-track CD frame counts for a GAPLESS concatenation of *wav_files*.
+
+    Returns ``(durations, total_frames)``.
+
+    Each track boundary is snapped to the nearest CD frame of the *continuous*
+    stream, so the audio stays bit-identical to the concatenation and a gapless
+    album survives: only the index marks move, by at most half a frame (6.7 ms).
+    That error does **not** accumulate, because every boundary is derived from
+    the absolute cumulative sample count rather than from a running sum of
+    already-rounded durations — summing rounded values is what displaced later
+    tracks without bound (rbi_spec §6.2.1).
+
+    The final boundary rounds UP so no audio is ever dropped; the resulting
+    sub-frame remainder is padded once, at the lead-out, by the caller.
+    """
+    bounds = [0]
+    cumulative = 0
     for path in wav_files:
         with wave.open(str(path), "rb") as w:
-            frames_75 = int(w.getnframes() / w.getframerate() * CD_FRAMES_PER_SECOND)
-            durations.append(frames_75)
-    return durations
+            if w.getframerate() != PCM_SAMPLE_RATE:
+                msg = (
+                    f"{path.name}: {w.getframerate()} Hz is not Red Book audio "
+                    f"({PCM_SAMPLE_RATE} Hz required)"
+                )
+                raise ValueError(msg)
+            cumulative += w.getnframes()
+        # Round half-up in integers: duration arithmetic never goes through
+        # float here (CLAUDE.md), and this also avoids banker's rounding
+        # deciding the exact-half case (cumulative % 588 == 294).
+        bounds.append(
+            (cumulative * 2 + SAMPLES_PER_CD_FRAME) // (2 * SAMPLES_PER_CD_FRAME)
+        )
+    bounds[-1] = frames_for_samples(cumulative)  # ceil: never drop the tail
+
+    durations = [bounds[i + 1] - bounds[i] for i in range(len(wav_files))]
+    if any(d <= 0 for d in durations):
+        short = [i for i, d in enumerate(durations, 1) if d <= 0]
+        msg = f"track(s) {short} are shorter than one CD frame (1/75 s)"
+        raise ValueError(msg)
+    return durations, bounds[-1]
 
 
 def build_toc_entries(

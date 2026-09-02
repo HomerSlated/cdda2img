@@ -25,7 +25,12 @@ def apply_offset(pcm_path: Path, offset: int) -> None:
     and drop the last |N|*4 bytes.
 
     Raises ValueError if the file size is not a multiple of 2352 bytes (one CD
-    frame), which would indicate an incomplete or malformed rip.
+    frame). Shifting audio by a sample offset cannot repair a stream that does
+    not hold a whole number of frames, and every consumer downstream addresses
+    it as ``frame x 2352`` — so this refuses rather than silently producing a
+    differently-misaligned stream. See rbi_spec §6.2.1; validation rule 31 is
+    the primary check, and this is the last line of defence for callers that
+    reach here with PCM from somewhere else.
     """
     if offset == 0:
         return
@@ -33,8 +38,10 @@ def apply_offset(pcm_path: Path, offset: int) -> None:
     size = pcm_path.stat().st_size
     if size % _BYTES_PER_FRAME != 0:
         msg = (
-            f"PCM size {size} is not a multiple of {_BYTES_PER_FRAME} — "
-            "cannot apply drive offset to a malformed rip"
+            f"PCM size {size} is not a multiple of {_BYTES_PER_FRAME} "
+            f"({size % _BYTES_PER_FRAME} bytes into a partial frame) — audio "
+            "and declared track geometry disagree (rbi_spec §6.2.1); "
+            "cannot apply a drive offset to it"
         )
         raise ValueError(msg)
 

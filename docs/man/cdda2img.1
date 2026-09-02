@@ -542,10 +542,11 @@ done
 .\"
 .SS test \(em Test
 Verifies the integrity and spec\-conformance of an RBI image.
-Runs 27 checks covering magic bytes, format version, flags, block directory
-structure, file size, UTF\-8 metadata, BLAKE3 checksums for all blocks
-(SHA\-256 for legacy v4.x containers),
-TOC parse, and track\-count consistency.
+Runs the 31 validation rules of the RBI specification, covering magic bytes,
+format version, flags, block directory structure, file size, UTF\-8 metadata,
+BLAKE3 checksums for all blocks (SHA\-256 for legacy v4.x containers),
+TOC parse, track\-count consistency, and agreement between the PCM block
+length and the geometry the TOC declares.
 Exits with status 1 if any check fails.
 .PP
 .B "cdda2img test"

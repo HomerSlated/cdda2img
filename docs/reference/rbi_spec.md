@@ -348,6 +348,39 @@ The PCM block contains raw interleaved audio samples with no file wrapper.
 
 The PCM block contains only sample data — no RIFF header or chunk structure. Audio parameters needed to reconstruct a WAV file on extraction are stored in the fixed header. This ensures the block checksum is a pure integrity check over audio data.
 
+#### 6.2.1 Geometry invariant
+
+The PCM block length **MUST** equal the total geometry declared by the TOC block:
+
+```
+PCM.length == Σ (pregap_frames + duration_frames) × 2352
+```
+
+The block therefore always holds a whole number of CD frames. This binds the two
+representations of one disc: every consumer — extraction, burning, ReplayGain
+slicing, offset correction — addresses audio as `frame × 2352` from byte 0 of the
+block (§6.1.3), so a PCM block that is longer than the TOC declares has a tail no
+reader can reach, and one that is shorter sends every reader past its end.
+
+**Track boundaries are frame-quantised, and this is a property of the disc, not of
+the container.** IEC 60908 addresses tracks in MM:SS:FF, so an index point cannot
+fall between frames. A writer assembling a disc from sample-exact sources (the
+`create` path) **MUST** therefore resolve each boundary to a frame, and **MUST**
+derive every boundary from the *absolute* cumulative sample position rather than
+from a running sum of already-rounded durations — the latter accumulates its
+rounding error along the disc, displacing later tracks without bound.
+
+Two resolutions are conforming, and they differ in what they preserve:
+
+| Strategy | Stored audio | Boundary error | Gapless |
+|----------|--------------|----------------|---------|
+| **Snap** — round each boundary to the nearest frame, pad only the final frame | Bit-identical to the source concatenation | ≤ ½ frame (6.7 ms), non-accumulating | Preserved |
+| **Pad** — extend each track with silence to a frame boundary | Silence inserted at every join | Exact | Broken |
+
+A writer **SHOULD** snap. Padding every track is conforming but displaces the disc
+timeline by the inserted silence, which is audible across a continuous mix; it is
+appropriate only when exact per-track content matters more than continuity.
+
 ---
 
 ### 6.3 PROV Block (`b"PROV"`)
@@ -692,7 +725,7 @@ never persisted.
 
 ## 7. Validation Rules
 
-A conforming reader **MUST** enforce (30 rules):
+A conforming reader **MUST** enforce (31 rules):
 
 1. `magic == b'RBIMAGE\x00'`
 2. `version_major == 6` (reject if not equal — v6.0 is a clean break, §1)
@@ -724,6 +757,7 @@ A conforming reader **MUST** enforce (30 rules):
 28. ART block (if present): `length >= 10` (room for the fixed ART header)
 29. ART block (if present): `image_length == length − 10`
 30. ART block (if present): `image_format` is a recognised value (`1` = JPEG); a reader **SHOULD** warn and skip the block on an unrecognised value rather than reject the file (the block carries `BLOCK_FLAG_SKIP`)
+31. `PCM.length == Σ (pregap_frames + duration_frames) × 2352` over the TOC block's tracks (§6.2.1) — the PCM block holds exactly the audio the TOC describes, and a whole number of CD frames
 
 ---
 
