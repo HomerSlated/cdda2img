@@ -93,6 +93,25 @@ class ARVerifyResult:
     # full verification pipeline.
     dbar_b3sum: str | None = None
 
+    @property
+    def reachable(self) -> bool:
+        """True when an AccurateRip server gave a usable answer (2xx or 4xx).
+
+        False means **not verified**. That is a different state from "the disc is
+        not in the database" — which is a real answer, and the far commoner one —
+        and every consumer that reports AR status must keep the two apart.
+        """
+        return self.transport is not None
+
+    @property
+    def lookup_status(self) -> str:
+        """The ``lookup_status_accuraterip`` PROV value: ``OK``, ``empty`` or ``down``."""
+        if not self.reachable:
+            return "down"
+        return (
+            "OK" if any(t.max_confidence is not None for t in self.tracks) else "empty"
+        )
+
 
 def _checksum_bounds(n: int, track: int, total_tracks: int) -> tuple[int, int]:
     """Return the (lo, sum_to) half-open frame window a track's v1/v2 checksum
@@ -206,7 +225,8 @@ def _fetch_ar(
         in the database (HTTP 404). No HTTP fallback in this case — the
         same disc will 404 over either transport.
       * ``(None, "http")``     — analogous 404 on the HTTP fallback.
-      * ``(None, None)``       — both transports failed at the network level.
+      * ``(None, None)``       — both transports failed at the network level,
+        or answered only with a server error (5xx). Nothing usable was said.
 
     Responses larger than ``_AR_DBAR_MAX`` are treated as malformed: body
     is dropped, transport is still recorded (the server *did* answer).
@@ -225,7 +245,13 @@ def _fetch_ar(
                 # 404 is a legitimate negative — same disc will 404 over HTTP too.
                 return None, name
             log.warning("AccurateRip %s fetch failed: HTTP %d", name, exc.code)
-            last_transport = name
+            # A 4xx is an answer — the server understood and refused. A 5xx is a
+            # server-side failure that says nothing about the disc, and recording a
+            # transport for it made an AccurateRip outage read as "not in database".
+            # The ARVerifyResult comment and rbi_spec's arip_transport row both
+            # already said a 5xx must leave the transport None.
+            if exc.code < 500:
+                last_transport = name
             continue
         except (urllib.error.URLError, OSError) as exc:
             log.warning("AccurateRip %s fetch failed: %s", name, exc)
@@ -833,15 +859,43 @@ def _track_status(r: ARTrackResult) -> str:
     return f"MISMATCH (max {r.max_confidence})"
 
 
-def format_ar_report(results: list[ARTrackResult], read_offset: int = 0) -> str:
-    """Return a per-track AccurateRip verification report as a multi-line string.
+def _ar_report_short_form(
+    results: list[ARTrackResult], *, reachable: bool
+) -> str | None:
+    """The reports that carry no per-track table, or None when one is needed.
 
-    ``print_ar_report`` is a thin wrapper that prints this string verbatim.
+    Kept apart so the two no-evidence cases sit side by side, where the difference
+    between them is visible: *unreachable* (AccurateRip gave no answer, so nothing
+    is known) and *not in database* (AccurateRip answered, and the answer was no).
     """
     if not results:
         return ""
+    if not reachable:
+        return (
+            "AccurateRip: server unreachable — audio NOT verified\n"
+            '  (this is not "disc not in database": AccurateRip gave no answer)'
+        )
     if results[0].max_confidence is None:
         return "AccurateRip: disc not found in database"
+    return None
+
+
+def format_ar_report(
+    results: list[ARTrackResult], read_offset: int = 0, *, reachable: bool = True
+) -> str:
+    """Return a per-track AccurateRip verification report as a multi-line string.
+
+    ``print_ar_report`` is a thin wrapper that prints this string verbatim.
+
+    *reachable* is :attr:`ARVerifyResult.reachable`. Without it, an AccurateRip
+    that never answered produces the same all-``None`` results as a disc it has
+    never heard of, and the report used to say "disc not found in database" for
+    both. It defaults to True so a caller holding only per-track results keeps the
+    old behaviour rather than silently gaining a claim it cannot support.
+    """
+    short = _ar_report_short_form(results, reachable=reachable)
+    if short is not None:
+        return short
 
     n = len(results)
     n_ok = sum(
@@ -893,9 +947,11 @@ def format_ar_report(results: list[ARTrackResult], read_offset: int = 0) -> str:
     return "\n".join(lines)
 
 
-def print_ar_report(results: list[ARTrackResult], read_offset: int = 0) -> None:
+def print_ar_report(
+    results: list[ARTrackResult], read_offset: int = 0, *, reachable: bool = True
+) -> None:
     """Print a per-track AccurateRip verification report to stdout."""
-    text = format_ar_report(results, read_offset)
+    text = format_ar_report(results, read_offset, reachable=reachable)
     if text:
         for line in text.splitlines():
             print(f"   {line}")

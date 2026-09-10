@@ -48,6 +48,11 @@ class RipLogBuilder:
         self.drive_name = drive_name
         self.read_offset = read_offset
         self.ar_results: list[ARTrackResult] | None = None
+        # False when AccurateRip gave no usable answer. The results are then all
+        # max_confidence=None, exactly like a disc AR has never heard of, so without
+        # this the sealed log would record "not present in database" for a query
+        # that was never answered (rbi_spec §6.6).
+        self.ar_reachable: bool = True
         self.cddb_id: int | None = None
         self._created: str = datetime.datetime.now(datetime.timezone.utc).isoformat(
             timespec="seconds"
@@ -99,6 +104,16 @@ class RipLogBuilder:
             lines.append(f"  {t.track_number}:")
             if self.ar_results is not None and len(self.ar_results) >= t.track_number:
                 r = self.ar_results[t.track_number - 1]
+                if not self.ar_reachable:
+                    for ar_ver, crc in (("v1", r.v1_crc), ("v2", r.v2_crc)):
+                        lines.append(f"    AccurateRip {ar_ver}:")
+                        lines.append(
+                            "      Result: Not verified (AccurateRip unreachable)"
+                        )
+                        lines.append(f"      Local CRC: {crc}")
+                    # Not "Copy error": nothing was compared, so nothing failed.
+                    lines.append("    Status: Not verified")
+                    continue
                 if r.max_confidence is None:
                     for ar_ver, crc in (("v1", r.v1_crc), ("v2", r.v2_crc)):
                         lines.append(f"    AccurateRip {ar_ver}:")
@@ -123,7 +138,11 @@ class RipLogBuilder:
         lines.append("Conclusive status report:")
         if self.ar_results is not None:
             n = len(self.ar_results)
-            if self.ar_results[0].max_confidence is None:
+            if not self.ar_reachable:
+                lines.append(
+                    "  AccurateRip summary: Not verified (AccurateRip unreachable)"
+                )
+            elif self.ar_results[0].max_confidence is None:
                 lines.append(
                     "  AccurateRip summary: Disc not present in AccurateRip database"
                 )

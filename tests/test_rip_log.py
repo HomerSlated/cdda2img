@@ -202,6 +202,20 @@ class TestRipLogContent:
         assert "Disc not present in AccurateRip database" in block
         assert "Disc not present in database" in block
 
+    def test_ar_unreachable_is_not_recorded_as_not_in_db(self) -> None:
+        """Same all-None results as test_ar_not_in_db_summary — which is this test's
+        control — but AccurateRip never answered, so the sealed log must say so."""
+        builder = RipLogBuilder(rip_type="cdrdao")
+        builder.ar_results = _make_ar_not_in_db(2)
+        builder.ar_reachable = False
+        block = builder.finalize(_make_disc(2)).decode("utf-8")
+
+        assert "AccurateRip summary: Not verified (AccurateRip unreachable)" in block
+        assert "Result: Not verified (AccurateRip unreachable)" in block
+        assert "Status: Not verified" in block
+        assert "Disc not present" not in block
+        assert "Copy error" not in block
+
     def test_ar_mismatch_summary(self) -> None:
         builder = RipLogBuilder(rip_type="cdrdao")
         builder.ar_results = _make_ar_mismatch(2)

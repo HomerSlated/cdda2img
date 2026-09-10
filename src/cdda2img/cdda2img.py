@@ -3211,6 +3211,20 @@ def _drive_supports_c2(device: str) -> bool:
     return drive_supports_c2(device)
 
 
+def _warn_ar_unreachable(ui: TerminalUI | None) -> None:
+    """Say plainly that the rip is unverified, and why nothing tried to repair it."""
+    if ui is not None:
+        ui.pause()
+    print(
+        "   Warning: AccurateRip could not be reached, so this rip is NOT verified.\n"
+        "   CTDB parity repair and re-read recovery both need AccurateRip, and did not"
+        " run.\n"
+        "   Re-rip once AccurateRip is reachable to verify (and if need be repair) it."
+    )
+    if ui is not None:
+        ui.resume()
+
+
 def _ar_has_partial_mismatch(results: list) -> bool:
     """True when some (but not all) disc-in-database tracks have AR mismatches.
 
@@ -3793,9 +3807,17 @@ def rip_image(  # noqa: C901
         )
         if ui is not None:
             ui.pause()
-        print_ar_report(ar_verify.tracks, read_offset=read_offset)
+        print_ar_report(
+            ar_verify.tracks, read_offset=read_offset, reachable=ar_verify.reachable
+        )
         if ui is not None:
             ui.resume()
+        if not ar_verify.reachable:
+            # Both repair paths are keyed on an AR mismatch and need AR to re-verify
+            # what they splice, so with AR unreachable neither can run and skipping
+            # them is correct. What was wrong is that it happened silently, beneath a
+            # report that blamed the database.
+            _warn_ar_unreachable(ui)
 
         # CTDB parity repair FIRST (above the re-read ladder): error-only ctanalyse on the
         # raw PCM (network parity, zero extra reads), with C2 erasures if the C2 path
@@ -3852,7 +3874,11 @@ def rip_image(  # noqa: C901
                     # fail one while passing the other.
                     resolved=not _ar_has_partial_mismatch(ar_verify.tracks),
                 )
-                print_ar_report(ar_verify.tracks, read_offset=read_offset)
+                print_ar_report(
+                    ar_verify.tracks,
+                    read_offset=read_offset,
+                    reachable=ar_verify.reachable,
+                )
                 if ui is not None:
                     ui.resume()
         # AR-triggered fallback: partial mismatch → read error on specific tracks.
@@ -3884,6 +3910,12 @@ def rip_image(  # noqa: C901
             ar_responses, _ar_transport, _ar_b3 = fetch_ar_responses(
                 final_track_lsns, final_disc_last_lsn, cddb_id
             )
+            if not ar_responses:
+                log.warning(
+                    "AccurateRip dBAR re-fetch returned nothing (transport=%s); "
+                    "re-read recovery cannot verify a splice and will not run",
+                    _ar_transport,
+                )
             # The ladder comes from the resolved profile bound to THIS drive and
             # THIS disc (§9.3) — a self-throttling governor caps a degraded disc
             # regardless of drive capability, so it must be probed per rip.
@@ -3948,7 +3980,9 @@ def rip_image(  # noqa: C901
             )
             if ui is not None:
                 ui.pause()
-            print_ar_report(ar_verify.tracks, read_offset=read_offset)
+            print_ar_report(
+                ar_verify.tracks, read_offset=read_offset, reachable=ar_verify.reachable
+            )
             if ui is not None:
                 ui.resume()
 
@@ -3964,8 +3998,16 @@ def rip_image(  # noqa: C901
 
             park_spindle(device)
 
-        arip_block = pack_arip_block(
-            ar_verify.tracks, final_track_lsns, final_disc_last_lsn, cddb_id
+        # An ARIP block of all-NOT_IN_DB statuses is a sealed claim that AccurateRip
+        # answered "this disc is unknown". When it gave no answer at all, write no
+        # block: absence plus lookup_status_accuraterip=down is the honest record
+        # (rbi_spec §6.5).
+        arip_block = (
+            pack_arip_block(
+                ar_verify.tracks, final_track_lsns, final_disc_last_lsn, cddb_id
+            )
+            if ar_verify.reachable
+            else None
         )
 
         from cdda2img.rip_log import RipLogBuilder
@@ -3976,6 +4018,7 @@ def rip_image(  # noqa: C901
             read_offset=read_offset,
         )
         rlog_builder.ar_results = ar_verify.tracks
+        rlog_builder.ar_reachable = ar_verify.reachable
         rlog_builder.cddb_id = cddb_id
 
         output_stem = sanitize_title(disc.album) or device.lstrip("/").replace("/", "_")
@@ -3997,6 +4040,7 @@ def rip_image(  # noqa: C901
             provenance["arip_transport"] = ar_verify.transport
         if ar_verify.dbar_b3sum is not None:
             provenance["arip_dbar_b3sum"] = ar_verify.dbar_b3sum
+        provenance["lookup_status_accuraterip"] = ar_verify.lookup_status
         # CTDB provenance. The declined case matters most: without it a failed parity
         # repair is invisible in the container and has to be reverse-engineered from
         # the finished RBI (which is exactly what happened on 2026-07-25).
@@ -4060,7 +4104,9 @@ def rip_image(  # noqa: C901
                 and _r.confidence_450 is not None
             ):
                 provenance[f"ar450_track_{_r.track}"] = f"matched@{_r.confidence_450}"
-        ar_summary = format_ar_report(ar_verify.tracks, read_offset=read_offset)
+        ar_summary = format_ar_report(
+            ar_verify.tracks, read_offset=read_offset, reachable=ar_verify.reachable
+        )
         rbi_path = _finalize_import(
             disc,
             temp.pcm_file,

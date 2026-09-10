@@ -426,7 +426,7 @@ The PROV block stores provenance and extended metadata that has no natural home 
 | `art_source`               | Origin of the embedded ART-block image, as `<source>:<scope>:<id>`. Values: `caa:release-group:<uuid>`, `caa:release:<uuid>`, `discogs:<id>`, or `file:embedded` (cover lifted from a source file's tags during `create`). Emitted only when an ART block is present. Records the **confirmed** (post-menu) identifier the embedded art was fetched against, so a reader can detect art-vs-metadata drift. |
 | `duration_match_release`   | MusicBrainz release UUID, or `?` if the matched release carried no id. Emitted only when the stage-7 last-resort duration matcher fired — i.e. no higher source (CD-Text / MB disc-ID / Discogs / AcoustID / CDDB) identified the release in MB, and a text-search candidate's total duration matched the physical disc within tolerance. The lowest-trust identifier in the container; treat as a best guess pending user confirmation. |
 | `multi_match_isrc_disambiguated` | `YES`. Present when MB disc-ID returned >1 match and the in-memory ISRC tally (R1) picked a strictly-winning candidate. Absent when N=1 (no disambiguation needed) or when N>1 and the tally was a tie / sub-threshold. |
-| `arip_transport`           | `https` \| `http`. Emitted whenever at least one AccurateRip fetch attempt reached the server (any 2xx/4xx). `http` indicates the HTTPS attempt failed and the fetcher fell back to plaintext — readers SHOULD treat the confidence values with reduced trust. |
+| `arip_transport`           | `https` \| `http`. Emitted whenever at least one AccurateRip fetch attempt reached the server (any 2xx/4xx). A 5xx does **not** count as reaching it (the code recorded one until 2026-09-10, contradicting this row). `http` indicates the HTTPS attempt failed and the fetcher fell back to plaintext — readers SHOULD treat the confidence values with reduced trust. |
 | `arip_dbar_b3sum`          | 64 lowercase hex chars. BLAKE3 of the raw dBAR response body (pre-parse). Emitted only when a body was actually received. Lets later re-fetches detect AR-side changes or mirror tampering without re-running verification. (`arip_dbar_sha256` was the name used in v4.x; the value is semantically equivalent but computed with BLAKE3.) |
 | `recovery_passes`          | Integer (decimal string). Emitted only when speed-laddered AR recovery ran (a track failed AR and `recovery_passes>0`). The configured number of full ladder sweeps attempted per failed track (total attempts per track = `recovery_passes` × ladder steps). |
 | `recovery_ladder`          | Comma-separated drive read speeds, e.g. `4X,8X,16X,24X,32X,40X`. The drive's own probed speed ladder that recovery swept (fastest→slowest). Emitted alongside `recovery_passes`. |
@@ -445,6 +445,7 @@ The PROV block stores provenance and extended metadata that has no natural home 
 | `lookup_status_discogs`    | As `lookup_status_cddb`, for Discogs: **did Discogs reply**, nothing more. `OK` when either Discogs query returned anything — the barcode search or the MB→Discogs link follow. `disabled` covers the absence of a `DISCOGS_TOKEN`. Corrected 2026-08-08: it previously reported whether a Discogs hit was *merged into the disc*, which under fill-blank merge semantics reads `empty` precisely when the rest of the metadata is good — so the better the record, the more likely the status lied. A container could carry `lookup_status_discogs=empty` beside `discogs_corroborates=YES`, the latter having fetched a Discogs release in the same run. The merge/disambiguation outcome now has its own keys (`discogs_barcode_matches`, `discogs_barcode_outcome`). |
 | `lookup_status_acoustid`   | As `lookup_status_cddb`, for AcoustID. `disabled` covers R10 offline mode, the absence of an `ACOUSTID_API_KEY`, and missing pyacoustid / libchromaprint. |
 | `lookup_status_art`        | As `lookup_status_cddb`, for the album-art fetch. `OK` = an image was retrieved and embedded; `empty` = no source carried cover art; `down` = network/decode error; `disabled` = R10 offline mode (no live fetch attempted — a cover already embedded from source-file tags may still be present). |
+| `lookup_status_accuraterip` | `OK` \| `empty` \| `down`. Rip only. `OK` = the dBAR was fetched and describes this disc; `empty` = AccurateRip answered but the disc is not in its database (or no block matched the disc's IDs); `down` = **no usable answer** — a network failure on both transports, or only server errors (5xx). `down` means *not verified*, and this key is the only record of that state: the ARIP block is omitted (§6.5), because status `0` (`NOT_IN_DB`) is an answer AccurateRip gave, never a stand-in for one it did not. Added 2026-09-10 — before it, an unreachable AccurateRip was stored as `NOT_IN_DB`, printed as "disc not found in database", and CTDB repair and re-read recovery were skipped without a word. |
 
 All keys are optional. A writer **SHOULD** emit at minimum `creator` and `created`. A reader **MUST NOT** fail on a missing key.
 
@@ -561,6 +562,8 @@ RG values are computed using the EBU R128 / ITU-R BS.1770-3 integrated loudness 
 
 The ARIP block stores AccurateRip verification results for the disc.
 
+The block is **omitted** when AccurateRip could not be reached (`lookup_status_accuraterip=down`, §6.3.1). An absent block therefore means *not verified* (or a container that was never ripped); a present block whose tracks carry status `0` means AccurateRip **answered** that the disc is not in its database. Writers **MUST NOT** use status `0` to record a query that went unanswered — the two are indistinguishable once sealed, and they call for opposite actions (re-rip later versus nothing to verify against).
+
 #### 6.5.1 Binary layout
 
 **Block header (13 bytes):**
@@ -632,7 +635,7 @@ Tracks:
     Test CRC: <8 hex chars>
     Copy CRC: <8 hex chars>
     AccurateRip v1:
-      Result: <Found, exact match | Found, no match | Disc not present in database>
+      Result: <Found, exact match | Found, no match | Disc not present in database | Not verified (AccurateRip unreachable)>
       Confidence: <N>
       Local CRC: <8 hex chars>
       Remote CRC: <8 hex chars>
@@ -645,7 +648,7 @@ Tracks:
   ...
 
 Conclusive status report:
-  AccurateRip summary: <All tracks accurately ripped | N/M tracks accurately ripped | Disc not present in AccurateRip database>
+  AccurateRip summary: <All tracks accurately ripped | N/M tracks accurately ripped | Disc not present in AccurateRip database | Not verified (AccurateRip unreachable)>
   Health status: <No errors occurred | N errors occurred>
   EOF: End of status report
 

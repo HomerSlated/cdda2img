@@ -17,6 +17,8 @@ import urllib.error
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
 from cdda2img.accuraterip import (
     ARTrackResult,
     ARVerifyResult,
@@ -1248,3 +1250,116 @@ def test_detect_offset_probe_only_candidate_is_never_marked_confirmed() -> None:
     assert lead.tracks_450 == 3
     assert lead.tracks_v1 == lead.tracks_v2 == 0
     assert not lead.confirmed
+
+
+# ---------------------------------------------------------------------------
+# Unreachable is not "not in database" (rbi_spec §6.3.1 lookup_status_accuraterip)
+#
+# An AccurateRip that never answered produces the same all-None per-track results
+# as a disc it has never heard of. Until 2026-09-10 the report, the ARIP block and
+# the RLOG all recorded both as "not in database". Each test here that asserts the
+# new reading carries its control: the same data *with* an answer still reads the
+# old way, so the distinction cannot be satisfied by rewording everything.
+# ---------------------------------------------------------------------------
+
+
+def _http_error(code: int) -> urllib.error.HTTPError:
+    return urllib.error.HTTPError("https://x", code, "err", {}, None)  # type: ignore[arg-type]
+
+
+def test_fetch_ar_5xx_on_both_transports_is_unreachable() -> None:
+    """A server error tells us nothing about the disc: no transport recorded."""
+    from cdda2img.accuraterip import _fetch_ar
+
+    fake, calls = _fake_urlopen({
+        "https://": _http_error(503),
+        "http://": _http_error(502),
+    })
+    with patch("cdda2img.accuraterip.urllib.request.urlopen", side_effect=fake):
+        result, transport = _fetch_ar(1, "00000000", "00000000", 0)
+
+    assert result is None
+    assert transport is None
+    assert len(calls) == 2
+
+
+def test_fetch_ar_https_5xx_then_http_404_is_an_answer() -> None:
+    """Control for the 5xx rule: a 404 on the fallback is still a real answer."""
+    from cdda2img.accuraterip import _fetch_ar
+
+    fake, calls = _fake_urlopen({
+        "https://": _http_error(503)
+    })  # http:// -> default 404
+    with patch("cdda2img.accuraterip.urllib.request.urlopen", side_effect=fake):
+        result, transport = _fetch_ar(1, "00000000", "00000000", 0)
+
+    assert result is None
+    assert transport == "http"
+    assert len(calls) == 2
+
+
+def test_fetch_ar_non_404_4xx_still_counts_as_an_answer() -> None:
+    """A 403 means the server understood and refused — reached, per the spec's 2xx/4xx."""
+    from cdda2img.accuraterip import _fetch_ar
+
+    fake, _calls = _fake_urlopen({
+        "https://": _http_error(403),
+        "http://": _http_error(403),
+    })
+    with patch("cdda2img.accuraterip.urllib.request.urlopen", side_effect=fake):
+        _result, transport = _fetch_ar(1, "00000000", "00000000", 0)
+
+    assert transport is not None
+
+
+def _results(*max_confidences: int | None) -> list:
+    from cdda2img.accuraterip import ARTrackResult
+
+    return [
+        ARTrackResult(
+            track=i + 1,
+            v1_crc="00000000",
+            v2_crc="00000000",
+            confidence_v1=mc,
+            confidence_v2=None,
+            max_confidence=mc,
+        )
+        for i, mc in enumerate(max_confidences)
+    ]
+
+
+@pytest.mark.parametrize(
+    ("transport", "confidences", "reachable", "status"),
+    [
+        (None, (None, None), False, "down"),
+        ("https", (None, None), True, "empty"),  # control: same tracks, answered
+        ("http", (7, None), True, "OK"),
+    ],
+)
+def test_verify_result_reachability_and_status(
+    transport, confidences, reachable, status
+):
+    from cdda2img.accuraterip import ARVerifyResult
+
+    result = ARVerifyResult(tracks=_results(*confidences), transport=transport)
+    assert result.reachable is reachable
+    assert result.lookup_status == status
+
+
+def test_report_for_unreachable_ar_does_not_blame_the_database() -> None:
+    from cdda2img.accuraterip import format_ar_report
+
+    text = format_ar_report(_results(None, None), reachable=False)
+    assert "unreachable" in text
+    assert "NOT verified" in text
+    assert "not found in database" not in text
+
+
+def test_report_for_answered_not_in_db_is_unchanged() -> None:
+    """Control: identical results with an answer keep the database wording."""
+    from cdda2img.accuraterip import format_ar_report
+
+    assert (
+        format_ar_report(_results(None, None))
+        == "AccurateRip: disc not found in database"
+    )
