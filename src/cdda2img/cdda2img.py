@@ -4501,6 +4501,13 @@ def main() -> None:
 
     args = parse_args()
     _install_log_handler(verbose=args.verbose)
+    # The other entry-point-only global mutation: bound every urllib socket, the
+    # only lever musicbrainzngs offers. requests-based lookups (AcoustID, Discogs)
+    # ignore this default and pass their own timeout — see net.py for why one line
+    # cannot cover them.
+    from cdda2img.net import install_default_socket_timeout
+
+    install_default_socket_timeout()
     # Validate the config once, before anything touches a drive or the network
     # (accudisc-migration-plan.md §9.6). `setup` is exempt: it is the tool for
     # repairing a broken config, so refusing to start on one would be a trap with

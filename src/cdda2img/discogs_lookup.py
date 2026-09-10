@@ -8,12 +8,14 @@ is absent so callers need not branch on availability.
 
 from __future__ import annotations
 
+import functools
 import importlib.metadata
 import logging
 import os
 
 from cdda2img.barcode import normalize_barcode
 from cdda2img.lookup_result import DiscMeta, TrackMeta
+from cdda2img.net import NETWORK_TIMEOUT
 
 log = logging.getLogger(__name__)
 
@@ -66,9 +68,46 @@ def _get_client():
     try:
         import discogs_client  # type: ignore[import-untyped]
 
-        return discogs_client.Client(_USER_AGENT, user_token=token)
+        client = discogs_client.Client(_USER_AGENT, user_token=token)
     except ImportError:
         return None
+    # discogs_client exposes no timeout, and its stock fetcher calls
+    # requests.request() without one; requests ignores the process-wide socket
+    # default, so a stalled Discogs would block indefinitely (net.py). The fetcher
+    # is the library's own swap point — fetchers.py describes the abstraction as
+    # "designed to make testing easier", and ships a delegating fetcher of its own.
+    client._fetcher = _timeout_fetcher_class()(token)
+    return client
+
+
+@functools.cache
+def _timeout_fetcher_class():
+    """``UserTokenRequestsFetcher`` with a request timeout; see :mod:`cdda2img.net`.
+
+    Built lazily because ``discogs_client`` is imported lazily — a run with no
+    ``DISCOGS_TOKEN`` never imports it. The body mirrors the library's own ``fetch``
+    exactly, plus ``timeout=``; ``test_network_timeouts`` pins both the timeout and
+    that the stock fetcher still lacks one, so an upstream fix is noticed rather
+    than silently duplicated.
+    """
+    import requests
+    from discogs_client.fetchers import (  # type: ignore[import-untyped]
+        UserTokenRequestsFetcher,
+    )
+
+    class _TimeoutUserTokenFetcher(UserTokenRequestsFetcher):
+        def fetch(self, client, method, url, data=None, headers=None, json=True):
+            resp = requests.request(
+                method,
+                url,
+                params={"token": self.user_token},
+                data=data,
+                headers=headers,
+                timeout=NETWORK_TIMEOUT,
+            )
+            return resp.content, resp.status_code
+
+    return _TimeoutUserTokenFetcher
 
 
 def _discogs_primary_type(formats) -> str | None:

@@ -16,6 +16,7 @@ import os
 from pathlib import Path
 
 from cdda2img.lookup_result import DiscMeta
+from cdda2img.net import NETWORK_TIMEOUT
 from cdda2img.validators import validate_isrc
 
 log = logging.getLogger(__name__)
@@ -286,7 +287,11 @@ def fingerprint_and_lookup(wav_path: Path, *, verbose: bool = False) -> list[Dis
     try:
         import acoustid  # type: ignore[import-untyped]
 
-        raw_matches = list(acoustid.match(api_key, str(wav_path)))
+        # pyacoustid is requests-based, so the process-wide socket default does
+        # not reach it; without this a stalled AcoustID blocks forever (net.py).
+        raw_matches = list(
+            acoustid.match(api_key, str(wav_path), timeout=NETWORK_TIMEOUT)
+        )
     except Exception as exc:
         log.debug("AcoustID fingerprint failed for %s: %s", wav_path, exc)
         if verbose:

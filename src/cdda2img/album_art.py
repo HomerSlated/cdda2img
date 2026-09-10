@@ -35,6 +35,7 @@ from av.video.codeccontext import VideoCodecContext
 from av.video.frame import VideoFrame
 from mutagen import File as _MutagenFile  # type: ignore[import-untyped]  # LINT-004
 
+from cdda2img.net import NETWORK_TIMEOUT
 from cdda2img.rbi_format import (
     ART_BLOCK_VERSION,
     ART_IMAGE_FORMAT_JPEG,
@@ -123,7 +124,7 @@ def _ext_for(fmt: str) -> str:
 # Per-request socket timeout for all cover fetches. Any caller that waits on a
 # fetch (e.g. the pre-rip banner's worker join) must allow at least this long,
 # or a slow-but-successful fetch is abandoned before it can be displayed.
-HTTP_TIMEOUT = 30
+HTTP_TIMEOUT = NETWORK_TIMEOUT  # the one network timeout (net.py)
 
 
 def _http_get(url: str, max_bytes: int, headers: dict[str, str] | None = None) -> bytes:

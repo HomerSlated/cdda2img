@@ -532,6 +532,25 @@ Full specification: `docs/reference/rbi_spec.md`.
   CD-Text still shows nothing — correctly. **Two art fetches at different pipeline stages see
   different identification evidence; do not assume a missing preview means a missing cover.**
 - **Lookup caching (OPT-1/OPT-2)**: caching is process-lifetime only (`mb_lookup._DISC_ID_CACHE`, `album_art._COVER_CACHE`) — no persistence, no TTL, discarded on process exit. The former persistent R7 SQLite cache was removed; there is no longer a 30-day-TTL on-disk metadata cache.
+- **Network timeouts (2026-09-10): one constant, three mechanisms, because one global
+  cannot do it.** `net.NETWORK_TIMEOUT = 30` s per socket operation. **Measured** against a
+  server that accepts and never answers, in both the dev venv and the pipx install:
+  `socket.setdefaulttimeout` bounds **urllib** (musicbrainzngs — which has no timeout
+  argument, so this is its only lever) and is **ignored by requests** (pyacoustid,
+  discogs_client), which hands urllib3 `timeout=None` as "block forever". Hence: the
+  default is installed once in `main()` beside `_install_log_handler` (the second
+  entry-point-only global mutation); `acoustid.match(..., timeout=)`; and Discogs, whose
+  client exposes no timeout at all, gets a `UserTokenRequestsFetcher` subclass swapped in
+  at `discogs_lookup._get_client` (`_timeout_fetcher_class`). `album_art.HTTP_TIMEOUT`
+  aliases the constant so the banner's worker join follows it. **Two things it does not
+  do.** (1) It is per socket operation, not per call: musicbrainzngs retries a read
+  timeout 8x with 2..14 s sleeps, so one stalled MB request takes ~5 min to fail
+  (measured: a 1 s timeout took 64.1 s over 8 connections). (2) Neither mechanism bounds
+  **DNS** — `getaddrinfo` runs on libc's clock (glibc default 5 s x 2 per nameserver, the
+  10 s failure seen that day). `tests/test_network_timeouts.py` pins each mechanism via
+  `call_args` and carries the control that matters: `requests` still ignoring the socket
+  default, and the stock Discogs fetcher still lacking a timeout — if either ever changes,
+  the per-call timeouts become candidates for deletion, not silent duplication.
 - **Network gating**: there is no global offline-mode flag. Each lookup module gates itself via its own `is_available()` (Discogs needs `DISCOGS_TOKEN`; AcoustID needs `fpcalc` on PATH + an AcoustID key; etc.). With caching now process-lifetime only, there is no way to reproduce a prior rip's network metadata offline across separate invocations.
 - **Deferred work**: tracked in `docs/reference/TODO.md` under the `## Open`
   section at the top of the file. The current live item is OPT-4 (per-field
