@@ -235,6 +235,15 @@ class TerminalUI:
             self._prog = progress
             self._detail = detail
 
+    def set_status_text(self, text: str) -> None:
+        """Replace only the status text, keeping progress and detail.
+
+        For a notice raised from inside a phase (a MusicBrainz retry) that must not
+        turn an indeterminate bar into "0.0%" or reset a determinate one.
+        """
+        with self._slk:
+            self._status = text
+
     def set_map(
         self,
         damage: bytearray | None,

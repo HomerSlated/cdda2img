@@ -45,3 +45,15 @@ def test_mb_no_match_is_unknown(monkeypatch):
     monkeypatch.setattr(mb, "lookup_disc_id", lambda _disc: [])
     disc = types.SimpleNamespace(album=None, artist=None)
     assert _disc_preview_label(disc) == "(unknown)"
+
+
+def test_mb_unreachable_is_unknown(monkeypatch):
+    """The banner is cosmetic: an unreachable MusicBrainz shows "(unknown)"."""
+    import cdda2img.mb_lookup as mb
+
+    def _down(_disc):
+        raise mb.MBLookupError("network", "no route")
+
+    monkeypatch.setattr(mb, "lookup_disc_id", _down)
+    disc = types.SimpleNamespace(album=None, artist=None)
+    assert _disc_preview_label(disc) == "(unknown)"

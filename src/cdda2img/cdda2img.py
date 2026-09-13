@@ -2305,8 +2305,12 @@ def _run_metadata_lookups(
         mb_result.mb_candidate_artist,
     )
     provenance["lookup_status_mb"] = _r12_status(
-        attempted=True, has_data=mb_result.match_count > 0, errored=False
+        attempted=True,
+        has_data=mb_result.match_count > 0,
+        errored=mb_result.lookup_error is not None,
     )
+    if mb_result.lookup_error is not None:
+        provenance["lookup_error_mb"] = mb_result.lookup_error
 
     # Discogs (catalogue / label / country).
     from cdda2img import discogs_lookup as _discogs
@@ -2383,7 +2387,13 @@ def _run_metadata_lookups(
     # give up to make the duration matcher outrank CDDB on every other disc.
     # B-2: gate on the Layer-1 selected pressing, not the mutated disc. Identical
     # today (selected_release_id == disc.mb_release_id here); survives the B-4 flip.
-    if mb_result.selected_release_id is None and (disc.album or disc.artist):
+    # Skipped when the disc-ID lookup could not reach MusicBrainz: stage 7 queries
+    # the same service, and would retry for minutes to reach the same failure.
+    if (
+        mb_result.lookup_error is None
+        and mb_result.selected_release_id is None
+        and (disc.album or disc.artist)
+    ):
         from cdda2img.mb_lookup import duration_match_lookup, strip_pressing_mbid
 
         dm = duration_match_lookup(disc, verbose=mb_verbose)
@@ -2889,12 +2899,16 @@ def _disc_preview_label(disc) -> str:
     """
     from collections import Counter
 
-    from cdda2img.mb_lookup import lookup_disc_id
+    from cdda2img.mb_lookup import MBLookupError, lookup_disc_id
 
     if disc.album:
         return f"{disc.album} - {disc.artist}" if disc.artist else disc.album
 
-    pairs = [(m.album, m.artist) for m in lookup_disc_id(disc) if m.album]
+    try:
+        matches = lookup_disc_id(disc)
+    except MBLookupError:
+        return "(unknown)"
+    pairs = [(m.album, m.artist) for m in matches if m.album]
     if not pairs:
         return "(unknown)"
     album, artist = Counter(pairs).most_common(1)[0][0]
@@ -4612,7 +4626,24 @@ def _install_log_handler(*, verbose: bool) -> None:
         # at default verbosity these are notices to an operator watching a rip,
         # not a trace to correlate after the fact.
         handler.setFormatter(logging.Formatter("  %(levelname)s: %(message)s"))
+        # The root level alone no longer filters everything: the musicbrainzngs
+        # logger is lowered to INFO below, and propagation to root handlers ignores
+        # the root logger's level. Without this its retry chatter would print.
+        handler.setLevel(logging.WARNING)
     root.addHandler(handler)
+
+    # MusicBrainz retry notice. musicbrainzngs retries a stalled request 8 times
+    # (56 s against fast 503s, ~5 min when the connection stalls) with no public
+    # knob, and says so only at INFO. The notice
+    # turns those records into a short status line (mb_lookup.RetryNotice). The
+    # logger is lowered to INFO only if nothing already set it lower (--verbose).
+    from cdda2img.mb_lookup import RetryNotice
+
+    mb_log = logging.getLogger("musicbrainzngs")
+    if mb_log.getEffectiveLevel() > logging.INFO:
+        mb_log.setLevel(logging.INFO)
+    mb_log.handlers[:] = [h for h in mb_log.handlers if not isinstance(h, RetryNotice)]
+    mb_log.addHandler(RetryNotice())
 
 
 def main() -> None:

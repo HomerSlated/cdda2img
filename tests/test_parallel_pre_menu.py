@@ -315,6 +315,56 @@ def test_stage7_skipped_when_only_cddb_seeds_album() -> None:
     assert result.album == "From CDDB"
 
 
+@pytest.mark.parametrize("unreachable", [True, False], ids=["down", "empty-control"])
+def test_an_unreachable_musicbrainz_is_down_and_skips_stage7(unreachable: bool) -> None:
+    """``down`` is recorded, with its cause, and stage 7 is not asked.
+
+    Until 2026-09-13 ``lookup_status_mb`` was hard-coded ``errored=False``, so an
+    unreachable MusicBrainz read ``empty`` and stage 7 then queried the same dead
+    service. The control is a disc MusicBrainz genuinely does not know: ``empty``,
+    no error key, and stage 7 does run (its seed is present).
+    """
+    from cdda2img.mb_lookup import MBLookupError
+
+    disc = _seeded_disc()
+    cddb_meta = DiscMeta(album="From CDDB", release_date="2009", source="cddb")
+    lookup = (
+        patch(
+            "cdda2img.mb_lookup.lookup_disc_id",
+            side_effect=MBLookupError("network", "no route"),
+        )
+        if unreachable
+        else patch("cdda2img.mb_lookup.lookup_disc_id", return_value=[])
+    )
+    prov: dict[str, str] = {}
+    with (
+        patch("cdda2img.cddb.query_cddb", return_value=[cddb_meta]),
+        lookup,
+        patch("cdda2img.mb_lookup.duration_match_lookup", return_value=None) as dur,
+        patch(
+            "cdda2img.cdda2img._prepopulate_from_discogs",
+            side_effect=lambda d, *a, **k: (d, None, None),
+        ),
+        patch(
+            "cdda2img.cdda2img._r6_acoustid_corroborate",
+            side_effect=lambda d, *a, **k: d,
+        ),
+    ):
+        result, mb_result = _run(disc, prov)
+
+    if unreachable:
+        assert prov["lookup_status_mb"] == "down"
+        assert prov["lookup_error_mb"] == "network"
+        assert mb_result.lookup_error == "network"
+        dur.assert_not_called()
+    else:
+        assert prov["lookup_status_mb"] == "empty"
+        assert "lookup_error_mb" not in prov
+        dur.assert_called_once()
+    # CDDB still fills what nothing else did, either way.
+    assert result.release_date == "2009"
+
+
 # ---------------------------------------------------------------------------
 # §10.3 — release-selection provenance emission
 # ---------------------------------------------------------------------------

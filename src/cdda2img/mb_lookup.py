@@ -26,6 +26,7 @@ import importlib.metadata
 import logging
 import math
 import re
+import threading
 from collections import Counter
 from dataclasses import replace
 from typing import NamedTuple
@@ -39,6 +40,103 @@ from cdda2img.lookup_result import (
 from cdda2img.rbi_format import CD_FRAMES_PER_SECOND, RBIDisc, RBITocEntry
 
 log = logging.getLogger(__name__)
+
+
+class MBLookupError(RuntimeError):
+    """MusicBrainz gave no usable answer, which is not the same as "no match".
+
+    A 404 is MusicBrainz saying it does not know the disc, and ``lookup_disc_id``
+    returns ``[]`` for it. Everything else (no connection, a timeout, a 5xx after
+    musicbrainzngs's retries, a 4xx that means our request was malformed) raises
+    this, so the pipeline can record ``lookup_status_mb=down`` instead of
+    ``empty`` and skip fallbacks that would ask the same unreachable service.
+
+    *reason* is the HTTP status code as a string (``"503"``, ``"400"``) or
+    ``"network"`` when no HTTP response arrived. It is recorded verbatim as PROV
+    ``lookup_error_mb``.
+    """
+
+    def __init__(self, reason: str, detail: object) -> None:
+        super().__init__(f"MusicBrainz lookup failed ({reason}): {detail}")
+        self.reason = reason
+
+
+def _mb_error_reason(exc: Exception) -> str:
+    """The HTTP status behind a musicbrainzngs error, or ``"network"``.
+
+    After exhausting its retries musicbrainzngs raises ``NetworkError`` with the
+    *last* underlying exception as ``cause``, so a server that answered 503 eight
+    times surfaces as a NetworkError whose cause carries ``code == 503``.
+    """
+    code = getattr(getattr(exc, "cause", None), "code", None)
+    return str(code) if isinstance(code, int) else "network"
+
+
+# musicbrainzngs retries a timed-out or 5xx request inside ``_safe_read``, whose
+# ``max_retries=8`` is a private default with no public setter. So the delay cannot
+# be shortened without patching the library; what we can do is say why it is long.
+# The library logs one INFO record per retry, straight after an INFO record naming
+# the cause. Both strings and the count are pinned by tests/test_mb_retry_notice.py.
+MB_ATTEMPTS = 8
+_RETRY_RE = re.compile(r"retrying after delay \(#(\d+)\)")
+
+
+def retry_notice_text(retry_num: int, *, busy: bool) -> str:
+    """The status line for musicbrainzngs retry *retry_num* (1-based).
+
+    Retry *n* precedes attempt *n + 1*. The first attempt logs no retry, so eight
+    attempts produce seven notices, ``try 2/8`` .. ``try 8/8``; the absence of a
+    ``1/8`` line is by design.
+
+    At most 26 characters: the TUI truncates its status to ``cols // 3``, which is
+    26 on an 80-column terminal. "busy" when MusicBrainz answered with an HTTP
+    error (it rate-limits with 503), "slow" when it did not answer in time.
+    """
+    return (
+        f"MusicBrainz {'busy' if busy else 'slow'}: try {retry_num + 1}/{MB_ATTEMPTS}"
+    )
+
+
+class RetryNotice(logging.Handler):
+    """Turns musicbrainzngs's retry records into a short user-facing notice.
+
+    Installed on the ``musicbrainzngs`` logger by the CLI entry point (the only
+    place that mutates logging). A running TUI shows the notice in its status
+    line, keeping the bar's progress; otherwise it is printed on its own line.
+    The notice stays until the next phase sets its own status: the library logs
+    nothing when a retry finally succeeds, so there is no signal to clear it on.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(logging.INFO)
+        self._busy = threading.local()
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            msg = record.getMessage()
+            m = _RETRY_RE.match(msg)
+            if m is None:
+                # The cause is logged immediately before the retry, on the same
+                # thread: "HTTP error 503", "unknown HTTP error 429", "socket timeout".
+                self._busy.http = "HTTP error" in msg
+                return
+            text = retry_notice_text(
+                int(m.group(1)), busy=getattr(self._busy, "http", False)
+            )
+            from cdda2img.terminal_ui import active_ui
+
+            ui = active_ui()
+            if ui is not None and not ui.is_paused():
+                ui.set_status_text(text)
+            else:
+                print(f"  {text}", flush=True)
+        except Exception:
+            self.handleError(record)
+
+    def handleError(self, record: logging.LogRecord) -> None:
+        """Swallow, like ``TuiLogHandler``: a traceback on stderr would strand a TUI
+        frame, and a missing notice is cosmetic."""
+
 
 _LEAD_IN_SECTORS = 150  # standard 2-second Red Book lead-in
 
@@ -354,7 +452,13 @@ _DISC_ID_CACHE: dict[str, list[DiscMeta]] = {}
 def lookup_disc_id(disc: RBIDisc) -> list[DiscMeta]:
     """Look up releases on MusicBrainz by Disc ID computed from the disc TOC.
 
-    Returns a list of matching DiscMeta (empty on no match or network error).
+    Returns the matching releases; ``[]`` only when MusicBrainz answered 404 (it
+    does not know this disc ID) or the disc has no computable ID.
+
+    Raises :class:`MBLookupError` when MusicBrainz gave no usable answer, so "not in
+    MusicBrainz" and "MusicBrainz could not be asked" stay distinguishable. Until
+    2026-09-13 both returned ``[]``, the pipeline could not tell them apart, and
+    ``lookup_status_mb`` was never ``down``. Errors are not cached.
     """
     disc_id_str = disc_id_from_rbi(disc)
     if not disc_id_str:
@@ -405,16 +509,9 @@ def lookup_disc_id(disc: RBIDisc) -> list[DiscMeta]:
             log.debug("MusicBrainz disc ID %s not found (404)", disc_id_str)
             _DISC_ID_CACHE[disc_id_str] = []  # legitimate negative — cache it
             return []
-        log.warning(
-            "MusicBrainz disc ID lookup error (HTTP %s) — treating as no "
-            "match, but this is not a clean negative: %s",
-            code,
-            exc,
-        )
-        return []  # transient/unknown error — do NOT cache
+        raise MBLookupError(_mb_error_reason(exc), exc) from exc  # not cached
     except musicbrainzngs.NetworkError as exc:
-        log.debug("MusicBrainz network error: %s", exc)
-        return []  # transient — do NOT cache
+        raise MBLookupError(_mb_error_reason(exc), exc) from exc  # not cached
     releases = (result.get("disc") or {}).get("release-list") or []
     parsed = [_parse_release(r, _disc_id=disc_id_str) for r in releases]
     _DISC_ID_CACHE[disc_id_str] = parsed
@@ -1343,6 +1440,11 @@ class MBPrepopResult(NamedTuple):
     # was pinned (zero/inconsistent match, or a recording-level fallback that routed
     # through ``strip_pressing_mbid``) — exactly the condition the stage-7 gate fires on.
     selected_release_id: str | None = None
+    # Why the disc-ID lookup got no usable answer (``MBLookupError.reason``: an HTTP
+    # status or ``"network"``), or None when MusicBrainz answered. Drives
+    # ``lookup_status_mb=down`` + ``lookup_error_mb``, and tells the stage-7 gate
+    # not to query a service that just failed.
+    lookup_error: str | None = None
 
 
 def _prepop_zero_match(
@@ -1696,7 +1798,19 @@ def _prepopulate_from_mb(
     the multi-match path was resolved by R1.
     """
     _setup_useragent()
-    raw_matches = lookup_disc_id(disc)
+    try:
+        raw_matches = lookup_disc_id(disc)
+    except MBLookupError as exc:
+        # Not "unknown to MB": MB was not reachable. The R4 ISRC tally would ask the
+        # same service once per ISRC, each request retried for ~1 min (fast errors)
+        # to ~5 min (a stalled connection), to
+        # arrive at the same failure — so it is skipped, not attempted.
+        log.warning(
+            "MusicBrainz disc ID lookup failed (%s); skipping the ISRC fallback: %s",
+            exc.reason,
+            exc,
+        )
+        return MBPrepopResult(disc, [], 0, lookup_error=exc.reason)
     # Unit G: a candidate that contradicts a non-blank on-disc MCN / per-track
     # ISRC is the wrong record — drop it before any resolution runs. The disc's
     # objective ids are gospel; rejecting the whole record (rather than merging a

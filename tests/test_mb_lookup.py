@@ -378,26 +378,108 @@ def test_lookup_disc_id_single_match():
     assert r.tracks[0].isrc == "BEXX89300001"
 
 
-def test_lookup_disc_id_network_error():
+def _http_error(code: int) -> Exception:
+    import urllib.error
+
+    return urllib.error.HTTPError(
+        "https://musicbrainz.org/ws/2/discid/x",
+        code,
+        "x",
+        None,  # type: ignore[arg-type]
+        None,
+    )
+
+
+def test_lookup_disc_id_network_error_raises_and_is_not_cached():
+    """No connection means MusicBrainz could not be asked, not that it knows
+    nothing. Until 2026-09-13 this returned [] and read as "not in MusicBrainz"."""
     import musicbrainzngs
+
+    from cdda2img.mb_lookup import MBLookupError
 
     disc = _make_disc(tracks=[(1, 0, 18000)])
     with patch(
         "musicbrainzngs.get_releases_by_discid",
         side_effect=musicbrainzngs.NetworkError("timeout"),
-    ):
-        results = lookup_disc_id(disc)
-    assert results == []
+    ) as mock_mb:
+        with pytest.raises(MBLookupError) as info:
+            lookup_disc_id(disc)
+        with pytest.raises(MBLookupError):
+            lookup_disc_id(disc)
+    assert isinstance(info.value, MBLookupError)
+    assert info.value.reason == "network"
+    assert mock_mb.call_count == 2  # the failure was not cached
 
 
-def test_lookup_disc_id_response_error():
+def test_lookup_disc_id_404_is_a_cached_empty_answer():
+    """Control: a 404 is MusicBrainz's genuine "not known", and stays []."""
     import musicbrainzngs
 
     disc = _make_disc(tracks=[(1, 0, 18000)])
-    err = musicbrainzngs.ResponseError(cause=Exception("404"))
-    with patch("musicbrainzngs.get_releases_by_discid", side_effect=err):
-        results = lookup_disc_id(disc)
-    assert results == []
+    err = musicbrainzngs.ResponseError(cause=_http_error(404))
+    with patch("musicbrainzngs.get_releases_by_discid", side_effect=err) as mock_mb:
+        assert lookup_disc_id(disc) == []
+        assert lookup_disc_id(disc) == []
+    assert mock_mb.call_count == 1
+
+
+@pytest.mark.parametrize(
+    ("make_exc", "reason"),
+    [
+        (lambda mb: mb.ResponseError(cause=_http_error(400)), "400"),
+        # After its retries musicbrainzngs raises NetworkError carrying the last
+        # HTTPError as the cause, so a persistent 503 must still read as 503.
+        (lambda mb: mb.NetworkError("retried 8 times", _http_error(503)), "503"),
+    ],
+    ids=["400-bad-request", "503-after-retries"],
+)
+def test_lookup_disc_id_other_failures_raise_with_the_http_code(make_exc, reason):
+    import musicbrainzngs
+
+    from cdda2img.mb_lookup import MBLookupError
+
+    disc = _make_disc(tracks=[(1, 0, 18000)])
+    with (
+        patch(
+            "musicbrainzngs.get_releases_by_discid",
+            side_effect=make_exc(musicbrainzngs),
+        ),
+        pytest.raises(MBLookupError) as info,
+    ):
+        lookup_disc_id(disc)
+    assert isinstance(info.value, MBLookupError)
+    assert info.value.reason == reason
+
+
+def test_prepopulate_records_the_error_and_skips_the_isrc_fallback():
+    """The R4 ISRC tally asks the same service once per ISRC, each retried for
+    minutes; after a failed disc-ID lookup it can only fail the same way."""
+    from cdda2img.mb_lookup import MBLookupError
+
+    disc = _make_disc(tracks=[(1, 0, 18000)])
+    with (
+        patch(
+            "cdda2img.mb_lookup.lookup_disc_id",
+            side_effect=MBLookupError("503", "busy"),
+        ),
+        patch("cdda2img.mb_lookup._resolve_via_isrc_tally") as tally,
+    ):
+        result = prepopulate_from_mb(disc, verbose=False)
+    assert result.lookup_error == "503"
+    assert result.match_count == 0
+    tally.assert_not_called()
+
+
+def test_prepopulate_a_genuine_miss_still_tries_the_isrc_fallback():
+    """Control for the test above: only a failure skips R4, not an empty answer."""
+    disc = _make_disc(tracks=[(1, 0, 18000)])
+    with (
+        patch("cdda2img.mb_lookup.lookup_disc_id", return_value=[]),
+        patch("cdda2img.mb_lookup._resolve_via_isrc_tally", return_value=None) as tally,
+    ):
+        result = prepopulate_from_mb(disc, verbose=False)
+    assert result.lookup_error is None
+    tally.assert_called_once()
 
 
 def test_lookup_disc_id_empty_disc():
@@ -1446,15 +1528,20 @@ def test_lookup_disc_id_omits_discids_include():
     assert "discids" not in captured["includes"]
 
 
-def test_lookup_disc_id_400_logs_warning_not_silent(caplog):
+def test_lookup_disc_id_400_is_loud_not_a_clean_negative(caplog):
     """A non-404 ResponseError (e.g. a 400 from a bad include) must be loud.
 
     Swallowing a 400 as a clean "no match" is exactly what hid the discids
-    regression for so long. 404 stays quiet (a real "disc not in MB").
+    regression for so long. Since 2026-09-13 it raises ``MBLookupError`` (reason
+    ``"400"``) instead of returning [], and ``prepopulate_from_mb`` logs it at
+    WARNING and carries the reason on to ``lookup_status_mb=down``. 404 stays
+    quiet (a real "disc not in MB").
     """
     import logging
 
     import musicbrainzngs
+
+    from cdda2img.mb_lookup import MBLookupError
 
     disc = _make_disc(tracks=[(1, 0, 12345), (2, 12345, 6789)])
 
@@ -1467,7 +1554,12 @@ def test_lookup_disc_id_400_logs_warning_not_silent(caplog):
         patch("musicbrainzngs.get_releases_by_discid", side_effect=err),
         caplog.at_level(logging.WARNING, logger="cdda2img.mb_lookup"),
     ):
-        assert lookup_disc_id(disc) == []
+        with pytest.raises(MBLookupError) as info:
+            lookup_disc_id(disc)
+        result = prepopulate_from_mb(disc, verbose=False)
+    assert isinstance(info.value, MBLookupError)
+    assert info.value.reason == "400"
+    assert result.lookup_error == "400"
     assert any(r.levelno == logging.WARNING for r in caplog.records)
 
 
@@ -1981,8 +2073,11 @@ def test_lookup_disc_id_does_not_cache_network_error(
     monkeypatch.setattr(mb_lookup.musicbrainzngs, "get_releases_by_discid", _raise_net)
 
     disc = RBIDisc(album="x", artist="y")
-    assert mb_lookup.lookup_disc_id(disc) == []
-    assert mb_lookup.lookup_disc_id(disc) == []
+    # It raises rather than returning [] (2026-09-13), and must still not be cached.
+    with pytest.raises(mb_lookup.MBLookupError):
+        mb_lookup.lookup_disc_id(disc)
+    with pytest.raises(mb_lookup.MBLookupError):
+        mb_lookup.lookup_disc_id(disc)
     assert calls["n"] == 2  # transient error not cached
 
 

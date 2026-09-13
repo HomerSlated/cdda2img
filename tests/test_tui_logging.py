@@ -182,9 +182,14 @@ def _clean_root():
     """Save and restore global logging state — these tests mutate it by design."""
     root = logging.getLogger()
     saved, level = root.handlers[:], root.level
+    # _install_log_handler also installs the MusicBrainz retry notice.
+    mb = logging.getLogger("musicbrainzngs")
+    mb_saved, mb_level = mb.handlers[:], mb.level
     yield root
     root.handlers[:] = saved
     root.setLevel(level)
+    mb.handlers[:] = mb_saved
+    mb.setLevel(mb_level)
 
 
 def test_a_running_tui_gets_the_record(monkeypatch) -> None:
