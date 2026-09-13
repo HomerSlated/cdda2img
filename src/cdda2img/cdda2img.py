@@ -250,6 +250,12 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Skip the interactive metadata menu; accept the best-guess result automatically (default: from config, false)",
     )
+    c.add_argument(
+        "--allow-offline",
+        action="store_true",
+        default=False,
+        help="Proceed even if MusicBrainz is unreachable. Without it, a non-interactive run refuses to start (an interactive one asks); either way the container records what was unavailable (PROV network_preflight)",
+    )
 
     x = sub.add_parser("extract", help="Extract blocks from an RBI image")
     x.add_argument("rbi_file", type=Path, help="RBI file to extract")
@@ -427,6 +433,12 @@ def parse_args() -> argparse.Namespace:
         help="Skip the interactive metadata menu; accept the best-guess result automatically (default: from config, false)",
     )
     r_cmd.add_argument(
+        "--allow-offline",
+        action="store_true",
+        default=False,
+        help="Proceed even if AccurateRip or MusicBrainz is unreachable. Without it, a non-interactive run refuses to start (an interactive one asks); either way the container records what was unavailable (PROV network_preflight)",
+    )
+    r_cmd.add_argument(
         "--extract",
         action="store_true",
         default=False,
@@ -484,6 +496,12 @@ def parse_args() -> argparse.Namespace:
         action=argparse.BooleanOptionalAction,
         default=None,
         help="Skip the interactive metadata menu; accept the best-guess result automatically (default: from config, false)",
+    )
+    i_cmd.add_argument(
+        "--allow-offline",
+        action="store_true",
+        default=False,
+        help="Proceed even if MusicBrainz is unreachable. Without it, a non-interactive run refuses to start (an interactive one asks); either way the container records what was unavailable (PROV network_preflight)",
     )
 
     d_cmd = sub.add_parser("catalogue", help="Browse disc catalogue")
@@ -758,6 +776,7 @@ def create_image(
     tui: bool = True,
     duplicate_policy: str | None = None,
     auto: bool = False,
+    network_preflight: str | None = None,
 ) -> None:
     files = sorted(
         p for p in input_dir.iterdir() if p.is_file() and not p.name.startswith(".")
@@ -820,6 +839,8 @@ def create_image(
                 "lookup_status_cddb": "disabled",
                 "lookup_status_discogs": "disabled",
             }
+            if network_preflight is not None:
+                provenance["network_preflight"] = network_preflight
             disc = _r6_acoustid_corroborate_wavs(disc, source_wavs, provenance)
 
             # Identify the original release before the menu so the user
@@ -1186,6 +1207,7 @@ def import_image(
     tui: bool = True,
     duplicate_policy: str | None = None,
     auto: bool = False,
+    network_preflight: str | None = None,
 ) -> None:
     import sys
 
@@ -1207,6 +1229,8 @@ def import_image(
 
     try:
         disc, output_stem, provenance = _import_source(source, temp, ui)
+        if network_preflight is not None:
+            provenance["network_preflight"] = network_preflight
 
         cddb_track_lsns: list[int] | None = None
         cddb_disc_last_lsn: int | None = None
@@ -3580,6 +3604,7 @@ def rip_image(  # noqa: C901
     extract: bool = False,
     keep_rbi: bool = True,
     strategy: ResolvedStrategy | None = None,
+    network_preflight: str | None = None,
 ) -> None:
     import sys
 
@@ -4041,6 +4066,8 @@ def rip_image(  # noqa: C901
         if ar_verify.dbar_b3sum is not None:
             provenance["arip_dbar_b3sum"] = ar_verify.dbar_b3sum
         provenance["lookup_status_accuraterip"] = ar_verify.lookup_status
+        if network_preflight is not None:
+            provenance["network_preflight"] = network_preflight
         # CTDB provenance. The declined case matters most: without it a failed parity
         # repair is invisible in the container and has to be reverse-engineered from
         # the finished RBI (which is exactly what happened on 2026-07-25).
@@ -4304,11 +4331,40 @@ def mount_image(
     print(f"Unload:  cdemu unload {slot_used}")
 
 
+def _network_preflight(
+    pipeline: str, *, auto: bool, allow_offline: bool, cddb_server: str | None
+) -> str:
+    """Check the services *pipeline* depends on; return the PROV value.
+
+    Runs from dispatch so it precedes everything the pipeline invests in — drive
+    offset prompts, spin-up, transcoding. Raises NetworkUnavailable (a RuntimeError,
+    so ``main`` reports it and exits 1) when the run must not start. A prompt is
+    offered only on a TTY without ``--auto``: an unattended run cannot answer one.
+    """
+    import sys
+
+    from cdda2img.network_preflight import run_preflight, services_for
+
+    outcome = run_preflight(
+        services_for(pipeline, cddb_server=cddb_server),
+        interactive=sys.stdin.isatty() and not auto,
+        allow_offline=allow_offline,
+    )
+    return outcome.prov_value
+
+
 def _dispatch(args: argparse.Namespace) -> None:
     if args.cmd == "create":
         from cdda2img.config import load_config
 
         cfg = load_config()
+        auto = args.auto if args.auto is not None else cfg.auto
+        preflight = _network_preflight(
+            "create",
+            auto=auto,
+            allow_offline=args.allow_offline,
+            cddb_server=cfg.cddb_server,
+        )
         create_image(
             args.input_dir,
             silence_mode=args.silence,
@@ -4324,7 +4380,8 @@ def _dispatch(args: argparse.Namespace) -> None:
             low_dr_threshold=cfg.low_dr_threshold,
             tui=args.tui if args.tui is not None else cfg.tui,
             duplicate_policy=args.duplicate,
-            auto=args.auto if args.auto is not None else cfg.auto,
+            auto=auto,
+            network_preflight=preflight,
         )
     elif args.cmd == "rip":
         from cdda2img.config import load_config
@@ -4355,6 +4412,13 @@ def _dispatch(args: argparse.Namespace) -> None:
             profile_name=args.profile,
             config_default=cfg.default_profile,
         )
+        auto = args.auto if args.auto is not None else cfg.auto
+        preflight = _network_preflight(
+            "rip",
+            auto=auto,
+            allow_offline=args.allow_offline,
+            cddb_server=cfg.cddb_server,
+        )
         rip_image(
             args.device,
             loudness=args.loudness,
@@ -4363,10 +4427,11 @@ def _dispatch(args: argparse.Namespace) -> None:
             tui=args.tui if args.tui is not None else cfg.tui,
             low_dr_threshold=cfg.low_dr_threshold,
             duplicate_policy=args.duplicate,
-            auto=args.auto if args.auto is not None else cfg.auto,
+            auto=auto,
             extract=args.extract,
             keep_rbi=not args.no_keep_rbi,
             strategy=strategy,
+            network_preflight=preflight,
         )
     elif args.cmd == "import":
         if args.info:
@@ -4375,6 +4440,13 @@ def _dispatch(args: argparse.Namespace) -> None:
             from cdda2img.config import load_config
 
             cfg = load_config()
+            auto = args.auto if args.auto is not None else cfg.auto
+            preflight = _network_preflight(
+                "import",
+                auto=auto,
+                allow_offline=args.allow_offline,
+                cddb_server=cfg.cddb_server,
+            )
             import_image(
                 args.source,
                 loudness=args.loudness,
@@ -4382,7 +4454,8 @@ def _dispatch(args: argparse.Namespace) -> None:
                 low_dr_threshold=cfg.low_dr_threshold,
                 tui=args.tui if args.tui is not None else cfg.tui,
                 duplicate_policy=args.duplicate,
-                auto=args.auto if args.auto is not None else cfg.auto,
+                auto=auto,
+                network_preflight=preflight,
             )
     elif args.cmd == "extract":
         from cdda2img.config import load_config

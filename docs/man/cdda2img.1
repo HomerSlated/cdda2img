@@ -181,6 +181,18 @@ Overrides the
 configuration key for this run.
 Default: from config, ask (prompt if TTY, skip otherwise).
 .TP
+.B \-\-allow\-offline
+Proceed even if AccurateRip or MusicBrainz is unreachable.
+Before any audio is read, copied or transcoded,
+.B cdda2img
+checks that the network services the pipeline depends on are answering.
+If a required one is not, an interactive run asks whether to retry, continue or abort;
+a non\-interactive run (no TTY, or
+.BR \-\-auto )
+refuses to start unless this flag is given.
+Services that did not answer are recorded in the container's PROV block as
+.BR network_preflight .
+.TP
 .BR \-\-auto ", " \-\-no\-auto
 Skip the interactive metadata menu and accept the best\-guess result
 automatically.
@@ -292,6 +304,18 @@ subcommand.
 Same as for the
 .B rip
 subcommand.
+.TP
+.B \-\-allow\-offline
+Proceed even if MusicBrainz is unreachable.
+Before any audio is read, copied or transcoded,
+.B cdda2img
+checks that the network services the pipeline depends on are answering.
+If a required one is not, an interactive run asks whether to retry, continue or abort;
+a non\-interactive run (no TTY, or
+.BR \-\-auto )
+refuses to start unless this flag is given.
+Services that did not answer are recorded in the container's PROV block as
+.BR network_preflight .
 .TP
 .BR \-\-auto ", " \-\-no\-auto
 Same as for the
@@ -433,6 +457,18 @@ subcommand.
 Same as for the
 .B rip
 subcommand.
+.TP
+.B \-\-allow\-offline
+Proceed even if MusicBrainz is unreachable.
+Before any audio is read, copied or transcoded,
+.B cdda2img
+checks that the network services the pipeline depends on are answering.
+If a required one is not, an interactive run asks whether to retry, continue or abort;
+a non\-interactive run (no TTY, or
+.BR \-\-auto )
+refuses to start unless this flag is given.
+Services that did not answer are recorded in the container's PROV block as
+.BR network_preflight .
 .TP
 .BR \-\-auto ", " \-\-no\-auto
 Same as for the
