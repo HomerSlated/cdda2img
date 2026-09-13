@@ -177,6 +177,22 @@ FLAG_MASTER_MODE: int = (
     0x00000004  # bit 2 (even): created in master mode (no silence trim)
 )
 FLAGS_RESERVED_MASK: int = 0xFFFFFFFB  # all bits except FLAG_MASTER_MODE are reserved
+# Odd bit positions. None is defined, so any set bit here is one this reader
+# cannot understand and MUST reject (rbi_spec §4.2, rule 4).
+FLAGS_MUST_UNDERSTAND_MASK: int = 0xAAAAAAAA
+BLOCK_FLAGS_RESERVED_MASK: int = 0xFFFE  # every block_flags bit but BLOCK_FLAG_SKIP
+
+REQUIRED_BLOCK_TYPES: frozenset[bytes] = frozenset({BLOCK_TYPE_TOC, BLOCK_TYPE_PCM})
+# Every type_id this revision defines (rbi_spec §5.4). An entry outside this set
+# must carry BLOCK_FLAG_SKIP or the file is rejected (rule 32).
+KNOWN_BLOCK_TYPES: frozenset[bytes] = REQUIRED_BLOCK_TYPES | frozenset({
+    BLOCK_TYPE_PROV,
+    BLOCK_TYPE_RGDB,
+    BLOCK_TYPE_ARIP,
+    BLOCK_TYPE_RLOG,
+    BLOCK_TYPE_ART,
+    BLOCK_TYPE_CTDB,
+})
 
 # ---------------------------------------------------------------------------
 # Dataclasses
@@ -191,7 +207,7 @@ class RBIDirEntry:
     block_flags: int  # uint16; BLOCK_FLAG_SKIP etc.
     offset: int  # uint64; byte offset to start of block
     length: int  # uint64; byte length of block
-    checksum: bytes  # 32-byte BLAKE3 digest of block content (SHA-256 in v4.x)
+    checksum: bytes  # 32-byte BLAKE3 digest of block content
 
     @property
     def is_skippable(self) -> bool:

@@ -3,7 +3,6 @@ container.py — RBI container writer, reader, and extractor.
 """
 
 import datetime
-import hashlib
 import importlib.metadata
 import json
 import os
@@ -21,6 +20,7 @@ from cdda2img.rbi_format import (
     ART_HEADER_STRUCT,
     ART_IMAGE_FORMAT_JPEG,
     BLOCK_FLAG_SKIP,
+    BLOCK_FLAGS_RESERVED_MASK,
     BLOCK_TYPE_ARIP,
     BLOCK_TYPE_ART,
     BLOCK_TYPE_CTDB,
@@ -34,14 +34,17 @@ from cdda2img.rbi_format import (
     DIR_ENTRY_SIZE,
     DIR_ENTRY_STRUCT,
     FLAG_MASTER_MODE,
+    FLAGS_MUST_UNDERSTAND_MASK,
     HEADER_FIXED_SIZE,
     HEADER_STRUCT,
+    KNOWN_BLOCK_TYPES,
     MAGIC,
     MAX_TRACKS,
     OFFSET_DIR_OFFSET,
     PCM_BIT_DEPTH,
     PCM_CHANNELS,
     PCM_SAMPLE_RATE,
+    REQUIRED_BLOCK_TYPES,
     VERSION_MAJOR,
     VERSION_MINOR,
     RBIAlbumArt,
@@ -76,11 +79,6 @@ def _checksum_file(path: Path) -> bytes:
         for chunk in iter(lambda: f.read(65536), b""):
             h.update(chunk)
     return h.digest()
-
-
-def _sha256_bytes(data: bytes) -> bytes:
-    """SHA-256 digest — used only when reading v4.x containers."""
-    return hashlib.sha256(data).digest()
 
 
 # ---------------------------------------------------------------------------
@@ -265,7 +263,7 @@ def build_container(
     extra_flags: int = 0,
     quiet: bool = False,
 ) -> None:
-    """Assemble and write an RBI v5.0 container from raw PCM and TOC data.
+    """Assemble and write an RBI container from raw PCM and TOC data.
 
     Blocks are written in order: TOC → PROV → RGDB → ARIP → RLOG → ART → PCM.
     The block directory is appended last, and ``dir_offset`` is patched into the
@@ -408,7 +406,14 @@ def build_container(
 
 
 def read_header(file: Path) -> RBIHeader:
-    """Read and validate the fixed header and block directory of an RBI file (v4.x and v5.0+)."""
+    """Read and validate the fixed header and block directory of an RBI file.
+
+    Rejects what a reader MUST reject (rbi_spec §1, §4.2, §5.3): any major
+    version but ``VERSION_MAJOR``, a must-understand (odd-position) flag bit,
+    and a block type this revision does not define that lacks
+    ``BLOCK_FLAG_SKIP``. ``verify_container`` enforces the same gates, so
+    ``test`` never passes a file that ``list`` or ``extract`` refuses.
+    """
     with open(file, "rb") as f:
         fixed = f.read(HEADER_FIXED_SIZE)
         if len(fixed) < HEADER_FIXED_SIZE:
@@ -440,6 +445,13 @@ def read_header(file: Path) -> RBIHeader:
                 f"(this reader requires major version {VERSION_MAJOR})"
             )
             raise ValueError(msg)
+        unknown_odd_bits = flags & FLAGS_MUST_UNDERSTAND_MASK
+        if unknown_odd_bits:
+            msg = (
+                f"Unsupported container: flag bits 0x{unknown_odd_bits:08X} must be "
+                "understood to read this file, and this reader does not define them"
+            )
+            raise ValueError(msg)
 
         f.seek(dir_offset)
         directory: list[RBIDirEntry] = []
@@ -460,6 +472,18 @@ def read_header(file: Path) -> RBIHeader:
                     checksum=e_checksum,
                 )
             )
+
+    unknown = [
+        e.type_id.decode("ascii", errors="replace")
+        for e in directory
+        if e.type_id not in KNOWN_BLOCK_TYPES and not e.is_skippable
+    ]
+    if unknown:
+        msg = (
+            f"Unsupported container: block type(s) {unknown} are not marked "
+            "skippable, and this reader does not define them"
+        )
+        raise ValueError(msg)
 
     return RBIHeader(
         version_major=version_major,
@@ -482,21 +506,8 @@ def read_header(file: Path) -> RBIHeader:
 # ---------------------------------------------------------------------------
 
 
-def _stream_sha256(f, length: int) -> bytes:
-    """SHA-256 streaming digest — used only when reading v4.x containers."""
-    h = hashlib.sha256()
-    remaining = length
-    while remaining > 0:
-        chunk = f.read(min(65536, remaining))
-        if not chunk:
-            break
-        h.update(chunk)
-        remaining -= len(chunk)
-    return h.digest()
-
-
 def _stream_checksum(f, length: int) -> bytes:
-    """BLAKE3 streaming digest — used for v5.0+ containers."""
+    """BLAKE3 streaming digest."""
     import blake3 as _blake3
 
     h = _blake3.blake3()
@@ -680,9 +691,6 @@ def extract_data(  # noqa: C901
     header = read_header(container_file)
     stem = container_file.stem
 
-    _csum_bytes = _checksum_bytes if header.version_major >= 5 else _sha256_bytes
-    _csum_stream = _stream_checksum if header.version_major >= 5 else _stream_sha256
-
     toc_entry = header.find_block(BLOCK_TYPE_TOC)
     pcm_entry = header.find_block(BLOCK_TYPE_PCM)
     if toc_entry is None or pcm_entry is None:
@@ -693,9 +701,9 @@ def extract_data(  # noqa: C901
         f.seek(toc_entry.offset)
         toc_data = f.read(toc_entry.length)
         f.seek(pcm_entry.offset)
-        pcm_checksum = _csum_stream(f, pcm_entry.length)
+        pcm_checksum = _stream_checksum(f, pcm_entry.length)
 
-    _warn_checksum("TOC", _csum_bytes(toc_data), toc_entry.checksum)
+    _warn_checksum("TOC", _checksum_bytes(toc_data), toc_entry.checksum)
     _warn_checksum("PCM", pcm_checksum, pcm_entry.checksum)
 
     prov: dict[str, str] = {}
@@ -716,7 +724,7 @@ def extract_data(  # noqa: C901
         with open(container_file, "rb") as f:
             f.seek(rg_entry.offset)
             rg_raw = f.read(rg_entry.length)
-        if _csum_bytes(rg_raw) == rg_entry.checksum:
+        if _checksum_bytes(rg_raw) == rg_entry.checksum:
             rg_data = unpack_rg_block(rg_raw, header.track_count)
         else:
             print(
@@ -1261,8 +1269,7 @@ def list_container(  # noqa: C901
             with open(rbi_file, "rb") as f:
                 f.seek(rg_entry.offset)
                 rg_raw = f.read(rg_entry.length)
-            _csum = _checksum_bytes if header.version_major >= 5 else _sha256_bytes
-            if _csum(rg_raw) == rg_entry.checksum:
+            if _checksum_bytes(rg_raw) == rg_entry.checksum:
                 rg_data = unpack_rg_block(rg_raw, header.track_count)
                 parts.append(_rg_json_str(rg_data))
             else:
@@ -1339,9 +1346,9 @@ def pad_pcm_to_declared_frames(pcm_file: Path, total_frames: int) -> None:
 
 
 def verify_container(rbi_file: Path) -> bool:  # noqa: C901
-    """Validate an RBI file against the RBI format specification (27 rules).
+    """Validate an RBI file against the RBI format specification (33 rules).
 
-    Supports v4.x (SHA-256 checksums) and v5.0+ (BLAKE3 checksums).
+    Accepts only major version ``VERSION_MAJOR``, like ``read_header``.
     Prints a pass/fail line for each check. Returns True if all pass.
     """
     import re as _re
@@ -1391,9 +1398,9 @@ def verify_container(rbi_file: Path) -> bool:  # noqa: C901
     # Rules 1-8
     magic_ok = check("1. Magic bytes", magic == MAGIC, f"got {magic!r}")
     version_ok = check(
-        "2. Format version major in supported range (4-5)",
-        4 <= version_major <= VERSION_MAJOR,
-        f"major version {version_major} unsupported (supported: 4-{VERSION_MAJOR})",
+        f"2. Format version major == {VERSION_MAJOR}",
+        version_major == VERSION_MAJOR,
+        f"major version {version_major} unsupported (this reader requires {VERSION_MAJOR})",
     )
     if not (magic_ok and version_ok):
         print(f"\n  {len(failed)} check(s) FAILED — cannot continue.")
@@ -1408,7 +1415,13 @@ def verify_container(rbi_file: Path) -> bool:  # noqa: C901
             version_minor <= VERSION_MINOR,
         )
 
-    unknown_odd_bits = flags & ~FLAG_MASTER_MODE & 0xAAAAAAAA  # odd bit positions
+    unknown_odd_bits = flags & FLAGS_MUST_UNDERSTAND_MASK
+    unknown_even_bits = flags & ~FLAG_MASTER_MODE & ~FLAGS_MUST_UNDERSTAND_MASK
+    if unknown_even_bits:
+        print(
+            f"  [WARN] 4. Unknown even-position flag bits 0x{unknown_even_bits:08X}"
+            " — safe to ignore, proceeding"
+        )
     check(
         "4. No unknown odd-position flag bits",
         unknown_odd_bits == 0,
@@ -1551,9 +1564,8 @@ def verify_container(rbi_file: Path) -> bool:  # noqa: C901
         print("  [SKIP] 19. TOC TRACK AUDIO count (no TOC entry)")
         print("  [SKIP] 21. TOC block is valid UTF-8 (no TOC entry)")
 
-    # Rule 20: checksums for all blocks (SHA-256 for v4.x; BLAKE3 for v5.0+)
-    _stream_csum = _stream_checksum if version_major >= 5 else _stream_sha256
-    algo_label = "BLAKE3" if version_major >= 5 else "SHA-256"
+    # Rule 20: BLAKE3 checksums for all blocks
+    algo_label = "BLAKE3"
     print("  Verifying block checksums (may take a moment for PCM)...")
     for entry in directory:
         type_name = _BLOCK_NAMES.get(
@@ -1568,7 +1580,7 @@ def verify_container(rbi_file: Path) -> bool:  # noqa: C901
             continue
         with open(rbi_file, "rb") as f:
             f.seek(entry.offset)
-            computed = _stream_csum(f, entry.length)
+            computed = _stream_checksum(f, entry.length)
         check(
             f"20. {type_name} block checksum ({algo_label})", computed == entry.checksum
         )
@@ -1597,19 +1609,13 @@ def verify_container(rbi_file: Path) -> bool:  # noqa: C901
         except UnicodeDecodeError as exc:
             check("23. RLOG block is valid UTF-8", False, str(exc))
 
-        # Rule 27: RLOG self-seal (SHA-256 in v4.x; BLAKE3 in v5.0+)
-        if version_major >= 5:
-            import blake3 as _blake3
+        # Rule 27: RLOG BLAKE3 self-seal
+        import blake3 as _blake3
 
-            _seal_pattern = rb"BLAKE3: [0-9a-f]{64}"
-            _seal_prefix = b"BLAKE3: "
-            _seal_algo = lambda b: _blake3.blake3(b).hexdigest()
-            _seal_label = "27. RLOG BLAKE3 self-seal"
-        else:
-            _seal_pattern = rb"SHA-256: [0-9a-f]{64}"
-            _seal_prefix = b"SHA-256: "
-            _seal_algo = lambda b: hashlib.sha256(b).hexdigest()
-            _seal_label = "27. RLOG SHA-256 self-seal"
+        _seal_pattern = rb"BLAKE3: [0-9a-f]{64}"
+        _seal_prefix = b"BLAKE3: "
+        _seal_algo = lambda b: _blake3.blake3(b).hexdigest()
+        _seal_label = "27. RLOG BLAKE3 self-seal"
         lines = rlog_bytes.split(b"\n")
         if lines and _re.match(_seal_pattern, lines[-1]):
             body = b"\n".join(lines[:-1]) + b"\n"
@@ -1711,6 +1717,40 @@ def verify_container(rbi_file: Path) -> bool:  # noqa: C901
         )
     else:
         print("  [SKIP] 31. PCM length == TOC geometry (missing TOC or PCM entry)")
+
+    # Rule 32: an unknown block type must be skippable (rbi_spec §3, §5.3). This is
+    # the format's only forward-compatibility gate for blocks; read_header enforces
+    # it too, so `test` cannot pass a file `list` and `extract` refuse.
+    unknown_unskippable = [
+        e.type_id.decode("ascii", errors="replace")
+        for e in directory
+        if e.type_id not in KNOWN_BLOCK_TYPES and not e.is_skippable
+    ]
+    check(
+        "32. Unknown block types carry BLOCK_FLAG_SKIP",
+        not unknown_unskippable,
+        f"not skippable: {unknown_unskippable}",
+    )
+
+    # Rule 33: block_flags conform for the types this revision defines. An
+    # unknown type's flags are rule 32's alone - the revision that defined the
+    # block may also have defined its flags. read_header deliberately does not
+    # enforce this one: a mis-flagged block of a known type is still readable.
+    bad_block_flags = [
+        f"{e.type_id.decode('ascii', errors='replace')}=0x{e.block_flags:04X}"
+        for e in directory
+        if e.type_id in KNOWN_BLOCK_TYPES
+        and (
+            e.block_flags & BLOCK_FLAGS_RESERVED_MASK
+            or e.is_skippable != (e.type_id not in REQUIRED_BLOCK_TYPES)
+        )
+    ]
+    check(
+        "33. block_flags conform (reserved bits 0; TOC/PCM not skippable, "
+        "optional blocks skippable)",
+        not bad_block_flags,
+        f"{bad_block_flags}",
+    )
 
     total = len(passed) + len(failed)
     print()

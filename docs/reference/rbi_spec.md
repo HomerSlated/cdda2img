@@ -71,7 +71,7 @@ RBI is deliberately CD-DA-only. It does not attempt to represent raw physical se
 ├─────────────────────────────────────────────────────────┤
 │  BLOCK DIRECTORY (dir_count × 54 bytes)                 │
 │    One entry per block: type_id, flags, offset, length, │
-│    SHA-256 checksum                                     │
+│    BLAKE3 checksum                                      │
 └─────────────────────────────────────────────────────────┘
 ```
 
@@ -90,8 +90,8 @@ All multi-byte integer fields are **little-endian** unless otherwise noted.
 | Offset | Size (bytes) | Type      | Field             | Description |
 |--------|-------------|-----------|-------------------|-------------|
 | 0      | 8           | bytes     | `magic`           | `RBIMAGE\x00` (0x52 0x42 0x49 0x4D 0x41 0x47 0x45 0x00) |
-| 8      | 1           | uint8     | `version_major`   | Format major version; current value: `4` |
-| 9      | 1           | uint8     | `version_minor`   | Format minor version; current value: `1` (was `0` before the ART block; see version history) |
+| 8      | 1           | uint8     | `version_major`   | Format major version; current value: `6` |
+| 9      | 1           | uint8     | `version_minor`   | Format minor version; current value: `0` |
 | 10     | 4           | uint32 LE | `flags`           | Feature bitmask (see §4.2); currently only `FLAG_MASTER_MODE` defined |
 | 14     | 1           | uint8     | `track_count`     | Number of audio tracks (1–99) |
 | 15     | 1           | uint8     | `disc_number`     | This disc's position in a set (1-based; `1` for single discs) |
@@ -111,7 +111,7 @@ All multi-byte integer fields are **little-endian** unless otherwise noted.
 |-----|--------------|--------------------|-------------|
 | 2   | `0x00000004` | `FLAG_MASTER_MODE` | Container was created in master mode (no silence trimming or inter-track gap was applied to the source audio). Affects pre-gap interpretation in TOC. |
 
-All other bits are currently reserved and **MUST** be `0` in v4.0 files. Even-numbered bits indicate "safe to ignore if not understood"; odd-numbered bits indicate "must understand to read correctly." A reader encountering an unknown odd-position flag **MUST** reject the file.
+All other bits are currently reserved, and a writer **MUST** set them to `0`. A bit's position says what a reader does when it does not recognise it: even-numbered bits mean "safe to ignore if not understood" (a reader **MAY** proceed and **SHOULD** warn); odd-numbered bits mean "must understand to read correctly", and a reader encountering an unknown odd-position flag **MUST** reject the file (rule 4). No odd-position flag is defined in this revision.
 
 ---
 
@@ -121,7 +121,7 @@ All other bits are currently reserved and **MUST** be `0` in v4.0 files. Even-nu
 
 The block directory begins at `dir_offset` bytes from the start of the file. It consists of exactly `dir_count` consecutive entries, each 54 bytes. The directory is always written last, after all blocks; `dir_offset` is patched into the fixed header once all block offsets are known.
 
-`dir_offset + dir_count × 54 == file_size` in all well-formed v4.0 files.
+`dir_offset + dir_count × 54 == file_size` in all well-formed files.
 
 ### 5.2 Directory entry layout
 
@@ -142,6 +142,8 @@ The block directory begins at `dir_offset` bytes from the start of the file. It 
 | 0   | `0x0001` | `BLOCK_FLAG_SKIP`    | A reader that does not recognise `type_id` **MAY** skip this block and proceed. |
 
 All other bits are reserved and **MUST** be `0`. The required blocks (`TOC ` and `PCM `) **MUST NOT** set `BLOCK_FLAG_SKIP`. All optional blocks **MUST** set `BLOCK_FLAG_SKIP`.
+
+A reader **MUST** reject a file containing a `type_id` it does not recognise that lacks `BLOCK_FLAG_SKIP` (§3, rule 32). For the block types this revision defines, a verifier checks `block_flags` against this section and §5.4 (rule 33). The flags on an *unrecognised* block are governed by rule 32 alone: the revision that defined the block may also have defined its flags.
 
 ### 5.4 Block type identifiers
 
@@ -251,7 +253,7 @@ The `ISRC` line contains the ISO 3901 International Standard Recording Code (12 
 
 #### 6.1.5 Pre-gap storage
 
-Tracks on a CD-DA disc may have a pre-gap: a period of silence (or, rarely, audio) preceding the track's INDEX 01 point. RBI v4.0 stores pre-gap audio contiguously in the PCM block as part of the following track's slot.
+Tracks on a CD-DA disc may have a pre-gap: a period of silence (or, rarely, audio) preceding the track's INDEX 01 point. RBI stores pre-gap audio contiguously in the PCM block as part of the following track's slot.
 
 For a track with a pre-gap of duration P frames and audio of duration D frames:
 
@@ -729,12 +731,12 @@ never persisted.
 
 ## 7. Validation Rules
 
-A conforming reader **MUST** enforce (31 rules):
+A conforming reader **MUST** enforce (33 rules):
 
 1. `magic == b'RBIMAGE\x00'`
 2. `version_major == 6` (reject if not equal — v6.0 is a clean break, §1)
 3. `version_minor` known to this revision is `0`; a reader **MUST** warn (not reject) when `version_minor` exceeds the highest minor it understands, and **MAY** attempt to read, since minor increments are intended to be backwards-compatible
-4. `flags & ~0x00000004 == 0` (all bits except `FLAG_MASTER_MODE` reserved; reject if any unknown odd-position flag bit is set)
+4. `flags & 0xAAAAAAAA == 0` — no odd-position (must-understand) flag bit is set, since this revision defines none; reject otherwise. An unknown *even*-position bit is not grounds for rejection (§4.2)
 5. `reserved == b'\x00' × 7`
 6. `1 <= track_count <= 99`
 7. `1 <= disc_number <= disc_total`
@@ -762,6 +764,8 @@ A conforming reader **MUST** enforce (31 rules):
 29. ART block (if present): `image_length == length − 10`
 30. ART block (if present): `image_format` is a recognised value (`1` = JPEG); a reader **SHOULD** warn and skip the block on an unrecognised value rather than reject the file (the block carries `BLOCK_FLAG_SKIP`)
 31. `PCM.length == Σ (pregap_frames + duration_frames) × 2352` over the TOC block's tracks (§6.2.1) — the PCM block holds exactly the audio the TOC describes, and a whole number of CD frames
+32. Every directory entry whose `type_id` this revision does not define has `BLOCK_FLAG_SKIP` set (§3, §5.3); reject otherwise — an unknown block its writer did not mark skippable is one this reader cannot safely ignore
+33. For every directory entry whose `type_id` this revision defines: the reserved `block_flags` bits (`0xFFFE`) are `0`, `TOC ` and `PCM ` do not set `BLOCK_FLAG_SKIP`, and every optional block does (§5.3, §5.4)
 
 ---
 
