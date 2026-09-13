@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import bisect
 import copy
+import functools
 import importlib.metadata
 import logging
 import re
@@ -15,6 +16,7 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from cdda2img.accudisc_reader import ReadLanes
+    from cdda2img.accuraterip import ARVerifyResult
     from cdda2img.config import Config
     from cdda2img.ctdb_repair import CtdbRepairResult
     from cdda2img.field_resolver import FieldProposal
@@ -1208,7 +1210,12 @@ def import_image(
     duplicate_policy: str | None = None,
     auto: bool = False,
     network_preflight: str | None = None,
-) -> None:
+) -> list[str]:
+    """Import *source* into an RBI container.
+
+    Returns the required services the container records as ``down`` (see
+    :func:`rip_image`).
+    """
     import sys
 
     from cdda2img.config import load_config
@@ -1262,6 +1269,7 @@ def import_image(
         if ui is not None:
             ui.stop()
         temp.cleanup()
+    return _unanswered_services(provenance)
 
 
 def _collect_barcode_candidates(
@@ -2206,6 +2214,40 @@ def _cddb_consensus(
     return cddb_meta
 
 
+def _retry_mb_lookup(
+    mb_result: MBPrepopResult,
+    disc: RBIDisc,
+    retry_service: Callable[[str, str], bool] | None,
+    ui: TerminalUI | None,
+    *,
+    verbose: bool,
+    preferred_country: list[str],
+) -> MBPrepopResult:
+    """While the MusicBrainz disc-ID lookup could not be asked, offer to try again.
+
+    Only that lookup is repeated: CDDB, which ran beside it, already answered or
+    failed on its own. A failed lookup leaves *disc* untouched, so the same disc is
+    the right input again.
+    """
+    from cdda2img.mb_lookup import prepopulate_from_mb
+
+    while (
+        mb_result.lookup_error is not None
+        and retry_service is not None
+        and retry_service("MusicBrainz", _mb_error_detail(mb_result.lookup_error))
+    ):
+        _ui_status(ui, "Retrying MusicBrainz…")
+        mb_result = prepopulate_from_mb(
+            disc, verbose=verbose, preferred_country=preferred_country
+        )
+    return mb_result
+
+
+def _mb_error_detail(reason: str) -> str:
+    """``MBLookupError.reason`` in words, for the retry prompt."""
+    return "no response" if reason == "network" else f"HTTP {reason}"
+
+
 def _run_metadata_lookups(
     disc: RBIDisc,
     pcm_file: Path,
@@ -2220,6 +2262,7 @@ def _run_metadata_lookups(
     preferred_country: list[str],
     ui: TerminalUI | None,
     _shadow_out: dict[str, object] | None = None,
+    retry_service: Callable[[str, str], bool] | None = None,
 ) -> tuple[RBIDisc, MBPrepopResult]:
     """Run every remote metadata lookup and merge results into *disc* in
     precedence order: disc-baked CD-Text > MusicBrainz > Discogs > AcoustID
@@ -2284,6 +2327,15 @@ def _run_metadata_lookups(
         mb_result = prepopulate_from_mb(
             disc, verbose=mb_verbose, preferred_country=preferred_country
         )
+
+    mb_result = _retry_mb_lookup(
+        mb_result,
+        disc,
+        retry_service,
+        ui,
+        verbose=mb_verbose,
+        preferred_country=preferred_country,
+    )
 
     cddb_meta = _cddb_consensus(cddb_matches, provenance, cddb_verbose)
 
@@ -2514,6 +2566,9 @@ def _finalize_import(
         mb_verbose=mb_verbose,
         preferred_country=preferred_country or [],
         ui=ui,
+        retry_service=functools.partial(
+            _offer_service_retry, ui, interactive=_interactive(auto)
+        ),
     )
 
     # Identify the original release BEFORE the menu so the user sees
@@ -3249,6 +3304,95 @@ def _drive_supports_c2(device: str) -> bool:
     return drive_supports_c2(device)
 
 
+EXIT_WRITTEN_WITH_CAVEATS = 3
+
+# The PROV status keys of the services a container's provenance depends on, and the
+# name to report. A container recording `down` for one of these was written without
+# that service's answer: `_dispatch` exits 3 for it (man page, EXIT STATUS).
+_REQUIRED_SERVICE_STATUS = {
+    "lookup_status_accuraterip": "AccurateRip",
+    "lookup_status_mb": "MusicBrainz",
+}
+
+
+def _unanswered_services(provenance: dict[str, str]) -> list[str]:
+    """Required services this container's provenance records as ``down``."""
+    return [
+        name
+        for key, name in _REQUIRED_SERVICE_STATUS.items()
+        if provenance.get(key) == "down"
+    ]
+
+
+def _interactive(auto: bool) -> bool:
+    """A prompt can be answered: a TTY, and not ``--auto``. Same rule as the pre-flight."""
+    import sys
+
+    return sys.stdin.isatty() and not auto
+
+
+def _offer_service_retry(
+    ui: TerminalUI | None,
+    service: str,
+    detail: str,
+    *,
+    interactive: bool,
+    input_fn: Callable[[str], str] = input,
+) -> bool:
+    """Ask whether to try *service* again after it failed mid-run. True = retry.
+
+    Unlike the pre-flight there is no abort: by the time this is asked the disc has
+    been read or the image converted, and continuing costs nothing that re-running
+    would not. Enter retries, since the likely reason for waiting at a prompt is to
+    fix the network first. Continuing writes a container that records the service
+    as ``down`` and makes the run exit with status 3. Never asked when *interactive*
+    is false (no TTY, or ``--auto``): an unattended run continues.
+    """
+    if not interactive:
+        return False
+    if ui is not None:
+        ui.pause()
+    try:
+        print(f"   {service} did not answer ({detail}).")
+        while True:
+            try:
+                answer = input_fn(
+                    f"   [R]etry {service}, or [c]ontinue without it"
+                    " (exit status 3)? [R/c] "
+                )
+            except EOFError:
+                return False
+            answer = answer.strip().lower()
+            if answer in ("", "r", "retry"):
+                return True
+            if answer in ("c", "continue"):
+                return False
+    finally:
+        if ui is not None:
+            ui.resume()
+
+
+def _verify_ar_with_retry(
+    verify: Callable[[], ARVerifyResult],
+    ui: TerminalUI | None,
+    *,
+    interactive: bool,
+) -> ARVerifyResult:
+    """Run *verify*; while AccurateRip gives no answer, offer to try again.
+
+    Only the first verification of a rip goes through here. The later ones (after a
+    CTDB repair or a re-read) run only when this one reached AccurateRip, so a
+    second prompt there would be for a service that just answered.
+    """
+    result = verify()
+    while not result.reachable and _offer_service_retry(
+        ui, "AccurateRip", "no response", interactive=interactive
+    ):
+        _ui_status(ui, "Retrying AccurateRip…")
+        result = verify()
+    return result
+
+
 def _warn_ar_unreachable(ui: TerminalUI | None) -> None:
     """Say plainly that the rip is unverified, and why nothing tried to repair it."""
     if ui is not None:
@@ -3619,7 +3763,13 @@ def rip_image(  # noqa: C901
     keep_rbi: bool = True,
     strategy: ResolvedStrategy | None = None,
     network_preflight: str | None = None,
-) -> None:
+) -> list[str]:
+    """Rip *device* into an RBI container.
+
+    Returns the required services the written container records as ``down``
+    (:func:`_unanswered_services`); ``_dispatch`` turns a non-empty list into exit
+    status 3.
+    """
     import sys
 
     from cdda2img import drive_speed
@@ -3837,12 +3987,16 @@ def rip_image(  # noqa: C901
         ctdb_result: CtdbRepairResult | None = None
 
         _ui_status(ui, "Verifying AccurateRip…")
-        ar_verify = verify_rip(
-            temp.pcm_file,
-            final_track_lsns,
-            final_disc_last_lsn,
-            read_offset=ar_offset,
-            cddb_id=cddb_id,
+        ar_verify = _verify_ar_with_retry(
+            lambda: verify_rip(
+                temp.pcm_file,
+                final_track_lsns,
+                final_disc_last_lsn,
+                read_offset=ar_offset,
+                cddb_id=cddb_id,
+            ),
+            ui,
+            interactive=_interactive(auto),
         )
         if ui is not None:
             ui.pause()
@@ -4180,6 +4334,7 @@ def rip_image(  # noqa: C901
             drive_speed.restore_drive_speed(device, entry_speed_x)
         temp.cleanup()
 
+    unanswered = _unanswered_services(provenance) if rbi_path is not None else []
     if extract and rbi_path is not None:
         extract_image(
             rbi_path,
@@ -4195,6 +4350,7 @@ def rip_image(  # noqa: C901
         )
         if not keep_rbi:
             rbi_path.unlink()
+    return unanswered
 
 
 def _confirm_overwrite(output_paths: list[Path]) -> bool:
@@ -4367,7 +4523,20 @@ def _network_preflight(
     return outcome.prov_value
 
 
-def _dispatch(args: argparse.Namespace) -> None:
+def _report_unanswered(unanswered: list[str]) -> int:
+    """Say which required services a written container lacks; return the exit code."""
+    if not unanswered:
+        return 0
+    print(
+        f"  Written without an answer from: {', '.join(unanswered)}."
+        f" Exit status {EXIT_WRITTEN_WITH_CAVEATS}; re-run once"
+        f" {'it is' if len(unanswered) == 1 else 'they are'} reachable."
+    )
+    return EXIT_WRITTEN_WITH_CAVEATS
+
+
+def _dispatch(args: argparse.Namespace) -> int:
+    """Run the subcommand; return the exit code (0, or 3 for written-with-caveats)."""
     if args.cmd == "create":
         from cdda2img.config import load_config
 
@@ -4414,7 +4583,7 @@ def _dispatch(args: argparse.Namespace) -> None:
                     f"{pname:16s} {prof.granularity:10s} ladder={prof.ladder:6s}{mark}"
                 )
                 print(f"{'':16s} {path}")
-            return
+            return 0
 
         cfg = load_config()
         # Only flags the user actually supplied may appear: argparse hands over
@@ -4433,19 +4602,21 @@ def _dispatch(args: argparse.Namespace) -> None:
             allow_offline=args.allow_offline,
             cddb_server=cfg.cddb_server,
         )
-        rip_image(
-            args.device,
-            loudness=args.loudness,
-            output=args.output,
-            preview=args.preview if args.preview is not None else cfg.preview,
-            tui=args.tui if args.tui is not None else cfg.tui,
-            low_dr_threshold=cfg.low_dr_threshold,
-            duplicate_policy=args.duplicate,
-            auto=auto,
-            extract=args.extract,
-            keep_rbi=not args.no_keep_rbi,
-            strategy=strategy,
-            network_preflight=preflight,
+        return _report_unanswered(
+            rip_image(
+                args.device,
+                loudness=args.loudness,
+                output=args.output,
+                preview=args.preview if args.preview is not None else cfg.preview,
+                tui=args.tui if args.tui is not None else cfg.tui,
+                low_dr_threshold=cfg.low_dr_threshold,
+                duplicate_policy=args.duplicate,
+                auto=auto,
+                extract=args.extract,
+                keep_rbi=not args.no_keep_rbi,
+                strategy=strategy,
+                network_preflight=preflight,
+            )
         )
     elif args.cmd == "import":
         if args.info:
@@ -4461,15 +4632,17 @@ def _dispatch(args: argparse.Namespace) -> None:
                 allow_offline=args.allow_offline,
                 cddb_server=cfg.cddb_server,
             )
-            import_image(
-                args.source,
-                loudness=args.loudness,
-                output=args.output,
-                low_dr_threshold=cfg.low_dr_threshold,
-                tui=args.tui if args.tui is not None else cfg.tui,
-                duplicate_policy=args.duplicate,
-                auto=auto,
-                network_preflight=preflight,
+            return _report_unanswered(
+                import_image(
+                    args.source,
+                    loudness=args.loudness,
+                    output=args.output,
+                    low_dr_threshold=cfg.low_dr_threshold,
+                    tui=args.tui if args.tui is not None else cfg.tui,
+                    duplicate_policy=args.duplicate,
+                    auto=auto,
+                    network_preflight=preflight,
+                )
             )
     elif args.cmd == "extract":
         from cdda2img.config import load_config
@@ -4490,6 +4663,7 @@ def _dispatch(args: argparse.Namespace) -> None:
         )
     else:
         _dispatch_utility(args)
+    return 0
 
 
 def _dispatch_utility(args: argparse.Namespace) -> None:
@@ -4674,7 +4848,7 @@ def main() -> None:
             raise SystemExit(1) from None
         _run_startup_checks(args)
     try:
-        _dispatch(args)
+        rc = _dispatch(args)
     except FileNotFoundError as e:
         print(f"Error: {e.filename}: no such file or directory")
         raise SystemExit(1) from None
@@ -4695,6 +4869,8 @@ def main() -> None:
     except KeyboardInterrupt:
         print("\nInterrupted.")
         raise SystemExit(130) from None
+    if rc:
+        raise SystemExit(rc)
 
 
 if __name__ == "__main__":

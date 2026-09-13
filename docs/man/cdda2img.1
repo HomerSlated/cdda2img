@@ -1464,6 +1464,19 @@ Success.
 .B 1
 Error (file not found, unsupported format, checksum mismatch, validation failure).
 .TP
+.B 3
+.BR rip " or " import
+wrote a container, but a service its provenance depends on did not answer
+(AccurateRip for a rip, MusicBrainz for both): the container records that
+service as
+.B down
+in its provenance.
+Re-run once the service is reachable.
+On a terminal without
+.BR \-\-auto ,
+a service that fails mid-run is first offered for retry; an unattended run
+continues without it.
+.TP
 .B 130
 Interrupted by SIGINT
 .RB ( Ctrl\-C ).

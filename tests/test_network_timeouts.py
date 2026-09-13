@@ -83,7 +83,7 @@ def test_main_installs_the_default_socket_timeout(restore_socket_default):
     with (
         patch.object(app, "parse_args", return_value=args),
         patch.object(app, "_install_log_handler"),
-        patch.object(app, "_dispatch") as dispatch,
+        patch.object(app, "_dispatch", return_value=0) as dispatch,
     ):
         app.main()
 
