@@ -690,7 +690,15 @@ def speed_ladder_rows(device: str) -> list[SpeedRow]:
     and **leaves the drive at its last rung** — restoring it is the caller's job
     (``drive_speed.admitted_ladder``).
 
-    Empty list on any failure.
+    **Empty list when the probe fails on the device or media** (``AccuDiscError``,
+    ``OSError``); :func:`drive_speed.admitted_ladder` then degrades to one rung at
+    the drive's maximum. This must be a return and not a raise: the probe runs
+    *after* a whole disc has been read and AccurateRip has disagreed, so raising
+    here discards a finished rip. It became reachable in AccuDisc 0.37.0, which
+    returns the drive's error from a probe that read no sector at all, where it
+    used to return a table of zeroes. ``AbiMismatch`` still raises: it is a build
+    fault, and hiding it here would surface it on the next call that matters
+    (the same rule as :func:`_best_effort_device_op`).
 
     The verdict is the whole point of the fourth field: ``req == page2a`` cannot
     detect a rung that is real-but-redundant, because both of its operands derive
@@ -712,7 +720,21 @@ def speed_ladder_rows(device: str) -> list[SpeedRow]:
     encodes what the gradient was measured *for*.
     """
     module = _binding("speed ladder")
-    return _call(module, "speed ladder", lambda: _speed_ladder_binding(module, device))
+
+    def _probe() -> list[SpeedRow]:
+        try:
+            return _speed_ladder_binding(module, device)
+        except module.AbiMismatch:
+            raise
+        except (module.AccuDiscError, OSError) as exc:
+            log.warning(
+                "accudisc speed ladder probe failed on %s (%s); no rungs measured",
+                device,
+                exc,
+            )
+            return []
+
+    return _call(module, "speed ladder", _probe)
 
 
 def engine_version() -> str:

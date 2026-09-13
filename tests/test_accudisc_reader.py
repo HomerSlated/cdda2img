@@ -1314,6 +1314,48 @@ def test_speed_ladder_binding_asks_for_three_points_and_no_span() -> None:
     assert dev.kwargs == {"points": 3}
 
 
+class _FailingLadderDevice(_FakeLadderDevice):
+    def __init__(self, exc: Exception) -> None:
+        super().__init__(())
+        self._exc = exc
+
+    def probe_speed_ladder(self, **kwargs: Any) -> tuple[_FakeRung, ...]:
+        raise self._exc
+
+
+@pytest.mark.parametrize(
+    "exc",
+    [_FakeBindingError("5/64/00 ILLEGAL MODE FOR THIS TRACK"), OSError("gone")],
+    ids=["drive-error", "oserror"],
+)
+def test_a_probe_that_reads_nothing_yields_no_rows_rather_than_raising(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, exc: Exception
+) -> None:
+    """AccuDisc 0.37.0 returns the drive's error from a probe that read no sector,
+    where it used to return a table of zeroes.
+
+    The probe runs only after a whole disc has been read and AccurateRip has
+    disagreed, so a raise here throws away a finished rip. An empty list is what
+    ``drive_speed.admitted_ladder`` degrades from (one rung at the drive's max),
+    and it is what this function's docstring always promised.
+    """
+    _install(monkeypatch, _binding_with(_FailingLadderDevice(exc)))  # type: ignore[arg-type]
+    with caplog.at_level(logging.WARNING, logger=ar.log.name):
+        assert ar.speed_ladder_rows("/dev/sr0") == []
+    assert str(exc) in caplog.text
+
+
+def test_a_probe_abi_mismatch_still_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Control for the test above: only device/media failures are absorbed. A skewed
+    extension is a build fault and must not be hidden behind a degraded ladder."""
+    _install(
+        monkeypatch,
+        _binding_with(_FailingLadderDevice(_FakeAbiMismatch("header drift"))),  # type: ignore[arg-type]
+    )
+    with pytest.raises(RuntimeError, match="Rebuild the binding"):
+        ar.speed_ladder_rows("/dev/sr0")
+
+
 # ── the speeds verdict, on both transports ───────────────────────────────────
 
 
