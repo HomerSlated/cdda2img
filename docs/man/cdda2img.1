@@ -674,6 +674,11 @@ Measure the drive write offset via burn-and-read-back cycles.
 Each cycle burns a synthetic 75-second test signal to a blank disc,
 rips it back, and locates the known noise pulses. Results accumulate in
 .IR $XDG_DATA_HOME/cdda2img/write_offset_<drive>.toml .
+Each cycle can instead rip a test disc burned earlier in the same drive,
+so a disc burned in a session that ended before its read-back is not wasted.
+If the tray will not eject, usually because a mounted filesystem or another
+program holds the device open, the loop warns and offers to retry once the
+lock is released, or to quit; a cycle already measured is saved first.
 Prompts are paced with quotes from
 .I 101 Uses For Your Write-Offset Test CDs
 because every cycle consumes a blank disc.

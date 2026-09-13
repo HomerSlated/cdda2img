@@ -173,6 +173,9 @@ def burn_disc(toc_path: Path, device: str, speed: int) -> None:
 
     Exit 3 is *completed with caveats* — the disc was written — so only 0 and 3
     are success. Raises RuntimeError otherwise.
+
+    Does not eject. A failed eject needs a prompt, and prompts live in
+    ``setup.py``.
     """
     from cdda2img.accudisc_reader import write_disc
 
@@ -189,7 +192,6 @@ def burn_disc(toc_path: Path, device: str, speed: int) -> None:
         detail = stderr_text.strip().splitlines()[-1] if stderr_text.strip() else ""
         msg = f"accudisc write failed (exit {rc}): {detail}"
         raise RuntimeError(msg)
-    eject(device)
 
 
 def rip_disc(device: str, bin_path: Path, toc_path: Path) -> None:
@@ -213,8 +215,8 @@ def rip_disc(device: str, bin_path: Path, toc_path: Path) -> None:
     print()
 
 
-def eject(device: str) -> None:
-    """Eject the disc from *device* (best-effort; never raises).
+def eject(device: str) -> str | None:
+    """Eject the disc from *device*: ``None`` once the tray is out, else the reason.
 
     Re-exported from the seam because ``setup.py`` drives the whole interactive
     burn → eject → reinsert → read-back loop through this module and should not
@@ -222,7 +224,7 @@ def eject(device: str) -> None:
     """
     from cdda2img.accudisc_reader import eject as _eject
 
-    _eject(device)
+    return _eject(device)
 
 
 # ── PCM analysis ──────────────────────────────────────────────────────────────

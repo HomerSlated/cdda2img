@@ -1877,8 +1877,13 @@ def ctdb_repair(
     return _call(module, "CTDB parity repair", _run)
 
 
-def _best_effort_device_op(device: str, what: str, method: str) -> None:
+def _best_effort_device_op(device: str, what: str, method: str) -> str | None:
     """Run ``Device.<method>()``, swallowing a device that will not cooperate.
+
+    Returns ``None`` on success, otherwise the reason it failed, so a caller whose
+    next step depends on the operation having happened can find out. Swallowing
+    the exception and discarding the reason are different decisions: only the
+    first belongs here.
 
     Shared by the two tray/spindle operations, which are the only calls in the
     seam whose contract is "never raises" *including* the device failing to open.
@@ -1893,7 +1898,7 @@ def _best_effort_device_op(device: str, what: str, method: str) -> None:
     """
     module = _binding(what)
 
-    def _run() -> None:
+    def _run() -> str | None:
         try:
             with module.Device(device) as dev:
                 getattr(dev, method)()
@@ -1901,15 +1906,27 @@ def _best_effort_device_op(device: str, what: str, method: str) -> None:
             raise
         except module.AccuDiscError as exc:
             log.debug("accudisc %s failed for %s: %s", what, device, exc)
+            return str(exc)
         except OSError as exc:
             log.debug("accudisc %s could not open %s: %s", what, device, exc)
+            return str(exc)
+        return None
 
-    _call(module, what, _run)
+    return _call(module, what, _run)
 
 
-def eject(device: str) -> None:
-    """Best-effort tray eject (``Device.eject``)."""
-    _best_effort_device_op(device, "eject", "eject")
+def eject(device: str) -> str | None:
+    """Tray eject (``Device.eject``): ``None`` once the tray is out, else why not.
+
+    Never raises for a device or media fault (``AbiMismatch`` still raises).
+    Since AccuDisc 0.37.0 the engine checks that the disc actually left: when a
+    mounted filesystem or another process holds the device open, the kernel
+    refuses to unlock the door and ``CDROMEJECT`` returns 0 with the tray shut,
+    which the engine used to report as success. A courtesy eject may ignore the
+    result; a caller whose next step assumes an open tray (the write-offset
+    loop in ``setup.py``) must not.
+    """
+    return _best_effort_device_op(device, "eject", "eject")
 
 
 def park_spindle(device: str) -> None:

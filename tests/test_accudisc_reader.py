@@ -1549,7 +1549,41 @@ def test_a_device_that_will_not_open_is_swallowed(
     monkeypatch.setattr(fake, "Device", _boom)
     _install(monkeypatch, fake)
 
-    getattr(ar, fn)("/dev/sr0")  # must return, not raise
+    result = getattr(ar, fn)("/dev/sr0")  # must return, not raise
+    # eject hands the reason back; park_spindle has no caller that needs it.
+    assert result == ("device busy" if fn == "eject" else None)
+
+
+class _StuckTrayDevice(_RecordingDevice):
+    def eject(self) -> None:
+        msg = "disc still present after eject"
+        raise _FakeBindingError(msg)
+
+
+def test_eject_reports_why_the_tray_did_not_open(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AccuDisc 0.37.0: with the device held open elsewhere the kernel keeps the
+    door locked, and ``Device.eject`` now raises instead of returning success with
+    the tray shut. The seam still does not raise, but it no longer throws the
+    reason away: the write-offset loop has to know before it says "reinsert"."""
+    fake = _FakeBinding()
+    monkeypatch.setattr(fake, "Device", lambda _p: _StuckTrayDevice([]))
+    _install(monkeypatch, fake)
+
+    assert ar.eject("/dev/sr0") == "disc still present after eject"
+
+
+def test_eject_returns_none_when_the_tray_opened(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+    fake = _FakeBinding()
+    monkeypatch.setattr(fake, "Device", lambda _p: _RecordingDevice(calls))
+    _install(monkeypatch, fake)
+
+    assert ar.eject("/dev/sr0") is None
+    assert calls == ["eject"]
 
 
 @pytest.mark.parametrize("fn", ["eject", "park_spindle"])

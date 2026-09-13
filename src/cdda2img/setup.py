@@ -459,6 +459,44 @@ def _section_read_offset(device: str | None) -> bool:
     return True
 
 
+_CYCLE_BURN = "Burn a blank disc"
+_CYCLE_READ = "Rip a test disc already burned in this drive"
+_CYCLE_QUIT = "Quit"
+_EJECT_RETRY = "Retry the eject"
+_EJECT_QUIT = "Quit (the disc stays in the drive)"
+_RESUME_HINT = (
+    "\n  The burned disc has not been measured. To measure it later, run\n"
+    "  `cdda2img setup --write-offset` again and choose\n"
+    f'  "{_CYCLE_READ}".'
+)
+
+
+def _eject_or_quit(device: str) -> bool:
+    """Eject; on failure warn and offer retry or quit. True once the tray is out.
+
+    AccuDisc 0.37.0 checks that the tray really opened. When a mounted filesystem, a
+    file manager or another program holds the device open, the kernel keeps the
+    door locked, and the eject now fails where it used to report success. The user
+    can usually release the lock, so they are offered another try; quitting is for
+    when they cannot. Quitting loses no work: a burned but unmeasured disc can be
+    ripped in a later session (``_CYCLE_READ``), and a measured cycle is saved
+    before the eject that follows it.
+    """
+    from cdda2img import write_offset as wo
+
+    while True:
+        error = wo.eject(device)
+        if error is None:
+            return True
+        print(f"\n  WARNING: the disc did not eject: {error}")
+        print(
+            f"  Something may be holding {device} open: a mounted filesystem, a file"
+            "\n  manager, or another program using the drive. Release it and retry."
+        )
+        if _select("  What now?", [_EJECT_RETRY, _EJECT_QUIT]) != _EJECT_RETRY:
+            return False
+
+
 def _section_write_offset(device: str | None, speed: int) -> bool:  # noqa: C901
     from cdda2img import write_offset as wo
     from cdda2img.config import load_config, save_drive_write_offset
@@ -513,21 +551,31 @@ def _section_write_offset(device: str | None, speed: int) -> bool:  # noqa: C901
             print(f"\n  Creative use for your new coaster: {quote}")
         print()
 
-        if not _confirm("  Insert a blank disc and press Enter to burn"):
+        choice = _select("  Next disc:", [_CYCLE_BURN, _CYCLE_READ, _CYCLE_QUIT])
+        if choice == _CYCLE_BURN:
+            if not _confirm("  Insert a blank disc and press Enter to burn", True):
+                break
+            print("  Burning...")
+            try:
+                wo.burn_disc(toc, device, speed)
+            except RuntimeError as exc:
+                print(f"  Burn failed: {exc}")
+                if not _confirm("  Try again with another disc?"):
+                    break
+                continue
+            if not _eject_or_quit(device):
+                print(_RESUME_HINT)
+                break
+            ready = "  Disc ejected. Reinsert the burned disc and press Enter to rip"
+        elif choice == _CYCLE_READ:
+            ready = (
+                "  Insert the test disc burned earlier in this drive (or leave it in)"
+                " and press Enter to rip"
+            )
+        else:
             break
 
-        print("  Burning...")
-        try:
-            wo.burn_disc(toc, device, speed)
-        except RuntimeError as exc:
-            print(f"  Burn failed: {exc}")
-            if not _confirm("  Try again with another disc?"):
-                break
-            continue
-
-        if not _confirm(
-            "  Disc ejected. Reinsert the burned disc and press Enter to rip"
-        ):
+        if not _confirm(ready, True):
             break
 
         print("  Ripping...")
@@ -535,39 +583,42 @@ def _section_write_offset(device: str | None, speed: int) -> bool:  # noqa: C901
             wo.rip_disc(device, ripped_bin, ripped_toc)
         except RuntimeError as exc:
             print(f"  Rip failed: {exc}")
-            wo.eject(device)
-            if not _confirm("  Try again with another disc?"):
+            if not _eject_or_quit(device) or not _confirm(
+                "  Try again with another disc?"
+            ):
                 break
             continue
-        wo.eject(device)
 
         cycle = wo.analyse_cycle(ripped_bin, read_offset)
+        if cycle is not None:
+            results["cycles"].append(cycle)
+            results["summary"] = wo.summarise_cycles(results["cycles"])
+            res_path.parent.mkdir(parents=True, exist_ok=True)
+            wo.save_results(res_path, results)
+
+            s = results["summary"]
+            print(
+                f"\n  write_offset = {s['write_offset']:+d}  "
+                f"({s['tests']} test(s), {s['confidence']}% confidence)"
+            )
+            if s["variance"]:
+                print("  WARNING: variance detected — consider more cycles")
+
+            if (
+                s["confidence"] >= 80
+                and drive_name
+                and _confirm(
+                    f"  Save write_offset={s['write_offset']:+d} for {drive_name!r}?"
+                )
+            ):
+                save_drive_write_offset(drive_name, s["write_offset"])
+                print("  Saved.")
+
+        # Ejected only after the cycle is saved, so quitting here loses nothing.
+        if not _eject_or_quit(device):
+            break
         if cycle is None:
             continue
-
-        results["cycles"].append(cycle)
-        results["summary"] = wo.summarise_cycles(results["cycles"])
-        res_path.parent.mkdir(parents=True, exist_ok=True)
-        wo.save_results(res_path, results)
-
-        s = results["summary"]
-        print(
-            f"\n  write_offset = {s['write_offset']:+d}  "
-            f"({s['tests']} test(s), {s['confidence']}% confidence)"
-        )
-        if s["variance"]:
-            print("  WARNING: variance detected — consider more cycles")
-
-        if (
-            s["confidence"] >= 80
-            and drive_name
-            and _confirm(
-                f"  Save write_offset={s['write_offset']:+d} for {drive_name!r}?"
-            )
-        ):
-            save_drive_write_offset(drive_name, s["write_offset"])
-            print("  Saved.")
-
         if not _confirm("  Another disc?"):
             break
 
