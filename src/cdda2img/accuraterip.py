@@ -902,14 +902,21 @@ def format_ar_report(
         1 for r in results if r.confidence_v1 is not None or r.confidence_v2 is not None
     )
 
-    # All tracks mismatch on a disc that IS in the database — almost always
-    # a drive offset configuration gap, not data corruption.
+    # All tracks mismatch on a disc that IS in the database. This used to be
+    # called "almost always a drive offset configuration gap" and told the user
+    # to add a [[drives]] entry, which no evidence here supports: the per-track
+    # results cannot tell a wrong offset from a misread or a pressing AccurateRip
+    # does not hold. The LITE-ON LH-20A1S rip (2026-09-14) printed that advice for
+    # a drive that already had an entry and a correct offset, while its audio was
+    # misframed. The rip's own diagnosis (PROV `ar_total_miss`) is the place a
+    # cause is recorded, and only with a confirmed checksum behind it.
     if n_ok == 0:
         max_conf = max(r.max_confidence or 0 for r in results)
         return (
-            f"AccurateRip: disc found (max confidence {max_conf}) but no CRC "
-            f"match at read_offset={read_offset}\n"
-            f"  Add a [[drives]] entry in ~/.config/cdda2img/cdda2img.toml"
+            f"AccurateRip: disc found (max confidence {max_conf}) but no track "
+            f"matched at read_offset={read_offset}\n"
+            "  Causes include a wrong read offset, a misread, or a pressing"
+            " AccurateRip does not hold"
         )
 
     def _conf(c: int | None) -> str:

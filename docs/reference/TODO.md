@@ -3110,6 +3110,14 @@ miss and record `ar_total_miss` / `ar_offset_candidates` / `ar_offset_suggests` 
 **Audio untouched by design**: a widely-pressed disc verifies at several offsets at once, so
 picking the winner would be choosing one pressing's cohort and calling it truth.
 
+**Corrected 2026-09-14.** As shipped, `offset_mismatch` was written from `detect_offset`'s
+**unfiltered** list. That list always ends with offset 0 "for reference", so for a disc in
+the database it was never empty and the `no_offset_verifies` branch was unreachable. A
+LITE-ON rip misframed by libata's PIO fallback (0/11) sealed `ar_offset_suggests=-6`
+against a correct offset. Only `confirmed` candidates count now, and a total miss exits 4
+(`_failed_checks`). Containers written before the fix carry `offset_mismatch` that is not
+evidence of any offset.
+
 #### Original item (2026-07-24)
 
 Same report, §2b. The Step-D CD-R readback contained **15 stereo samples of a transient read

@@ -324,7 +324,7 @@ def test_main_exits_with_the_dispatched_code() -> None:
     assert _run_main(0) == 0
 
 
-def _dispatch(monkeypatch, argv: list[str], pipeline: str, unanswered: list[str]):
+def _dispatch(monkeypatch, argv: list[str], pipeline: str, unanswered: object):
     monkeypatch.setattr("sys.argv", ["cdda2img", *argv])
     args = app.parse_args()
     cfg = MagicMock(auto=False, cddb_server=None, default_profile=None)
@@ -342,10 +342,23 @@ def test_rip_and_import_return_their_exit_code(
     monkeypatch, tmp_path, unanswered: list[str]
 ) -> None:
     expected = 3 if unanswered else 0
-    assert _dispatch(monkeypatch, ["rip"], "rip_image", unanswered) == expected
+    rip = app.RipOutcome(unanswered, [])
+    assert _dispatch(monkeypatch, ["rip"], "rip_image", rip) == expected
     src = tmp_path / "x.toc"
     src.write_text("")
     assert (
         _dispatch(monkeypatch, ["import", str(src)], "import_image", unanswered)
         == expected
     )
+
+
+@pytest.mark.parametrize("unanswered", [["MusicBrainz"], []], ids=["and-down", "only"])
+def test_a_rip_that_failed_a_check_exits_4_through_dispatch_and_main(
+    monkeypatch, unanswered: list[str]
+) -> None:
+    """End to end from a pipeline result to the process exit status: the reporter
+    is tested on its own, but only this proves `_dispatch` routes a rip through it
+    and `main` raises the code."""
+    rip = app.RipOutcome(unanswered, ["AccurateRip matched none of its tracks"])
+    assert _dispatch(monkeypatch, ["rip"], "rip_image", rip) == 4
+    assert _run_main(4) == 4

@@ -79,6 +79,17 @@ def build_rip_info(
     prov: dict[str, str] = {"toc_source": "subq@accudisc"}
     layout = _derive_layout(sub_data, track_starts, leadout, prov)
     scan = scan_subcode(sub_data, leadout_lba=leadout)
+    # Recorded unconditionally, because a collapse of this number is the one
+    # in-container witness to a MISFRAMED read. Q is CRC-checked on every
+    # sector, so it cannot pass by accident: when the subchannel slice lands
+    # on the wrong bytes (a record stride or field order the reader did not
+    # expect) the rate falls to ~0 while the audio reads GOOD. Measured
+    # 2026-09-14 on the LITE-ON LH-20A1S: 0/23 in both its failure modes
+    # (libata PIO padding; sub before C2), 23/23 at the true position.
+    # Including an EMPTY capture (0/0): a rip that asked for raw sub and got none
+    # is the limiting case of a collapse, not an absence of evidence.
+    # `cdda2img._failed_checks` judges it; this module only reports.
+    prov["subq_q_valid"] = f"{scan.valid_q}/{scan.n_sectors}"
     isrcs = _voted_isrcs(scan, prov)
     mcn = _voted_mcn(scan)
     cdtext = _first_cdtext_block(cdtext_raw)

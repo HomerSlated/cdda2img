@@ -1,6 +1,6 @@
 .\" cdda2img.1 — manual page for cdda2img
 .\" Install: doas install -m 644 docs/man/cdda2img.1 /usr/local/share/man/man1/
-.TH CDDA2IMG 1 "2026\-07\-30" "cdda2img 0.2.1" "User Commands"
+.TH CDDA2IMG 1 "2026\-09\-14" "cdda2img 0.2.1" "User Commands"
 .\"
 .SH NAME
 cdda2img \- create and extract RBI audio CD archive images
@@ -124,7 +124,11 @@ automatically so subsequent rips skip the catalog lookup.
 .PP
 After a successful rip, the per\-track AccurateRip v1/v2 checksums are computed
 and verified against the AccurateRip database.
-Results are printed as an informational report; a mismatch does not fail the rip.
+Results are printed as a report.
+A partial mismatch triggers the recovery described above.
+If the disc is in AccurateRip and no track verifies, the container is still
+written, but the rip exits with status 4 (see
+.BR "EXIT STATUS" ).
 .PP
 .BI "cdda2img rip " "[options]"
 .TP
@@ -217,6 +221,8 @@ is also supplied.
 Delete the RBI container after successful extraction.
 Only meaningful with
 .BR \-\-extract .
+Ignored for a rip that exits with status 4: that container is kept, because the
+provenance explaining the failed verification exists only inside it.
 .\"
 .SS create \(em Create
 Creates one or more RBI images from a directory of audio files.
@@ -1476,6 +1482,19 @@ On a terminal without
 .BR \-\-auto ,
 a service that fails mid-run is first offered for retry; an unattended run
 continues without it.
+.TP
+.B 4
+.B rip
+wrote a container that failed a verification recorded in its provenance:
+AccurateRip holds the disc and matched none of its tracks
+.RB ( ar_total_miss ),
+or almost no subchannel Q frames passed their CRC
+.RB ( subq_q_valid
+below 7.5%), which is what a misframed read looks like.
+The container is kept, because both can also happen with good audio (a pressing
+AccurateRip does not hold; a drive returning its fields in a non-standard
+order), but its audio should not be trusted until checked.
+Takes precedence over 3.
 .TP
 .B 130
 Interrupted by SIGINT

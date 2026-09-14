@@ -162,6 +162,25 @@ def test_build_degrades_without_anchorable_sub():
     assert info.disc.pre_emphasis is None  # uncaptured, not False
     assert info.prov is not None
     assert info.prov["subq_layout"] == "unanchored"
+    # The witness a misframed read leaves: nothing passed its CRC.
+    assert info.prov["subq_q_valid"] == "0/4"
+
+
+def test_an_empty_capture_still_records_its_q_count():
+    """A rip that requested raw sub and received none must leave ``0/0`` rather
+    than no key, or the collapse check would read it as "no witness"."""
+    info = build_rip_info(_TOC, b"")
+    assert info.prov is not None
+    assert info.prov["subq_q_valid"] == "0/0"
+
+
+def test_q_valid_counts_every_crc_good_frame():
+    """Control for the collapse witness: a well-formed stream reports every frame."""
+    sub = _sub_stream((1, 1, 0, 10), (2, 0, 0, 5), (2, 1, 0, 5), (2, 2, 0, 10))
+    info = build_rip_info(_TOC, sub)
+    n = len(sub) // CD_SUBCODE_SIZE
+    assert info.prov is not None
+    assert info.prov["subq_q_valid"] == f"{n}/{n}"
 
 
 # ---------------------------------------------------------------------------

@@ -255,8 +255,30 @@ class TestRipLogContent:
         builder = RipLogBuilder(rip_type="cdrdao")
         block = builder.finalize(_make_disc(1)).decode("utf-8")
 
-        assert "Health status: No errors occurred" in block
         assert "EOF: End of status report" in block
+
+    def test_no_health_claim_without_a_measured_error_count(self) -> None:
+        """rbi_spec §6.6.1: the line is present only with a measured count. It was
+        written unconditionally until 2026-09-14, and a LITE-ON rip misframed on
+        22 sectors in 23 (AccurateRip 0/11) sealed "No errors occurred". Checked
+        on exactly that shape: in the database, every track a copy error."""
+        results = [
+            ARTrackResult(
+                track=i,
+                v1_crc="deadbeef",
+                v2_crc="cafebabe",
+                confidence_v1=None,
+                confidence_v2=None,
+                max_confidence=200,
+            )
+            for i in (1, 2)
+        ]
+        builder = RipLogBuilder(rip_type="accudisc")
+        builder.ar_results = results
+        block = builder.finalize(_make_disc(2)).decode("utf-8")
+
+        assert "0/2 tracks accurately ripped" in block
+        assert "Health status" not in block
 
 
 class TestRipLogContainerRoundtrip:

@@ -64,12 +64,61 @@ def test_diagnosis_names_the_offset_delta_from_what_was_used(
     )
     monkeypatch.setattr(
         "cdda2img.accuraterip.detect_offset",
-        lambda *a, **k: [SimpleNamespace(offset=-667), SimpleNamespace(offset=-1333)],
+        lambda *a, **k: [
+            SimpleNamespace(offset=-667, confirmed=True),
+            SimpleNamespace(offset=-1333, confirmed=True),
+        ],
     )
     prov = C._diagnose_total_ar_miss(Path("/x.pcm"), [0], 100, 0x123, read_offset=30)
     assert prov["ar_total_miss"] == "offset_mismatch"
     assert prov["ar_offset_candidates"] == "-667,-1333"
     assert prov["ar_offset_suggests"] == "-697"  # -667 - 30
+
+
+def test_an_unconfirmed_candidate_is_not_an_offset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``detect_offset`` always appends offset 0 for reference, and ranks frame-450
+    probe hits that no whole-track checksum confirms. On the LITE-ON LH-20A1S rip
+    (2026-09-14, audio misframed by libata's PIO fallback) that list was
+    ``[offset 0, 1 probe hit, 0 tracks matched]``, and it was sealed as
+    ``offset_mismatch`` with ``ar_offset_suggests=-6`` against a correct offset.
+    Uses the real dataclass: the ``confirmed`` property is what decides."""
+    from cdda2img.accuraterip import OffsetMatch
+
+    monkeypatch.setattr(
+        "cdda2img.accuraterip.fetch_ar_responses",
+        lambda *a, **k: ([[{"x": 1}]], "https", "b3"),
+    )
+    monkeypatch.setattr(
+        "cdda2img.accuraterip.detect_offset",
+        lambda *a, **k: [OffsetMatch(0, 1, 0, 0, 200, 11)],
+    )
+    prov = C._diagnose_total_ar_miss(Path("/x.pcm"), [0], 100, 0x123, read_offset=6)
+    assert prov == {"ar_total_miss": "no_offset_verifies"}
+
+
+def test_unconfirmed_candidates_do_not_crowd_out_a_confirmed_one(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Control for the filter: ranking puts confirmed first, but the filter must
+    drop only the unconfirmed ones, not everything after the first."""
+    from cdda2img.accuraterip import OffsetMatch
+
+    monkeypatch.setattr(
+        "cdda2img.accuraterip.fetch_ar_responses",
+        lambda *a, **k: ([[{"x": 1}]], "https", "b3"),
+    )
+    monkeypatch.setattr(
+        "cdda2img.accuraterip.detect_offset",
+        lambda *a, **k: [
+            OffsetMatch(0, 3, 0, 0, 9, 11),
+            OffsetMatch(-669, 11, 11, 11, 4400, 11),
+        ],
+    )
+    prov = C._diagnose_total_ar_miss(Path("/x.pcm"), [0], 100, 0x123, read_offset=6)
+    assert prov["ar_offset_candidates"] == "-669"
+    assert prov["ar_offset_suggests"] == "-675"
 
 
 def test_verifying_at_no_offset_is_reported_as_such(

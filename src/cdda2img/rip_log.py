@@ -158,7 +158,15 @@ class RipLogBuilder:
                     lines.append(
                         f"  AccurateRip summary: {n_ok}/{n} tracks accurately ripped"
                     )
-        lines.append("  Health status: No errors occurred")
+        # No "Health status:" line. It used to be appended here unconditionally as
+        # "No errors occurred", with nothing measured behind it: this builder never
+        # receives read counters, and `import`/`create` have none to give. On
+        # 2026-09-14 a LITE-ON rip whose audio was misframed on every sector but
+        # one in 23 (AccurateRip 0/11) sealed that claim into its log. rbi_spec
+        # §6.6.1 makes a section present only when its data is available; the line
+        # returns only when a read error count is carried here. Do not reintroduce
+        # it from AccuDisc's `sectors_flagged`: on that same rip it counted every
+        # sector, because C2 was being read from the subchannel's bytes.
         lines.append("  EOF: End of status report")
         lines.append("")  # trailing blank → body ends with \n after join
 

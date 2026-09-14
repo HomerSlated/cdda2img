@@ -12,7 +12,7 @@ import threading
 from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NamedTuple
 
 if TYPE_CHECKING:
     from cdda2img.accudisc_reader import ReadLanes
@@ -3324,6 +3324,93 @@ def _unanswered_services(provenance: dict[str, str]) -> list[str]:
     ]
 
 
+EXIT_WRITTEN_UNVERIFIED = 4
+
+#: Below this share of CRC-good Q frames a rip's subchannel was sliced from the
+#: wrong bytes. The two bounds, both from 2026-09-14 evidence:
+#:
+#: * **Misframed, from above: 1/chunk.** Sub before C2 (the LITE-ON LH-20A1S)
+#:   gives 0%, with or without libata's PIO padding (measured 0/23 both ways). An
+#:   MMC-order drive under the same padding keeps only each chunk's FIRST record
+#:   framed, so it reads 1/n for an n-sector chunk: 4.35% at the engine's default
+#:   23, but 6.67% at the 15 AccuDisc used in its own prediction test. A threshold
+#:   of 5% would miss that.
+#: * **Good audio, from below: 13.43%.** A read while another process used the
+#:   drive (RECOVERY.md §12.0), AR v2 passing throughout. It is the lowest yield on
+#:   record with good audio. Without contention, specific speed requests crater
+#:   whole-pass Q to ~33-39% (ZZ Top 32x, Tracy 16x, RECOVERY.md); ordinary reads
+#:   measure 98-99.9%. cdda2img takes no drive lock, so contention is a case that
+#:   recurs, not a curiosity.
+#:
+#: 7.5% sits at roughly equal ratio from both (4.35 x 1.72; 13.43 / 1.79). It
+#: catches chunks of 14 or more sectors. It does not catch smaller chunks, and it
+#: does not protect a contended read worse than the one measured. Move it only on
+#: a new measurement, and say which bound moved. Not RECOVERY.md's ~90% crater gate:
+#: that one discards a disturbed PASS for re-reading; this one flags misframing.
+_MIN_Q_VALID_FRACTION = 0.075
+
+
+class RipOutcome(NamedTuple):
+    """What ``_dispatch`` needs from a finished rip to choose its exit status."""
+
+    unanswered: list[str]
+    failed_checks: list[str]
+
+
+def _q_valid_fraction(value: str | None) -> float | None:
+    """``subq_q_valid`` (``"<valid>/<sectors>"``) as a fraction; None if absent or malformed.
+
+    ``0/0`` is **0.0**, not None. It is what a rip that asked for raw subchannel and
+    got none records, which is the limiting case of a collapse, not an absence of
+    evidence. Absence of the key (a container written before it existed) stays
+    None: that one really is no witness.
+    """
+    try:
+        valid, total = (int(x) for x in (value or "").split("/"))
+    except ValueError:
+        return None
+    if valid < 0 or valid > total:
+        return None
+    return valid / total if total > 0 else 0.0
+
+
+def _failed_checks(provenance: dict[str, str]) -> list[str]:
+    """Verifications this rip's provenance records as failed, as sentences.
+
+    **Fresh provenance only**, from the rip that just ran. The sentences assume
+    this version's semantics: `offset_mismatch` has meant "checksum-confirmed"
+    only since 2026-09-14, so fed a stored container's PROV this would assert a
+    confirmed match that was never confirmed.
+
+    Neither check refuses the rip; both make it exit 4. Each can also happen with
+    good audio, so the container is kept for inspection rather than discarded:
+    AccurateRip matches nothing for a pressing it does not hold, and a drive that
+    returns subchannel before C2 (the LITE-ON LH-20A1S does) collapses Q while its
+    audio is correct. What they cannot be is ignored, which is what happened on
+    2026-09-14: that drive's rip, misframed on 22 sectors in 23, verified 0/11 and
+    exited 0 with "No errors occurred" in its sealed log.
+    """
+    failed: list[str] = []
+    miss = provenance.get("ar_total_miss")
+    if miss is not None:
+        text = "AccurateRip holds this disc and matched none of its tracks"
+        candidates = provenance.get("ar_offset_candidates")
+        if miss == "offset_mismatch" and candidates:
+            text += (
+                f" (a checksum-confirmed match exists at read offset"
+                f" {candidates.split(',')[0]}: a wrong drive offset, or a pressing"
+                " AccurateRip holds only at that offset)"
+            )
+        failed.append(text)
+    fraction = _q_valid_fraction(provenance.get("subq_q_valid"))
+    if fraction is not None and fraction < _MIN_Q_VALID_FRACTION:
+        failed.append(
+            f"subchannel Q passed its CRC on {provenance['subq_q_valid']} sectors"
+            f" ({fraction:.1%}), the signature of a misframed read"
+        )
+    return failed
+
+
 def _interactive(auto: bool) -> bool:
     """A prompt can be answered: a TTY, and not ``--auto``. Same rule as the pre-flight."""
     import sys
@@ -3479,10 +3566,20 @@ def _diagnose_total_ar_miss(
         log.debug("AR offset diagnosis failed: %s", exc)
         return {"ar_total_miss": "offset_probe_failed"}
 
+    # Only a CONFIRMED match (a whole-track checksum agreed) is evidence of an
+    # offset. `detect_offset` always appends offset 0 "for reference" and ranks
+    # frame-450 probe hits, so an unfiltered list is never empty for a disc in the
+    # database, and its head can match nothing at all. Until 2026-09-14 that
+    # unconfirmed head was reported as `offset_mismatch`: the LITE-ON LH-20A1S
+    # rip, misframed by libata's PIO fallback and verifying 0/11, was sealed with
+    # `ar_offset_candidates=0` and `ar_offset_suggests=-6` on a match with no
+    # checksum agreeing, which sent the user after the one parameter that was
+    # correct.
+    matches = [m for m in matches if m.confirmed]
     if not matches:
         # In the database, verifies at no offset in the swept radius. That is a
         # real result: the audio differs from every submitted copy, which is
-        # damage or a different pressing — not a misconfiguration.
+        # damage, a misread or a different pressing — not a misconfiguration.
         return {"ar_total_miss": "no_offset_verifies"}
 
     cands = ",".join(str(m.offset) for m in matches[:4])
@@ -3763,12 +3860,13 @@ def rip_image(  # noqa: C901
     keep_rbi: bool = True,
     strategy: ResolvedStrategy | None = None,
     network_preflight: str | None = None,
-) -> list[str]:
+) -> RipOutcome:
     """Rip *device* into an RBI container.
 
-    Returns the required services the written container records as ``down``
-    (:func:`_unanswered_services`); ``_dispatch`` turns a non-empty list into exit
-    status 3.
+    Returns a :class:`RipOutcome`: the required services the written container
+    records as ``down`` (:func:`_unanswered_services`, exit 3) and the
+    verifications its provenance records as failed (:func:`_failed_checks`,
+    exit 4). Both are empty when no container was written.
     """
     import sys
 
@@ -4335,6 +4433,7 @@ def rip_image(  # noqa: C901
         temp.cleanup()
 
     unanswered = _unanswered_services(provenance) if rbi_path is not None else []
+    failed_checks = _failed_checks(provenance) if rbi_path is not None else []
     if extract and rbi_path is not None:
         extract_image(
             rbi_path,
@@ -4348,9 +4447,15 @@ def rip_image(  # noqa: C901
             normalize=False,
             output=None,
         )
-        if not keep_rbi:
+        # A rip that failed a recorded verification keeps its container whatever
+        # --no-keep-rbi says. Exit 4 tells the user to check it, and the PROV that
+        # explains why lives only in the container; deleting it would leave the
+        # extracted FLACs as the only record, unverified and unexplained.
+        if not keep_rbi and not failed_checks:
             rbi_path.unlink()
-    return unanswered
+        elif not keep_rbi:
+            print(f"  Kept {rbi_path.name} despite --no-keep-rbi: it did not verify.")
+    return RipOutcome(unanswered, failed_checks)
 
 
 def _confirm_overwrite(output_paths: list[Path]) -> bool:
@@ -4535,8 +4640,29 @@ def _report_unanswered(unanswered: list[str]) -> int:
     return EXIT_WRITTEN_WITH_CAVEATS
 
 
+def _report_rip_outcome(outcome: RipOutcome) -> int:
+    """Report a finished rip and return its exit code: 4 for a failed check, else
+    whatever :func:`_report_unanswered` says. 4 wins because re-running once a
+    service is back does not fix audio that did not verify."""
+    if not outcome.failed_checks:
+        return _report_unanswered(outcome.unanswered)
+    if outcome.unanswered:
+        print(
+            f"  Written without an answer from: {', '.join(outcome.unanswered)}"
+            " (re-running once it is reachable fixes that part)."
+        )
+    for reason in outcome.failed_checks:
+        print(f"  Not verified: {reason}.")
+    print(
+        f"  Exit status {EXIT_WRITTEN_UNVERIFIED}: the rip was written but not"
+        " verified; check it before trusting its audio."
+    )
+    return EXIT_WRITTEN_UNVERIFIED
+
+
 def _dispatch(args: argparse.Namespace) -> int:
-    """Run the subcommand; return the exit code (0, or 3 for written-with-caveats)."""
+    """Run the subcommand; return the exit code (0; 3 written without a required
+    service; 4 written but failed a recorded verification, rip only)."""
     if args.cmd == "create":
         from cdda2img.config import load_config
 
@@ -4602,7 +4728,7 @@ def _dispatch(args: argparse.Namespace) -> int:
             allow_offline=args.allow_offline,
             cddb_server=cfg.cddb_server,
         )
-        return _report_unanswered(
+        return _report_rip_outcome(
             rip_image(
                 args.device,
                 loudness=args.loudness,
