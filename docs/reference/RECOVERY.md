@@ -601,15 +601,16 @@ read it before the flags**: the identical `--verify 2` is a ~20-second repair or
 |------|-------|-------------|---------|-----------|--------------|
 | **capture pass** | whole-disc | `--c2f … --sub raw --subf …` | the "one careful pass": PCM+C2+Q+TOC in a single spin | complete picture at ~1.25× the minimal cost; the correct **default** | +25% over minimal |
 | **R0 baseline** | whole-disc | `--retries 2` | plain read, error-retry only | free on clean sectors | no recovery |
-| **R1** | whole-disc | `+ --c2-retries 3` | hunt a C2-clean copy of each flagged sector via cache-defeated same-speed re-reads | **cheap and effective** (cut C2 58→2 on ABBA at +0 s); cost ∝ damage → whole-disc-safe | same-speed re-reads share the drive's failure mode; can't fix a *deterministic* miscorrect |
+| ~~**R1**~~ | ~~whole-disc~~ | ~~`+ --c2-retries 3`~~ | **REFUSED since AccuDisc 0.43.0** (2026-09-16): `--c2-retries` requires `--verify 2`+, so it no longer rides a single whole-disc pass — use it inside R3 on flagged spans | was cheap (cut C2 58→2 on ABBA at +0 s) | a single-pass chunk on a LITE-ON LH-20A1S landed 48–96 bytes late with clean C2, and a rescue anchored to it marked a late sector RECOVERED; only a second transfer can check position |
 | **R2** | **flagged spans** | `+ --verify 2` | read everything ≥2× cache-defeated, resolve by consensus | catches non-deterministic errors the single pass hides; marks irreconcilable as `suspect` | **~5–15× slower** — reads the whole *scope* again; whole-disc = the ~4 h blow-up |
 | **R3** | **flagged spans** | `+ --verify 2 --c2-retries 3 --overlap 4` | full careful recovery: consensus + C2-hunt + seam check | **reached C2 = 0 on every damaged span** in the suite; the recommended repair rung | slowest short of the ladder; `--overlap` for the positioning-slip class only |
 | **R4** | **flagged spans** | `+ --ladder 8,4` | escalate residual problem sectors to careful-mode speed | recovers the most (rescues speed-marginal sectors R1–R3 can't) | highest cost; only earns it when R3 leaves residue |
 
 **The scope rule that must not be mis-read:** a rung is whole-disc-safe iff its
 re-read cost scales with **damage**, not with **scope**. `--retries` re-reads only
-errored sectors; `--c2-retries` re-reads only C2-flagged sectors — both ~0 on
-clean media, so they ride the whole-disc capture pass. `--verify P` re-reads
+errored sectors, ~0 on clean media, so it rides the whole-disc capture pass.
+(`--c2-retries` used to ride it too; since 0.43.0 it requires `--verify 2`+ and
+so belongs with R3 on flagged spans.) `--verify P` re-reads
 **everything in scope P times** (cache-defeated), and `--overlap`/`--ladder`
 compound that — cost scales with the sector count you point them at. Run R2–R4
 over **only the map-derived flagged spans** (`--start L --count N`), never
@@ -2043,4 +2044,4 @@ That set lets a future reader distinguish "we never checked" from "we checked
 thoroughly and this disc cannot be verified" — which is the only useful thing
 left to say about it.
 
-Blake3 cd370a9f20355d1cb4fa1736368ca00904ef2919fe7643dd4bfce00394f25380
+Blake3 085c7cc2464f56582583690c1d93bee9298f51d7e8867be7a44b8e3a32938409
