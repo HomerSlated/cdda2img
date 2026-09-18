@@ -244,8 +244,35 @@ Per AR-failed track, after CTDB and before `track-ladder`:
    its map state is `OK` or `RECOVERED`, its own C2 block is all zero, **and** it is not in
    the widened Q-position lane (below). `SUSPECT`, `C2`, `HARD` are never accepted.
 
+   **RESOLVED FOR THE LITE-ON, 2026-09-18 (AccuDisc §18s). The history below is kept.**
+   Measured on one drive, one disc. The engine's `cache_defeat` reads 1 sector 5000 away,
+   and after it the second pass came back **fresh in 3/3 pairs**. Reading 1 sector far away
+   instead gave **9/9** fresh at span sizes of 49, 400 and 800 sectors. `--verify 2` over the
+   site came back fresh 3/3. So the second pass is a real witness on this drive, and
+   `verify_passes >= 2` is back to being a working filter.
+   - **The absolute gate still decides.** A fresh second pass is a real second opinion, but
+     seven fresh reads' majority vote was still right for 0/49. A real witness does not make
+     agreement mean truth. Retiring a sector only when the absolute gate passes (below)
+     stays.
+   - **Partial caching is not ruled out.** "Any sector differs" proves the pass was not
+     *wholly* cached. Two fresh reads agree on 22-40 of 49 sectors anyway, so a sector served
+     from cache looks the same as one that happened to re-read identically. The only hint is
+     timing, and it was not controlled.
+   - **Neither side's cache model held, and our prediction was wrong** ("falls as C − S").
+     The cache is not plain LRU. One distant sector displaced a 49-sector span 12/12, which
+     fits a cache that is *invalidated by a non-sequential read*. That is outside all three
+     models we put forward. So the flush threshold is flat at **1 sector**, and the cache
+     size never enters into it.
+   - **Spans of 400 sectors or more re-read fresh with no flush at all** (6/6). There is a
+     size limit somewhere between 196 and 400 sectors that was not bisected. Below it, a
+     1-sector distant read is enough. Separately, a slow first read (~6 s) threw the cache
+     away 4/4 times in phase 1. The cause is unknown and was not controlled. It is the
+     reason phase 1's bisection result `C = 159` did not replicate.
+   - **Other drives are untested.** Measure this per drive before relying on the result
+     anywhere else.
+
    **OPEN RISK to condition one, raised by AccuDisc against their own engine (§18k,
-   2026-09-18).** `verify_passes >= 2` is the witness this whole rule rests on, and it is
+   2026-09-18) — the history, now resolved above.** `verify_passes >= 2` is the witness this whole rule rests on, and it is
    only a witness if the second pass actually re-reads the disc. AccuDisc's `cache_defeat`
    is **one 1-sector read 5000 sectors away** (`engine.c:243`), and whether that evicts a
    115 kB span from this drive's ~2 MB cache is now an open question — the same confound
