@@ -57,7 +57,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, NamedTuple, TypeVar
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Sequence
 
 _T = TypeVar("_T")
 
@@ -1602,6 +1602,254 @@ def read_span_bytes(
             module, device, start_lba, count, read_speed, progress_cb
         ),
     )
+
+
+#: C2 error-pointer bytes per sector (one bit per 8-bit audio word, 2352/8).
+#: Named here because :func:`read_span_detail` predicts a 2646-byte sector and a
+#: wrong prediction must raise rather than mis-slice — the same reasoning the
+#: ``sector_len`` guard in :func:`_read_span_binding` carries.
+_C2_BYTES = 294
+
+#: Sector width when C2 pointers ride along with the audio. Requested
+#: unconditionally on the whole-disc path, so a span read that asks for C2 sees
+#: the same geometry the rip did.
+_SECTOR_BYTES_C2 = _SECTOR_BYTES + _C2_BYTES
+
+
+@dataclass(frozen=True)
+class SpanDetail:
+    """One flagged-span re-read, with everything the acceptance rule needs.
+
+    **The decoded ``states`` are why this is a dataclass and not a tuple of
+    buffers.** ``status_map`` is one raw byte per sector whose low nibble is a
+    state and whose high nibble is a severity, and decoding it needs
+    ``accudisc.map_state``. Handing the raw bytes out would force the caller to
+    import the binding to understand them, which is exactly what the seam exists
+    to prevent (``test_no_module_outside_the_seam_imports_accudisc``). So the
+    decode happens here, once, and what leaves the seam is state *names*.
+
+    Hand-decoding the nibble with ``byte & 15`` is not an alternative: the
+    priority order is AccuDisc's and the encoding is theirs to change.
+
+    ``c2_clean`` is derived rather than left to the caller because "this sector's
+    own C2 block is all zero" is one of the three acceptance conditions and is a
+    C-level ``count`` here against a per-byte Python loop there. ``c2`` is kept
+    alongside it for the bench, which scores the bitmap itself.
+
+    ``verify_passes`` records what was *asked for*, not what was achieved, and it
+    is carried on the result deliberately: the acceptance rule in
+    ``span-recovery-plan.md`` §4.4 turns on the read having had a position
+    witness, so a caller that never sees the request cannot apply the rule.
+    Measured on hardware (AccuDisc run B, 2026-09-16f): a single-pass read
+    delivered whole chunks 48-96 bytes late with a clean C2 and ``slips == 0``,
+    so neither the C2 lane nor the slip counter can stand in for it.
+    """
+
+    start_lba: int
+    pcm: bytes  # count * 2352, raw (offset correction happens at storage)
+    c2: bytes  # count * 294
+    states: tuple[
+        str, ...
+    ]  # per sector: OK / RECOVERED / C2 / HARD / SUSPECT / PENDING
+    c2_clean: tuple[bool, ...]  # per sector: this sector's own C2 block is all zero
+    verify_passes: int  # what was requested — see the class docstring
+    slips: int
+    sectors_flagged: int
+    sectors_recovered: int
+    speed_honoured_x: int | None
+
+    @property
+    def count(self) -> int:
+        return len(self.states)
+
+
+def read_span_detail(
+    device: str,
+    start_lba: int,
+    count: int,
+    *,
+    read_speed: int | None = None,
+    verify_passes: int = 2,
+    overlap_sectors: int = 4,
+    c2_retries: int = 0,
+    speed_ladder: Sequence[int] | None = None,
+    progress_cb: Callable[[int, int], None] | None = None,
+) -> SpanDetail:
+    """Re-read ``[start_lba, start_lba + count)`` keeping C2 and the status map.
+
+    The flagged-span recovery primitive (``docs/reference/span-recovery-plan.md``
+    §4.3). :func:`read_span_bytes` answers "give me these sectors"; this answers
+    "give me these sectors **and tell me whether to believe them**", which is a
+    different question and needs three lanes rather than one.
+
+    **``verify_passes`` defaults to 2, and 0 is refused.** A single transfer
+    cannot witness its own position: AccuDisc's run B delivered whole chunks 48
+    and 96 bytes late while reporting clean C2 and ``slips == 0``, so a caller
+    that quietly accepted ``verify_passes=0`` would get a result the acceptance
+    rule is not sound over, with nothing in the return value saying so. The
+    engine agrees from 0.43.0, where ``c2_retries`` without ``verify_passes >= 2``
+    is ``ERR_INVAL`` — checked here as well as there, because a local refusal
+    names the caller and the engine's names the read.
+
+    **``c2_retries`` defaults to 0 and should stay there** until a measurement
+    shows it adds recovery under verification. Its anchor is the chunk as first
+    delivered, so when that chunk is itself late the rescue inherits the shift
+    and still labels the sector ``RECOVERED`` (raw 113098, +48 bytes — AccuDisc
+    2026-09-16g). That is a reference sharing the displacement it is meant to
+    detect.
+
+    **Declines rather than degrades without ``caller_map_buffers``.** The C2
+    census fallback :func:`_census_c2` uses cannot tell ``HARD`` from ``C2`` — a
+    zero-filled hard sector carries an all-ones C2 block and reads as ordinary
+    damage — and the acceptance rule accepts neither, so a fallback here would
+    silently change which sectors are eligible.
+
+    Speed is set per invocation and **not** restored, matching
+    :func:`read_span`; the caller restores once after its sweep.
+    """
+    if verify_passes < 2:
+        msg = (
+            f"read_span_detail: verify_passes={verify_passes} gives the read no "
+            f"position witness, and the acceptance rule is unsound without one "
+            f"(span-recovery-plan.md §4.4) — pass 2 or more"
+        )
+        raise ValueError(msg)
+    module = _binding("span detail read")
+    return _call(
+        module,
+        "span detail read",
+        lambda: _read_span_detail_binding(
+            module,
+            device,
+            start_lba,
+            count,
+            read_speed,
+            verify_passes,
+            overlap_sectors,
+            c2_retries,
+            speed_ladder,
+            progress_cb,
+        ),
+    )
+
+
+def _read_span_detail_binding(
+    module: Any,
+    device: str,
+    start_lba: int,
+    count: int,
+    read_speed: int | None,
+    verify_passes: int,
+    overlap_sectors: int,
+    c2_retries: int,
+    speed_ladder: Sequence[int] | None,
+    progress_cb: Callable[[int, int], None] | None,
+) -> SpanDetail:
+    """:func:`read_span_detail` over the binding — one ``Device``, three lanes.
+
+    The sink de-interleaves PCM and C2 itself for the same reason
+    :func:`_read_span_binding` does: ``read_span``/``read_to_file`` supply their
+    own sink and leave nowhere to hang ``progress_cb``.
+
+    Both guards from :func:`_read_span_binding` carry over and both are load
+    bearing one axis apart. ``sector_len`` catches the wrong *width* — 2646 is
+    our prediction of a number the library reports, and slice assignment into a
+    ``bytearray`` silently resizes rather than raising. The final length check
+    catches the wrong *count*, which downstream would be a short buffer spliced
+    at a sample-exact offset, i.e. silent corruption rather than a failure.
+    """
+    pcm = bytearray(count * _SECTOR_BYTES)
+    c2 = bytearray(count * _C2_BYTES)
+    pos = 0
+
+    def collect(chunk: Any) -> None:
+        nonlocal pos
+        if chunk.sector_len != _SECTOR_BYTES_C2:
+            msg = (
+                f"span detail read returned {chunk.sector_len}-byte sectors, "
+                f"expected {_SECTOR_BYTES_C2} ({_SECTOR_BYTES} audio + "
+                f"{_C2_BYTES} C2) — refusing to reassemble"
+            )
+            raise RuntimeError(msg)
+        for i in range(chunk.nsec):
+            base = i * chunk.sector_len
+            a = (pos + i) * _SECTOR_BYTES
+            pcm[a : a + _SECTOR_BYTES] = chunk.data[base : base + chunk.audio_len]
+            c = (pos + i) * _C2_BYTES
+            off = base + chunk.audio_len
+            c2[c : c + _C2_BYTES] = chunk.data[off : off + chunk.c2_len]
+        pos += chunk.nsec
+        if progress_cb is not None:
+            progress_cb(pos, count)
+
+    with module.Device(device) as dev:
+        if not _supports_caller_map(dev, module):
+            msg = (
+                "span detail read needs a caller-owned status_map "
+                f"({_FEATURE_CALLER_MAPS}); this binding cannot distinguish HARD "
+                f"from C2, and the acceptance rule accepts neither — declining "
+                f"rather than degrading to a C2 census"
+            )
+            raise RuntimeError(msg)
+        status = bytearray(count)
+        # copy=False is safe: `collect` consumes the view synchronously and
+        # never retains it past the call.
+        result = dev.read(
+            start_lba,
+            count,
+            sink=collect,
+            copy=False,
+            c2=module.C2.PTRS,
+            sub=module.Sub.NONE,
+            speed_x=read_speed or 0,
+            verify_passes=verify_passes,
+            overlap_sectors=overlap_sectors,
+            c2_retries=c2_retries,
+            speed_ladder=speed_ladder,
+            status_map=status,
+        )
+
+    if pos != count:
+        msg = (
+            f"span detail read delivered {pos} of {count} sectors from lba "
+            f"{start_lba} — refusing a short span, it would splice silently"
+        )
+        raise RuntimeError(msg)
+
+    states = tuple(module.map_state(b).name for b in status)
+    clean = tuple(
+        bytes(c2[i * _C2_BYTES : (i + 1) * _C2_BYTES]).count(0) == _C2_BYTES
+        for i in range(count)
+    )
+    stats = result.stats
+    return SpanDetail(
+        start_lba=start_lba,
+        pcm=bytes(pcm),
+        c2=bytes(c2),
+        states=states,
+        c2_clean=clean,
+        verify_passes=verify_passes,
+        slips=stats.slips,
+        sectors_flagged=stats.sectors_flagged,
+        sectors_recovered=stats.sectors_recovered,
+        speed_honoured_x=_speed_x_or_none(module, stats),
+    )
+
+
+def _speed_x_or_none(module: Any, stats: Any) -> int | None:
+    """``speed_honoured_x`` as a multiplier, or ``None`` when nothing was reported.
+
+    ``0`` is "did not report", not "0x" — the same rule :func:`_drive_speed_x`
+    applies, and for the same reason: a bench row reading ``0x`` looks like a
+    measurement somebody took.
+
+    Feature-detected via the published capability name rather than ``getattr``
+    with a default: absent is "this binding cannot tell us", which must not be
+    rendered as a speed.
+    """
+    if not _has_feature(module, _FEATURE_SPEED_HONOURED):
+        return None
+    return getattr(stats, "speed_honoured_x", 0) or None
 
 
 # ── write path (the one destructive operation) ────────────────────────────────

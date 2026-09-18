@@ -643,7 +643,13 @@ class _FakeStats:
         sectors_flagged: int = 0,
         subq_total: int = 0,
         subq_ok: int = 0,
+        slips: int = 0,
+        sectors_recovered: int = 0,
+        speed_honoured_x: int = 0,
     ) -> None:
+        self.slips = slips
+        self.sectors_recovered = sectors_recovered
+        self.speed_honoured_x = speed_honoured_x
         self.sectors_read = sectors_read
         self.hard_errors = hard_errors
         self.sectors_suspect = sectors_suspect
@@ -2396,3 +2402,263 @@ def test_the_track_fake_here_uses_the_binding_s_own_names() -> None:
     module = _real_binding()
     real = {f.name for f in dataclasses.fields(module.Track)} | {"is_audio"}
     assert real >= _USED_TRACK_ATTRS
+
+
+# ── read_span_detail: the flagged-span recovery primitive ─────────────────────
+#
+# The acceptance rule in docs/reference/span-recovery-plan.md §4.4 rests on three
+# things this function must deliver honestly: the read had a position witness,
+# the per-sector state decoded through AccuDisc's own `map_state`, and the
+# sector's own C2 block. Each test below fails if one of those is faked, and the
+# de-interleave tests use a distinguishable payload rather than zeros — zeros are
+# also what a wrong slice produces.
+
+
+def _detail_map_state(byte: int) -> _FakeMapState:
+    """Decode a fake map byte — with the state in the **high** nibble.
+
+    The real engine puts it in the low one, so this fake is deliberately not
+    bit-compatible with it. That is the whole point: production code must reach
+    the state through `map_state` and must not know the packing, because the
+    packing is AccuDisc's to change and a hand-rolled `byte & 15` has been
+    written here before.
+
+    **Measured 2026-09-18.** With this fake decoding `byte & 0x0F` — i.e.
+    mirroring the real layout — replacing `module.map_state(b)` with
+    `module.MapState(b & 15)` in production left all 13 tests passing. A fake
+    that agrees with the bug cannot witness it. With the nibbles swapped, the
+    same mutation fails loudly.
+    """
+    return _FakeMapState((byte >> 4) & 0x0F)
+
+
+class _FakeResult:
+    def __init__(self, stats: _FakeStats) -> None:
+        self.stats = stats
+
+
+class _DetailDevice:
+    """A device that serves C2-bearing chunks and fills the caller's status map.
+
+    `read` writes into `status_map` the way the engine does, so the production
+    code's decode is exercised rather than a value handed straight back.
+    """
+
+    def __init__(
+        self,
+        chunks: list[_DetailChunk],
+        states: list[int],
+        stats: _FakeStats | None = None,
+    ) -> None:
+        self._chunks = chunks
+        self._states = states
+        self._stats = stats or _FakeStats()
+        self.read_kwargs: dict[str, Any] = {}
+
+    def __enter__(self) -> _DetailDevice:
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        return None
+
+    # `_supports_caller_map` prefers `module.features`; this annotation is the
+    # fallback probe's target and must not read as plain `bool`.
+    def read(self, lba: int, count: int, **kw: Any) -> _FakeResult:
+        self.read_kwargs = {"lba": lba, "count": count, **kw}
+        status = kw.get("status_map")
+        if isinstance(status, bytearray):
+            status[: len(self._states)] = bytes(self._states)
+        for chunk in self._chunks:
+            kw["sink"](chunk)
+        return _FakeResult(self._stats)
+
+
+class _DetailChunk:
+    def __init__(self, nsec: int, data: bytes, sector_len: int = 2646) -> None:
+        self.nsec = nsec
+        self.data = data
+        self.sector_len = sector_len
+        self.audio_len = 2352
+        self.c2_len = sector_len - 2352
+
+
+def _detail_binding(
+    device: _DetailDevice, features: frozenset[str] | None = None
+) -> _FakeBinding:
+    module = _FakeBinding()
+    module.Device = lambda _path: device  # type: ignore[assignment]
+    module.C2 = _FakeC2  # type: ignore[attr-defined]
+    module.Sub = _FakeSub  # type: ignore[attr-defined]
+    module.MapState = _FakeMapState  # type: ignore[attr-defined]
+    module.map_state = staticmethod(_detail_map_state)  # type: ignore[attr-defined]
+    module.features = (  # type: ignore[attr-defined]
+        frozenset({"caller_map_buffers", "speed_honoured"})
+        if features is None
+        else features
+    )
+    return module
+
+
+def _detail_sector(audio_byte: int, c2_byte: int) -> bytes:
+    """One 2646-byte sector whose audio and C2 halves are distinguishable."""
+    return bytes([audio_byte]) * 2352 + bytes([c2_byte]) * 294
+
+
+@pytest.mark.parametrize("passes", [0, 1])
+def test_span_detail_refuses_a_read_with_no_position_witness(
+    monkeypatch: pytest.MonkeyPatch, passes: int
+) -> None:
+    """A single transfer cannot witness its own position (AccuDisc run B: whole
+    chunks 48-96 B late, clean C2, slips == 0), so the acceptance rule is unsound
+    over it. Refused here, in the caller's own terms, as well as by the engine."""
+    _install(monkeypatch, _detail_binding(_DetailDevice([], [])))
+    with pytest.raises(ValueError, match="position witness"):
+        ar.read_span_detail("/dev/sr0", 100, 1, verify_passes=passes)
+
+
+def test_span_detail_accepts_two_passes() -> None:
+    """Negative control for the test above: the guard must have a passing side,
+    or it is indistinguishable from the function being broken."""
+    device = _DetailDevice([_DetailChunk(1, _detail_sector(0xAA, 0x00))], [0x10])
+    with pytest.MonkeyPatch.context() as mp:
+        _install(mp, _detail_binding(device))
+        out = ar.read_span_detail("/dev/sr0", 100, 1, verify_passes=2)
+    assert out.states == ("OK",)
+    assert out.verify_passes == 2
+
+
+def test_span_detail_declines_without_caller_map_buffers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Declines rather than degrading: the C2 census cannot tell HARD from C2 (a
+    zero-filled hard sector carries an all-ones C2 block), and the acceptance rule
+    accepts neither — so a fallback would silently change what is eligible."""
+    device = _DetailDevice([_DetailChunk(1, _detail_sector(0xAA, 0x00))], [0x10])
+    _install(monkeypatch, _detail_binding(device, features=frozenset()))
+    with pytest.raises(RuntimeError, match="caller_map_buffers"):
+        ar.read_span_detail("/dev/sr0", 100, 1)
+
+
+def test_span_detail_deinterleaves_audio_and_c2_into_separate_lanes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The payload differs per sector AND per lane, so a slice that is off by a
+    lane or by a sector produces the wrong bytes rather than plausible zeros."""
+    chunk = _DetailChunk(
+        2, _detail_sector(0x11, 0x22) + _detail_sector(0x33, 0x44), sector_len=2646
+    )
+    device = _DetailDevice([chunk], [0x10, 0x10])
+    _install(monkeypatch, _detail_binding(device))
+    out = ar.read_span_detail("/dev/sr0", 100, 2)
+
+    assert out.pcm == bytes([0x11]) * 2352 + bytes([0x33]) * 2352
+    assert out.c2 == bytes([0x22]) * 294 + bytes([0x44]) * 294
+    assert out.count == 2
+
+
+def test_span_detail_rejects_a_sector_width_that_is_not_2646(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """2646 is our PREDICTION of a number the library reports. Slice assignment
+    into a bytearray silently resizes, so a wrong prediction would yield a
+    plausible buffer of the wrong length rather than an error."""
+    device = _DetailDevice([_DetailChunk(1, b"\x00" * 2352, sector_len=2352)], [0x10])
+    _install(monkeypatch, _detail_binding(device))
+    with pytest.raises(RuntimeError, match="2646"):
+        ar.read_span_detail("/dev/sr0", 100, 1)
+
+
+def test_span_detail_rejects_a_short_span(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The count axis of the same defect: downstream this is spliced at a
+    sample-exact offset, so a short buffer is silent corruption, not a failure."""
+    device = _DetailDevice([_DetailChunk(1, _detail_sector(0xAA, 0x00))], [0x10, 0x10])
+    _install(monkeypatch, _detail_binding(device))
+    with pytest.raises(RuntimeError, match="1 of 2 sectors"):
+        ar.read_span_detail("/dev/sr0", 100, 2)
+
+
+def test_span_detail_decodes_states_through_map_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The high nibble is severity and must not leak into the state. These bytes
+    carry a non-zero severity, so a decode that returned the raw byte, or compared
+    it to a state value directly, produces a different answer here."""
+    payload = b"".join(_detail_sector(0xAA, 0x00) for _ in range(4))
+    device = _DetailDevice(
+        [_DetailChunk(4, payload)],
+        [0x1A, 0x42, 0x2F, 0x53],  # OK, RECOVERED, C2, SUSPECT — each with a
+        # non-zero severity in the other nibble, so a hand-decode reads severity
+        # as state and gets a different answer (or no member at all).
+    )
+    _install(monkeypatch, _detail_binding(device))
+    out = ar.read_span_detail("/dev/sr0", 100, 4)
+    assert out.states == ("OK", "RECOVERED", "C2", "SUSPECT")
+
+
+def test_span_detail_reports_c2_cleanliness_per_sector(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`c2_clean` is one of the three acceptance conditions and is per SECTOR: a
+    whole-span answer would accept a clean sector's neighbour."""
+    payload = _detail_sector(0xAA, 0x00) + _detail_sector(0xAA, 0x01)
+    device = _DetailDevice([_DetailChunk(2, payload)], [0x10, 0x10])
+    _install(monkeypatch, _detail_binding(device))
+    out = ar.read_span_detail("/dev/sr0", 100, 2)
+    assert out.c2_clean == (True, False)
+
+
+def test_span_detail_passes_the_recovery_knobs_to_the_engine(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Read from `read_kwargs`, never from the source text: the defaults are
+    constants, so a test that cannot fail on a dropped argument proves nothing."""
+    device = _DetailDevice([_DetailChunk(1, _detail_sector(0xAA, 0x00))], [0x10])
+    _install(monkeypatch, _detail_binding(device))
+    ar.read_span_detail(
+        "/dev/sr0",
+        500,
+        1,
+        read_speed=8,
+        verify_passes=3,
+        overlap_sectors=4,
+        c2_retries=0,
+        speed_ladder=[8, 4],
+    )
+    kw = device.read_kwargs
+    assert (kw["lba"], kw["count"]) == (500, 1)
+    assert kw["verify_passes"] == 3
+    assert kw["overlap_sectors"] == 4
+    assert kw["c2_retries"] == 0
+    assert kw["speed_x"] == 8
+    assert list(kw["speed_ladder"]) == [8, 4]
+    assert kw["c2"] is _FakeC2.PTRS
+    assert kw["sub"] is _FakeSub.NONE
+    assert isinstance(kw["status_map"], bytearray)
+
+
+@pytest.mark.parametrize(
+    ("features", "honoured", "expected"),
+    [
+        (frozenset({"caller_map_buffers", "speed_honoured"}), 8, 8),
+        (frozenset({"caller_map_buffers", "speed_honoured"}), 0, None),
+        (frozenset({"caller_map_buffers"}), 8, None),
+    ],
+    ids=["reported", "zero-is-not-a-speed", "feature-absent"],
+)
+def test_span_detail_speed_zero_and_absent_are_both_none(
+    monkeypatch: pytest.MonkeyPatch,
+    features: frozenset[str],
+    honoured: int,
+    expected: int | None,
+) -> None:
+    """`0` means "did not report", and a binding without the capability cannot
+    tell us at all. Both must read as None — a bench row saying `0x` looks like a
+    measurement somebody took."""
+    device = _DetailDevice(
+        [_DetailChunk(1, _detail_sector(0xAA, 0x00))],
+        [0x10],
+        _FakeStats(speed_honoured_x=honoured),
+    )
+    _install(monkeypatch, _detail_binding(device, features=features))
+    out = ar.read_span_detail("/dev/sr0", 100, 1)
+    assert out.speed_honoured_x == expected
