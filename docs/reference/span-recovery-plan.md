@@ -142,6 +142,20 @@ Per AR-failed track, after CTDB and before `track-ladder`:
      Measured at 113068 (§18g): 31 sectors were wrong while `status_map` read `OK`, and only
      13 of the 44 wrong ones were C2-flagged. So the damage lane locates the *neighbourhood*
      of the fault, not its extent — which is the whole reason step 2 pads and step 4 witnesses.
+     **§18w measured the gap as large.** Every read was wrong from 113026 onward, including
+     113026–113067 and 113117–113136, which lie well outside the flagged site. Padding of
+     a few sectors does not reach that far. Such a track fails AR with an unflagged remainder
+     and falls through to `track-ladder` (§4.5). That is safe, but the rung recovers nothing
+     there.
+   - **Unexplained, and possibly ours: Tuesday and today disagree.** Tuesday's `--verify 3`
+     run (engine 0.42.0, **no raw subchannel**, 2646-byte sectors) delivered 113068–113116
+     exact with zero C2 flags. Today's reads (engine **0.45.0**, **C2 plus raw
+     subchannel**, **2742-byte sectors**) carry 13–15 flags per read over the same sectors.
+     AccuDisc list disc, drive or conditions as possible causes. Two **configuration**
+     differences come before any of those: the engine version, which includes 0.44.0's
+     publish-one-chunk-later restructure, and the sector width. 2742 is the width at which
+     this drive's libata mod-16 misframing lived. §18c's "sub raw costs nothing" was
+     measured on **clean** media only. Rule out both before blaming the disc (§214).
      A slip outside every padded span is found by nothing here; the AR gate still rejects
      the track, and `track-ladder` still runs after.
 2. **Cluster.** Merge targets closer than `G` sectors, pad each span by `P` sectors (the
@@ -243,6 +257,22 @@ Per AR-failed track, after CTDB and before `track-ladder`:
    2026-09-16f),
    its map state is `OK` or `RECOVERED`, its own C2 block is all zero, **and** it is not in
    the widened Q-position lane (below). `SUSPECT`, `C2`, `HARD` are never accepted.
+
+   **MEASURED ON HARDWARE, 2026-09-18 (AccuDisc §18w): the rule's conditions ALL HOLD for
+   wrong sectors in this region.** Raw 113022–113136, 115 sectors, 3 repetitions per arm.
+   With `--verify 2`, between **13 and 33 wrong sectors per read came out marked OK**. Two
+   independent transfers agreed on them, and their C2 was clean. `--c2-witness` did no
+   better (14–46), and `--overlap 4` did nothing at all, because no seam ever disagreed.
+   The diagnostic found the reason. The displacement is a ramp that **resets to 0 at fixed
+   disc positions** (113053, 113095, 113123, the same in all four reads) and grows in
+   multiples of 24 bytes in between. It varies from read to read, but the pattern repeats,
+   so two fresh transfers often land on the same wrong bytes. So on this drive, in this
+   region, §4.4's four conditions are a **filter and nothing more**. What decides is
+   `match_track_pcm` in step 5, plus the rule that retires a sector only when that gate
+   passes. That is exactly what the §6 test "a candidate that fails AR leaves the PCM file
+   byte-identical" exists to pin. The test is therefore a **merge requirement for the
+   rung, with a negative control**: if the gate is moved after the write, the test must
+   fail.
 
    **RESOLVED FOR THE LITE-ON, 2026-09-18 (AccuDisc §18s). The history below is kept.**
    Measured on one drive, one disc. The engine's `cache_defeat` reads 1 sector 5000 away,
