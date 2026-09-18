@@ -88,7 +88,21 @@ sectors, with `slips` and `subq_misposition` both zero. The tempting summary —
 113068 and 113092 went late as units. At `sector_len` 2742 under a 64 KiB cap the chunk is 23
 sectors, so 4,000 sectors is 174 chunk-transfers and six runs are **1,044 trials**, not
 24,000. Rule of three on zero events in 1,044 gives a **95% upper bound of ≈0.29% per
-chunk-transfer**; counting sectors would have given 0.0125% and overstated the result by 23×.
+chunk-transfer**; counting sectors would have given 0.0125%, which answers a different
+question.
+
+**Restated 2026-09-18 after §18g, which falsified the reasoning without touching the
+number.** The original justification was "the fault displaces a transfer as a unit". That is
+**wrong**: measured at 113068, displacement is a step function *within* a transfer whose runs
+do not align with chunk boundaries — chunk 1 alone carries three transitions
+(`[+48][0 x4][+48 x14][+96 x4]`), including a 4-sector island that is **correct** in the
+middle of the damage. So the transfer is not the fault's unit.
+
+The bound stands anyway, as a statement about a different event: *0 of 1,044 transfers
+contained **any** displaced sector*, so ≈0.29% bounds **P(a clean transfer contains at least
+one displaced sector)**. That is a property *of* a transfer and is well-defined whatever the
+sub-transfer structure turns out to be. It is also the conservative direction — a finer true
+trial unit would only tighten it. Quote it that way, never as "0.29% of transfers slip".
 
 So the defensible sentence is: *on clean media this drive slips at a rate bounded above by
 roughly 0.3% of transfers (95%), on one disc at two radii — not zero, and untested on other
@@ -125,12 +139,57 @@ Per AR-failed track, after CTDB and before `track-ladder`:
    lane is set (map `C2`, `HARD` or `SUSPECT`; `disc_damage`, captured on every rip).
    Exclude the disc's final sector (§2).
    - *Known blind spot:* the capture pass has no verify/overlap, so it cannot see a slip.
+     Measured at 113068 (§18g): 31 sectors were wrong while `status_map` read `OK`, and only
+     13 of the 44 wrong ones were C2-flagged. So the damage lane locates the *neighbourhood*
+     of the fault, not its extent — which is the whole reason step 2 pads and step 4 witnesses.
      A slip outside every padded span is found by nothing here; the AR gate still rejects
      the track, and `track-ladder` still runs after.
 2. **Cluster.** Merge targets closer than `G` sectors, pad each span by `P` sectors (the
    0.41.0 neighbour anchor needs neighbours with alignment signal), clamp to the track
-   window plus the offset margin. `G`, `P` are profile fields, tuned offline on the maps.
-3. **Re-read the spans**, one pass = each span once, **speed-diverse across passes**
+   window plus the offset margin. `G`, `P` are profile fields (`span_gap`, `span_pad`), tuned
+   offline on the maps.
+
+   **The trigger is a cost optimiser, not a correctness mechanism** (AccuDisc §18g, and they
+   are speccing to the same rule). Correctness comes from the witness in step 4; clustering
+   only decides *where to spend one*. Over-triggering costs time; **under-triggering is the
+   only correctness risk**, because a sector never re-read is never witnessed. So err wide:
+   a condemned sector is re-read with a witness, never discarded.
+
+   Two consequences that are easy to get backwards:
+   - **Do not carve correct sectors out of a span.** The measured damage at 113068 contains a
+     4-sector island that is byte-correct in the middle of the wrong run, with nothing marking
+     either edge. Excluding it would save four sector-reads and reintroduce the risk the
+     whole rung exists to remove.
+   - **Do not tune `G`/`P` to a scanned maximum.** AccuDisc scored a ±8 margin at 44/44 on
+     this span against ±4's 41/44, and explicitly refuse to adopt ±8 *because* it scored
+     perfectly: the longest displaced run measured is 14 sectors and nothing signals where a
+     run ends, so ±8 is fitted to one observation. Their transfer-wide rule scored 43/44 but
+     condemns up to 22 good sectors per flag, and its single miss sits in a 3-sector runt
+     chunk created by their own `--count 49` — n=1, boundary-adjacent, not evidence.
+3. **Re-read the spans**, one pass = each span once, **start-address-diverse and
+   speed-diverse across passes**
+
+   **Start-address diversity is the load-bearing one, and it is new (AccuDisc §18g,
+   2026-09-18).** Ten independent single-pass reads of the same 49 sectors at raw 113068 came
+   back **byte-identical**, 44 of 49 wrong, 31 of those wrong while `status_map` said `OK`.
+   So this is not "slips reproduce": **the delivered bytes are a fixed function of the
+   address read**, and no number of re-reads of the same span can help. Consensus among
+   re-reads of one address is *structurally* incapable of catching it — the span is maximally
+   stable and maximally wrong.
+
+   What breaks the determinism is reading the same sectors from a transfer that **starts
+   somewhere else**, which is also the only reason the engine's neighbour anchoring works
+   (AccuDisc: *"anchoring works only because neighbours come from transfers at different
+   start addresses"*). So each pass must offset its span start — pass *k* begins at
+   `start - k*Δ` for a small Δ, clamped into the track window — and a pass that re-reads
+   identical boundaries is a wasted pass rather than a second opinion.
+
+   *Assumption this rests on, stated so it can fail:* that a different start address actually
+   changes what lands at the target sectors. That is AccuDisc's explanation for why anchoring
+   works, and it is strongly implied, but §18g varied neither start nor speed — it repeated
+   one request ten times. H1 must therefore report displacement **per (sector, start-offset)**,
+   not only per sector, or it cannot tell "this address is cursed" from "this pass was
+   wasted".
    (the bound ladder, as today). This is the engine author's own advice, not merely ours:
    *"Verify passes themselves stream at `speed_x` — drives recalibrate on every speed
    change, so per-chunk speed switching thrashes; run whole-range passes at different
@@ -184,8 +243,12 @@ Per AR-failed track, after CTDB and before `track-ladder`:
      the narrow one accepts exactly what the lane exists to catch.
    - *Cost is nil on this drive:* AccuDisc measured `--sub raw` and no-sub deliveries of the
      same span byte-identical, so the capture changes no alignment. The first accepted copy wins and the sector leaves the target set; later
-   passes re-read only the shrunken spans. *Variant for the bench:* require two accepted
-   copies at different speeds to agree byte-for-byte.
+   passes re-read only the shrunken spans. *Variant for the bench — REFUTED AS WRITTEN (§18g).* It said
+   "require two accepted copies at different speeds to agree byte-for-byte". Agreement
+   between two reads **of the same address** is not evidence: ten such reads agreed
+   perfectly at 113068 and 44 of 49 were wrong. If the variant is kept it must require
+   agreement between copies delivered by transfers with **different start addresses**, and
+   whether speed alone also breaks the determinism is untested — §18g held both fixed.
 5. **Gate.** When the target set is empty, or after each pass, overlay accepted sectors onto
    the track's current PCM in memory and run `match_track_pcm`. Pass → splice the verified
    bytes (same sample-exact write as today) and stop. Fail with an empty target set → the
@@ -255,7 +318,10 @@ run, `/var/tmp/sr0.owner` = who/what/ETA, release):**
 - *H0 (AccuDisc's):* their 0.41/0.42 verification read of the same spans. Ours waits for it.
 - *H1:* a bench tool (`tools/span_recovery_bench.py`) that runs §4 steps 1–5 on Tracy's
   tracks 8, 9, 11 only, and logs every pass scored against the key: sectors accepted,
-  accepted-but-wrong, time. Both acceptance variants. Quiet AccuDisc build tree, engine
+  accepted-but-wrong, time. Both acceptance variants. **It must report displacement per
+  (sector, start-offset), not per sector** — that is the only way to tell "this address is
+  deterministically wrong" from "this pass added nothing", and after §18g the first is the
+  expected case. A pass that repeats a start offset already tried is a bug, not a retry. Quiet AccuDisc build tree, engine
   version named in the claim.
 - *H2:* a full `cdda2img rip` of Tracy with `--profile span-flagged`, expected 11/11.
 
