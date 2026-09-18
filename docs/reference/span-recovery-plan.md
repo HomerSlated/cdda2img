@@ -166,55 +166,47 @@ Per AR-failed track, after CTDB and before `track-ladder`:
      run ends, so ±8 is fitted to one observation. Their transfer-wide rule scored 43/44 but
      condemns up to 22 good sectors per flag, and its single miss sits in a 3-sector runt
      chunk created by their own `--count 49` — n=1, boundary-adjacent, not evidence.
-3. **Re-read the spans**, one pass = each span once, **start-address-diverse and
-   speed-diverse across passes**
+3. **Re-read the spans**, one pass = each span once, **speed-diverse across passes**, and
+   **start-address-diverse too once that is shown to buy anything** (open — see the
+   retraction below; do not promote it to load-bearing again without replication).
 
-   **Start-address diversity is the load-bearing one, and it is new (AccuDisc §18g,
-   2026-09-18).** Ten independent single-pass reads of the same 49 sectors at raw 113068 came
-   back **byte-identical**, 44 of 49 wrong, 31 of those wrong while `status_map` said `OK`.
-   So this is not "slips reproduce": **the delivered bytes are a fixed function of the
-   address read**, and no number of re-reads of the same span can help. Consensus among
-   re-reads of one address is *structurally* incapable of catching it — the span is maximally
-   stable and maximally wrong.
+   **RETRACTED 2026-09-18 (AccuDisc §18k). Read this before believing anything below
+   about start addresses.** §18g reported ten byte-identical reads of raw 113068 and
+   concluded the span is "a fixed function of its address". **Those ten reads were served
+   from the drive's cache** — ~115 kB of audio against a ~2 MB cache, issued back to back.
+   With a 5.5 MB distant read in between, 36 of 49 sectors differ; flushed again, 9 of 49.
+   The determinism was the measurement's, not the drive's. This plan briefly made
+   start-address diversity *the* load-bearing axis on that premise; the premise is
+   withdrawn and so is the conclusion.
 
-   What breaks the determinism is reading the same sectors from a transfer that **starts
-   somewhere else**, which is also the only reason the engine's neighbour anchoring works
-   (AccuDisc: *"anchoring works only because neighbours come from transfers at different
-   start addresses"*). So each pass must offset its span start — pass *k* begins at
-   `start - k*Δ` for a small Δ, clamped into the track window — and a pass that re-reads
-   identical boundaries is a wasted pass rather than a second opinion.
+   **What the four-arm test did and did not settle.** Arms differ from one another at the
+   target sectors (A vs C 49/49, B vs C 25/49, C vs D 47/49), which looks like a start
+   effect. It is not scoreable as one: at *identical* parameters with a flush between,
+   reads differ from each other by 22 to 49 of 49, so within-arm variance is as large as
+   between-arm and the test had no replication. **The start-address question is OPEN.** It
+   is neither the load-bearing axis nor ruled out.
 
-   **This assumption is UNPROVEN, and the only evidence we have points against it
-   (AccuDisc §18h, 2026-09-18).** That a different start address changes what lands at the
-   target sectors is AccuDisc's explanation for why anchoring works — it is not a
-   measurement. Asked directly, they found they do not have the data and that what they do
-   have runs the wrong way:
-   - **The anchor path has never run against a real slip.** Run A's `--verify 3` did not
-     reproduce 113069-71, so `anchor_position` was never exercised on hardware; only
-     fake-drive tests cover it.
-   - **In run B, a differently-started transfer landed at the SAME displacement.**
-     `c2_rescue` candidates are 3-sector context reads and so start elsewhere by
-     construction; one corroborated the late chunk, which is how 113098 came back
-     `RECOVERED` at +48. One location and an indirect reading — but it is the opposite of
-     reassurance.
+   What *is* established is narrower and was my own prediction's undoing: cache-defeated
+   re-reads of this span are **not** identical, so "position-locked" is refuted and re-reads
+   are not futile by construction.
 
-   They have queued our test verbatim as `[P1]` (read 113068-113116 from starts 113060,
-   113064, 113068; compare the overlap; under a minute of drive time) and recommended it to
-   Keith. **Nothing here should be designed around an answer until it is measured.**
+   **The result that actually governs this rung, and it is bad.** Seven cache-defeated reads
+   at identical parameters, scored against the key: exact sectors `0, 0, 0, 3, 0, 0, 0` of
+   49; union across all seven `3/49`; **majority vote across all seven `0/49`** — worse than
+   the best single read. And `23/49` sectors had **four or more of seven reads agreeing on a
+   value, with the majority value correct for none of them**.
 
-   *Why the rung is still worth building while this is open.* The uncertainty is about
-   **yield, not correctness**. If start diversity does nothing, every re-read returns the
-   same wrong bytes, the acceptance rule rejects them (verify still disagrees, or C2 still
-   fires, or the AR gate fails), the target set does not empty, and §4.5 falls through to
-   `track-ladder` exactly as designed. The rung cannot make a track worse; it can only fail
-   to help. So the risk is a wasted rung, not a corrupted container — which is precisely why
-   the witness, and not the trigger, is where correctness lives (§4.2).
+   So on this disc, at this site, **agreement is not merely weak evidence of truth — it is
+   anti-correlated with it.** Re-reading does not converge; it produces varied wrong answers
+   that sometimes agree. Any acceptance rule gating on consensus alone would accept those 23
+   sectors confidently and be wrong 23 times. §4.4 does not, because it also requires the
+   sector's own C2 to be all zero — which is now the condition carrying the most weight,
+   rather than a belt-and-braces extra.
 
-   *And if it is measured false*, that is a result rather than a dead end: it would say this
-   disc's damage at these sites is **unrecoverable by re-reading on this drive**, redirecting
-   effort to the exits that do not re-read at all — CTDB parity and AccurateRip offset
-   matching, already the first exit in the pipeline — and narrowing 0.41.0's anchoring
-   guarantee at the same time.
+   *Do not design against arm A yet.* Start 113060 (−8) scored **20/49 exact** against 0–3
+   for every read at 113068 — far outside the same-start range and the most hopeful number
+   of the day. It is also n=1 per arm against a within-arm spread of 22–49, which is exactly
+   the error that produced the retraction above. It needs replication first.
 
    H1 must therefore report displacement **per (sector, start-offset)**, not only per sector,
    or it cannot tell "this address is cursed" from "this pass was wasted".
@@ -249,6 +241,25 @@ Per AR-failed track, after CTDB and before `track-ladder`:
    its map state is `OK` or `RECOVERED`, its own C2 block is all zero, **and** it is not in
    the widened Q-position lane (below). `SUSPECT`, `C2`, `HARD` are never accepted.
 
+   **OPEN RISK to condition one, raised by AccuDisc against their own engine (§18k,
+   2026-09-18).** `verify_passes >= 2` is the witness this whole rule rests on, and it is
+   only a witness if the second pass actually re-reads the disc. AccuDisc's `cache_defeat`
+   is **one 1-sector read 5000 sectors away** (`engine.c:243`), and whether that evicts a
+   115 kB span from this drive's ~2 MB cache is now an open question — the same confound
+   that produced the §18g retraction. If it does not, then verify passes, `anchor_position`
+   candidates and `c2_rescue` context reads may all be comparing **cached copies of one
+   read**, which would agree perfectly and witness nothing.
+   - Not wholly ineffective: run A's `--verify 3` did find disagreements, so something is
+     being defeated. But "not wholly ineffective" is not the property this rule needs.
+   - It is queued as their next measurement and they will report either way. **Until then,
+     treat `verify_passes >= 2` as the strongest witness available rather than a proven
+     one**, and note that the C2-all-zero condition is now carrying more weight than it was
+     designed to — it is the one condition that does not depend on two reads being
+     independent.
+   - H1 must therefore record, per accepted sector, *which* conditions carried it. An
+     acceptance that rested on verify alone is a different result from one where C2 agreed,
+     and after this they cannot be reported as one number.
+
    **The fourth condition, added 2026-09-18 (AccuDisc §199.3/§199.3b).** The read asks for
    `Sub.RAW` and a `subq_map`, giving a per-sector `MISPOSITION` flag: the sector's own
    CRC-valid ADR=1 Q frame named an LBA other than the one commanded.
@@ -271,12 +282,16 @@ Per AR-failed track, after CTDB and before `track-ladder`:
      the narrow one accepts exactly what the lane exists to catch.
    - *Cost is nil on this drive:* AccuDisc measured `--sub raw` and no-sub deliveries of the
      same span byte-identical, so the capture changes no alignment. The first accepted copy wins and the sector leaves the target set; later
-   passes re-read only the shrunken spans. *Variant for the bench — REFUTED AS WRITTEN (§18g).* It said
-   "require two accepted copies at different speeds to agree byte-for-byte". Agreement
-   between two reads **of the same address** is not evidence: ten such reads agreed
-   perfectly at 113068 and 44 of 49 were wrong. If the variant is kept it must require
-   agreement between copies delivered by transfers with **different start addresses**, and
-   whether speed alone also breaks the determinism is untested — §18g held both fixed.
+   passes re-read only the shrunken spans. *Variant for the bench — STILL REFUTED, on better evidence
+   (§18k).* It said "require two accepted copies at different speeds to agree
+   byte-for-byte". The first refutation cited §18g's ten identical reads and is withdrawn
+   with them — those were cache hits. The conclusion survives and is now stronger, because
+   it rests on cache-defeated reads instead: across seven of them, **23 of 49 sectors had
+   four or more agreeing on a value and the majority value was correct for none of them**,
+   and the majority vote overall scored 0/49 against a best single read of 3/49. Agreement
+   here is not weak evidence of truth, it is anti-correlated with it. **Adding an agreement
+   clause to the acceptance rule would make it worse, not stricter** — which is why §4.4
+   gates on the witness and the copy's own C2 rather than on consensus.
 5. **Gate.** When the target set is empty, or after each pass, overlay accepted sectors onto
    the track's current PCM in memory and run `match_track_pcm`. Pass → splice the verified
    bytes (same sample-exact write as today) and stop. Fail with an empty target set → the
