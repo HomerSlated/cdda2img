@@ -155,6 +155,23 @@ and a different acceptance rule.
   experimental `span-fixed` / `sector-hammer` / `sector-runup` stay untouched controls:
   their 1/16, 2/20, 2/20 were fixed-size damage-blind spans and are **not** evidence about
   this rung.
+- **`validation.py` `PROFILE_SCHEMA` — three changes, all in the `span-flagged` commit.**
+  Read 2026-09-18; the schema is narrower than §4 assumed.
+  1. **`c2_retries` and `verify_passes` do not exist as profile fields.** There is a
+     `verify` *bool* and no retry count at all — `--ad-c2-retries` reaches only PROV
+     `recovery_ad_flags`. §4.3/§4.4 need both as real fields, so they are added here.
+  2. **Adding them creates the obligation to mirror AccuDisc 0.43.0's constraint.** That
+     engine returns `ERR_INVAL` for `c2_retries > 0` without `verify_passes >= 2`. Without a
+     sanity rule a hand-edited profile fails **mid-rip, from the engine**, after the disc has
+     been read; with one it fails at config load. This is exactly the `--retries 256` class
+     `validation.py` was built for — well-formed and still illegal — and it keeps our copy of
+     the constraint pinned to theirs rather than to a comment.
+  3. **The existing coherence rules must widen, not just gain a sibling.** `span > 0
+     requires granularity="sector"` and the same rule for `run_up` predate this rung; adding
+     `granularity="span"` without widening them makes `span_gap`/`span_pad` unusable on the
+     very granularity they exist for. Widen to `in {"sector", "span"}` and keep a negative
+     control that still rejects `track` / `whole-disc`.
+
 - **PROV** (rbi_spec §6.3.1 first, spec-before-code): `recovery_track_<n>=span_matched@p<k>`
   alongside the existing `matched@<N>X` / `unrecovered`; `span_targets_track_<n>=<sectors>/
   <spans>`; `span_unresolved_track_<n>=<sectors>` when the rung gave up;
@@ -183,13 +200,40 @@ run, `/var/tmp/sr0.owner` = who/what/ETA, release):**
   version named in the claim.
 - *H2:* a full `cdda2img rip` of Tracy with `--profile span-flagged`, expected 11/11.
 
-## 7. Decisions for Keith
+## 7. Decisions — settled by Keith, 2026-09-18
 
-1. **Placement:** the rung runs after CTDB and *before* `track-ladder`, which stays as the
-   fallback (recommended), or it replaces `track-ladder` for tracks with flagged sectors.
-2. **Default:** ship `span-flagged` opt-in until H2 passes, then make it the built-in
-   default (recommended), or default from the start.
-3. **Keep the locator:** save the capture-pass damage map (or its flagged ranges) in the
-   container. Today it is lost when the rip ends, which is why §196 Q2 needed a drive read.
-   A PROV range list needs no format bump; a block does. Separate change, flagged here
-   because this rung depends on the same data.
+1. **Placement: before `track-ladder`.** The rung runs after CTDB and before
+   `_recover_failed_tracks`, which stays as the fallback. A track whose target set empties
+   and still fails AR falls through to the ladder unchanged (§4.5).
+2. **Default: opt-in.** `span-flagged` is reachable only via `--profile` until H2 verifies
+   11/11 on Tracy. `track-ladder` remains `resolve_recovery`'s built-in default (its
+   measured 19/20 is not displaced by an offline score). Promoting it is a separate commit
+   that cites the H2 run.
+3. **Keep the locator: persist it, as a bit-packed block — but AFTER the bench, not before.**
+   A new optional block carries the capture-pass damage lane at **1 bit per sector**,
+   `BLOCK_FLAG_SKIP` set. Measured 2026-09-18 on both Tracy containers (162,892 sectors):
+   **20,362 B**, 0.0053 % of a 383 MB container; the 80-minute ceiling is 45,000 B. The full
+   map byte (state + severity nibbles) was rejected at 162,892 B — 8× the cost for two
+   nibbles no consumer reads, where the 0/1 lane is exactly what `disc_damage` already hands
+   recovery.
+   - **It is not on this rung's critical path, and must not be sequenced as if it were.**
+     §4.1 takes its targets from `disc_damage`, captured on every rip and passed to recovery
+     **in-process**. The block buys one thing the rung does not need: re-running recovery
+     against an *existing* container without re-reading the disc. H1 and H2 do not consume
+     it. Order is therefore **rung → bench → block**, and spec-before-code binds the block
+     change, not the rung.
+   - **It IS a minor version bump: v6.1.** The earlier draft said "no format bump, the same
+     reasoning §6.5 used to make ARIP omissible" — that was wrong, and the right precedent is
+     **v4.1**, which added the optional ART block as an explicit backwards-compatible minor
+     bump. §6.5 governs *omitting* a block the spec already defines; this *defines* one.
+   - **Non-breaking is verified, not assumed**, and rests on two independent gates. Rule 3
+     (`container.py:1408`): a reader **warns and proceeds** when `version_minor` exceeds what
+     it knows. Rule 32: an unknown `type_id` **with** `BLOCK_FLAG_SKIP` is accepted, without
+     it the file is rejected — exercised today by
+     `tests/test_format_gates.py::test_unknown_block_type_is_accepted_only_when_skippable`,
+     which passes. So a v6.0 reader clears both and ignores the block. Registering an id
+     ahead of its layout is also established here (`CTDB`, §6.7 — registered, layout undefined).
+
+**Still open, not gating this rung:** whether an exit-4 rip should be catalogued
+(`register_rbi` runs before the checks), and whether AccuDisc should force a position
+witness on plain reads.
