@@ -1629,6 +1629,17 @@ _SECTOR_BYTES_C2_SUB = _SECTOR_BYTES + _C2_BYTES + _SUB_BYTES
 #: set, because the published stat would then overstate what was observed
 #: (AccuDisc §199.3b). A consumer that gates on the raw lane accepts exactly the
 #: corruption the lane exists to catch.
+#:
+#: **It is implementation, not contract — 4 is a floor we may exceed, never a
+#: value to track downward** (AccuDisc §200.1). It is a `#define` in `engine.c`,
+#: absent from the public header, so this is a private constant read out loud
+#: rather than by accident; they intend to publish it with the floor documented.
+#: The asymmetry that settles it: this lane drives *rejection*, and a rejected
+#: sector stays in the target set to be re-read rather than being discarded. So
+#: over-widening costs recoveries while under-widening accepts wrong audio —
+#: erring wide is free in correctness and expensive only in yield. If a future
+#: engine widens the margin, inherit the larger number; if it narrows one, keep
+#: this.
 _QPOS_MARGIN = 4
 
 

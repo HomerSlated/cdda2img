@@ -81,10 +81,24 @@ displacement as though that had been measured. It had not: runs A and B captured
 subchannel at all, so the check never ran — Q was not asked, rather than asked and silent.
 The conclusion is unchanged but now rests on mechanism instead of a measurement that did not
 happen: the Q check is whole-sector, quantum 588 samples, against displacements of 12 and 24.
-Separately, three full-speed single-pass transfers of **clean** media at two radii delivered
-0 wrong of 24,000 sectors with `slips` and `subq_misposition` both zero — so every slip ever
-measured on this drive sits inside or beside a C2-flagged span, which is positive evidence
-for §4.1's locator and against paying for a witness on healthy media.
+**Clean-media slip rate, stated with the right trial unit (AccuDisc §18c, bounded in
+§200.2).** Six full-speed single-pass transfers of clean media at two radii delivered 0 wrong
+sectors, with `slips` and `subq_misposition` both zero. The tempting summary — "0 of 24,000"
+— is wrong, because **the fault displaces a transfer, not a sector**: run B's chunks at
+113068 and 113092 went late as units. At `sector_len` 2742 under a 64 KiB cap the chunk is 23
+sectors, so 4,000 sectors is 174 chunk-transfers and six runs are **1,044 trials**, not
+24,000. Rule of three on zero events in 1,044 gives a **95% upper bound of ≈0.29% per
+chunk-transfer**; counting sectors would have given 0.0125% and overstated the result by 23×.
+
+So the defensible sentence is: *on clean media this drive slips at a rate bounded above by
+roughly 0.3% of transfers (95%), on one disc at two radii — not zero, and untested on other
+discs, other radii, and any span where C2 is silent but damage is present.*
+
+That still supports §4.1's locator — every slip ever measured on this drive sits inside or
+beside a C2-flagged span, and these spans carried `c2 = 0` throughout — but it **does not**
+show that slips require C2. The locator's blind spot remains a slip in a span with no C2 flag
+anywhere near it; the measurement bounds that case rather than eliminating it, and H2 must be
+allowed to fail.
 
 ## 3. The constraint the design turns on: no absolute gate below a track
 
