@@ -184,6 +184,83 @@ def test_a_sector_shaped_field_requires_sector_granularity(field_name: str) -> N
     )
 
 
+@pytest.mark.parametrize("field_name", ["span", "run_up"])
+def test_a_sector_shaped_field_is_also_valid_at_span_granularity(
+    field_name: str,
+) -> None:
+    """A span IS a run of sectors, so a sector-shaped field means something there.
+    The rule WIDENED when granularity="span" arrived rather than gaining a sibling;
+    had it not, span_gap/span_pad would be unusable on the granularity they exist
+    for. The negative control above still rejects track."""
+    assert (
+        validate({"name": "p", field_name: 4, "granularity": "span"}, PROFILE_SCHEMA)
+        == []
+    )
+
+
+@pytest.mark.parametrize("field_name", ["span_gap", "span_pad"])
+@pytest.mark.parametrize("granularity", ["sector", "track", "whole-disc"])
+def test_a_clustering_field_requires_span_granularity(
+    field_name: str, granularity: str
+) -> None:
+    """Narrower than the sector-shaped rule, deliberately: clustering is what turns
+    a damage MAP into spans, so it is meaningless even at fixed-size "sector"."""
+    errors = validate(
+        {"name": "p", field_name: 4, "granularity": granularity}, PROFILE_SCHEMA
+    )
+    assert _where(errors) == [field_name]
+
+
+def test_c2_retries_without_a_position_witness_is_rejected_at_load() -> None:
+    """AccuDisc 0.43.0 answers ERR_INVAL for this. Checking it here is not
+    duplication: the engine's refusal arrives MID-RIP, after the disc has been
+    read, while this one arrives at profile load."""
+    errors = validate({"name": "p", "c2_retries": 3}, PROFILE_SCHEMA)
+    assert _where(errors) == ["c2_retries"]
+    errors = validate(
+        {"name": "p", "c2_retries": 3, "verify_passes": 1}, PROFILE_SCHEMA
+    )
+    assert _where(errors) == ["c2_retries"]
+
+
+def test_c2_retries_with_two_verify_passes_is_accepted() -> None:
+    """Negative control: the rule must have a passing side, or it is
+    indistinguishable from c2_retries being unusable."""
+    assert (
+        validate({"name": "p", "c2_retries": 3, "verify_passes": 2}, PROFILE_SCHEMA)
+        == []
+    )
+
+
+@pytest.mark.parametrize("value", [-1, 9, 100])
+def test_overlap_sectors_outside_the_engines_range_is_rejected(value: int) -> None:
+    """The engine clamps above 8. Refusing here means the profile says what will
+    happen, rather than being silently narrowed at read time — a profile that
+    reads 16 and behaves as 8 mislabels every measurement taken under it."""
+    assert _where(
+        validate({"name": "p", "overlap_sectors": value}, PROFILE_SCHEMA)
+    ) == ["overlap_sectors"]
+
+
+def test_every_profile_schema_field_exists_on_the_profile_dataclass() -> None:
+    """`Profile.from_dict` splats the validated dict, so a schema field with no
+    dataclass field is a TypeError at load and a dataclass field the schema does
+    not know is unreachable from a TOML file.
+
+    This pins a coupling that until now was enforced only by accident: adding
+    span_gap/span_pad to the schema broke three unrelated tests with a TypeError,
+    which is luck rather than a check. Both directions are asserted because they
+    fail differently — one at runtime, one silently.
+    """
+    import dataclasses
+
+    from cdda2img.recovery_profile import Profile
+
+    schema_fields = set(PROFILE_SCHEMA.fields)
+    dataclass_fields = {f.name for f in dataclasses.fields(Profile)}
+    assert schema_fields == dataclass_fields
+
+
 def test_zero_passes_is_rejected_for_a_profile() -> None:
     assert _where(validate({"name": "p", "passes": 0}, PROFILE_SCHEMA)) == ["passes"]
 

@@ -279,6 +279,12 @@ def _speed_ok(value: object) -> bool:
     return False
 
 
+#: Granularities at which a sector-shaped field (span, run_up) means something.
+#: A span is a run of sectors, so it is sector-shaped; a track or the whole disc
+#: is not.
+_SECTOR_SHAPED = frozenset({"sector", "span"})
+
+
 PROFILE_SCHEMA = Schema(
     name="profile",
     fields={
@@ -294,19 +300,35 @@ PROFILE_SCHEMA = Schema(
         "c2": FieldSpec((bool,), default=True),
         # recovery re-read (pass 2 — the bench axis)
         "granularity": FieldSpec(
-            (str,), default="track", enum=frozenset({"sector", "track", "whole-disc"})
+            (str,),
+            default="track",
+            # "span" is map-derived: the spans come from the capture pass's damage
+            # lane. "sector" is damage-blind and fixed-size, which is why the
+            # experimental sector-* profiles are controls for this rung rather
+            # than evidence about it.
+            enum=frozenset({"sector", "span", "track", "whole-disc"}),
         ),
         "ladder": FieldSpec((str,), default="full", enum=frozenset({"full", "single"})),
         "speed": FieldSpec((str, float), default="max"),
         "passes": FieldSpec((int,), default=3),
         "run_up": FieldSpec((int,), default=0),
         "span": FieldSpec((int,), default=0),
+        # span clustering (granularity="span"): merge targets closer than
+        # span_gap, then pad each span by span_pad so the neighbour anchor has
+        # neighbours carrying alignment signal.
+        "span_gap": FieldSpec((int,), default=0),
+        "span_pad": FieldSpec((int,), default=0),
         "variation": FieldSpec(
             (str,), default="none", enum=frozenset({"none", "speed", "full"})
         ),
         # recovery adjuncts
         "ctdb": FieldSpec((str,), default="auto", enum=frozenset({"off", "auto"})),
         "verify": FieldSpec((bool,), default=False),
+        # Engine knobs the span rung needs as real fields. Until now the only way
+        # to reach them was --ad-c2-retries, which goes to PROV and nowhere else.
+        "verify_passes": FieldSpec((int,), default=0),
+        "overlap_sectors": FieldSpec((int,), default=0),
+        "c2_retries": FieldSpec((int,), default=0),
         "budget_s": FieldSpec((int,), default=300),
     },
     rules=(
@@ -328,15 +350,60 @@ PROFILE_SCHEMA = Schema(
             "over on a single rung)",
             lambda d: d["variation"] != "speed" or d["ladder"] == "full",
         ),
+        # These two WIDENED rather than gaining a sibling when granularity="span"
+        # arrived: a sector-shaped field is meaningless at track or whole-disc
+        # granularity, but a span IS sector-shaped, and leaving the rules at
+        # "sector" alone would have made span_gap/span_pad unusable on the very
+        # granularity they exist for.
         SanityRule(
             "span",
-            'span > 0 requires granularity="sector"',
-            lambda d: d["span"] <= 0 or d["granularity"] == "sector",
+            'span > 0 requires granularity="sector" or "span"',
+            lambda d: d["span"] <= 0 or d["granularity"] in _SECTOR_SHAPED,
         ),
         SanityRule(
             "run_up",
-            'run_up > 0 requires granularity="sector"',
-            lambda d: d["run_up"] <= 0 or d["granularity"] == "sector",
+            'run_up > 0 requires granularity="sector" or "span"',
+            lambda d: d["run_up"] <= 0 or d["granularity"] in _SECTOR_SHAPED,
+        ),
+        SanityRule(
+            "span_gap",
+            'span_gap > 0 requires granularity="span"',
+            lambda d: d["span_gap"] <= 0 or d["granularity"] == "span",
+        ),
+        SanityRule(
+            "span_pad",
+            'span_pad > 0 requires granularity="span"',
+            lambda d: d["span_pad"] <= 0 or d["granularity"] == "span",
+        ),
+        SanityRule("span_gap", "must not be negative", lambda d: d["span_gap"] >= 0),
+        SanityRule("span_pad", "must not be negative", lambda d: d["span_pad"] >= 0),
+        SanityRule(
+            "verify_passes",
+            "must not be negative",
+            lambda d: d["verify_passes"] >= 0,
+        ),
+        # AccuDisc 0.43.0 returns ERR_INVAL for this combination. Checking it here
+        # is not duplication: without it a hand-edited profile fails MID-RIP, from
+        # the engine, after the disc has been read — with it, the profile is
+        # rejected at load. Same class as --retries 256, which parses as a fine
+        # integer and then becomes 0 in an unguarded uint8_t cast.
+        SanityRule(
+            "c2_retries",
+            "c2_retries > 0 requires verify_passes >= 2 (AccuDisc 0.43.0 returns "
+            "ERR_INVAL otherwise); a single pass cannot witness its own position",
+            lambda d: d["c2_retries"] <= 0 or d["verify_passes"] >= 2,
+        ),
+        SanityRule(
+            "c2_retries",
+            "must not be negative",
+            lambda d: d["c2_retries"] >= 0,
+        ),
+        # The engine clamps to 8; refusing here means the profile says what will
+        # happen rather than being silently narrowed at read time.
+        SanityRule(
+            "overlap_sectors",
+            "must be between 0 and 8 (the engine clamps above 8)",
+            lambda d: 0 <= d["overlap_sectors"] <= 8,
         ),
         SanityRule(
             "ladder",
