@@ -2244,11 +2244,21 @@ def test_the_real_binding_is_reachable_from_the_test_suite() -> None:
 
 
 class _FakeSubQState(enum.IntEnum):
+    """Mirrors the real `SubQState` — including MISPOSITION, which this fake was
+    missing until 2026-09-18.
+
+    NO_POSITION sits beside MISPOSITION as the member most easily confused with
+    it: "the Q frame did not say where we were" is not "the Q frame said we were
+    somewhere else". Only the second is a position fault, and a fake without the
+    second cannot witness a rule that conflates them.
+    """
+
     PENDING = 0
     OK = 1
     BAD = 2
     NO_POSITION = 3
     NO_AUDIO = 4
+    MISPOSITION = 5
 
 
 def _subq_module(device: _FakeDiscDevice, *, feature: bool = True) -> _FakeBinding:
@@ -2449,9 +2459,11 @@ class _DetailDevice:
         chunks: list[_DetailChunk],
         states: list[int],
         stats: _FakeStats | None = None,
+        subq: list[int] | None = None,
     ) -> None:
         self._chunks = chunks
         self._states = states
+        self._subq = subq
         self._stats = stats or _FakeStats()
         self.read_kwargs: dict[str, Any] = {}
 
@@ -2468,18 +2480,22 @@ class _DetailDevice:
         status = kw.get("status_map")
         if isinstance(status, bytearray):
             status[: len(self._states)] = bytes(self._states)
+        qmap = kw.get("subq_map")
+        if isinstance(qmap, bytearray) and self._subq is not None:
+            qmap[: len(self._subq)] = bytes(self._subq)
         for chunk in self._chunks:
             kw["sink"](chunk)
         return _FakeResult(self._stats)
 
 
 class _DetailChunk:
-    def __init__(self, nsec: int, data: bytes, sector_len: int = 2646) -> None:
+    def __init__(self, nsec: int, data: bytes, sector_len: int = 2742) -> None:
         self.nsec = nsec
         self.data = data
         self.sector_len = sector_len
         self.audio_len = 2352
-        self.c2_len = sector_len - 2352
+        self.c2_len = 294 if sector_len >= 2646 else sector_len - 2352
+        self.sub_len = sector_len - 2352 - self.c2_len
 
 
 def _detail_binding(
@@ -2491,17 +2507,25 @@ def _detail_binding(
     module.Sub = _FakeSub  # type: ignore[attr-defined]
     module.MapState = _FakeMapState  # type: ignore[attr-defined]
     module.map_state = staticmethod(_detail_map_state)  # type: ignore[attr-defined]
+    module.SubQState = _FakeSubQState  # type: ignore[attr-defined]
+    module.subq_state = staticmethod(  # type: ignore[attr-defined]
+        lambda b: _FakeSubQState(b & 0x0F)
+    )
     module.features = (  # type: ignore[attr-defined]
-        frozenset({"caller_map_buffers", "speed_honoured"})
+        frozenset({"caller_map_buffers", "speed_honoured", "subq_map"})
         if features is None
         else features
     )
     return module
 
 
-def _detail_sector(audio_byte: int, c2_byte: int) -> bytes:
-    """One 2646-byte sector whose audio and C2 halves are distinguishable."""
-    return bytes([audio_byte]) * 2352 + bytes([c2_byte]) * 294
+def _detail_sector(audio_byte: int, c2_byte: int, sub_byte: int = 0x5A) -> bytes:
+    """One 2742-byte sector whose three lanes are each distinguishable.
+
+    A distinct byte per lane, so a slice off by a lane produces wrong content
+    rather than plausible zeros — zeros are also what a wrong slice gives.
+    """
+    return bytes([audio_byte]) * 2352 + bytes([c2_byte]) * 294 + bytes([sub_byte]) * 96
 
 
 @pytest.mark.parametrize("passes", [0, 1])
@@ -2545,7 +2569,8 @@ def test_span_detail_deinterleaves_audio_and_c2_into_separate_lanes(
     """The payload differs per sector AND per lane, so a slice that is off by a
     lane or by a sector produces the wrong bytes rather than plausible zeros."""
     chunk = _DetailChunk(
-        2, _detail_sector(0x11, 0x22) + _detail_sector(0x33, 0x44), sector_len=2646
+        2,
+        _detail_sector(0x11, 0x22, 0x66) + _detail_sector(0x33, 0x44, 0x77),
     )
     device = _DetailDevice([chunk], [0x10, 0x10])
     _install(monkeypatch, _detail_binding(device))
@@ -2554,6 +2579,10 @@ def test_span_detail_deinterleaves_audio_and_c2_into_separate_lanes(
     assert out.pcm == bytes([0x11]) * 2352 + bytes([0x33]) * 2352
     assert out.c2 == bytes([0x22]) * 294 + bytes([0x44]) * 294
     assert out.count == 2
+    # The subchannel is requested but not republished: it exists so the engine
+    # can fill the Q lane. Asserting it is absent pins that, so a later change
+    # that starts carrying 96 B/sector of sub in memory is a visible decision.
+    assert not hasattr(out, "sub")
 
 
 def test_span_detail_rejects_a_sector_width_that_is_not_2646(
@@ -2564,7 +2593,7 @@ def test_span_detail_rejects_a_sector_width_that_is_not_2646(
     plausible buffer of the wrong length rather than an error."""
     device = _DetailDevice([_DetailChunk(1, b"\x00" * 2352, sector_len=2352)], [0x10])
     _install(monkeypatch, _detail_binding(device))
-    with pytest.raises(RuntimeError, match="2646"):
+    with pytest.raises(RuntimeError, match="2742"):
         ar.read_span_detail("/dev/sr0", 100, 1)
 
 
@@ -2632,7 +2661,11 @@ def test_span_detail_passes_the_recovery_knobs_to_the_engine(
     assert kw["speed_x"] == 8
     assert list(kw["speed_ladder"]) == [8, 4]
     assert kw["c2"] is _FakeC2.PTRS
-    assert kw["sub"] is _FakeSub.NONE
+    # RAW, not NONE: the Q lane is derived from the subchannel and is zero
+    # without it — "zero here is not a clean bill of health" (AccuDisc §199.3).
+    assert kw["sub"] is _FakeSub.RAW
+    assert isinstance(kw["subq_map"], bytearray)
+    assert len(kw["subq_map"]) == 1
     assert isinstance(kw["status_map"], bytearray)
     # `count` bytes, not `start_lba + count`: the engine indexes the map
     # relative to the request (`idx = cur - req->lba`, engine.c:974) and the
@@ -2645,9 +2678,9 @@ def test_span_detail_passes_the_recovery_knobs_to_the_engine(
 @pytest.mark.parametrize(
     ("features", "honoured", "expected"),
     [
-        (frozenset({"caller_map_buffers", "speed_honoured"}), 8, 8),
-        (frozenset({"caller_map_buffers", "speed_honoured"}), 0, None),
-        (frozenset({"caller_map_buffers"}), 8, None),
+        (frozenset({"caller_map_buffers", "subq_map", "speed_honoured"}), 8, 8),
+        (frozenset({"caller_map_buffers", "subq_map", "speed_honoured"}), 0, None),
+        (frozenset({"caller_map_buffers", "subq_map"}), 8, None),
     ],
     ids=["reported", "zero-is-not-a-speed", "feature-absent"],
 )
@@ -2668,3 +2701,96 @@ def test_span_detail_speed_zero_and_absent_are_both_none(
     _install(monkeypatch, _detail_binding(device, features=features))
     out = ar.read_span_detail("/dev/sr0", 100, 1)
     assert out.speed_honoured_x == expected
+
+
+def test_span_detail_declines_without_the_per_sector_q_lane(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Without `subq_map` a whole-sector re-acquisition is invisible: C2 is silent
+    for it and repeated reads agree with each other, so it would be accepted as
+    clean. Declining beats reporting an unwatched lane as quiet."""
+    device = _DetailDevice([_DetailChunk(1, _detail_sector(0xAA, 0x00))], [0x10])
+    _install(
+        monkeypatch,
+        _detail_binding(device, features=frozenset({"caller_map_buffers"})),
+    )
+    with pytest.raises(RuntimeError, match="subq_map"):
+        ar.read_span_detail("/dev/sr0", 100, 1)
+
+
+def test_span_detail_reads_misposition_through_subq_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """MISPOSITION only — NO_POSITION means the Q frame did not say where we were,
+    which is not the same claim and must not be counted as a position fault."""
+    payload = b"".join(_detail_sector(0xAA, 0x00) for _ in range(4))
+    device = _DetailDevice(
+        [_DetailChunk(4, payload)],
+        [0x10] * 4,
+        subq=[
+            _FakeSubQState.OK,
+            _FakeSubQState.NO_POSITION,
+            _FakeSubQState.MISPOSITION,
+            _FakeSubQState.BAD,
+        ],
+    )
+    _install(monkeypatch, _detail_binding(device))
+    out = ar.read_span_detail("/dev/sr0", 100, 4)
+    assert out.q_misposition == (False, False, True, False)
+
+
+def test_span_detail_widens_the_position_lane_by_the_engines_margin(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The leading edge of a slip carries a CORRECT Q frame beside already-wrong
+    audio, because audio and subchannel are offset in time. So the flagged sector
+    is not the first wrong one, and a rule gating on the raw lane accepts exactly
+    the corruption the lane exists to catch (AccuDisc §199.3b)."""
+    n = 12
+    payload = b"".join(_detail_sector(0xAA, 0x00) for _ in range(n))
+    subq = [_FakeSubQState.OK] * n
+    subq[6] = _FakeSubQState.MISPOSITION
+    device = _DetailDevice([_DetailChunk(n, payload)], [0x10] * n, subq=subq)
+    _install(monkeypatch, _detail_binding(device))
+    out = ar.read_span_detail("/dev/sr0", 100, n)
+
+    assert sum(out.q_misposition) == 1
+    # +/- 4 = AccuDisc's own ADSC_QPOS_MARGIN, not a number of ours.
+    assert [i for i, f in enumerate(out.position_suspect) if f] == list(range(2, 11))
+    # The two lanes must stay distinguishable: folding them would publish the
+    # widened set as a measurement, overstating what the drive reported.
+    assert out.q_misposition != out.position_suspect
+
+
+def test_span_detail_widening_clamps_at_the_span_edges(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A flag at sector 0 cannot widen backwards out of the buffer. That is a real
+    limitation, not tidiness — it is why the caller pads its spans rather than
+    relying on the widening to reach outside them."""
+    n = 3
+    payload = b"".join(_detail_sector(0xAA, 0x00) for _ in range(n))
+    device = _DetailDevice(
+        [_DetailChunk(n, payload)],
+        [0x10] * n,
+        subq=[_FakeSubQState.MISPOSITION, _FakeSubQState.OK, _FakeSubQState.OK],
+    )
+    _install(monkeypatch, _detail_binding(device))
+    out = ar.read_span_detail("/dev/sr0", 100, n)
+    assert out.position_suspect == (True, True, True)
+
+
+def test_span_detail_a_clean_q_lane_widens_to_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Control for the widening tests: with nothing flagged, nothing is suspect.
+    Without this, a widener that returned all-True would pass every test above."""
+    n = 5
+    payload = b"".join(_detail_sector(0xAA, 0x00) for _ in range(n))
+    device = _DetailDevice(
+        [_DetailChunk(n, payload)], [0x10] * n, subq=[_FakeSubQState.OK] * n
+    )
+    _install(monkeypatch, _detail_binding(device))
+    out = ar.read_span_detail("/dev/sr0", 100, n)
+    assert not any(out.position_suspect)
+    assert not any(out.q_misposition)

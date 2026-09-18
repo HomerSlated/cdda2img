@@ -76,6 +76,16 @@ Map byte decode (header, `ACCUDISC_MAP_STATE` / `ACCUDISC_MAP_SEVERITY`): low ni
 state, high nibble = severity (C2: ~log2 fired bits; RECOVERED: extra reads taken; SUSPECT:
 ~log2 disagreeing bytes). Decode through the binding's `map_state`, never by hand.
 
+**Correction, 2026-09-18 (AccuDisc §199.3).** 16f/16g reported run B's Q as *blind* to the
+displacement as though that had been measured. It had not: runs A and B captured no raw
+subchannel at all, so the check never ran — Q was not asked, rather than asked and silent.
+The conclusion is unchanged but now rests on mechanism instead of a measurement that did not
+happen: the Q check is whole-sector, quantum 588 samples, against displacements of 12 and 24.
+Separately, three full-speed single-pass transfers of **clean** media at two radii delivered
+0 wrong of 24,000 sectors with `slips` and `subq_misposition` both zero — so every slip ever
+measured on this drive sits inside or beside a C2-flagged span, which is positive evidence
+for §4.1's locator and against paying for a witness on healthy media.
+
 ## 3. The constraint the design turns on: no absolute gate below a track
 
 AccurateRip v1/v2 and CTDB CRCs are **per track**. The frame-450 CRC covers one frame. So:
@@ -107,11 +117,23 @@ Per AR-failed track, after CTDB and before `track-ladder`:
    0.41.0 neighbour anchor needs neighbours with alignment signal), clamp to the track
    window plus the offset margin. `G`, `P` are profile fields, tuned offline on the maps.
 3. **Re-read the spans**, one pass = each span once, **speed-diverse across passes**
-   (the bound ladder, as today). Request: PCM + C2 + `status_map`; `verify_passes=2`,
+   (the bound ladder, as today). This is the engine author's own advice, not merely ours:
+   *"Verify passes themselves stream at `speed_x` — drives recalibrate on every speed
+   change, so per-chunk speed switching thrashes; run whole-range passes at different
+   `speed_x` yourself for a full speed-diverse sweep"* (`accudisc.h`, `speed_ladder`). So
+   `speed_ladder` and the per-pass `read_speed` are different mechanisms and both belong.
+   Request: PCM + C2 + **raw subchannel** + `status_map` + `subq_map`; `verify_passes=2`,
    `overlap_sectors=4` (R3, cdda2img RECOVERY.md §4.2); **`c2_retries=0`** until 0.42.0's
    fix is verified on this drive (AccuDisc run B), because §2's slips are its exact
    signature. **`verify_passes >= 2` is not optional**: it is what makes step 4 sound.
-   `overlap_sectors` stays for seam slips but is not a substitute.
+   `overlap_sectors` stays for seam slips but is not a substitute — and it is weaker than
+   its name suggests. **A seam mismatch currently condemns only the seam sectors**
+   (`s < prev_ext_n`, nothing propagates outward), so a chunk that landed 48 bytes late
+   yields two `SUSPECT` sectors at the seam and ~20 wrong ones still marked `OK` in the same
+   displaced transfer. AccuDisc call this a defect on their side, queued as the first item of
+   their ladder work (§199.2). Until it is fixed, **never read `overlap_sectors` as "the
+   transfer was position-checked"** — which is why §4.4 keeps `verify_passes >= 2` as the
+   condition and overlap as an extra rather than an alternative.
    **`c2_retries` stays 0 even on 0.42.0**, until a measurement shows it adds recovery
    under verify. Measured on hardware (run B, AccuDisc 2026-09-16g): its anchor is the
    chunk *as first delivered*, so when that chunk is itself late the rescue inherits the
@@ -123,8 +145,31 @@ Per AR-failed track, after CTDB and before `track-ladder`:
    sectors; run B in §2). `overlap_sectors` alone does **not** qualify: it compares chunk
    seams, so it only sees a slip that differs between neighbouring chunks (AccuDisc
    2026-09-16f),
-   its map state is `OK` or `RECOVERED`, **and** its own C2 block is all zero. `SUSPECT`, `C2`, `HARD` are never
-   accepted. The first accepted copy wins and the sector leaves the target set; later
+   its map state is `OK` or `RECOVERED`, its own C2 block is all zero, **and** it is not in
+   the widened Q-position lane (below). `SUSPECT`, `C2`, `HARD` are never accepted.
+
+   **The fourth condition, added 2026-09-18 (AccuDisc §199.3/§199.3b).** The read asks for
+   `Sub.RAW` and a `subq_map`, giving a per-sector `MISPOSITION` flag: the sector's own
+   CRC-valid ADR=1 Q frame named an LBA other than the one commanded.
+   - *It is an addition, never a swap.* It **cannot** see run B's class — the Q check is a
+     whole-sector test, quantum 588 samples, against displacements of 12 and 24 samples, so
+     a record 48 bytes late still carries the Q frame naming its own sector. AccuDisc state
+     plainly that `subq_misposition` would **not** have fired at raw 113068-71 or 113098.
+     `verify_passes >= 2` remains the witness for that class.
+   - *What it does catch* is whole-sector re-acquisition: the drive loses lock and returns
+     valid audio from elsewhere with a CRC-valid Q naming where it really went. 17/17 caught,
+     zero false positives over 1.4M sectors on the PX-716A. C2 is silent for it, repeated
+     reads agree with each other, and a seam check looks at seams while it sits mid-transfer.
+     Nothing else in the rule sees it.
+   - *Gate on the WIDENED set.* Audio and subchannel are offset in time — worst case 2
+     sectors on the PX-716A — so the leading edge of a slip carries a **correct** Q frame
+     beside already-wrong audio and is not flagged. The seam publishes the measured lane and
+     the widened one separately (`q_misposition` / `position_suspect`, margin
+     `ADSC_QPOS_MARGIN` = 4, AccuDisc's own constant); the rule reads the second, a report of
+     what the drive did quotes the first. Folding them overstates the measurement; gating on
+     the narrow one accepts exactly what the lane exists to catch.
+   - *Cost is nil on this drive:* AccuDisc measured `--sub raw` and no-sub deliveries of the
+     same span byte-identical, so the capture changes no alignment. The first accepted copy wins and the sector leaves the target set; later
    passes re-read only the shrunken spans. *Variant for the bench:* require two accepted
    copies at different speeds to agree byte-for-byte.
 5. **Gate.** When the target set is empty, or after each pass, overlay accepted sectors onto

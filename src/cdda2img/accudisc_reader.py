@@ -1610,10 +1610,26 @@ def read_span_bytes(
 #: ``sector_len`` guard in :func:`_read_span_binding` carries.
 _C2_BYTES = 294
 
-#: Sector width when C2 pointers ride along with the audio. Requested
-#: unconditionally on the whole-disc path, so a span read that asks for C2 sees
-#: the same geometry the rip did.
-_SECTOR_BYTES_C2 = _SECTOR_BYTES + _C2_BYTES
+#: Raw P-W subchannel bytes per sector.
+_SUB_BYTES = 96
+
+#: Sector width with C2 pointers *and* raw subchannel. The span read asks for
+#: both: C2 locates damage, and the Q lane is an independent position witness for
+#: a fault class C2 is silent about (AccuDisc §199.3). Measured by them
+#: 2026-09-18: ``--sub raw`` and no-sub deliveries of the same span are
+#: byte-identical, so the capture costs alignment nothing on this drive.
+_SECTOR_BYTES_C2_SUB = _SECTOR_BYTES + _C2_BYTES + _SUB_BYTES
+
+#: How far either side of a Q-misposition flag the audio must also be distrusted.
+#: **AccuDisc's own ``ADSC_QPOS_MARGIN`` (engine.c:35), not a number of ours.**
+#: The audio and subchannel are offset in time — worst case 2 sectors measured on
+#: the PX-716A — so the *leading edge* of a slip carries a correct Q frame beside
+#: already-wrong audio and is therefore NOT flagged. The engine widens by this
+#: margin for its own rechecking and deliberately does not publish the widened
+#: set, because the published stat would then overstate what was observed
+#: (AccuDisc §199.3b). A consumer that gates on the raw lane accepts exactly the
+#: corruption the lane exists to catch.
+_QPOS_MARGIN = 4
 
 
 @dataclass(frozen=True)
@@ -1643,6 +1659,30 @@ class SpanDetail:
     Measured on hardware (AccuDisc run B, 2026-09-16f): a single-pass read
     delivered whole chunks 48-96 bytes late with a clean C2 and ``slips == 0``,
     so neither the C2 lane nor the slip counter can stand in for it.
+
+    **``q_misposition`` and ``position_suspect`` are separate fields and must
+    never be folded together**, the same way AccuDisc keeps ``audio`` apart from
+    ``audio_unverified``. The first is what was *observed*: the sectors whose own
+    CRC-valid ADR=1 Q frame named an LBA other than the one commanded. The second
+    is what may be *trusted*: the same set widened by :data:`_QPOS_MARGIN`,
+    because audio and subchannel are offset in time and the leading edge of a slip
+    therefore carries a correct Q frame beside already-wrong audio. An acceptance
+    rule gates on ``position_suspect``; a report of what the drive did quotes
+    ``q_misposition``. Publishing only the widened set would overstate the
+    measurement; gating on only the narrow one accepts the corruption the lane
+    exists to catch (AccuDisc §199.3b).
+
+    **Neither lane sees run B's class**, and that is mechanism rather than a gap in
+    the measurement: the Q check compares a whole-sector position, quantum 588
+    samples, while run B's displacements were 12 and 24 samples. A record whose
+    audio is 48 bytes late still carries the Q frame naming its own sector, so
+    ``subq_misposition`` would *not* have fired at raw 113068-71 or 113098. What it
+    does see is whole-sector re-acquisition — the drive losing lock and returning
+    valid audio from elsewhere with a CRC-valid Q naming where it really went
+    (AccuDisc: 17/17 caught, no false positives over 1.4M sectors). C2 is silent
+    for that, repeated reads agree with each other, and a seam check looks at seams
+    while it sits mid-transfer. So the Q lane witnesses a *different* class and is
+    an addition to ``verify_passes >= 2``, never a substitute for it.
     """
 
     start_lba: int
@@ -1652,6 +1692,8 @@ class SpanDetail:
         str, ...
     ]  # per sector: OK / RECOVERED / C2 / HARD / SUSPECT / PENDING
     c2_clean: tuple[bool, ...]  # per sector: this sector's own C2 block is all zero
+    q_misposition: tuple[bool, ...]  # AS MEASURED — this sector's own Q disagreed
+    position_suspect: tuple[bool, ...]  # q_misposition widened by _QPOS_MARGIN
     verify_passes: int  # what was requested — see the class docstring
     slips: int
     sectors_flagged: int
@@ -1790,11 +1832,11 @@ def _read_span_detail_binding(
 
     def collect(chunk: Any) -> None:
         nonlocal pos
-        if chunk.sector_len != _SECTOR_BYTES_C2:
+        if chunk.sector_len != _SECTOR_BYTES_C2_SUB:
             msg = (
                 f"span detail read returned {chunk.sector_len}-byte sectors, "
-                f"expected {_SECTOR_BYTES_C2} ({_SECTOR_BYTES} audio + "
-                f"{_C2_BYTES} C2) — refusing to reassemble"
+                f"expected {_SECTOR_BYTES_C2_SUB} ({_SECTOR_BYTES} audio + "
+                f"{_C2_BYTES} C2 + {_SUB_BYTES} sub) — refusing to reassemble"
             )
             raise RuntimeError(msg)
         for i in range(chunk.nsec):
@@ -1817,7 +1859,15 @@ def _read_span_detail_binding(
                 f"rather than degrading to a C2 census"
             )
             raise RuntimeError(msg)
+        if not _has_feature(module, _FEATURE_SUBQ_MAP):
+            msg = (
+                f"span detail read needs the per-sector Q lane "
+                f"({_FEATURE_SUBQ_MAP}); without it a whole-sector re-acquisition "
+                f"is invisible and would be accepted as clean"
+            )
+            raise RuntimeError(msg)
         status = bytearray(count)
+        subq = bytearray(count)
         # copy=False is safe: `collect` consumes the view synchronously and
         # never retains it past the call.
         result = dev.read(
@@ -1826,13 +1876,14 @@ def _read_span_detail_binding(
             sink=collect,
             copy=False,
             c2=module.C2.PTRS,
-            sub=module.Sub.NONE,
+            sub=module.Sub.RAW,
             speed_x=read_speed or 0,
             verify_passes=verify_passes,
             overlap_sectors=overlap_sectors,
             c2_retries=c2_retries,
             speed_ladder=speed_ladder,
             status_map=status,
+            subq_map=subq,
         )
 
     if pos != count:
@@ -1844,6 +1895,8 @@ def _read_span_detail_binding(
         raise RuntimeError(msg)
 
     states = tuple(module.map_state(b).name for b in status)
+    mis = tuple(module.subq_state(b) is module.SubQState.MISPOSITION for b in subq)
+    suspect = _widen(mis, _QPOS_MARGIN)
     clean = tuple(
         bytes(c2[i * _C2_BYTES : (i + 1) * _C2_BYTES]).count(0) == _C2_BYTES
         for i in range(count)
@@ -1855,12 +1908,35 @@ def _read_span_detail_binding(
         c2=bytes(c2),
         states=states,
         c2_clean=clean,
+        q_misposition=mis,
+        position_suspect=suspect,
         verify_passes=verify_passes,
         slips=stats.slips,
         sectors_flagged=stats.sectors_flagged,
         sectors_recovered=stats.sectors_recovered,
         speed_honoured_x=_speed_x_or_none(module, stats),
     )
+
+
+def _widen(flags: tuple[bool, ...], margin: int) -> tuple[bool, ...]:
+    """Spread each set flag *margin* sectors either side, clamped to the span.
+
+    Separate from the lane it widens because the two answer different questions —
+    see :class:`SpanDetail`. Clamping at the span edges is a real limitation and
+    not merely arithmetic tidiness: a slip whose leading edge lies *before*
+    ``start_lba`` cannot be widened into view from inside this buffer, which is
+    why the caller pads its spans (span-recovery-plan.md §4.2) rather than relying
+    on this function to reach outside them.
+    """
+    if margin <= 0 or not any(flags):
+        return flags
+    n = len(flags)
+    out = [False] * n
+    for i, flag in enumerate(flags):
+        if flag:
+            for j in range(max(0, i - margin), min(n, i + margin + 1)):
+                out[j] = True
+    return tuple(out)
 
 
 def _speed_x_or_none(module: Any, stats: Any) -> int | None:
