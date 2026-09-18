@@ -2634,6 +2634,12 @@ def test_span_detail_passes_the_recovery_knobs_to_the_engine(
     assert kw["c2"] is _FakeC2.PTRS
     assert kw["sub"] is _FakeSub.NONE
     assert isinstance(kw["status_map"], bytearray)
+    # `count` bytes, not `start_lba + count`: the engine indexes the map
+    # relative to the request (`idx = cur - req->lba`, engine.c:974) and the
+    # header calls the buffer "count bytes". A fake cannot test the engine's
+    # half, so our half is pinned here — an absolute-indexed buffer would have
+    # to be 501 bytes for this read and the size is the visible difference.
+    assert len(kw["status_map"]) == 1
 
 
 @pytest.mark.parametrize(

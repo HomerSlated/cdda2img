@@ -1706,6 +1706,32 @@ def read_span_detail(
 
     Speed is set per invocation and **not** restored, matching
     :func:`read_span`; the caller restores once after its sweep.
+
+    **Two properties this depends on, read out of AccuDisc's source rather than
+    assumed** (2026-09-18; both are request shapes nothing else in this tree
+    makes, so neither had ever been exercised here):
+
+    * ``status_map`` is indexed **relative to the request**, not by absolute LBA
+      — ``engine.c:974`` computes ``idx = cur - req->lba`` and the header calls
+      the buffer "count bytes". The only other consumer reads from LBA 0, where
+      the two readings coincide, so a span starting at LBA 113000 is the first
+      call that could tell them apart.
+    * ``overlap_sectors`` does **not** inflate what the sink receives. The chunk
+      carries ``.nsec = n`` and the ``k`` trailing sectors are read into
+      ``buf + n * sector_len``, stashed as the next chunk's seam sample and never
+      delivered (``engine.c:1031-1052``), after which ``lba += n``. So delivery is
+      exactly *count* and the length check below is a contract guard rather than
+      a live risk.
+
+    **``positional_fault`` is deliberately NOT on :class:`SpanDetail`.** It derives
+    from ``subq_misposition``, which is zero whenever the read did not request
+    ``Sub.RAW`` — and this one requests ``Sub.NONE``. Carrying it would publish a
+    structural zero as "the drive read the right part of the disc", which is the
+    false clean bill of health the acceptance rule exists to avoid. Whether the
+    span read should request the subchannel and gain that second, *independent*
+    position witness is a real question and an open one with AccuDisc (§199): run
+    B's displacement was invisible to both C2 and ``slips``, and Q's own LBA claim
+    is the one lane that does not share the audio path's blind spot.
     """
     if verify_passes < 2:
         msg = (
@@ -1810,9 +1836,10 @@ def _read_span_detail_binding(
         )
 
     if pos != count:
+        how = "short" if pos < count else "over-long"
         msg = (
             f"span detail read delivered {pos} of {count} sectors from lba "
-            f"{start_lba} — refusing a short span, it would splice silently"
+            f"{start_lba} — refusing an {how} span, it would splice silently"
         )
         raise RuntimeError(msg)
 
