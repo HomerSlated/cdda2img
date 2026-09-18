@@ -196,9 +196,12 @@ Per AR-failed track, after CTDB and before `track-ladder`:
    the best single read. And `23/49` sectors had **four or more of seven reads agreeing on a
    value, with the majority value correct for none of them**.
 
-   So on this disc, at this site, **agreement is not merely weak evidence of truth — it is
-   anti-correlated with it.** Re-reading does not converge; it produces varied wrong answers
-   that sometimes agree. Any acceptance rule gating on consensus alone would accept those 23
+   So on this disc, at this site, **agreement is not evidence of truth and extra passes
+   bought nothing.** Re-reading does not converge; it produces varied wrong answers that
+   sometimes agree. *An earlier draft called agreement "anti-correlated" with truth;
+   AccuDisc are right that the word is heavier than the data (§18l) — the majority-beats-a-
+   single-read comparison turns on three sectors. The solid part is the large, consistent
+   one: 23 of 49 with four or more reads agreeing and the majority value correct for none.* Any acceptance rule gating on consensus alone would accept those 23
    sectors confidently and be wrong 23 times. §4.4 does not, because it also requires the
    sector's own C2 to be all zero — which is now the condition carrying the most weight,
    rather than a belt-and-braces extra.
@@ -251,11 +254,25 @@ Per AR-failed track, after CTDB and before `track-ladder`:
    read**, which would agree perfectly and witness nothing.
    - Not wholly ineffective: run A's `--verify 3` did find disagreements, so something is
      being defeated. But "not wholly ineffective" is not the property this rule needs.
-   - It is queued as their next measurement and they will report either way. **Until then,
-     treat `verify_passes >= 2` as the strongest witness available rather than a proven
-     one**, and note that the C2-all-zero condition is now carrying more weight than it was
-     designed to — it is the one condition that does not depend on two reads being
-     independent.
+   - It is queued as their next measurement (a sweep of flush sizes — 1, 8, 64, 512, 2048
+     sectors — reporting the smallest that changes the bytes, so we can pad the defeat
+     caller-side if the engine's stays fixed) and they will report either way.
+   - **An earlier draft here said the C2-all-zero condition was "now carrying more weight",
+     being the one that does not depend on two reads being independent. That was wrong and
+     is withdrawn (AccuDisc §18l).** Half of it is true — C2 is the drive's own decoder
+     output for the read in hand, so the cache question does not touch it. But it promotes
+     the one condition that is *structurally blind to the fault in play*: a positioning slip
+     is a **clean decode of the wrong samples**, so the decoder has no complaint to make.
+     Measured on this very span: 44 of 49 sectors wrong, **31 of them C2-clean with
+     `status_map == OK`**; C2 saw 13. Leaning on C2 while the witness is in doubt swaps a
+     condition that *might* be broken for one *known not to detect this*.
+   - **So no relative condition is load-bearing while `cache_defeat` is open.** C2,
+     agreement, overlap and `verify_passes` are all relative checks, and the right response
+     is not to re-rank them but to stop treating any of them as certification. They remain
+     **filters that cheapen the work**; nothing is delivered as verified on their strength.
+     The **absolute gate alone decides** — AccurateRip and CTDB, in step 5 — which is
+     `RECOVERY.md`'s standing invariant that relative checks never outrank absolute gates,
+     and this is the situation it was written for.
    - H1 must therefore record, per accepted sector, *which* conditions carried it. An
      acceptance that rested on verify alone is a different result from one where C2 agreed,
      and after this they cannot be reported as one number.
@@ -281,8 +298,15 @@ Per AR-failed track, after CTDB and before `track-ladder`:
      what the drive did quotes the first. Folding them overstates the measurement; gating on
      the narrow one accepts exactly what the lane exists to catch.
    - *Cost is nil on this drive:* AccuDisc measured `--sub raw` and no-sub deliveries of the
-     same span byte-identical, so the capture changes no alignment. The first accepted copy wins and the sector leaves the target set; later
-   passes re-read only the shrunken spans. *Variant for the bench — STILL REFUTED, on better evidence
+     same span byte-identical, so the capture changes no alignment. A sector leaves the target set when the **absolute gate**
+   passes, not when a copy is accepted (changed 2026-09-18 after §18k/§18l). The first
+   accepted copy becomes the sector's *current best* and later passes still re-read it.
+   Retiring on acceptance was the old rule and it is unsafe now for a measured reason: with
+   agreement worth nothing here, C2 blind to this fault and `verify_passes` itself in doubt,
+   an early wrong copy would be locked in and the sector never revisited — the track would
+   then fail AR forever with an empty target set, converting a recoverable track into the
+   §4.5 falsifier. The cost is re-reading sectors that were already good; the benefit is
+   that being wrong early is survivable. *Variant for the bench — STILL REFUTED, on better evidence
    (§18k).* It said "require two accepted copies at different speeds to agree
    byte-for-byte". The first refutation cited §18g's ten identical reads and is withdrawn
    with them — those were cache hits. The conclusion survives and is now stronger, because
