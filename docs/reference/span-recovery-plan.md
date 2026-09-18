@@ -184,12 +184,40 @@ Per AR-failed track, after CTDB and before `track-ladder`:
    `start - k*Δ` for a small Δ, clamped into the track window — and a pass that re-reads
    identical boundaries is a wasted pass rather than a second opinion.
 
-   *Assumption this rests on, stated so it can fail:* that a different start address actually
-   changes what lands at the target sectors. That is AccuDisc's explanation for why anchoring
-   works, and it is strongly implied, but §18g varied neither start nor speed — it repeated
-   one request ten times. H1 must therefore report displacement **per (sector, start-offset)**,
-   not only per sector, or it cannot tell "this address is cursed" from "this pass was
-   wasted".
+   **This assumption is UNPROVEN, and the only evidence we have points against it
+   (AccuDisc §18h, 2026-09-18).** That a different start address changes what lands at the
+   target sectors is AccuDisc's explanation for why anchoring works — it is not a
+   measurement. Asked directly, they found they do not have the data and that what they do
+   have runs the wrong way:
+   - **The anchor path has never run against a real slip.** Run A's `--verify 3` did not
+     reproduce 113069-71, so `anchor_position` was never exercised on hardware; only
+     fake-drive tests cover it.
+   - **In run B, a differently-started transfer landed at the SAME displacement.**
+     `c2_rescue` candidates are 3-sector context reads and so start elsewhere by
+     construction; one corroborated the late chunk, which is how 113098 came back
+     `RECOVERED` at +48. One location and an indirect reading — but it is the opposite of
+     reassurance.
+
+   They have queued our test verbatim as `[P1]` (read 113068-113116 from starts 113060,
+   113064, 113068; compare the overlap; under a minute of drive time) and recommended it to
+   Keith. **Nothing here should be designed around an answer until it is measured.**
+
+   *Why the rung is still worth building while this is open.* The uncertainty is about
+   **yield, not correctness**. If start diversity does nothing, every re-read returns the
+   same wrong bytes, the acceptance rule rejects them (verify still disagrees, or C2 still
+   fires, or the AR gate fails), the target set does not empty, and §4.5 falls through to
+   `track-ladder` exactly as designed. The rung cannot make a track worse; it can only fail
+   to help. So the risk is a wasted rung, not a corrupted container — which is precisely why
+   the witness, and not the trigger, is where correctness lives (§4.2).
+
+   *And if it is measured false*, that is a result rather than a dead end: it would say this
+   disc's damage at these sites is **unrecoverable by re-reading on this drive**, redirecting
+   effort to the exits that do not re-read at all — CTDB parity and AccurateRip offset
+   matching, already the first exit in the pipeline — and narrowing 0.41.0's anchoring
+   guarantee at the same time.
+
+   H1 must therefore report displacement **per (sector, start-offset)**, not only per sector,
+   or it cannot tell "this address is cursed" from "this pass was wasted".
    (the bound ladder, as today). This is the engine author's own advice, not merely ours:
    *"Verify passes themselves stream at `speed_x` — drives recalibrate on every speed
    change, so per-chunk speed switching thrashes; run whole-range passes at different
