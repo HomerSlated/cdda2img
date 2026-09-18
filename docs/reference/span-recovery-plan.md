@@ -147,7 +147,18 @@ Per AR-failed track, after CTDB and before `track-ladder`:
      a few sectors does not reach that far. Such a track fails AR with an unflagged remainder
      and falls through to `track-ladder` (§4.5). That is safe, but the rung recovers nothing
      there.
-   - **Unexplained, and possibly ours: Tuesday and today disagree.** Tuesday's `--verify 3`
+   - **WITHDRAWN 2026-09-18 (AccuDisc §18x): there is no Tuesday-versus-today difference to
+     explain.** The paragraph below compared Tuesday's *best* first pass with today's
+     reads. Tuesday itself contains the counterexample. Run A and run B made the
+     **identical first-pass request** (C2, no sub, engine 0.42.0, the same day), since
+     `verify_passes` and `c2_retries` act only after pass 1. Run A came back 49/49 exact;
+     run B came back 45/49 wrong. So date, engine and sub geometry are each **not required**
+     to explain a wrong read. The dominant variable is run-to-run variance in the first
+     pass. Sub geometry may still make things *worse*, and one run each way cannot show
+     that. The discriminating test is no-sub against sub, single pass, alternated, 4
+     repetitions each. If the two overlap at n=4, that is "no detectable effect at this
+     sample size", not "exonerated". Kept below as the reasoning that was corrected.
+   - *(superseded)* **Unexplained, and possibly ours: Tuesday and today disagree.** Tuesday's `--verify 3`
      run (engine 0.42.0, **no raw subchannel**, 2646-byte sectors) delivered 113068–113116
      exact with zero C2 flags. Today's reads (engine **0.45.0**, **C2 plus raw
      subchannel**, **2742-byte sectors**) carry 13–15 flags per read over the same sectors.
