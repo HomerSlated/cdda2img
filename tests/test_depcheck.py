@@ -489,7 +489,7 @@ def test_doctor_separates_an_empty_install_from_a_tampered_one(
     assert "no profiles found" not in result.detail
 
 
-def test_all_seven_shipped_profiles_load_and_validate() -> None:
+def test_all_eight_shipped_profiles_load_and_validate() -> None:
     """The files `doctor` counts must also be loadable.
 
     Counting `*.toml` proves packaging, not validity — a profile whose `name`
@@ -499,7 +499,7 @@ def test_all_seven_shipped_profiles_load_and_validate() -> None:
 
     directory = depcheck._shipped_profiles_dir()
     names = sorted(p.stem for p in directory.glob("*.toml"))
-    assert len(names) == 7
+    assert len(names) == 8
     for name in names:
         assert load_profile(name).name == name
 

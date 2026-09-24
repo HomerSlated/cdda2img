@@ -393,6 +393,16 @@ PROFILE_SCHEMA = Schema(
             "ERR_INVAL otherwise); a single pass cannot witness its own position",
             lambda d: d["c2_retries"] <= 0 or d["verify_passes"] >= 2,
         ),
+        # The span rung's acceptance rule turns on a position witness, and the
+        # seam's read_span_detail refuses verify_passes=0 outright. Without this a
+        # span profile left at the default would load, read the whole disc, and
+        # then fail at the first span re-read.
+        SanityRule(
+            "verify_passes",
+            'granularity="span" requires verify_passes >= 2; a single pass cannot '
+            "witness its own position",
+            lambda d: d["granularity"] != "span" or d["verify_passes"] >= 2,
+        ),
         SanityRule(
             "c2_retries",
             "must not be negative",

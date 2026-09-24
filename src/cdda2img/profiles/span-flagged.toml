@@ -1,0 +1,38 @@
+# span-flagged — re-read only the sectors the capture pass flagged, clustered into
+# padded spans, and commit a track only when the assembled result matches
+# AccurateRip. Runs ahead of the speed ladder, which still gets every track it
+# does not recover. Design: docs/reference/span-recovery-plan.md.
+#
+# EXPERIMENTAL and OPT-IN (`--profile span-flagged` only). It has NEVER run on
+# hardware: the H1/H2 bench runs in the plan were cancelled on 2026-09-24 under the
+# replacement PX-716A's minimal-testing terms, so it is validated offline alone and
+# stays opt-in indefinitely. track-ladder remains the default.
+#
+# span_gap / span_pad are UNMEASURED. The captures the plan meant to tune them
+# against were deleted under the scratch rule. pad = 4 matches the ±4 margin
+# AccuDisc scored 41/44 on the one span measured; they refused ±8 precisely because
+# it scored 44/44 on that single observation. gap = 8 = 2 × pad, so two flagged
+# sites whose padding would touch are merged into one read.
+#
+# verify_passes = 2 is required (the schema refuses less for granularity = "span"):
+# the acceptance rule needs a position witness. c2_retries stays 0 until a
+# measurement shows it helps under verification (plan §4.3).
+name            = "span-flagged"
+experimental    = true
+
+sub             = true
+c2              = true
+
+granularity     = "span"
+ladder          = "full"
+passes          = 3
+span_gap        = 8
+span_pad        = 4
+variation       = "none"
+
+ctdb            = "auto"
+verify          = true
+verify_passes   = 2
+overlap_sectors = 4
+c2_retries      = 0
+budget_s        = 300

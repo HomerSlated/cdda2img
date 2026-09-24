@@ -15,7 +15,9 @@ from pathlib import Path
 from typing import TYPE_CHECKING, NamedTuple
 
 if TYPE_CHECKING:
-    from cdda2img.accudisc_reader import ReadLanes
+    from typing import BinaryIO
+
+    from cdda2img.accudisc_reader import ReadLanes, SpanDetail
     from cdda2img.accuraterip import ARVerifyResult
     from cdda2img.config import Config
     from cdda2img.ctdb_repair import CtdbRepairResult
@@ -24,7 +26,7 @@ if TYPE_CHECKING:
     from cdda2img.mb_lookup import MBPrepopResult
     from cdda2img.pxi_reader import OffsetCandidate as PXIOffsetCandidate
     from cdda2img.rbi_format import RipInfo
-    from cdda2img.recovery_profile import ResolvedStrategy
+    from cdda2img.recovery_profile import Profile, ResolvedStrategy
     from cdda2img.rip_log import RipLogBuilder
     from cdda2img.terminal_ui import TerminalUI
     from cdda2img.track_preview import TrackPreview
@@ -3634,6 +3636,90 @@ def _recovery_status_cb(
     return _cb
 
 
+class _RawWindow(NamedTuple):
+    """The raw sectors one track's offset-corrected audio is cut from.
+
+    Shared by both re-read rungs, because they must agree to the byte: the speed
+    ladder reads the whole window, the span rung rebuilds it from the PCM file and
+    overlays re-read sectors, and both then slice the same corrected track out of
+    it. ``first`` is the unclamped window start (``track_start - lead``); ``lo``/
+    ``hi`` are that window clamped to the disc, and the difference is zero-padded.
+    """
+
+    first: int  # unclamped window start
+    last: int  # unclamped window end (exclusive)
+    lo: int  # clamped to the disc
+    hi: int
+    lead: int  # margin sectors before the track
+    track_bytes: int
+
+
+def _raw_track_window(
+    track_lsns: list[int], disc_last_lsn: int, idx: int, read_offset: int
+) -> _RawWindow:
+    """Track ``idx`` (0-based) plus ``ceil(|read_offset| / 588)`` margin sectors on
+    the side the offset points to, clamped to ``[0, lead-out)``."""
+    from math import ceil
+
+    leadout = disc_last_lsn + 1
+    s = track_lsns[idx]
+    e = track_lsns[idx + 1] if idx + 1 < len(track_lsns) else leadout
+    lead = ceil(-read_offset / 588) if read_offset < 0 else 0
+    tail = ceil(read_offset / 588) if read_offset > 0 else 0
+    return _RawWindow(
+        first=s - lead,
+        last=e + tail,
+        lo=max(0, s - lead),
+        hi=min(leadout, e + tail),
+        lead=lead,
+        track_bytes=(e - s) * _R6_BYTES_PER_FRAME,
+    )
+
+
+def _corrected_from_window(window: bytes, w: _RawWindow, read_offset: int) -> bytes:
+    """Offset-correct the raw bytes of ``[w.lo, w.hi)`` into the track's audio.
+
+    Where the window crossed a disc edge it is zero-padded back to its unclamped
+    extent; the pad lands inside AccurateRip's first/last 2940-sample exclusion
+    zone, the same invariant accuraterip.py relies on.
+    """
+    pad_front = (w.lo - w.first) * _R6_BYTES_PER_FRAME
+    pad_back = (w.last - w.hi) * _R6_BYTES_PER_FRAME
+    if pad_front or pad_back:
+        window = bytes(pad_front) + window + bytes(pad_back)
+    base = w.lead * _R6_BYTES_PER_FRAME + read_offset * 4
+    corrected = window[base : base + w.track_bytes]
+    if len(corrected) < w.track_bytes:
+        msg = f"short window read: {len(corrected)} of {w.track_bytes} bytes"
+        raise RuntimeError(msg)
+    return corrected
+
+
+def _splice_corrected(
+    pcm_fh: BinaryIO,
+    corrected: bytes,
+    track_lsn: int,
+    read_offset: int,
+    file_size: int,
+) -> None:
+    """Write VERIFIED corrected bytes back at their raw-file position.
+
+    Clamped to the file: samples beyond a disc edge were zero-pad inside AR's
+    exclusion zone and have no file position. Callers invoke this only after
+    ``match_track_pcm`` has matched *corrected*; it is the one write either
+    re-read rung makes.
+    """
+    dst_lo = track_lsn * _R6_BYTES_PER_FRAME + read_offset * 4
+    src = corrected
+    if dst_lo < 0:
+        src = src[-dst_lo:]
+        dst_lo = 0
+    if dst_lo + len(src) > file_size:
+        src = src[: file_size - dst_lo]
+    pcm_fh.seek(dst_lo)
+    pcm_fh.write(src)
+
+
 def _read_track_window(
     device: str,
     track_lsns: list[int],
@@ -3643,37 +3729,16 @@ def _read_track_window(
     speed: int,
     prog_cb: Callable[[int, int], None] | None,
 ) -> bytes:
-    """One targeted c2read re-read of track ``idx`` (0-based); returns the track's
-    offset-CORRECTED PCM bytes, ready for AR verification.
-
-    The raw read window carries ``ceil(|read_offset| / 588)`` margin sectors on the
-    side the offset points to; where the window would cross a disc edge it is clamped
-    and zero-padded instead (the pad lands inside AccurateRip's first/last
-    2940-sample exclusion zone — the same invariant accuraterip.py relies on).
-    """
-    from math import ceil
-
+    """One targeted re-read of track ``idx`` (0-based); returns the track's
+    offset-CORRECTED PCM bytes, ready for AR verification. Geometry in
+    :func:`_raw_track_window`."""
     from cdda2img.accudisc_reader import read_span_bytes
 
-    leadout = disc_last_lsn + 1
-    s = track_lsns[idx]
-    e = track_lsns[idx + 1] if idx + 1 < len(track_lsns) else leadout
-    track_bytes = (e - s) * _R6_BYTES_PER_FRAME
-    lead = ceil(-read_offset / 588) if read_offset < 0 else 0
-    tail = ceil(read_offset / 588) if read_offset > 0 else 0
-    lo = max(0, s - lead)
-    hi = min(leadout, e + tail)
-    window = read_span_bytes(device, lo, hi - lo, read_speed=speed, progress_cb=prog_cb)
-    pad_front = (lo - (s - lead)) * _R6_BYTES_PER_FRAME
-    pad_back = ((e + tail) - hi) * _R6_BYTES_PER_FRAME
-    if pad_front or pad_back:
-        window = bytes(pad_front) + window + bytes(pad_back)
-    base = lead * _R6_BYTES_PER_FRAME + read_offset * 4
-    corrected = window[base : base + track_bytes]
-    if len(corrected) < track_bytes:
-        msg = f"short window read: {len(corrected)} of {track_bytes} bytes"
-        raise RuntimeError(msg)
-    return corrected
+    w = _raw_track_window(track_lsns, disc_last_lsn, idx, read_offset)
+    window = read_span_bytes(
+        device, w.lo, w.hi - w.lo, read_speed=speed, progress_cb=prog_cb
+    )
+    return _corrected_from_window(window, w, read_offset)
 
 
 def _track_sector_window(
@@ -3845,18 +3910,9 @@ def _recover_failed_tracks(
                     corrected, t, n_tracks, responses
                 )
                 if conf_v1 or conf_v2:
-                    # Splice the VERIFIED corrected bytes at their raw-file position,
-                    # clamped to the file (samples beyond a disc edge were zero-pad
-                    # inside AR's exclusion zone — they have no file position).
-                    dst_lo = track_lsns[idx] * _R6_BYTES_PER_FRAME + read_offset * 4
-                    src = corrected
-                    if dst_lo < 0:
-                        src = src[-dst_lo:]
-                        dst_lo = 0
-                    if dst_lo + len(src) > file_size:
-                        src = src[: file_size - dst_lo]
-                    pcm_fh.seek(dst_lo)
-                    pcm_fh.write(src)
+                    _splice_corrected(
+                        pcm_fh, corrected, track_lsns[idx], read_offset, file_size
+                    )
                     outcomes[t] = f"matched@{speed}X"
                     matched = True
                     disc_map_view.clear(lo, hi)
@@ -3866,6 +3922,266 @@ def _recover_failed_tracks(
                 outcomes[t] = "unrecovered"  # keep the original audio
     disc_map_view.release()
     return outcomes
+
+
+#: Map states a re-read copy may be accepted from (span-recovery-plan.md §4.4).
+#: ``SUSPECT``, ``C2``, ``HARD`` and ``PENDING`` never are.
+_SPAN_ACCEPT_STATES = frozenset({"OK", "RECOVERED"})
+
+
+def _span_copy_accepted(detail: SpanDetail, i: int) -> bool:
+    """The §4.4 acceptance rule for sector *i* of one span re-read.
+
+    Four conditions, all relative: the read had a position witness
+    (``verify_passes >= 2``, checked here although the seam already refuses less,
+    so the rule is visible where it is applied), the map state is ``OK`` or
+    ``RECOVERED``, the sector's own C2 block is all zero, and it is outside the
+    **widened** Q-position lane. On the LITE-ON every one of them held for wrong
+    sectors (AccuDisc §18w), so this is a filter that cheapens the work and
+    nothing more: the AccurateRip gate in :func:`_recover_flagged_spans` decides.
+    """
+    return (
+        detail.verify_passes >= 2
+        and detail.states[i] in _SPAN_ACCEPT_STATES
+        and detail.c2_clean[i]
+        and not detail.position_suspect[i]
+    )
+
+
+def _span_pass(
+    device: str,
+    spans: tuple,
+    profile: Profile,
+    speed: int | None,
+    prog_cb: Callable[[int, int], None] | None,
+    best: dict[int, bytes],
+    track: int,
+) -> None:
+    """Re-read every span once and record each accepted copy in *best*, replacing
+    the previous one. A failed span read is logged and skipped, not fatal."""
+    from cdda2img.accudisc_reader import read_span_detail
+
+    for span in spans:
+        try:
+            detail = read_span_detail(
+                device,
+                span.start,
+                span.count,
+                read_speed=speed,
+                verify_passes=profile.verify_passes,
+                overlap_sectors=profile.overlap_sectors,
+                c2_retries=profile.c2_retries,
+                progress_cb=prog_cb,
+            )
+        except (RuntimeError, OSError) as exc:
+            log.warning("track %d span re-read failed: %s", track, exc)
+            continue
+        for i in range(detail.count):
+            if _span_copy_accepted(detail, i):
+                off = i * _R6_BYTES_PER_FRAME
+                best[detail.start_lba + i] = detail.pcm[off : off + _R6_BYTES_PER_FRAME]
+
+
+def _span_gate(
+    base: bytes,
+    best: dict[int, bytes],
+    w: _RawWindow,
+    read_offset: int,
+    track: int,
+    n_tracks: int,
+    responses: list,
+) -> bytes | None:
+    """Overlay *best* onto the window's raw bytes **in memory** and AR-verify.
+
+    Returns the corrected track when it matches, else ``None``. Writes nothing:
+    the only write is the caller's splice, made on a non-``None`` return.
+    """
+    from cdda2img.accuraterip import match_track_pcm
+
+    if not best:
+        return None
+    candidate = bytearray(base)
+    for lba, sector in best.items():
+        off = (lba - w.lo) * _R6_BYTES_PER_FRAME
+        candidate[off : off + _R6_BYTES_PER_FRAME] = sector
+    corrected = _corrected_from_window(bytes(candidate), w, read_offset)
+    _v1, _v2, conf_v1, conf_v2 = match_track_pcm(corrected, track, n_tracks, responses)
+    return corrected if conf_v1 or conf_v2 else None
+
+
+def _recover_flagged_spans(
+    device: str,
+    failed_tracks: list,
+    track_lsns: list[int],
+    disc_last_lsn: int,
+    pcm_file: Path,
+    responses: list,
+    n_tracks: int,
+    ladder: list[int],
+    profile: Profile,
+    read_offset: int,
+    disc_damage: bytes,
+    ui: TerminalUI | None,
+) -> tuple[dict[int, str], dict[str, str]]:
+    """Re-read only the flagged sectors of each AR-failed track; commit on AR pass.
+
+    ``docs/reference/span-recovery-plan.md`` §4. Per track: take the capture
+    pass's damage lane inside the track's raw window as targets (the disc's final
+    sector excluded, a lead-out artefact), cluster and pad them into spans
+    (``span_gap``/``span_pad``), then run up to ``profile.passes`` passes, each
+    re-reading every span once at the next speed of the ladder
+    (fastest→slowest, cycling). Accepted copies (:func:`_span_copy_accepted`) are
+    overlaid onto the track's current raw audio **in memory**; after each pass the
+    assembled track goes to ``match_track_pcm``, and only a match is written. A
+    track that never matches keeps its audio byte-identical, the same invariant
+    the speed ladder keeps: no unverified splice.
+
+    **The newest accepted copy replaces the current best**, and every sector is
+    re-read on every pass: nothing is retired before the AR gate passes. Keeping
+    the first accepted copy would lock in an early wrong one, and on the LITE-ON
+    agreement between reads was worth nothing (seven cache-defeated reads, majority
+    correct for 0/49), so "being wrong early" has to stay survivable.
+
+    ``profile.budget_s`` bounds each track's passes in wall time.
+
+    **Never run on hardware** (kgr, 2026-09-24): the H1/H2 bench runs in the plan
+    were cancelled under the replacement drive's minimal-testing terms, so this is
+    reachable only through ``--profile span-flagged`` and is validated offline
+    alone.
+
+    Returns ``(outcomes, prov)``: ``outcomes`` has an entry ``span_matched@p<k>``
+    **only for tracks it recovered**, so the caller hands the rest to the speed
+    ladder; ``prov`` carries ``span_targets_track_<n>`` for every track tried and,
+    for a track given up on, ``span_unresolved_track_<n>`` (targets never
+    accepted) or ``span_accepted_unverified_track_<n>`` (every target accepted and
+    AR still failed: the falsifier, rbi_spec §6.3.1).
+    """
+    import time
+
+    from cdda2img.span_planner import cluster_spans, locate_targets
+
+    outcomes: dict[int, str] = {}
+    prov: dict[str, str] = {}
+    speeds: list[int | None] = list(reversed(ladder)) or [None]
+    file_size = (disc_last_lsn + 1) * _R6_BYTES_PER_FRAME
+    status_line = [""]
+    prog_cb = _recovery_status_cb(ui, status_line)
+
+    with pcm_file.open("r+b") as pcm_fh:
+        for result in failed_tracks:
+            t = result.track
+            idx = t - 1
+            w = _raw_track_window(track_lsns, disc_last_lsn, idx, read_offset)
+            targets = locate_targets(
+                disc_damage, w.lo, w.hi - w.lo, exclude=(disc_last_lsn,)
+            )
+            spans = cluster_spans(
+                targets, gap=profile.span_gap, pad=profile.span_pad, lo=w.lo, hi=w.hi
+            )
+            prov[f"span_targets_track_{t}"] = f"{len(targets)}/{len(spans)}"
+            if not spans:
+                continue  # nothing flagged: the ladder is the only remedy left
+
+            if ui is None:
+                print(f"  Re-reading {len(targets)} flagged sector(s) of track {t}…")
+            pcm_fh.seek(w.lo * _R6_BYTES_PER_FRAME)
+            base = pcm_fh.read((w.hi - w.lo) * _R6_BYTES_PER_FRAME)
+            best: dict[int, bytes] = {}
+            deadline = time.monotonic() + profile.budget_s
+
+            for k in range(1, profile.passes + 1):
+                if time.monotonic() > deadline:
+                    break
+                speed = speeds[(k - 1) % len(speeds)]
+                status_line[0] = f"Span re-read track {t} ({k}/{profile.passes})"
+                if ui is not None:
+                    ui.set_status(status_line[0], 0.0)
+                _span_pass(device, spans, profile, speed, prog_cb, best, t)
+                corrected = _span_gate(
+                    base, best, w, read_offset, t, n_tracks, responses
+                )
+                if corrected is not None:
+                    _splice_corrected(
+                        pcm_fh, corrected, track_lsns[idx], read_offset, file_size
+                    )
+                    outcomes[t] = f"span_matched@p{k}"
+                    break
+
+            if t not in outcomes:
+                never = len(set(targets) - best.keys())
+                if never:
+                    prov[f"span_unresolved_track_{t}"] = str(never)
+                else:
+                    prov[f"span_accepted_unverified_track_{t}"] = str(len(targets))
+    return outcomes, prov
+
+
+def _span_rung_decline(
+    disc_damage: bytes | None, responses: list, recovery_passes: int
+) -> str | None:
+    """Why the span rung cannot run although the profile asked for it, or ``None``.
+
+    Each reason is recorded as ``span_declined`` rather than skipped silently,
+    and the speed ladder still runs as usual on every one of them.
+    """
+    from cdda2img.accudisc_reader import span_detail_supported
+
+    if recovery_passes <= 0:
+        return "recovery_disabled"
+    if disc_damage is None:
+        return "no_damage_map"
+    if not responses:
+        return "no_ar_responses"
+    if not span_detail_supported():
+        return "no_engine_support"
+    return None
+
+
+def _run_span_rung(
+    profile: Profile | None,
+    failed_tracks: list,
+    *,
+    device: str,
+    track_lsns: list[int],
+    disc_last_lsn: int,
+    pcm_file: Path,
+    responses: list,
+    ladder: list[int],
+    recovery_passes: int,
+    read_offset: int,
+    disc_damage: bytes | None,
+    ui: TerminalUI | None,
+) -> tuple[dict[int, str], dict[str, str], list]:
+    """Dispatch the span rung ahead of the speed ladder, when the profile asks.
+
+    Returns ``(outcomes, prov, remaining)``. *remaining* is what the ladder gets:
+    every failed track the span rung did not recover. Handing it the recovered
+    ones too would re-read a verified track (grinding, under kgr's terms for the
+    replacement drive) and overwrite ``span_matched@p<k>`` with the ladder's
+    outcome. Any profile whose granularity is not ``"span"`` passes straight
+    through untouched.
+    """
+    if profile is None or profile.granularity != "span":
+        return {}, {}, failed_tracks
+    reason = _span_rung_decline(disc_damage, responses, recovery_passes)
+    if reason is not None or disc_damage is None:
+        return {}, {"span_declined": reason or "no_damage_map"}, failed_tracks
+    outcomes, prov = _recover_flagged_spans(
+        device,
+        failed_tracks,
+        track_lsns,
+        disc_last_lsn,
+        pcm_file,
+        responses,
+        len(track_lsns),
+        ladder,
+        profile,
+        read_offset,
+        disc_damage,
+        ui,
+    )
+    remaining = [r for r in failed_tracks if r.track not in outcomes]
+    return outcomes, prov, remaining
 
 
 def rip_image(  # noqa: C901
@@ -4100,6 +4416,7 @@ def rip_image(  # noqa: C901
         final_disc_last_lsn = info.disc_last_lsn
         # Speed-laddered AR recovery outcome (populated only if a track fails AR).
         recovery_outcomes: dict[int, str] = {}
+        span_prov: dict[str, str] = {}  # flagged-span rung keys, merged below
         recovery_ladder: list[int] = []
         # CTDB attempt outcome, kept whether it succeeded or declined — a declined
         # repair is the interesting case and used to leave no trace at all.
@@ -4257,7 +4574,23 @@ def rip_image(  # noqa: C901
                 if bound is not None and bound.profile is not None
                 else cfg.recovery_passes
             )
-            if recovery_ladder:
+            span_outcomes, span_keys, failed_tracks = _run_span_rung(
+                bound.profile if bound is not None else None,
+                failed_tracks,
+                device=device,
+                track_lsns=final_track_lsns,
+                disc_last_lsn=final_disc_last_lsn,
+                pcm_file=temp.pcm_file,
+                responses=ar_responses,
+                ladder=list(bound.ladder) if bound is not None else [],
+                recovery_passes=cfg.recovery_passes,
+                read_offset=read_offset,
+                disc_damage=disc_damage,
+                ui=ui,
+            )
+            recovery_outcomes.update(span_outcomes)
+            span_prov.update(span_keys)
+            if recovery_ladder and failed_tracks:
                 outcomes = _recover_failed_tracks(
                     device,
                     failed_tracks,
@@ -4355,6 +4688,7 @@ def rip_image(  # noqa: C901
         provenance["lookup_status_accuraterip"] = ar_verify.lookup_status
         if network_preflight is not None:
             provenance["network_preflight"] = network_preflight
+        provenance.update(span_prov)
         # CTDB provenance. The declined case matters most: without it a failed parity
         # repair is invisible in the container and has to be reverse-engineered from
         # the finished RBI (which is exactly what happened on 2026-07-25).

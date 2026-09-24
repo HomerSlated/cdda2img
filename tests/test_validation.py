@@ -193,9 +193,32 @@ def test_a_sector_shaped_field_is_also_valid_at_span_granularity(
     had it not, span_gap/span_pad would be unusable on the granularity they exist
     for. The negative control above still rejects track."""
     assert (
-        validate({"name": "p", field_name: 4, "granularity": "span"}, PROFILE_SCHEMA)
+        validate(
+            {"name": "p", field_name: 4, "granularity": "span", "verify_passes": 2},
+            PROFILE_SCHEMA,
+        )
         == []
     )
+
+
+def test_span_granularity_without_a_position_witness_is_rejected_at_load() -> None:
+    """The seam's read_span_detail refuses verify_passes=0, and the acceptance rule
+    is unsound without a witness. Left to the default, a span profile would load,
+    read the whole disc, and fail at the first re-read."""
+    for passes in (0, 1):
+        errors = validate(
+            {"name": "p", "granularity": "span", "verify_passes": passes},
+            PROFILE_SCHEMA,
+        )
+        assert _where(errors) == ["verify_passes"]
+    assert (
+        validate(
+            {"name": "p", "granularity": "span", "verify_passes": 2}, PROFILE_SCHEMA
+        )
+        == []
+    )
+    # Control: the rule is scoped to span; track granularity keeps its default.
+    assert validate({"name": "p", "granularity": "track"}, PROFILE_SCHEMA) == []
 
 
 @pytest.mark.parametrize("field_name", ["span_gap", "span_pad"])

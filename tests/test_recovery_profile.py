@@ -234,10 +234,12 @@ def test_speed_rows_expose_the_fields_the_ladder_policy_reads() -> None:
 # ---- shipped profiles -------------------------------------------------------
 
 
-def test_all_seven_bench_arms_ship() -> None:
-    """§9.1 retired the pre-measurement names; these are the strategies the bench
-    actually ranked, and the set must stay complete or the ranking loses its
-    controls (sector-hammer anchors the low end of the variation axis)."""
+def test_all_shipped_profiles_ship() -> None:
+    """§9.1 retired the pre-measurement names; the first seven are the strategies
+    the bench actually ranked, and the set must stay complete or the ranking loses
+    its controls (sector-hammer anchors the low end of the variation axis).
+    span-flagged is the eighth and is NOT a bench arm: opt-in, never run on
+    hardware (span-recovery-plan.md §7, kgr 2026-09-24)."""
     assert set(R.list_profiles()) == {
         "track-ladder",
         "track-constant",
@@ -246,6 +248,7 @@ def test_all_seven_bench_arms_ship() -> None:
         "sector-runup",
         "sector-hammer",
         "span-fixed",
+        "span-flagged",
     }
 
 
@@ -269,6 +272,7 @@ def test_the_experimental_arms_are_flagged_and_the_shipped_ones_are_not() -> Non
         "sector-runup",
         "sector-hammer",
         "span-fixed",
+        "span-flagged",  # never run on hardware, so it says so in `--list-profiles`
     }
 
 

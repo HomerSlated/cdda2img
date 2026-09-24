@@ -1,6 +1,12 @@
 # Flagged-span recovery rung — plan
 
-Status: **PLAN, no code** (2026-09-16). Owner: cdda2img. Engine: AccuDisc ≥ 0.41.0.
+Status: **IMPLEMENTED, opt-in, never run on hardware** (2026-09-24). `_recover_flagged_spans`
+and the `span-flagged` profile ship; kgr ruled on 2026-09-24 that H1 and H2 (§6) will **not**
+run, under the replacement PX-716A's minimal-testing terms, so the profile stays opt-in and
+`experimental` indefinitely (§7.2's promotion condition can no longer be met). The v6.1
+locator block (§7.3) is **not** built: its order was rung → bench → block, and with no bench
+it has no trigger. Every hardware finding below is from the LITE-ON. *Original status:*
+**PLAN, no code** (2026-09-16).
 Hardware tests on the LITE-ON LH-20A1S (`/dev/sr0`) are coordinated with AccuDisc under
 the agreed protocol (our §198, their 2026-09-16d). The PX-716A stays under the no-test
 rule until it is repaired.

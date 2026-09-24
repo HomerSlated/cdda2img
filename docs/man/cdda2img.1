@@ -107,6 +107,21 @@ sample\-exactly.
 A track that never matches keeps its original audio \(em an unverified splice is
 never written.
 .PP
+With
+.BR "\-\-profile span\-flagged" ,
+an extra rung runs between those two: only the sectors the first pass flagged
+are re\-read, in padded spans, and a track is written only when the assembled
+result matches AccurateRip.
+Tracks it does not recover still go to the speed ladder.
+.B NOTE:
+this profile is experimental and has never been run on real hardware; it is
+validated only by offline tests, and it is never selected by default.
+.PP
+If no track verifies at all, neither exit runs: re\-reading cannot fix a disc
+that is wrong everywhere (a wrong drive offset, a pressing AccurateRip does not
+hold, or a bad burn).
+The rip says so, then searches for an offset that would verify.
+.PP
 Before each rip,
 .B cdda2img rip
 automatically resolves the correct drive sample offset.

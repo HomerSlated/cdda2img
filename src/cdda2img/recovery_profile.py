@@ -2,8 +2,9 @@
 
 A *profile* is a complete recovery specification — what to capture, what to re-read
 and how, and which adjuncts to allow — named after the strategy the bench actually
-measured (accudisc-migration-plan.md §9.1/§9.2). The seven shipped profiles are the
+measured (accudisc-migration-plan.md §9.1/§9.2). Seven shipped profiles are the
 seven arms of that bench; their success rates live in each file's header comment.
+The eighth, ``span-flagged``, is not an arm: an opt-in rung never run on hardware.
 
 Resolution has exactly four rungs (§9.4), in priority order:
 
@@ -103,7 +104,7 @@ def shipped_profiles_dir() -> Path:
     joined with ``"../../conf/profiles"`` — and so resolved in a source checkout and
     nowhere else: the wheel ships ``src/cdda2img`` alone, and two levels up from an
     installed package is site-packages, which has no ``conf/``. Every install was
-    therefore missing all seven profiles, and since rung 4 of :func:`resolve_recovery`
+    therefore missing every shipped profile, and since rung 4 of :func:`resolve_recovery`
     loads ``track-ladder`` unconditionally, `rip` failed outright with "unknown
     recovery profile" rather than degrading.
 

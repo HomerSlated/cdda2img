@@ -1716,6 +1716,23 @@ class SpanDetail:
         return len(self.states)
 
 
+def span_detail_supported() -> bool:
+    """Whether :func:`read_span_detail` can run on this binding at all.
+
+    Asked once, before a recovery rung starts, so that a binding lacking either
+    lane declines the whole rung in one place instead of raising on every span of
+    every track. The same two capabilities :func:`_read_span_detail_binding`
+    refuses without, tested the same way; a missing binding answers ``False``.
+    """
+    try:
+        module = _binding("span detail read")
+    except RuntimeError:
+        return False
+    return _has_feature(module, _FEATURE_CALLER_MAPS) and _has_feature(
+        module, _FEATURE_SUBQ_MAP
+    )
+
+
 def read_span_detail(
     device: str,
     start_lba: int,
