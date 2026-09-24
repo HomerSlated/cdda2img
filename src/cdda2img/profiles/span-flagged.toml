@@ -31,7 +31,6 @@ span_pad        = 4
 variation       = "none"
 
 ctdb            = "auto"
-verify          = true
 verify_passes   = 2
 overlap_sectors = 4
 c2_retries      = 0

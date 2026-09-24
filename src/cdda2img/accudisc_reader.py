@@ -1793,15 +1793,14 @@ def read_span_detail(
       exactly *count* and the length check below is a contract guard rather than
       a live risk.
 
-    **``positional_fault`` is deliberately NOT on :class:`SpanDetail`.** It derives
-    from ``subq_misposition``, which is zero whenever the read did not request
-    ``Sub.RAW`` — and this one requests ``Sub.NONE``. Carrying it would publish a
-    structural zero as "the drive read the right part of the disc", which is the
-    false clean bill of health the acceptance rule exists to avoid. Whether the
-    span read should request the subchannel and gain that second, *independent*
-    position witness is a real question and an open one with AccuDisc (§199): run
-    B's displacement was invisible to both C2 and ``slips``, and Q's own LBA claim
-    is the one lane that does not share the audio path's blind spot.
+    **The read requests ``Sub.RAW``** (with ``subq_map``), which is what makes
+    :class:`SpanDetail`'s ``q_misposition`` / ``position_suspect`` lanes real
+    measurements rather than structural zeros. An earlier version of this
+    docstring said ``Sub.NONE`` and called that question open with AccuDisc
+    (§199); it was settled by §199.3 and the request changed, the paragraph did
+    not. The Q lane is a second, *independent* position witness: run B's
+    displacement was invisible to both C2 and ``slips``, and Q's own LBA claim is
+    the one lane that does not share the audio path's blind spot.
     """
     if verify_passes < 2:
         msg = (
