@@ -3494,6 +3494,27 @@ def _warn_ar_unreachable(ui: TerminalUI | None) -> None:
         ui.resume()
 
 
+def _warn_ar_total_miss(ui: TerminalUI | None) -> None:
+    """Say that no repair ran on a whole-disc miss, and why, before the offset search.
+
+    The twin of :func:`_warn_ar_unreachable`. Both repair exits are gated on a
+    PARTIAL mismatch, so a total miss skips them by design; until 2026-09-24 it
+    skipped them silently, and the offset search that follows ran with no output
+    either. Printed first so it covers that wait, however long it turns out to be.
+    """
+    if ui is not None:
+        ui.pause()
+    print(
+        "   No track verified, so no repair was attempted: re-reading cannot fix a"
+        " whole disc\n"
+        "   that is wrong everywhere (a wrong drive offset, a pressing AccurateRip"
+        " does not\n"
+        "   hold, or a bad burn). Searching for an offset that does verify…"
+    )
+    if ui is not None:
+        ui.resume()
+
+
 def _ar_has_partial_mismatch(results: list) -> bool:
     """True when some (but not all) disc-in-database tracks have AR mismatches.
 
@@ -4377,6 +4398,8 @@ def rip_image(  # noqa: C901
         # verifies is not automatically the right one to store (a widely-pressed
         # disc verifies at several at once).
         if _ar_has_total_mismatch(ar_verify.tracks):
+            _warn_ar_total_miss(ui)
+            _ui_status(ui, "Searching for a verifying offset…")
             provenance.update(
                 _diagnose_total_ar_miss(
                     temp.pcm_file,

@@ -147,3 +147,25 @@ def test_a_failing_probe_never_fails_the_rip(monkeypatch: pytest.MonkeyPatch) ->
     monkeypatch.setattr("cdda2img.accuraterip.fetch_ar_responses", _boom)
     prov = C._diagnose_total_ar_miss(Path("/x.pcm"), [0], 100, 0x123, read_offset=30)
     assert prov == {"ar_total_miss": "offset_probe_failed"}
+
+
+def test_the_skipped_repair_is_announced(capsys: pytest.CaptureFixture[str]) -> None:
+    """A total miss skips both repair exits by design; saying nothing about it read,
+    on 2026-09-23, as a rip that stalled and failed with no reason. The notice must
+    name the skip and the search that follows it."""
+    C._warn_ar_total_miss(None)
+    out = capsys.readouterr().out
+    assert "no repair was attempted" in out
+    assert "Searching for an offset" in out
+
+
+def test_the_notice_is_wired_ahead_of_the_offset_search() -> None:
+    """Control for the wiring: the helper is useless if the rip path never calls
+    it, or calls it after the silent pass it exists to announce."""
+    import inspect
+
+    src = inspect.getsource(C.rip_image)
+    warn = src.index("_warn_ar_total_miss(ui)")
+    diagnose = src.index("_diagnose_total_ar_miss(")
+    gate = src.index("_ar_has_total_mismatch(ar_verify.tracks)")
+    assert gate < warn < diagnose
