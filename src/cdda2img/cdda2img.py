@@ -3308,12 +3308,6 @@ def _rip_disc_stage(
     return info, "accudisc", (c2_file if want_c2 else None), disc_damage
 
 
-def _drive_supports_c2(device: str) -> bool:
-    from cdda2img.accudisc_reader import drive_supports_c2
-
-    return drive_supports_c2(device)
-
-
 EXIT_WRITTEN_WITH_CAVEATS = 3
 
 # The PROV status keys of the services a container's provenance depends on, and the

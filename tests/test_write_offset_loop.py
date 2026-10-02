@@ -99,7 +99,9 @@ def _run(
 
 
 def test_a_failed_eject_warns_and_a_retry_carries_on(rig, monkeypatch, capsys):
-    rig.eject_results = ["disc still present: device held open"]
+    # The eject that opens the tray for the blank succeeds; the one after the
+    # burn does not.
+    rig.eject_results = [None, "disc still present: device held open"]
     _run(
         monkeypatch,
         selects=[setup._CYCLE_BURN, setup._EJECT_RETRY],
@@ -110,6 +112,7 @@ def test_a_failed_eject_warns_and_a_retry_carries_on(rig, monkeypatch, capsys):
     assert "WARNING: the disc did not eject: disc still present" in out
     # The rip only happens after the eject that succeeded, and after a load.
     assert rig.calls == [
+        "eject",
         "load",
         "burn",
         "eject",
@@ -124,13 +127,13 @@ def test_a_failed_eject_warns_and_a_retry_carries_on(rig, monkeypatch, capsys):
 def test_quitting_a_failed_eject_after_a_burn_rips_nothing_and_says_how_to_resume(
     rig, monkeypatch, capsys
 ):
-    rig.eject_results = ["busy"]
+    rig.eject_results = [None, "busy"]
     _, confirm = _run(
         monkeypatch,
         selects=[setup._CYCLE_BURN, setup._EJECT_QUIT],
         confirms=[True],
     )
-    assert rig.calls == ["load", "burn", "eject"]
+    assert rig.calls == ["eject", "load", "burn", "eject"]
     # Never told the user the disc was ejected.
     assert not any("Disc ejected" in prompt for prompt, _ in confirm.asked)
     assert setup._CYCLE_READ in capsys.readouterr().out
@@ -198,6 +201,7 @@ def test_one_failed_read_reloads_and_rereads_the_same_disc(rig, monkeypatch, cap
     )
     # The second rip follows an eject and a load of its own.
     assert rig.calls == [
+        "eject",
         "load",
         "burn",
         "eject",
@@ -224,6 +228,7 @@ def test_two_failed_reads_offer_another_disc_once(rig, monkeypatch):
         confirms=[True, True, False],
     )
     assert rig.calls == [
+        "eject",
         "load",
         "burn",
         "eject",
@@ -266,7 +271,7 @@ def test_a_failed_burn_still_offers_another_disc_at_once(rig, monkeypatch):
 
     monkeypatch.setattr(wo, "burn_disc", _burn)
     _, confirm = _run(monkeypatch, selects=[setup._CYCLE_BURN], confirms=[True, False])
-    assert rig.calls == ["load", "burn", "eject"]
+    assert rig.calls == ["eject", "load", "burn", "eject"]
     assert _asked(confirm, _ANOTHER) == 1
 
 
@@ -277,11 +282,11 @@ def test_a_failed_burn_whose_eject_is_quit_asks_nothing_more(rig, monkeypatch):
         raise RuntimeError(msg)
 
     monkeypatch.setattr(wo, "burn_disc", _burn)
-    rig.eject_results = ["busy"]
+    rig.eject_results = [None, "busy"]
     _, confirm = _run(
         monkeypatch, selects=[setup._CYCLE_BURN, setup._EJECT_QUIT], confirms=[True]
     )
-    assert rig.calls == ["load", "burn", "eject"]
+    assert rig.calls == ["eject", "load", "burn", "eject"]
     assert _asked(confirm, _ANOTHER) == 0
 
 
@@ -307,7 +312,7 @@ def test_quitting_a_failed_load_reads_nothing_and_says_how_to_resume(
         selects=[setup._CYCLE_BURN, setup._LOAD_QUIT],
         confirms=[True, True],
     )
-    assert rig.calls == ["load", "burn", "eject", "load"]
+    assert rig.calls == ["eject", "load", "burn", "eject", "load"]
     assert setup._CYCLE_READ in capsys.readouterr().out
 
 
@@ -315,12 +320,22 @@ def test_quitting_the_eject_between_two_reads_says_how_to_resume(
     rig, monkeypatch, capsys
 ):
     rig.rip_errors = ["unreadable"]
-    rig.eject_results = [None, "busy"]
+    rig.eject_results = [None, None, "busy"]
     _, confirm = _run(
         monkeypatch,
         selects=[setup._CYCLE_BURN, setup._EJECT_QUIT],
         confirms=[True, True],
     )
-    assert rig.calls == ["load", "burn", "eject", "load", "rip", "eject"]
+    assert rig.calls == ["eject", "load", "burn", "eject", "load", "rip", "eject"]
     assert _asked(confirm, _ANOTHER) == 0
     assert setup._CYCLE_READ in capsys.readouterr().out
+
+
+def test_the_tray_is_opened_before_a_blank_is_asked_for(rig, monkeypatch):
+    """Quitting that first eject burns nothing and asks nothing."""
+    rig.eject_results = ["busy"]
+    _, confirm = _run(
+        monkeypatch, selects=[setup._CYCLE_BURN, setup._EJECT_QUIT], confirms=[]
+    )
+    assert rig.calls == ["eject"]
+    assert confirm.asked == []

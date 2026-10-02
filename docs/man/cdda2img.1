@@ -697,6 +697,7 @@ rips it back, and locates the known noise pulses. Results accumulate in
 .IR $XDG_DATA_HOME/cdda2img/write_offset_<drive>.toml .
 Each cycle can instead rip a test disc burned earlier in the same drive,
 so a disc burned in a session that ended before its read-back is not wasted.
+The tray is opened before a disc is asked for.
 Every burn and every read follows a tray load the loop makes itself, and a
 disc is ejected and reloaded between its burn and its read-back.
 A failed burn ejects its disc before another is offered.

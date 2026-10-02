@@ -614,6 +614,9 @@ def _section_write_offset(device: str | None, speed: int) -> bool:  # noqa: C901
 
         choice = _select("  Next disc:", [_CYCLE_BURN, _CYCLE_READ, _CYCLE_QUIT])
         if choice == _CYCLE_BURN:
+            # Opened first, so the blank is asked for with the tray out.
+            if not _eject_or_quit(device):
+                break
             if not _confirm("  Insert a blank disc and press Enter to burn", True):
                 break
             if not _load_or_quit(device):
