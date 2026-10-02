@@ -623,6 +623,10 @@ def _section_write_offset(device: str | None, speed: int) -> bool:  # noqa: C901
                 wo.burn_disc(toc, device, speed)
             except RuntimeError as exc:
                 print(f"  Burn failed: {exc}")
+                # Ejected before the question, so "another disc" is asked with
+                # the tray out and the failed disc is not left inside.
+                if not _eject_or_quit(device):
+                    break
                 if not _confirm("  Try again with another disc?"):
                     break
                 continue

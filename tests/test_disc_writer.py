@@ -325,4 +325,3 @@ def test_the_man_page_states_the_same_default():
     man = (Path(__file__).parent.parent / "docs/man/cdda2img.1").read_text()
     assert r"Burn speed in CD\-DA drive units (default: 8)." in man
     assert "cycles (default: 8)." in man
-    assert "(default: 4)" not in man

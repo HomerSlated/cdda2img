@@ -256,7 +256,8 @@ def test_the_failure_count_belongs_to_the_disc_not_the_session(rig, monkeypatch)
 
 def test_a_failed_burn_still_offers_another_disc_at_once(rig, monkeypatch):
     """Control: the re-read rule is about reads. A failed burn has spent its
-    blank, and the question about another disc comes straight away."""
+    blank, and the question about another disc comes straight away. The disc is
+    ejected first, so the question is asked with the tray out."""
 
     def _burn(_toc: Path, _device: str, _speed: int) -> None:
         rig.calls.append("burn")
@@ -265,8 +266,23 @@ def test_a_failed_burn_still_offers_another_disc_at_once(rig, monkeypatch):
 
     monkeypatch.setattr(wo, "burn_disc", _burn)
     _, confirm = _run(monkeypatch, selects=[setup._CYCLE_BURN], confirms=[True, False])
-    assert rig.calls == ["load", "burn"]
+    assert rig.calls == ["load", "burn", "eject"]
     assert _asked(confirm, _ANOTHER) == 1
+
+
+def test_a_failed_burn_whose_eject_is_quit_asks_nothing_more(rig, monkeypatch):
+    def _burn(_toc: Path, _device: str, _speed: int) -> None:
+        rig.calls.append("burn")
+        msg = "accudisc write failed (exit 2)"
+        raise RuntimeError(msg)
+
+    monkeypatch.setattr(wo, "burn_disc", _burn)
+    rig.eject_results = ["busy"]
+    _, confirm = _run(
+        monkeypatch, selects=[setup._CYCLE_BURN, setup._EJECT_QUIT], confirms=[True]
+    )
+    assert rig.calls == ["load", "burn", "eject"]
+    assert _asked(confirm, _ANOTHER) == 0
 
 
 def test_a_failed_load_warns_and_a_retry_carries_on(rig, monkeypatch, capsys):
