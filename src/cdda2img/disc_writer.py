@@ -36,6 +36,11 @@ if TYPE_CHECKING:
 
     from cdda2img.terminal_ui import TerminalUI
 
+#: The burn speed when ``--speed`` is not given, for ``burn`` and for
+#: ``setup --write-offset`` alike (kgr, 2026-10-02; it was 4). One constant
+#: because both commands write a disc, and eight sites used to hold the literal.
+DEFAULT_BURN_SPEED = 8
+
 _FILE_NAME_RE = re.compile(r'(FILE\s+)"[^"]*"')
 # CATALOG line with anything other than exactly 13 decimal digits
 _CATALOG_BAD_RE = re.compile(r'^CATALOG\s+"([^"]*)"\s*\n?', re.MULTILINE)
@@ -223,7 +228,7 @@ def burn_disc(
     rbi_file: Path,
     device: str = "/dev/sr0",
     write_offset: int = 0,
-    speed: int = 4,
+    speed: int = DEFAULT_BURN_SPEED,
     *,
     simulate: bool = False,
     yes: bool = False,

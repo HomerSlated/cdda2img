@@ -13,6 +13,8 @@ import random
 import sqlite3
 from pathlib import Path
 
+from cdda2img.disc_writer import DEFAULT_BURN_SPEED
+
 log = logging.getLogger(__name__)
 
 _SECTION_CHOICES = [
@@ -36,7 +38,7 @@ def run_setup_wizard(
     *,
     section: str | None = None,
     device: str | None = None,
-    speed: int = 4,
+    speed: int = DEFAULT_BURN_SPEED,
     verify_test: bool = False,
 ) -> bool:
     """Run the setup wizard, optionally jumping directly to *section*.
@@ -464,6 +466,11 @@ _CYCLE_READ = "Rip a test disc already burned in this drive"
 _CYCLE_QUIT = "Quit"
 _EJECT_RETRY = "Retry the eject"
 _EJECT_QUIT = "Quit (the disc stays in the drive)"
+_LOAD_RETRY = "Retry the load"
+_LOAD_QUIT = "Quit"
+_RIP_OK = "ok"
+_RIP_FAILED = "failed"
+_RIP_QUIT = "quit"
 _RESUME_HINT = (
     "\n  The burned disc has not been measured. To measure it later, run\n"
     "  `cdda2img setup --write-offset` again and choose\n"
@@ -495,6 +502,60 @@ def _eject_or_quit(device: str) -> bool:
         )
         if _select("  What now?", [_EJECT_RETRY, _EJECT_QUIT]) != _EJECT_RETRY:
             return False
+
+
+def _load_or_quit(device: str) -> bool:
+    """Close the tray and wait for the drive; on failure warn and offer retry or quit.
+
+    True once the drive is ready. Every burn and every read in the write-offset
+    loop starts from a load this code made, so none of them depends on the kernel
+    closing the tray as a side effect of opening the device, or on a drive that is
+    still spinning up. A drive that cannot close its own tray (a laptop or
+    slot-loading drive) fails here; the user closes it by hand and retries.
+    """
+    from cdda2img import write_offset as wo
+
+    while True:
+        error = wo.load(device)
+        if error is None:
+            return True
+        print(f"\n  WARNING: the drive did not load the disc: {error}")
+        print("  If the tray is still open, close it by hand and retry.")
+        if _select("  What now?", [_LOAD_RETRY, _LOAD_QUIT]) != _LOAD_RETRY:
+            return False
+
+
+def _rip_with_one_reload(device: str, ripped_bin: Path, ripped_toc: Path) -> str:
+    """Rip the loaded disc, and give it one fresh load before calling it unreadable.
+
+    A burn that reads back as blank or unreadable is not yet a coaster. On
+    2026-10-02 a correctly burned CD-R read blank at its first load in a PX-716A
+    and ripped 11/11 against AccurateRip at a later one. So the first failure
+    costs an eject and a reload of the *same* disc, and only a second failure is
+    reported as the disc's. The second rip follows a new load deliberately: a
+    repeat read inside the load that failed asks the same question twice.
+
+    Returns ``_RIP_OK``; ``_RIP_FAILED`` after two failures, with the disc
+    ejected; or ``_RIP_QUIT`` when the user quit at a tray prompt.
+    """
+    from cdda2img import write_offset as wo
+
+    for attempt in (1, 2):
+        print("  Ripping...")
+        try:
+            wo.rip_disc(device, ripped_bin, ripped_toc)
+        except RuntimeError as exc:
+            print(f"  Rip failed: {exc}")
+        else:
+            return _RIP_OK
+        if not _eject_or_quit(device):
+            return _RIP_QUIT
+        if attempt == 2:
+            break
+        print("  Reloading the same disc to read it once more...")
+        if not _load_or_quit(device):
+            return _RIP_QUIT
+    return _RIP_FAILED
 
 
 def _section_write_offset(device: str | None, speed: int) -> bool:  # noqa: C901
@@ -555,6 +616,8 @@ def _section_write_offset(device: str | None, speed: int) -> bool:  # noqa: C901
         if choice == _CYCLE_BURN:
             if not _confirm("  Insert a blank disc and press Enter to burn", True):
                 break
+            if not _load_or_quit(device):
+                break
             print("  Burning...")
             try:
                 wo.burn_disc(toc, device, speed)
@@ -566,10 +629,17 @@ def _section_write_offset(device: str | None, speed: int) -> bool:  # noqa: C901
             if not _eject_or_quit(device):
                 print(_RESUME_HINT)
                 break
-            ready = "  Disc ejected. Reinsert the burned disc and press Enter to rip"
-        elif choice == _CYCLE_READ:
             ready = (
-                "  Insert the test disc burned earlier in this drive (or leave it in)"
+                "  Disc ejected. Leave the burned disc in the tray and press Enter"
+                " to reload and rip it"
+            )
+        elif choice == _CYCLE_READ:
+            # Ejected first, so this read follows a fresh load too. A disc left in
+            # the drive since its burn has not been loaded since it was written.
+            if not _eject_or_quit(device):
+                break
+            ready = (
+                "  Insert the test disc burned earlier in this drive"
                 " and press Enter to rip"
             )
         else:
@@ -577,14 +647,17 @@ def _section_write_offset(device: str | None, speed: int) -> bool:  # noqa: C901
 
         if not _confirm(ready, True):
             break
+        if not _load_or_quit(device):
+            print(_RESUME_HINT)
+            break
 
-        print("  Ripping...")
-        try:
-            wo.rip_disc(device, ripped_bin, ripped_toc)
-        except RuntimeError as exc:
-            print(f"  Rip failed: {exc}")
-            if not _eject_or_quit(device) or not _confirm(
-                "  Try again with another disc?"
+        outcome = _rip_with_one_reload(device, ripped_bin, ripped_toc)
+        if outcome == _RIP_QUIT:
+            print(_RESUME_HINT)
+            break
+        if outcome == _RIP_FAILED:
+            if not _confirm(
+                "  The disc failed to read twice. Try again with another disc?"
             ):
                 break
             continue

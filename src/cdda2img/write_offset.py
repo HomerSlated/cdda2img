@@ -227,6 +227,16 @@ def eject(device: str) -> str | None:
     return _eject(device)
 
 
+def load(device: str) -> str | None:
+    """Close the tray of *device* and wait for the drive: ``None``, else the reason.
+
+    Re-exported from the seam for the same reason as :func:`eject`.
+    """
+    from cdda2img.accudisc_reader import load as _load
+
+    return _load(device)
+
+
 # ── PCM analysis ──────────────────────────────────────────────────────────────
 
 

@@ -277,3 +277,52 @@ def test_disc_level_nonempty_preserved_when_tracks_empty():
     # Disc-level block preserved (has LANGUAGE_MAP); track-level block is gone.
     assert "LANGUAGE_MAP" in result
     assert result.count("CD_TEXT {") == 1
+
+
+# ── the default burn speed ───────────────────────────────────────────────────
+#
+# 8x since 2026-10-02 (kgr); it was 4x. Every assertion compares against the
+# literal: comparing against DEFAULT_BURN_SPEED would pass at any value.
+
+
+@pytest.mark.parametrize(
+    "argv", [["burn", "album.rbi"], ["setup", "--write-offset"]], ids=["burn", "setup"]
+)
+def test_a_burn_without_speed_goes_out_at_8x(argv, monkeypatch):
+    """Both commands write a disc, so both carry the default."""
+    import cdda2img.cdda2img as app
+
+    monkeypatch.setattr("sys.argv", ["cdda2img", *argv])
+    assert app.parse_args().speed == 8
+
+
+def test_an_explicit_speed_still_wins(monkeypatch):
+    import cdda2img.cdda2img as app
+
+    monkeypatch.setattr("sys.argv", ["cdda2img", "burn", "album.rbi", "--speed", "16"])
+    assert app.parse_args().speed == 16
+
+
+def test_no_burn_entry_point_keeps_a_default_of_its_own():
+    """A caller that skips the parser gets the same speed as one that uses it."""
+    import inspect
+
+    import cdda2img.cdda2img as app
+    from cdda2img import setup
+
+    defaults = {
+        fn.__qualname__: inspect.signature(fn).parameters["speed"].default
+        for fn in (disc_writer.burn_disc, app.burn_image, setup.run_setup_wizard)
+    }
+    assert defaults == {
+        "burn_disc": 8,
+        "burn_image": 8,
+        "run_setup_wizard": 8,
+    }
+
+
+def test_the_man_page_states_the_same_default():
+    man = (Path(__file__).parent.parent / "docs/man/cdda2img.1").read_text()
+    assert r"Burn speed in CD\-DA drive units (default: 8)." in man
+    assert "cycles (default: 8)." in man
+    assert "(default: 4)" not in man

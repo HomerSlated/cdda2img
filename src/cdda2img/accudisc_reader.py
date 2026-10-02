@@ -2263,7 +2263,7 @@ def _best_effort_device_op(device: str, what: str, method: str) -> str | None:
     the exception and discarding the reason are different decisions: only the
     first belongs here.
 
-    Shared by the two tray/spindle operations, which are the only calls in the
+    Shared by the tray and spindle operations, which are the only calls in the
     seam whose contract is "never raises" *including* the device failing to open.
     Everywhere else a failure to open is the caller's problem; here the whole
     operation is a courtesy — a drive that will not eject has not broken a rip
@@ -2305,6 +2305,23 @@ def eject(device: str) -> str | None:
     loop in ``setup.py``) must not.
     """
     return _best_effort_device_op(device, "eject", "eject")
+
+
+def load(device: str) -> str | None:
+    """Close the tray (``Device.load``): ``None`` once the drive is ready, else why not.
+
+    Never raises for a device or media fault (``AbiMismatch`` still raises). Since
+    AccuDisc 0.38.0 this blocks until the drive stops answering "becoming ready"
+    (measured 1 to 18 s on a PX-716A, with a 60 s limit), so the read that follows
+    does not meet a drive that is still spinning up. An empty tray is not an
+    error: the caller finds out there is no disc by reading.
+
+    Recognition of a disc belongs to the load, not to the disc. A CD-R burned on
+    2026-10-02 read blank at one load and ripped 11/11 at a later one, so a
+    caller re-reading a disc that failed (the write-offset loop in ``setup.py``)
+    ejects and loads it again first.
+    """
+    return _best_effort_device_op(device, "load", "load")
 
 
 def park_spindle(device: str) -> None:

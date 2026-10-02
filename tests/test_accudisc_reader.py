@@ -1515,12 +1515,16 @@ class _RecordingDevice:
     def eject(self) -> None:
         self._calls.append("eject")
 
+    def load(self) -> None:
+        self._calls.append("load")
+
     def park_spindle(self) -> None:
         self._calls.append("park_spindle")
 
 
 @pytest.mark.parametrize(
-    ("fn", "method"), [("eject", "eject"), ("park_spindle", "park_spindle")]
+    ("fn", "method"),
+    [("eject", "eject"), ("load", "load"), ("park_spindle", "park_spindle")],
 )
 def test_tray_and_spindle_call_the_matching_device_method(
     fn: str, method: str, monkeypatch: pytest.MonkeyPatch
@@ -1535,11 +1539,11 @@ def test_tray_and_spindle_call_the_matching_device_method(
     assert calls == [method]
 
 
-@pytest.mark.parametrize("fn", ["eject", "park_spindle"])
+@pytest.mark.parametrize("fn", ["eject", "load", "park_spindle"])
 def test_a_device_that_will_not_open_is_swallowed(
     fn: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """These two are the seam's only "never raises" calls, open included.
+    """These three are the seam's only "never raises" calls, open included.
 
     Everywhere else a device that will not open is the caller's problem. Here the
     whole operation is a courtesy: a tray that will not open has not broken a rip
@@ -1556,8 +1560,8 @@ def test_a_device_that_will_not_open_is_swallowed(
     _install(monkeypatch, fake)
 
     result = getattr(ar, fn)("/dev/sr0")  # must return, not raise
-    # eject hands the reason back; park_spindle has no caller that needs it.
-    assert result == ("device busy" if fn == "eject" else None)
+    # eject and load hand the reason back; park_spindle has no caller that needs it.
+    assert result == (None if fn == "park_spindle" else "device busy")
 
 
 class _StuckTrayDevice(_RecordingDevice):

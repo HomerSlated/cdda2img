@@ -522,7 +522,7 @@ CD drive device node (default:
 .BR /dev/sr0 ).
 .TP
 .BI \-\-speed " N"
-Burn speed in CD\-DA drive units (default: 4).
+Burn speed in CD\-DA drive units (default: 8).
 .TP
 .BI \-\-write\-offset " N"
 Write offset override in samples.
@@ -697,6 +697,11 @@ rips it back, and locates the known noise pulses. Results accumulate in
 .IR $XDG_DATA_HOME/cdda2img/write_offset_<drive>.toml .
 Each cycle can instead rip a test disc burned earlier in the same drive,
 so a disc burned in a session that ended before its read-back is not wasted.
+Every burn and every read follows a tray load the loop makes itself, and a
+disc is ejected and reloaded between its burn and its read-back.
+A disc that fails to read is ejected, reloaded and read once more; another
+disc is offered only after the second failure, because a good burn can fail
+to be recognised at one load and read correctly at the next.
 If the tray will not eject, usually because a mounted filesystem or another
 program holds the device open, the loop warns and offers to retry once the
 lock is released, or to quit; a cycle already measured is saved first.
@@ -711,7 +716,7 @@ CD drive device (default: from config
 .BI \-\-speed " N"
 Burn speed for
 .B \-\-write\-offset
-cycles (default: 4).
+cycles (default: 8).
 .TP
 .B \-\-create\-catalogue
 Create the disc catalogue database if it does not exist.

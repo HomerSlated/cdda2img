@@ -40,6 +40,7 @@ from cdda2img.container import (
     resolve_temp_dir,
     wav_to_raw_pcm,
 )
+from cdda2img.disc_writer import DEFAULT_BURN_SPEED
 from cdda2img.input_selector import (
     MAX_RUNTIME_MINUTES,
     MAX_TRACKS,
@@ -132,7 +133,7 @@ def parse_args() -> argparse.Namespace:
 
             burn options:  (validated on a virtual CDEmu writer only — see cdda2img(1))
               --device DEVICE       CD drive device (default: from config default_device, fallback /dev/sr0)
-              --speed N             Burn speed in CD-DA drive units (default: 4)
+              --speed N             Burn speed in CD-DA drive units (default: 8)
               --write-offset N      Write offset override in samples (default: from config)
               --simulate            Test write (laser off) — validate without consuming a blank
               --yes                 Skip confirmation prompt (non-interactive burn)
@@ -531,9 +532,9 @@ def parse_args() -> argparse.Namespace:
     w_cmd.add_argument(
         "--speed",
         type=int,
-        default=4,
+        default=DEFAULT_BURN_SPEED,
         metavar="N",
-        help="Burn speed in CD-DA drive units (default: 4)",
+        help=f"Burn speed in CD-DA drive units (default: {DEFAULT_BURN_SPEED})",
     )
     w_cmd.add_argument(
         "--write-offset",
@@ -641,7 +642,14 @@ def parse_args() -> argparse.Namespace:
         help="Run full RBI verify per entry (with --verify-catalogue)",
     )
     s_cmd.add_argument("--device", default=None)
-    s_cmd.add_argument("--speed", type=int, default=4)
+    s_cmd.add_argument(
+        "--speed",
+        type=int,
+        default=DEFAULT_BURN_SPEED,
+        metavar="N",
+        help="Burn speed for --write-offset, in CD-DA drive units "
+        f"(default: {DEFAULT_BURN_SPEED})",
+    )
 
     return parser.parse_args()
 
@@ -4884,7 +4892,7 @@ def burn_image(
     rbi_file: Path,
     device: str | None = None,
     write_offset_override: int | None = None,
-    speed: int = 4,
+    speed: int = DEFAULT_BURN_SPEED,
     simulate: bool = False,
     yes: bool = False,
 ) -> None:
@@ -5204,7 +5212,7 @@ def _dispatch_utility(args: argparse.Namespace) -> None:
         run_setup_wizard(
             section=section,
             device=getattr(args, "device", None),
-            speed=getattr(args, "speed", 4),
+            speed=getattr(args, "speed", DEFAULT_BURN_SPEED),
             verify_test=getattr(args, "test", False),
         )
 
