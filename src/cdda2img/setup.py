@@ -624,6 +624,13 @@ def _section_write_offset(device: str | None, speed: int) -> bool:  # noqa: C901
             print("  Burning...")
             try:
                 wo.burn_disc(toc, device, speed)
+            except wo.BurnRefused as exc:
+                # Before RuntimeError, which it subclasses. The fault is the
+                # drive's state, not the disc, so another blank would meet the
+                # same refusal: stop, and say the blank is still good.
+                print(f"  Burn refused: {exc}")
+                print("  Keep this disc: it is still blank and can be used again.")
+                break
             except RuntimeError as exc:
                 print(f"  Burn failed: {exc}")
                 # Ejected before the question, so "another disc" is asked with

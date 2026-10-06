@@ -275,6 +275,39 @@ def test_a_failed_burn_still_offers_another_disc_at_once(rig, monkeypatch):
     assert _asked(confirm, _ANOTHER) == 1
 
 
+def test_a_refused_burn_does_not_ask_for_another_disc(rig, monkeypatch, capsys):
+    """AccuDisc 0.48.0 refuses a burn when the drive does not hold its write
+    parameters. Nothing was written, so the blank is not spent and another one
+    would meet the same refusal: no eject, no question, and the user is told to
+    keep the disc."""
+
+    def _burn(_toc: Path, _device: str, _speed: int) -> None:
+        rig.calls.append("burn")
+        msg = "the disc is still blank (test_write held=1)"
+        raise wo.BurnRefused(msg)
+
+    monkeypatch.setattr(wo, "burn_disc", _burn)
+    _, confirm = _run(monkeypatch, selects=[setup._CYCLE_BURN], confirms=[True])
+    assert rig.calls == ["eject", "load", "burn"]
+    assert _asked(confirm, _ANOTHER) == 0
+    out = capsys.readouterr().out
+    assert "Burn refused: the disc is still blank (test_write held=1)" in out
+    assert "Keep this disc" in out
+    assert "Burn failed" not in out
+
+
+def test_burn_disc_raises_burn_refused_on_the_write_params_token(tmp_path, monkeypatch):
+    """The token has to survive ``write_offset.burn_disc`` or the loop above
+    cannot tell a refusal from a spoiled disc."""
+    import cdda2img.accudisc_reader as ar
+
+    monkeypatch.setattr(
+        ar, "write_disc", lambda *a, **k: (2, "bufe sent=1 held=0", "write_params")
+    )
+    with pytest.raises(wo.BurnRefused, match="bufe sent=1 held=0"):
+        wo.burn_disc(tmp_path / "test.toc", "/dev/sr0", 8)
+
+
 def test_a_failed_burn_whose_eject_is_quit_asks_nothing_more(rig, monkeypatch):
     def _burn(_toc: Path, _device: str, _speed: int) -> None:
         rig.calls.append("burn")

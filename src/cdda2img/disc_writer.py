@@ -164,7 +164,11 @@ def _write_disc(
     a targeted message for the disc-not-blank case (which moved from 3 to 2 in the
     reconciliation, hence keyed on the stderr text, not the bare code).
     """
-    from cdda2img.accudisc_reader import write_disc
+    from cdda2img.accudisc_reader import (
+        BurnRefused,
+        burn_refused_message,
+        write_disc,
+    )
 
     _ui_status(ui, f"Burning {track_count} track(s)…")
     rc, stderr_text, result = write_disc(
@@ -196,6 +200,9 @@ def _write_disc(
     if result == "not_blank":
         msg = "disc is not blank — insert a blank CD-R/RW and retry"
         raise RuntimeError(msg)
+    if result == "write_params":
+        # AccuDisc 0.48.0: refused before the laser fired. Not a failed burn.
+        raise BurnRefused(burn_refused_message(stderr_text))
     detail = stderr_text.strip().splitlines()[-1] if stderr_text.strip() else ""
     msg = f"accudisc write failed (exit {rc}): {detail}"
     raise RuntimeError(msg)

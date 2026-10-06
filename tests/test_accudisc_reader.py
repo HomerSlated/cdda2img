@@ -1203,6 +1203,39 @@ def test_write_not_blank_raises_not_blank_and_maps_to_not_blank() -> None:
     assert "not blank" in err
 
 
+class _FakeWriteParams(_FakeBindingError):
+    """AccuDisc 0.48.0's ``WriteParams``: a sibling of ``NotBlank``."""
+
+
+def test_write_params_refusal_has_its_own_token_and_keeps_the_log() -> None:
+    """The drive refused before the laser fired, so the blank is still good.
+    Reported as ``error`` it reads as a spoiled disc. The log names the field,
+    and the exception text alone does not."""
+    module = _write_binding(
+        _FakeWriteDevice(
+            _FakeWriteParams("write parameters not held"),
+            logs=("page 05 read-back: test_write sent=0 held=1",),
+        )
+    )
+    module.WriteParams = _FakeWriteParams  # type: ignore[attr-defined]
+    rc, err, token = ar._write_disc_binding(
+        module, "/dev/sr0", Path("/x/a.toc"), Path("/x/a.bin"), 8, False, None, None
+    )
+    assert (rc, token) == (2, "write_params")
+    assert "test_write sent=0 held=1" in err
+    assert "write parameters not held" in err
+
+
+def test_a_binding_without_write_params_still_maps_errors_to_error() -> None:
+    """Control for the feature detection: an engine older than 0.48.0 has no
+    ``WriteParams``. Its errors must reach the last arm, not die in the
+    ``except`` clause that names the missing class."""
+    module = _write_binding(_FakeWriteDevice(_FakeUnsupported("no such mode")))
+    assert not hasattr(module, "WriteParams")
+    rc, _err, token = _do_write(_FakeWriteDevice(_FakeUnsupported("no such mode")))
+    assert (rc, token) == (2, "error")
+
+
 def test_write_unsupported_is_an_error_now_not_not_blank() -> None:
     """The discriminating case for AccuDisc 0.4.0's `-13`, and the reason for it.
 

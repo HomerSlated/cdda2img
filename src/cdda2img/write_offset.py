@@ -27,6 +27,8 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
+from cdda2img.accudisc_reader import BurnRefused, burn_refused_message
+
 if __import__("sys").version_info >= (3, 11):
     import tomllib
 else:
@@ -172,7 +174,9 @@ def burn_disc(toc_path: Path, device: str, speed: int) -> None:
     """Burn the TOC + raw PCM at *toc_path* to the disc in *device*.
 
     Exit 3 is *completed with caveats* — the disc was written — so only 0 and 3
-    are success. Raises RuntimeError otherwise.
+    are success. Raises RuntimeError otherwise, and its subclass
+    :class:`BurnRefused` when the drive refused before writing (the blank is
+    untouched, so the caller must not ask for another one).
 
     Does not eject. A failed eject needs a prompt, and prompts live in
     ``setup.py``.
@@ -180,7 +184,7 @@ def burn_disc(toc_path: Path, device: str, speed: int) -> None:
     from cdda2img.accudisc_reader import write_disc
 
     wav = toc_path.with_name(toc_path.stem + ".wav")
-    rc, stderr_text, _result = write_disc(
+    rc, stderr_text, result = write_disc(
         device,
         toc_path.resolve(),
         pcm_path(wav).resolve(),
@@ -188,6 +192,8 @@ def burn_disc(toc_path: Path, device: str, speed: int) -> None:
         progress_cb=_print_progress("burning"),
     )
     print()
+    if result == "write_params":
+        raise BurnRefused(burn_refused_message(stderr_text))
     if rc not in (0, 3):
         detail = stderr_text.strip().splitlines()[-1] if stderr_text.strip() else ""
         msg = f"accudisc write failed (exit {rc}): {detail}"

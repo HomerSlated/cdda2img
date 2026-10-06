@@ -278,6 +278,29 @@ def _call(module: Any, what: str, fn: Callable[[], _T]) -> _T:
         raise RuntimeError(msg) from exc
 
 
+class BurnRefused(RuntimeError):
+    """The drive refused a burn before writing: the disc is untouched and reusable.
+
+    Raised by the callers of :func:`write_disc` on the ``write_params`` token. A
+    ``RuntimeError`` so existing handlers still catch it, and a subclass so the
+    ones that decide whether to spend another blank can tell it apart.
+    """
+
+
+class _NeverRaised(Exception):
+    """Stands in for a binding exception class that this engine does not have."""
+
+
+def burn_refused_message(text: str) -> str:
+    """One line for a ``write_params`` refusal, naming the field from *text*."""
+    detail = "; ".join(ln.strip() for ln in text.splitlines() if ln.strip())
+    msg = (
+        "the drive did not keep the write parameters it was sent, so nothing "
+        "was written and the disc is still blank"
+    )
+    return f"{msg} ({detail})" if detail else msg
+
+
 # ── TOC geometry (READ TOC, with the 0x02 → 0x00 degrade) ─────────────────────
 
 
@@ -2009,8 +2032,18 @@ def _write_disc_binding(
     ``ok``              ``WriteResult.OK``          0     yes
     ``caveats``         ``WriteResult.CAVEATS``     3     **yes**
     ``not_blank``       raises ``NotBlank``         2     no
+    ``write_params``    raises ``WriteParams``      2     no
     ``error``           raises ``AccuDiscError``    2     no
     ==================  ==========================  ====  ==============
+
+    ``WriteParams`` is AccuDisc 0.48.0's ``ACCUDISC_ERR_WRITE_PARAMS = -16``: the
+    drive accepted mode page 05 and a read-back shows it does not hold what was
+    sent, so the burn is refused before the blank check and before the laser
+    fires. The disc is untouched and the medium is not at fault, which is the
+    opposite advice from ``error`` (do not spend another blank). The class is
+    **feature-detected**, not listed in ``_BINDING_SURFACE``: an engine older
+    than 0.48.0 has no such refusal and must keep working. The log lines are
+    returned with the message because the log is what names the field.
 
     ``NotBlank`` is AccuDisc 0.4.0's ``ACCUDISC_ERR_NOT_BLANK = -13``, and it is a
     **sibling** of ``Unsupported``, not a subclass. Before 0.4.0 the two were one
@@ -2049,6 +2082,9 @@ def _write_disc_binding(
     surfaces at the burn rather than at open.
     """
     lines: list[str] = []
+    # Absent before 0.48.0. `except None` is a TypeError, so an older binding
+    # gets a class nothing raises and its errors fall through to the last arm.
+    write_params = getattr(module, "WriteParams", _NeverRaised)
     try:
         with module.Device(device, rdwr=True) as dev:
             dev.set_log(lines.append)
@@ -2074,6 +2110,10 @@ def _write_disc_binding(
         # by the token, never by the code. Caught by its own type since 0.4.0 —
         # `Unsupported` no longer implies it and must NOT be caught here.
         return 2, str(exc), "not_blank"
+    except write_params as exc:
+        # Nothing was written and the disc is still blank. Its own token so that
+        # no caller reports a spoiled disc or asks for another one.
+        return 2, "\n".join([*lines, str(exc)]), "write_params"
     except module.AccuDiscError as exc:
         # Deliberately returned, not raised. The code shape is inherited from
         # when a raise would have triggered a second burn of a disc whose state
