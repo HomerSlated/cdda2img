@@ -291,14 +291,31 @@ class _NeverRaised(Exception):
     """Stands in for a binding exception class that this engine does not have."""
 
 
+def _with_log(lines: list[str], exc: BaseException) -> str:
+    """The engine's log lines for a failed burn, then the exception text last."""
+    return "\n".join([*lines, str(exc)])
+
+
+def burn_refusal_line(text: str) -> str:
+    """The one log line of a ``write_params`` refusal that names the field.
+
+    *text* is :func:`write_disc`'s failure text: log lines, then the exception
+    text. AccuDisc logs the refusal as a single line and nothing after it
+    (their 2026-10-06a, read from ``burn.c``), so it is the last log line. The
+    BURN-Proof and speed lines of the same burn come before it. Falls back to
+    the exception text when no log line arrived.
+    """
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    if not lines:
+        return ""
+    return lines[-2] if len(lines) > 1 else lines[-1]
+
+
 def burn_refused_message(text: str) -> str:
-    """One line for a ``write_params`` refusal, naming the field from *text*."""
-    detail = "; ".join(ln.strip() for ln in text.splitlines() if ln.strip())
-    msg = (
-        "the drive did not keep the write parameters it was sent, so nothing "
-        "was written and the disc is still blank"
-    )
-    return f"{msg} ({detail})" if detail else msg
+    """One line for a ``write_params`` refusal: the disc is blank, and why."""
+    msg = "burn refused, the disc is still blank"
+    line = burn_refusal_line(text)
+    return f"{msg}: {line}" if line else msg
 
 
 # ── TOC geometry (READ TOC, with the 0x02 → 0x00 degrade) ─────────────────────
@@ -2042,8 +2059,13 @@ def _write_disc_binding(
     fires. The disc is untouched and the medium is not at fault, which is the
     opposite advice from ``error`` (do not spend another blank). The class is
     **feature-detected**, not listed in ``_BINDING_SURFACE``: an engine older
-    than 0.48.0 has no such refusal and must keep working. The log lines are
-    returned with the message because the log is what names the field.
+    than 0.48.0 has no such refusal and must keep working.
+
+    **Every failure returns the engine's log lines, then the exception text as
+    the last line** (kgr, 2026-10-06). The exception text is the generic
+    ``accudisc_strerror`` string; the log is where AccuDisc says what happened
+    (the field a refusal turned on, or ``page 05 could not be read back``).
+    Callers that want one line of detail take the last.
 
     ``NotBlank`` is AccuDisc 0.4.0's ``ACCUDISC_ERR_NOT_BLANK = -13``, and it is a
     **sibling** of ``Unsupported``, not a subclass. Before 0.4.0 the two were one
@@ -2109,17 +2131,17 @@ def _write_disc_binding(
         # Nothing was written. Callers distinguish this from a transport failure
         # by the token, never by the code. Caught by its own type since 0.4.0 —
         # `Unsupported` no longer implies it and must NOT be caught here.
-        return 2, str(exc), "not_blank"
+        return 2, _with_log(lines, exc), "not_blank"
     except write_params as exc:
         # Nothing was written and the disc is still blank. Its own token so that
         # no caller reports a spoiled disc or asks for another one.
-        return 2, "\n".join([*lines, str(exc)]), "write_params"
+        return 2, _with_log(lines, exc), "write_params"
     except module.AccuDiscError as exc:
         # Deliberately returned, not raised. The code shape is inherited from
         # when a raise would have triggered a second burn of a disc whose state
         # was unknown; it survives because callers of write_disc branch on the
         # (code, token) pair and a raise here would bypass every one of them.
-        return 2, str(exc), "error"
+        return 2, _with_log(lines, exc), "error"
     return (
         (3 if result is module.WriteResult.CAVEATS else 0),
         "\n".join(lines),

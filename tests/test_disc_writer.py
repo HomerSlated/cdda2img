@@ -129,7 +129,9 @@ def test_burn_exit_2_not_blank_reports_disc_not_blank(tmp_path, monkeypatch):
         disc_writer.burn_disc(rbi, device="/dev/sr0", yes=True)
 
 
-def test_burn_write_params_refusal_says_the_disc_is_still_blank(tmp_path, monkeypatch):
+def test_burn_write_params_refusal_says_the_disc_is_still_blank(
+    tmp_path, monkeypatch, capsys
+):
     # AccuDisc 0.48.0: the drive did not hold mode page 05, and the burn was
     # refused before the laser fired. Keyed on the token, and not the generic
     # "accudisc write failed" text, which reads as a spoiled disc.
@@ -143,6 +145,10 @@ def test_burn_write_params_refusal_says_the_disc_is_still_blank(tmp_path, monkey
         disc_writer.burn_disc(rbi, device="/dev/sr0", yes=True)
     assert "test_write sent=0 held=1" in str(info.value)
     assert "write failed" not in str(info.value)
+    # One line: the generic exception text is not appended, and the refusal
+    # line is in the message, so it is not also printed.
+    assert "not held" not in str(info.value)
+    assert "test_write" not in capsys.readouterr().out
 
 
 def test_burn_transport_error_raises(tmp_path, monkeypatch):

@@ -308,6 +308,23 @@ def test_burn_disc_raises_burn_refused_on_the_write_params_token(tmp_path, monke
         wo.burn_disc(tmp_path / "test.toc", "/dev/sr0", 8)
 
 
+def test_burn_disc_prints_the_engine_log_of_a_failed_burn(
+    tmp_path, monkeypatch, capsys
+):
+    """The message carries the last line only. The lines before it are the
+    engine's own account, and used to be dropped."""
+    import cdda2img.accudisc_reader as ar
+
+    monkeypatch.setattr(
+        ar,
+        "write_disc",
+        lambda *a, **k: (2, "write: page 05 could not be read back\nio", "error"),
+    )
+    with pytest.raises(RuntimeError, match=r"exit 2\): io$"):
+        wo.burn_disc(tmp_path / "test.toc", "/dev/sr0", 8)
+    assert "  write: page 05 could not be read back" in capsys.readouterr().out
+
+
 def test_a_failed_burn_whose_eject_is_quit_asks_nothing_more(rig, monkeypatch):
     def _burn(_toc: Path, _device: str, _speed: int) -> None:
         rig.calls.append("burn")

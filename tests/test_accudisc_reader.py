@@ -1226,6 +1226,43 @@ def test_write_params_refusal_has_its_own_token_and_keeps_the_log() -> None:
     assert "write parameters not held" in err
 
 
+def test_every_burn_failure_keeps_the_engine_log_and_ends_with_the_error() -> None:
+    """kgr, 2026-10-06: log all errors. The exception text is a generic string;
+    the log line is where the engine says what happened. The exception text
+    stays last because callers take the last line as their one-line detail."""
+    for outcome, token in (
+        (_FakeUnsupported("generic io error"), "error"),
+        (_FakeNotBlank("disc is not blank"), "not_blank"),
+    ):
+        dev = _FakeWriteDevice(
+            outcome, logs=("write: page 05 could not be read back (rc -5)",)
+        )
+        rc, err, got = _do_write(dev)
+        assert (rc, got) == (2, token)
+        assert err.splitlines() == [
+            "write: page 05 could not be read back (rc -5)",
+            str(outcome),
+        ]
+
+
+def test_the_refusal_message_is_the_one_line_that_names_the_field() -> None:
+    """The same burn logs its BURN-Proof decision and speed first. Only the
+    refusal line belongs in the message, and it is the last log line."""
+    text = "\n".join([
+        "write: BURN-Proof on",
+        "write: speed 8x",
+        "write: THE DRIVE DOES NOT HOLD THE WRITE PARAMETERS: test_write",
+        "write parameters not held",
+    ])
+    assert ar.burn_refused_message(text) == (
+        "burn refused, the disc is still blank: "
+        "write: THE DRIVE DOES NOT HOLD THE WRITE PARAMETERS: test_write"
+    )
+    # No log line arrived: the exception text is all there is.
+    assert ar.burn_refused_message("not held").endswith(": not held")
+    assert ar.burn_refused_message("") == "burn refused, the disc is still blank"
+
+
 def test_a_binding_without_write_params_still_maps_errors_to_error() -> None:
     """Control for the feature detection: an engine older than 0.48.0 has no
     ``WriteParams``. Its errors must reach the last arm, not die in the

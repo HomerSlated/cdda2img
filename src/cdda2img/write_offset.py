@@ -195,6 +195,10 @@ def burn_disc(toc_path: Path, device: str, speed: int) -> None:
     if result == "write_params":
         raise BurnRefused(burn_refused_message(stderr_text))
     if rc not in (0, 3):
+        # The engine's own account of the failure. The last line is the
+        # exception text and goes in the message below.
+        for line in [ln for ln in stderr_text.splitlines() if ln.strip()][:-1]:
+            print(f"  {line}")
         detail = stderr_text.strip().splitlines()[-1] if stderr_text.strip() else ""
         msg = f"accudisc write failed (exit {rc}): {detail}"
         raise RuntimeError(msg)

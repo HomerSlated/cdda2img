@@ -193,6 +193,10 @@ def _write_disc(
             "match its audio (see above). The audio itself was written correctly.",
         )
         return
+    if result == "write_params":
+        # AccuDisc 0.48.0: refused before the laser fired. Not a failed burn.
+        # The refusal line goes in the message, so it is not printed here too.
+        raise BurnRefused(burn_refused_message(stderr_text))
     _print_burn_error(ui, stderr_text)
     # Keyed on AccuDisc's machine token, not on stderr wording — their contract
     # explicitly reserves the right to reword stderr, and exit 2 also covers
@@ -200,9 +204,6 @@ def _write_disc(
     if result == "not_blank":
         msg = "disc is not blank — insert a blank CD-R/RW and retry"
         raise RuntimeError(msg)
-    if result == "write_params":
-        # AccuDisc 0.48.0: refused before the laser fired. Not a failed burn.
-        raise BurnRefused(burn_refused_message(stderr_text))
     detail = stderr_text.strip().splitlines()[-1] if stderr_text.strip() else ""
     msg = f"accudisc write failed (exit {rc}): {detail}"
     raise RuntimeError(msg)
