@@ -97,9 +97,10 @@ def _capture(args: argparse.Namespace) -> int:
         for f in files.values():
             f.close()
         elapsed = time.monotonic() - t0
-        if before[0]:
-            seam.set_speed(args.device, max(1, round(before[0] / 176.4)))
-        seam.park_spindle(args.device)
+        if not args.keep_spinning:
+            if before[0]:
+                seam.set_speed(args.device, max(1, round(before[0] / 176.4)))
+            seam.park_spindle(args.device)
     stats = result.stats
     meta = {
         "start": args.start,
@@ -158,7 +159,7 @@ def _q_text(sub: bytes | None, i: int) -> str:
     q = decode_q(sub[i * _SUB : (i + 1) * _SUB])
     if not q.valid:
         return "q:bad-crc"
-    lba = q.position_lba
+    lba = q.position_lba()
     if lba is None:
         return f"q:adr{q.adr}"
     return f"q:trk{q.track_number} idx{q.index} lba{lba}"
@@ -182,7 +183,8 @@ def _locate(args: argparse.Namespace) -> int:  # noqa: C901
     for i in range(count):
         sector = cap[i * _SAMPLES : (i + 1) * _SAMPLES]
         if not sector.any():
-            shifts.append(shifts[-1] if shifts else None)  # silence matches anywhere
+            # Silence matches at any shift, so it takes its neighbour's.
+            shifts.append(shifts[-1] if shifts else hint)
             continue
         found = _shift_of(sector, ref, (start + i) * _SAMPLES, hint)
         shifts.append(found)
@@ -230,6 +232,11 @@ def main() -> int:
     c.add_argument("--speed", type=int, default=40)
     c.add_argument("--plain", action="store_true", help="audio only, no C2 or sub")
     c.add_argument("--expect-leadout", type=int)
+    c.add_argument(
+        "--keep-spinning",
+        action="store_true",
+        help="leave speed and spindle alone, for a capture that another follows",
+    )
     c.add_argument("--out", type=Path, required=True)
     c.set_defaults(fn=_capture)
     lo = sp.add_parser("locate")
