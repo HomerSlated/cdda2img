@@ -4527,7 +4527,7 @@ def rip_image(  # noqa: C901
             n_bad = len(failed_tracks)
             _ui_status(
                 ui,
-                f"{n_bad} track(s) failed AccurateRip — re-reading with c2read…",
+                f"{n_bad} track(s) failed AccurateRip — re-reading with AccuDisc…",
             )
 
             # Speed-laddered recovery: re-read each failed track across the drive's own
