@@ -279,7 +279,7 @@ def _call(module: Any, what: str, fn: Callable[[], _T]) -> _T:
 
 
 class BurnRefused(RuntimeError):
-    """The drive refused a burn before writing: the disc is untouched and reusable.
+    """The drive refused a burn before writing: the disc is still blank and reusable.
 
     Raised by the callers of :func:`write_disc` on the ``write_params`` token. A
     ``RuntimeError`` so existing handlers still catch it, and a subclass so the
@@ -2055,9 +2055,12 @@ def _write_disc_binding(
 
     ``WriteParams`` is AccuDisc 0.48.0's ``ACCUDISC_ERR_WRITE_PARAMS = -16``: the
     drive accepted mode page 05 and a read-back shows it does not hold what was
-    sent, so the burn is refused before the blank check and before the laser
-    fires. The disc is untouched and the medium is not at fault, which is the
-    opposite advice from ``error`` (do not spend another blank). The class is
+    sent, so the burn is refused before anything is written. 0.48.0 reads the
+    page back once, before the blank check and before the laser fires. 0.48.1
+    reads it again on a live burn, after power calibration, so a refusal there
+    has used one calibration slot. Either way the program area is blank, the
+    disc is reusable and the medium is not at fault, which is the opposite
+    advice from ``error`` (do not spend another blank). The class is
     **feature-detected**, not listed in ``_BINDING_SURFACE``: an engine older
     than 0.48.0 has no such refusal and must keep working.
 
