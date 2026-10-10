@@ -92,7 +92,7 @@ A value that must win a vote across the whole track cannot be set by one frame.
 .PP
 If AccurateRip then reports a
 .I partial
-mismatch, two recovery exits are tried in cost order.
+mismatch, three recovery exits are tried in cost order.
 First
 .IR "CTDB parity repair" :
 Reed\-Solomon repair against crowd\-sourced parity from the CUETools database,
@@ -100,7 +100,15 @@ with zero extra reads, using the C2 bitmap as erasures where one was captured.
 A repair is committed only if a CTDB per\-track CRC
 .I and
 AccurateRip both accept it.
-Only if that declines does the drive spin again: each failed track\(cqs sector
+Second, the
+.IR "displacement check" ,
+also with zero extra reads.
+A drive can drop or repeat a few samples in the middle of a stream; every later
+track is then intact but out of place, which raises no C2 flag, fails
+AccurateRip, and looks to CTDB like damage beyond its capacity.
+The check finds the shift at which a failed track verifies and re\-slices the
+track from the audio already captured, writing it only on an AccurateRip match.
+Only for tracks neither exit recovered does the drive spin again: each failed track\(cqs sector
 window is re\-read across the drive\(cqs admitted speed ladder, fastest to
 slowest, and the first AccurateRip\-verified result is spliced in
 sample\-exactly.
@@ -109,7 +117,7 @@ never written.
 .PP
 With
 .BR "\-\-profile span\-flagged" ,
-an extra rung runs between those two: only the sectors the first pass flagged
+an extra rung runs before the speed ladder: only the sectors the first pass flagged
 are re\-read, in padded spans, and a track is written only when the assembled
 result matches AccurateRip.
 Tracks it does not recover still go to the speed ladder.

@@ -41,7 +41,7 @@ def _patch(
     """Stub `read_span_bytes` (returns canned window bytes) + `match_track_pcm`
     (matches at one speed). Returns a state dict recording the reads.
 
-    Patches `read_span_bytes`, which is what `_read_track_window` actually calls.
+    Patches `read_span_bytes`, which is what `_ladder_attempt` actually calls.
     These stubs patched `read_span` until 2026-08-01 and worked only because
     `read_span_bytes` was then implemented *through* it, via a temp file the
     subprocess needed. Retiring the CLI removed that indirection and the patch

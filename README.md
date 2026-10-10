@@ -32,12 +32,17 @@ This is an active prototype. A Rust reimplementation is planned once the design 
   lead-in's full TOC and CD-Text. Track boundaries come from the error-corrected TOC;
   pre-gaps, INDEX points, MCN and per-track ISRC are assembled from the Q stream by
   majority vote. There is no second metadata pass and no second engine
-- **Two-stage recovery on a partial AccurateRip mismatch**, in cost order:
+- **Three-stage recovery on a partial AccurateRip mismatch**, in cost order:
   1. *CTDB parity repair* — Reed-Solomon reconstruction against crowd-sourced parity
      from the CUETools database, with **zero extra reads**. Where a C2 bitmap was
      captured it is fed in as erasures (roughly doubling what can be reconstructed);
      a repair is committed only if a CTDB per-track CRC **and** AccurateRip both accept it
-  2. *Speed-ladder re-read* — only if CTDB declines. Each failed track's sector window is
+  2. *Displacement check* — also **zero extra reads**. A drive can drop or repeat a few
+     samples mid-stream, after which every later track is intact but out of place: no C2
+     flag, an AccurateRip mismatch, and damage beyond CTDB's reach. The check finds the
+     shift at which a failed track verifies and re-slices it from the audio already
+     captured, writing it only on an AccurateRip match
+  3. *Speed-ladder re-read* — only for tracks neither step recovered. Each failed track's sector window is
      re-read across the drive's admitted speeds, fastest to slowest, and the first
      AccurateRip-verified result is spliced in sample-exactly. A track that never matches
      keeps its original audio: no unverified splice ever lands

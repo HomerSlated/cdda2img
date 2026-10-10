@@ -3657,17 +3657,26 @@ class _RawWindow(NamedTuple):
 
 
 def _raw_track_window(
-    track_lsns: list[int], disc_last_lsn: int, idx: int, read_offset: int
+    track_lsns: list[int],
+    disc_last_lsn: int,
+    idx: int,
+    read_offset: int,
+    margin: int = 0,
 ) -> _RawWindow:
     """Track ``idx`` (0-based) plus ``ceil(|read_offset| / 588)`` margin sectors on
-    the side the offset points to, clamped to ``[0, lead-out)``."""
+    the side the offset points to, clamped to ``[0, lead-out)``.
+
+    *margin* adds that many sectors on **both** sides. It defaults to 0, which is
+    the window both re-read rungs have always used and the span rung still does;
+    the speed ladder passes :data:`_LADDER_MARGIN` so a re-read that came back
+    displaced can be recognised (:func:`_ladder_attempt`)."""
     from math import ceil
 
     leadout = disc_last_lsn + 1
     s = track_lsns[idx]
     e = track_lsns[idx + 1] if idx + 1 < len(track_lsns) else leadout
-    lead = ceil(-read_offset / 588) if read_offset < 0 else 0
-    tail = ceil(read_offset / 588) if read_offset > 0 else 0
+    lead = margin + (ceil(-read_offset / 588) if read_offset < 0 else 0)
+    tail = margin + (ceil(read_offset / 588) if read_offset > 0 else 0)
     return _RawWindow(
         first=s - lead,
         last=e + tail,
@@ -3722,7 +3731,13 @@ def _splice_corrected(
     pcm_fh.write(src)
 
 
-def _read_track_window(
+#: Sectors read either side of a track on a speed-ladder re-read, so a re-read
+#: that came back displaced still holds the whole track. Five sectors is 2940
+#: samples, one more than the displacement search radius.
+_LADDER_MARGIN = 5
+
+
+def _ladder_attempt(
     device: str,
     track_lsns: list[int],
     disc_last_lsn: int,
@@ -3730,17 +3745,61 @@ def _read_track_window(
     read_offset: int,
     speed: int,
     prog_cb: Callable[[int, int], None] | None,
-) -> bytes:
-    """One targeted re-read of track ``idx`` (0-based); returns the track's
-    offset-CORRECTED PCM bytes, ready for AR verification. Geometry in
-    :func:`_raw_track_window`."""
-    from cdda2img.accudisc_reader import read_span_bytes
+    n_tracks: int,
+    responses: list,
+    cohort: list | None,
+) -> tuple[bytes, str] | None:
+    """One targeted re-read of track ``idx`` (0-based) at *speed*.
 
-    w = _raw_track_window(track_lsns, disc_last_lsn, idx, read_offset)
+    Returns ``(corrected, outcome)`` when the re-read yields the track's
+    AccurateRip-matching audio, else ``None``. *corrected* is offset-corrected and
+    ready for :func:`_splice_corrected`. Geometry in :func:`_raw_track_window`.
+
+    With a *cohort* (``displacement.cohort_blocks``) a re-read that does not match
+    in place is also tested for a displaced copy of the track, and the outcome
+    then says so: ``matched@40X,displaced@+12``. That record is the point as much
+    as the repair. On 2026-10-10 every re-read of seven tracks failed at 40, 32,
+    24 and 8x after a pass that had lost 12 samples, and nothing kept what those
+    re-reads held, so whether the drive stays displaced across a seek could not
+    be answered afterwards.
+    """
+    from cdda2img import displacement
+    from cdda2img.accudisc_reader import read_span_bytes
+    from cdda2img.accuraterip import match_track_pcm
+
+    w = _raw_track_window(
+        track_lsns,
+        disc_last_lsn,
+        idx,
+        read_offset,
+        margin=_LADDER_MARGIN if cohort else 0,
+    )
     window = read_span_bytes(
         device, w.lo, w.hi - w.lo, read_speed=speed, progress_cb=prog_cb
     )
-    return _corrected_from_window(window, w, read_offset)
+    corrected = _corrected_from_window(window, w, read_offset)
+    _v1, _v2, conf_v1, conf_v2 = match_track_pcm(
+        corrected, idx + 1, n_tracks, responses
+    )
+    if conf_v1 or conf_v2:
+        return corrected, f"matched@{speed}X"
+    if not cohort:
+        return None
+    pad_front = (w.lo - w.first) * 588  # samples the window lacks at a disc edge
+    pad_back = (w.last - w.hi) * 588
+    found = displacement.displaced_in_window(
+        bytes(pad_front * 4) + window + bytes(pad_back * 4),
+        w.lead * 588 + read_offset,
+        w.track_bytes // 4,
+        (pad_front, pad_front + len(window) // 4),
+        idx + 1,
+        n_tracks,
+        cohort,
+    )
+    if found is None:
+        return None
+    shift, data = found
+    return data, f"matched@{speed}X,{displacement.outcome(shift)}"
 
 
 def _track_sector_window(
@@ -3829,6 +3888,7 @@ def _recover_failed_tracks(
     read_offset: int,
     ui: TerminalUI | None,
     disc_damage: bytes | None = None,
+    cohort: list | None = None,
 ) -> dict[int, str]:
     """Re-read each AR-failed track across the drive's speed ladder until it matches.
 
@@ -3852,10 +3912,13 @@ def _recover_failed_tracks(
     per-attempt status (``Recover track N (x/y)``) with the live read progress routed
     into the bar + detail only.
 
-    Returns ``outcomes`` mapping track number → ``"matched@<N>X"`` or ``"unrecovered"``.
-    """
-    from cdda2img.accuraterip import match_track_pcm
+    *cohort* (optional) turns on the displaced-re-read test in
+    :func:`_ladder_attempt`; without it every re-read is the track's own window
+    and nothing else, as before.
 
+    Returns ``outcomes`` mapping track number → ``"matched@<N>X"``,
+    ``"matched@<N>X,displaced@<±S>"`` or ``"unrecovered"``.
+    """
     outcomes: dict[int, str] = {}
     # fastest→slowest, repeated n_passes times: an early high-speed match exits sooner.
     speeds = [s for _ in range(n_passes) for s in reversed(ladder)]
@@ -3895,7 +3958,7 @@ def _recover_failed_tracks(
                 if ui is not None:
                     ui.set_status(status_line[0], 0.0)
                 try:
-                    corrected = _read_track_window(
+                    hit = _ladder_attempt(
                         device,
                         track_lsns,
                         disc_last_lsn,
@@ -3903,19 +3966,19 @@ def _recover_failed_tracks(
                         read_offset,
                         speed,
                         prog_cb,
+                        n_tracks,
+                        responses,
+                        cohort,
                     )
                 except (RuntimeError, OSError) as exc:
                     log.warning("track %d re-read at %dX failed: %s", t, speed, exc)
                     continue
 
-                _v1, _v2, conf_v1, conf_v2 = match_track_pcm(
-                    corrected, t, n_tracks, responses
-                )
-                if conf_v1 or conf_v2:
+                if hit is not None:
+                    corrected, outcomes[t] = hit
                     _splice_corrected(
                         pcm_fh, corrected, track_lsns[idx], read_offset, file_size
                     )
-                    outcomes[t] = f"matched@{speed}X"
                     matched = True
                     disc_map_view.clear(lo, hi)
                     break
@@ -4137,6 +4200,79 @@ def _span_rung_decline(
     if not span_detail_supported():
         return "no_engine_support"
     return None
+
+
+def _track_ranges(tracks: list[int]) -> str:
+    """``[6, 7, 8, 10]`` as ``6-8, 10``."""
+    runs: list[list[int]] = []
+    for t in sorted(tracks):
+        if runs and t == runs[-1][1] + 1:
+            runs[-1][1] = t
+        else:
+            runs.append([t, t])
+    return ", ".join(str(a) if a == b else f"{a}-{b}" for a, b in runs)
+
+
+def _print_displacement(outcomes: dict[int, str]) -> None:
+    """Say which tracks were re-sliced and by how much, one line per displacement."""
+    by_amount: dict[int, list[int]] = {}
+    for track, value in outcomes.items():
+        by_amount.setdefault(int(value.split("@")[1]), []).append(track)
+    for amount, tracks in sorted(by_amount.items()):
+        what = "early" if amount > 0 else "late"
+        noun = "track" if len(tracks) == 1 else "tracks"
+        print(
+            f"   Displaced audio: {noun} {_track_ranges(tracks)} intact in the "
+            f"capture, {abs(amount)} samples {what}"
+        )
+    print("   Re-sliced from the capture, no re-read.")
+
+
+def _displacement_stage(
+    pcm_file: Path,
+    track_lsns: list[int],
+    disc_last_lsn: int,
+    read_offset: int,
+    results: list,
+    responses: list,
+    scratch_dir: Path,
+) -> tuple[dict[int, str], list]:
+    """The zero-read displacement check, between CTDB and the re-read rungs.
+
+    Returns ``(outcomes, cohort)``: ``outcomes`` maps each track that was
+    re-sliced to ``displaced@<±N>``, and *cohort* is this disc's own dBAR blocks,
+    which the speed ladder reuses to test its re-reads the same way. What it
+    looks for, the three rules that keep a coincidence from being written, and
+    the sign are in :mod:`cdda2img.displacement`.
+
+    Runs on the raw PCM, like CTDB and the ladder, and writes a track only after
+    its bytes matched AccurateRip. A track it cannot place (real damage, or the
+    track the slip is inside) is left exactly as it was for the ladder.
+    """
+    from cdda2img import displacement
+
+    cohort = displacement.cohort_blocks(responses, results)
+    found = displacement.find_displaced(
+        pcm_file,
+        track_lsns,
+        disc_last_lsn,
+        cohort,
+        displacement.failed_track_numbers(results),
+        read_offset,
+    )
+    if not found:
+        return {}, cohort
+    written = displacement.reslice(
+        pcm_file,
+        found,
+        track_lsns,
+        disc_last_lsn,
+        read_offset,
+        cohort,
+        scratch_dir / "resliced.pcm",
+        _splice_corrected,
+    )
+    return {t: displacement.outcome(s) for t, s in written.items()}, cohort
 
 
 def _run_span_rung(
@@ -4423,6 +4559,11 @@ def rip_image(  # noqa: C901
         # CTDB attempt outcome, kept whether it succeeded or declined — a declined
         # repair is the interesting case and used to leave no trace at all.
         ctdb_result: CtdbRepairResult | None = None
+        # Displacement check outcome ("found" | "none"), None when it did not run.
+        displacement_check: str | None = None
+        ar_responses: list = []
+        ar_cohort: list = []
+        _ar_transport: str | None = None
 
         _ui_status(ui, "Verifying AccurateRip…")
         ar_verify = _verify_ar_with_retry(
@@ -4512,6 +4653,49 @@ def rip_image(  # noqa: C901
                 )
                 if ui is not None:
                     ui.resume()
+        # Displacement check, also zero reads: a drive that drops or repeats a few
+        # samples mid-stream leaves every later track intact and out of place, which
+        # AccurateRip reports as a mismatch and CTDB as damage beyond its capacity.
+        # Tracks it can place are re-sliced from the capture; the rest fall through.
+        if raw_domain and _ar_has_partial_mismatch(ar_verify.tracks):
+            from cdda2img.accuraterip import fetch_ar_responses
+
+            ar_responses, _ar_transport, _ar_b3 = fetch_ar_responses(
+                final_track_lsns, final_disc_last_lsn, cddb_id
+            )
+            if ar_responses:
+                _ui_status(ui, "Checking for displaced audio…")
+                _displaced, ar_cohort = _displacement_stage(
+                    temp.pcm_file,
+                    final_track_lsns,
+                    final_disc_last_lsn,
+                    read_offset,
+                    ar_verify.tracks,
+                    ar_responses,
+                    temp.base,
+                )
+                displacement_check = "found" if _displaced else "none"
+                if _displaced:
+                    rip_type = f"{rip_type}+reslice"
+                    recovery_outcomes.update(_displaced)
+                    _ui_status(ui, "Re-verifying AccurateRip (re-sliced)…")
+                    ar_verify = verify_rip(
+                        temp.pcm_file,
+                        final_track_lsns,
+                        final_disc_last_lsn,
+                        read_offset=read_offset,
+                        cddb_id=cddb_id,
+                    )
+                    if ui is not None:
+                        ui.pause()
+                    _print_displacement(_displaced)
+                    print_ar_report(
+                        ar_verify.tracks,
+                        read_offset=read_offset,
+                        reachable=ar_verify.reachable,
+                    )
+                    if ui is not None:
+                        ui.resume()
         # AR-triggered fallback: partial mismatch → read error on specific tracks.
         # Re-read only the failed tracks via AccuDisc (raw targeted window reads) and
         # splice the verified corrected bytes into the still-raw PCM. Disc metadata
@@ -4538,9 +4722,12 @@ def rip_image(  # noqa: C901
             from cdda2img import recovery_profile
             from cdda2img.accuraterip import fetch_ar_responses
 
-            ar_responses, _ar_transport, _ar_b3 = fetch_ar_responses(
-                final_track_lsns, final_disc_last_lsn, cddb_id
-            )
+            # Fetched once already for the displacement check; asked again only
+            # when that fetch came back empty.
+            if not ar_responses:
+                ar_responses, _ar_transport, _ar_b3 = fetch_ar_responses(
+                    final_track_lsns, final_disc_last_lsn, cddb_id
+                )
             if not ar_responses:
                 log.warning(
                     "AccurateRip dBAR re-fetch returned nothing (transport=%s); "
@@ -4606,6 +4793,7 @@ def rip_image(  # noqa: C901
                     read_offset,
                     ui,
                     disc_damage,
+                    ar_cohort or None,
                 )
                 recovery_outcomes.update(outcomes)
                 # No restore here any more. The ladder leaves the drive at its last
@@ -4691,6 +4879,8 @@ def rip_image(  # noqa: C901
         if network_preflight is not None:
             provenance["network_preflight"] = network_preflight
         provenance.update(span_prov)
+        if displacement_check is not None:
+            provenance["displacement_check"] = displacement_check
         # CTDB provenance. The declined case matters most: without it a failed parity
         # repair is invisible in the container and has to be reverse-engineered from
         # the finished RBI (which is exactly what happened on 2026-07-25).
