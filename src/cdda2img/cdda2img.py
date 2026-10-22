@@ -3893,16 +3893,27 @@ def _recover_failed_tracks(
 ) -> dict[int, str]:
     """Re-read each AR-failed track across the drive's speed ladder until it matches.
 
-    For every failed track, sweep the ladder *fastest→slowest*, ``n_passes`` times (total
-    ``n_passes x len(ladder)`` attempts), re-reading the track's raw sector window via
-    ``c2read`` at each speed, AR-verifying the offset-corrected slice against the cached
-    *responses*, and splicing the first match into the RAW *pcm_file*. The splice is
-    sample-exact — the verified corrected bytes land at ``track_start*2352 +
-    read_offset*4`` — so a neighbouring track's already-verified audio is never
-    perturbed. A track that never matches keeps its original audio (no unverified
-    splice). *pcm_file* stays in the raw offset domain throughout; the caller applies
-    ``apply_offset`` once, at storage. Speed is set per read and NOT restored between
-    attempts — the caller restores once after the loop.
+    For every failed track, walk *ladder* in the order given, ``n_passes`` times (total
+    ``n_passes x len(ladder)`` attempts), re-reading the track's raw sector window
+    through AccuDisc at each speed, AR-verifying the offset-corrected slice against the
+    cached *responses*, and splicing the first match into the RAW *pcm_file*.
+
+    **The order is decided where the ladder is bound, never here**:
+    :func:`~cdda2img.recovery_profile.rungs_for` returns a profile's ladder fastest
+    first (kgr, 2026-10-22: slow reads were not necessarily more successful, so start
+    fast), and ``--ad-ladder`` arrives as written. Until 2026-10-22 this loop reversed
+    the list, a leftover from the ascending ``probe_speed_ladder`` it was written
+    against. Once ``e5c37ff`` (2026-07-25) bound a fastest-first ladder instead, every
+    rip walked slowest-first while PROV ``recovery_ladder`` still listed the speeds
+    fastest first. Two components each applying an order to the same list is how that
+    happened, so this loop applies none.
+
+    The splice is sample-exact — the verified corrected bytes land at
+    ``track_start*2352 + read_offset*4`` — so a neighbouring track's already-verified
+    audio is never perturbed. A track that never matches keeps its original audio (no
+    unverified splice). *pcm_file* stays in the raw offset domain throughout; the
+    caller applies ``apply_offset`` once, at storage. Speed is set per read and NOT
+    restored between attempts — the caller restores once after the loop.
 
     Validated live: 6/6 recoveries on the damaged reference disc across two days
     (tools/c2read_recovery_test.py + tools/c2timing.py baseline arm), every recovery
@@ -3921,8 +3932,9 @@ def _recover_failed_tracks(
     ``"matched@<N>X,displaced@<±S>"`` or ``"unrecovered"``.
     """
     outcomes: dict[int, str] = {}
-    # fastest→slowest, repeated n_passes times: an early high-speed match exits sooner.
-    speeds = [s for _ in range(n_passes) for s in reversed(ladder)]
+    # The ladder as bound, repeated n_passes times: fastest first, so an early
+    # high-speed match exits sooner. Never reorder it here (see the docstring).
+    speeds = [s for _ in range(n_passes) for s in ladder]
     total_attempts = len(speeds)
     file_size = (disc_last_lsn + 1) * _R6_BYTES_PER_FRAME
 
@@ -4095,8 +4107,8 @@ def _recover_flagged_spans(
     pass's damage lane inside the track's raw window as targets (the disc's final
     sector excluded, a lead-out artefact), cluster and pad them into spans
     (``span_gap``/``span_pad``), then run up to ``profile.passes`` passes, each
-    re-reading every span once at the next speed of the ladder
-    (fastest→slowest, cycling). Accepted copies (:func:`_span_copy_accepted`) are
+    re-reading every span once at the next speed of the ladder, in the order it was
+    bound (fastest first, cycling). Accepted copies (:func:`_span_copy_accepted`) are
     overlaid onto the track's current raw audio **in memory**; after each pass the
     assembled track goes to ``match_track_pcm``, and only a match is written. A
     track that never matches keeps its audio byte-identical, the same invariant
@@ -4128,7 +4140,8 @@ def _recover_flagged_spans(
 
     outcomes: dict[int, str] = {}
     prov: dict[str, str] = {}
-    speeds: list[int | None] = list(reversed(ladder)) or [None]
+    # The ladder as bound, never reordered here (see _recover_failed_tracks).
+    speeds: list[int | None] = [*ladder] or [None]
     file_size = (disc_last_lsn + 1) * _R6_BYTES_PER_FRAME
     status_line = [""]
     prog_cb = _recovery_status_cb(ui, status_line)

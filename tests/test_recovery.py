@@ -79,7 +79,7 @@ def test_recovery_stops_at_first_match_fastest_first(
 ) -> None:
     state = _patch(monkeypatch, match_speed=8)
     pcm = _disc_pcm(tmp_path)
-    ladder = [4, 8, 16, 32]  # ascending; loop sweeps reversed (fastest first)
+    ladder = [32, 16, 8, 4]  # fastest first, as rungs_for binds it
 
     outcomes = _recover_failed_tracks(
         "/dev/sr0",
@@ -110,12 +110,77 @@ def test_recovery_stops_at_first_match_fastest_first(
     assert data[splice_lo + _TRACK2_BYTES] == 0  # nothing written past the slice
 
 
+def test_the_bound_ladder_is_walked_in_the_order_bound(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The shipped default from the profile on: what ``rungs_for`` binds is what
+    each pass walks, so PROV ``recovery_ladder`` names the order of the attempts.
+
+    Until 2026-10-22 the loop reversed the list. The test above fed it an
+    ascending ladder, the shape the retired ``probe_speed_ladder`` returned, so it
+    passed while every real rip walked slowest-first. This one starts where
+    production starts.
+    """
+    from cdda2img.recovery_profile import load_profile, rungs_for
+
+    profile = load_profile("track-ladder")
+    rungs = rungs_for(profile, [8, 40, 4, 24, 32])  # admitted, in no order
+    assert rungs == [40, 32, 24, 8, 4]
+    state = _patch(monkeypatch, match_speed=None)
+
+    outcomes = _recover_failed_tracks(
+        "/dev/sr0",
+        _failed(2),
+        _LSNS,
+        _LAST_LSN,
+        _disc_pcm(tmp_path),
+        ["resp"],
+        _N_TRACKS,
+        rungs,
+        profile.passes,
+        _OFFSET,
+        None,
+    )
+
+    assert state["speeds"] == rungs * profile.passes
+    assert outcomes == {2: "unrecovered"}
+
+
+def test_an_ad_ladder_is_walked_as_written(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """``--ad-ladder 4,32`` starts slow and then tries fast, a different experiment
+    from ``32,4`` (``parse_ad_ladder``). Until 2026-10-22 it ran as ``32,4``."""
+    from cdda2img.recovery_profile import ResolvedStrategy, bind_ladder
+
+    bound = bind_ladder(
+        ResolvedStrategy("ad-flags", ad_flags={"ladder": "4,32"}), "/dev/null"
+    )
+    state = _patch(monkeypatch, match_speed=None)
+
+    _recover_failed_tracks(
+        "/dev/sr0",
+        _failed(2),
+        _LSNS,
+        _LAST_LSN,
+        _disc_pcm(tmp_path),
+        ["resp"],
+        _N_TRACKS,
+        list(bound.ladder),
+        2,
+        _OFFSET,
+        None,
+    )
+
+    assert state["speeds"] == [4, 32, 4, 32]
+
+
 def test_recovery_no_match_keeps_original_audio(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     state = _patch(monkeypatch, match_speed=None)  # never matches
     pcm = _disc_pcm(tmp_path)
-    ladder = [4, 8, 16]
+    ladder = [16, 8, 4]  # fastest first, as bound
 
     outcomes = _recover_failed_tracks(
         "/dev/sr0",
@@ -165,14 +230,14 @@ def test_recovery_read_failure_consumes_attempt(
         pcm,
         ["resp"],
         _N_TRACKS,
-        [8, 16],
+        [16, 8],
         2,
         _OFFSET,
         None,
     )
 
     assert state["calls"] == 2  # attempt 1 failed, attempt 2 matched
-    assert outcomes == {2: "matched@8X"}  # ladder [8, 16] reversed → 16 failed, 8 won
+    assert outcomes == {2: "matched@8X"}  # ladder [16, 8] → 16 failed, 8 won
 
 
 def test_recovery_last_track_clamps_window_and_splice(
@@ -265,7 +330,7 @@ def test_recovery_tui_status_is_per_attempt(
     monkeypatch.setattr(ar, "match_track_pcm", fake_match)
 
     pcm = _disc_pcm(tmp_path)
-    ladder = [4, 8, 16]  # 3 passes x 3 steps = 9 total attempts
+    ladder = [16, 8, 4]  # as bound; 3 passes x 3 steps = 9 total attempts
 
     outcomes = _recover_failed_tracks(
         "/dev/sr0",

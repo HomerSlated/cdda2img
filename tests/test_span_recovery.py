@@ -221,10 +221,10 @@ def test_a_later_accepted_copy_replaces_an_earlier_wrong_one(
     _true_ar(monkeypatch)
     wrong = bytes(b ^ 0x55 for b in KEY)
     calls = _reads(monkeypatch, lambda p: wrong if p == 1 else KEY)
-    outcomes, _prov = _run(pcm, ladder=[4, 8, 16])
+    outcomes, _prov = _run(pcm, ladder=[16, 8, 4])  # fastest first, as bound
     assert outcomes == {2: "span_matched@p2"}
     assert pcm.read_bytes() == KEY
-    # speed-diverse across passes, fastest first, one speed per pass
+    # speed-diverse across passes, in the order bound, one speed per pass
     assert [s for _, _, s in calls] == [16, 16, 8, 8]
 
 

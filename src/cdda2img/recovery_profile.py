@@ -312,6 +312,11 @@ def rungs_for(profile: Profile, admitted: list[int]) -> list[int]:
     ``full`` takes the whole admitted list fastest->slowest; ``single`` picks the
     admitted rung nearest the selector. ``variation="full"`` also needs the whole
     list, because the sweep chooses a rung per attempt at random.
+
+    **The order returned is the order walked**: both re-read rungs take the list as
+    given, so this is the one place the order is decided. Fastest first is kgr's
+    ruling (2026-10-22): slow reads were not necessarily more successful, so start
+    fast.
     """
     if not admitted:
         return []
@@ -382,7 +387,9 @@ def bind_ladder(strategy: ResolvedStrategy, device: str) -> ResolvedStrategy:
     A flag whose only purpose is to name a ladder, turning the ladder off. The rungs
     are taken verbatim and are NOT filtered against ``admitted_ladder``: this rung is
     the escape hatch for driving the engine directly, and a user asking for a speed
-    our admission policy would reject is exactly the case the hatch exists for.
+    our admission policy would reject is exactly the case the hatch exists for. They
+    are walked in the order written, as :func:`parse_ad_ladder` promises; until
+    2026-10-22 the re-read loops reversed them.
     """
     from cdda2img import drive_speed
 
