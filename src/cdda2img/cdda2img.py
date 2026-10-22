@@ -3763,6 +3763,18 @@ def _ladder_attempt(
     re-reads held, so whether the drive stays displaced across a seek could not be
     answered afterwards. PROV names the speed that matched, not the attempt, so it
     does not show which other speeds were tried first.
+
+    **Every attempt asks AccuDisc for a cache defeat** (kgr, 2026-10-22): one
+    sector read 5000 away before the first transfer, so the attempt is not
+    answered from what the previous one left in the drive's cache. A whole-track
+    window starts away from where the last read ended, so the start misses the
+    cache anyway. What the defeat protects is a short track re-read back to back:
+    on the LITE-ON, spans of 49 to 196 sectors came back cached 15/15 with no read
+    between (AccuDisc 2026-09-18s). A cached attempt can only repeat a miss,
+    because AccurateRip gates the splice, so the option costs one seek and buys
+    attempts that are really attempts. Measured on the LITE-ON only, not on the
+    PX-716A; an engine without the option reads as before (the seam
+    feature-detects it).
     """
     from cdda2img import displacement
     from cdda2img.accudisc_reader import read_span_bytes
@@ -3776,7 +3788,12 @@ def _ladder_attempt(
         margin=_LADDER_MARGIN if cohort else 0,
     )
     window = read_span_bytes(
-        device, w.lo, w.hi - w.lo, read_speed=speed, progress_cb=prog_cb
+        device,
+        w.lo,
+        w.hi - w.lo,
+        read_speed=speed,
+        progress_cb=prog_cb,
+        cache_defeat=True,
     )
     corrected = _corrected_from_window(window, w, read_offset)
     _v1, _v2, conf_v1, conf_v2 = match_track_pcm(

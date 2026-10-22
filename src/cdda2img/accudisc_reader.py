@@ -1112,6 +1112,15 @@ _FEATURE_CALLER_MAPS = "caller_map_buffers"
 #: request a field that does not exist or decline one that does.
 _FEATURE_SUBQ_MAP = "subq_map"
 
+#: AccuDisc's capability name for ``Device.read(cache_defeat=True)`` (0.49.0): one
+#: sector read 5000 away before the first transfer, so a re-read straight after
+#: another read is not answered from the drive's cache. Measured on the LITE-ON
+#: only. When the name is absent the keyword is **omitted**, never passed as
+#: ``False``: an older binding raises ``TypeError`` on an unknown keyword, which
+#: neither ``_call`` nor the recovery ladder translates, so asking would end the
+#: rip instead of degrading the read.
+_FEATURE_CACHE_DEFEAT = "cache_defeat"
+
 
 def _has_feature(module: Any, name: str) -> bool:
     """Whether the binding publishes capability *name* in ``accudisc.features``.
@@ -1537,6 +1546,8 @@ def _read_span_binding(
     count: int,
     read_speed: int | None,
     progress_cb: Callable[[int, int], None] | None,
+    *,
+    cache_defeat: bool = False,
 ) -> bytes:
     """Span read straight into memory — no temp file, no filesystem round-trip.
 
@@ -1583,16 +1594,22 @@ def _read_span_binding(
         if progress_cb is not None:
             progress_cb(pos // _SECTOR_BYTES, count)
 
+    extra: dict[str, Any] = {}
+    if cache_defeat and _has_feature(module, _FEATURE_CACHE_DEFEAT):
+        extra["cache_defeat"] = True
     with module.Device(device) as dev:
         # copy=False is safe: `collect` consumes the view synchronously into
         # `buf` and never retains it past the call.
-        dev.read(
+        result = dev.read(
             start_lba,
             count,
             sink=collect,
             copy=False,
             speed_x=read_speed or 0,
+            **extra,
         )
+    if extra:
+        _log_cache_defeat(result.stats, start_lba, module)
 
     # Length is a guarantee on the subprocess path — AccuDisc zero-fills
     # hard-unreadable sectors, so the output file is always exactly `count`
@@ -1614,12 +1631,36 @@ def _read_span_binding(
     return bytes(buf)
 
 
+def _log_cache_defeat(stats: Any, start_lba: int, module: Any) -> None:
+    """Say whether a requested cache defeat ran, from the engine's own answer.
+
+    Anything but ``DONE`` is logged at **INFO**, as a quantized speed is: it is
+    not a fault. ``FAILED`` means the drive refused the far read, or there was
+    no address 5000 sectors away, and the read went ahead exactly as it would
+    have without the option. So this read may have been answered from the
+    drive's cache. On the recovery ladder that can only repeat a miss, never
+    splice wrong audio, because AccurateRip gates every splice.
+    """
+    outcome = module.CacheDefeat(stats.cache_defeat)
+    if outcome == module.CacheDefeat.DONE:
+        log.debug("accudisc span read at lba %d: cache defeated", start_lba)
+        return
+    log.info(
+        "accudisc span read at lba %d: the cache defeat did not run (%s); "
+        "this read may have been answered from the drive's cache",
+        start_lba,
+        outcome.name,
+    )
+
+
 def read_span_bytes(
     device: str,
     start_lba: int,
     count: int,
     read_speed: int | None = None,
     progress_cb: Callable[[int, int], None] | None = None,
+    *,
+    cache_defeat: bool = False,
 ) -> bytes:
     """:func:`read_span` returning the PCM, for callers that never wanted a file.
 
@@ -1633,13 +1674,24 @@ def read_span_bytes(
 
     Bounded reads only — one track is ~50 MB at worst. Use :func:`read_span` when
     the destination genuinely is a file, and :func:`read_disc_c2` for a whole disc.
+
+    *cache_defeat* asks AccuDisc for one far read before the first transfer
+    (:data:`_FEATURE_CACHE_DEFEAT`). The recovery ladder sets it on every attempt
+    (kgr, 2026-10-22). On an engine without the capability the read goes ahead
+    as before, and whether it ran is logged by :func:`_log_cache_defeat`.
     """
     module = _binding("span read")
     return _call(
         module,
         "span read",
         lambda: _read_span_binding(
-            module, device, start_lba, count, read_speed, progress_cb
+            module,
+            device,
+            start_lba,
+            count,
+            read_speed,
+            progress_cb,
+            cache_defeat=cache_defeat,
         ),
     )
 

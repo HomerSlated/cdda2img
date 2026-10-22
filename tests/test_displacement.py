@@ -281,7 +281,9 @@ def _drive(monkeypatch: pytest.MonkeyPatch, what_it_returns: np.ndarray) -> list
     raw = what_it_returns.astype("<u4").tobytes()
     reads: list[tuple[int, int]] = []
 
-    def fake_read_span(device, start, count, read_speed=None, progress_cb=None):
+    def fake_read_span(
+        device, start, count, read_speed=None, progress_cb=None, cache_defeat=False
+    ):
         reads.append((start, count))
         return raw[start * 2352 : (start + count) * 2352]
 

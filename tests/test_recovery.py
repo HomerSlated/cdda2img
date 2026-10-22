@@ -50,10 +50,13 @@ def _patch(
     designed, and the tests failed on an empty speed list rather than on an
     error. Patch the function under test, not one it happens to delegate to.
     """
-    state: dict = {"speeds": [], "windows": [], "cur": None}
+    state: dict = {"speeds": [], "windows": [], "cur": None, "defeat": []}
 
-    def fake_read_span(device, start, count, read_speed=None, progress_cb=None):
+    def fake_read_span(
+        device, start, count, read_speed=None, progress_cb=None, cache_defeat=False
+    ):
         state["speeds"].append(read_speed)
+        state["defeat"].append(cache_defeat)
         state["windows"].append((start, count))
         state["cur"] = read_speed
         return fill * (count * _FRAME)
@@ -175,6 +178,32 @@ def test_an_ad_ladder_is_walked_as_written(
     assert state["speeds"] == [4, 32, 4, 32]
 
 
+def test_every_ladder_attempt_asks_for_a_cache_defeat(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """kgr, 2026-10-22: each attempt reads past what the previous one left in the
+    drive's cache, or it repeats that read rather than making a new one. The
+    first attempt asks too: a neighbouring track's re-read can leave this
+    track's head in the cache."""
+    state = _patch(monkeypatch, match_speed=None)
+
+    _recover_failed_tracks(
+        "/dev/sr0",
+        _failed(2),
+        _LSNS,
+        _LAST_LSN,
+        _disc_pcm(tmp_path),
+        ["resp"],
+        _N_TRACKS,
+        [16, 8],
+        2,
+        _OFFSET,
+        None,
+    )
+
+    assert state["defeat"] == [True, True, True, True]
+
+
 def test_recovery_no_match_keeps_original_audio(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -208,7 +237,9 @@ def test_recovery_read_failure_consumes_attempt(
     """A c2read failure (RuntimeError) is one consumed attempt, not an abort."""
     state: dict = {"calls": 0}
 
-    def flaky_read_span(device, start, count, read_speed=None, progress_cb=None):
+    def flaky_read_span(
+        device, start, count, read_speed=None, progress_cb=None, cache_defeat=False
+    ):
         state["calls"] += 1
         if state["calls"] == 1:
             msg = "accudisc span read failed: boom"
@@ -318,7 +349,9 @@ def test_recovery_tui_status_is_per_attempt(
         ) -> None:
             statuses.append((text, progress))
 
-    def fake_read_span(device, start, count, read_speed=None, progress_cb=None):
+    def fake_read_span(
+        device, start, count, read_speed=None, progress_cb=None, cache_defeat=False
+    ):
         if progress_cb is not None:  # emit one mid-window progress event
             progress_cb(5, 10)
         return b"\xaa" * (count * _FRAME)

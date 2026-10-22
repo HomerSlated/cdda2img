@@ -434,9 +434,10 @@ class _FakeInfo:
 class _FakeDevice:
     """Context-manager device returning canned structs; records the reads it served."""
 
-    def __init__(self, toc_src=None, chunks=()) -> None:
+    def __init__(self, toc_src=None, chunks=(), result=None) -> None:
         self._toc_src = toc_src
         self._chunks = chunks
+        self._result = result
         self.read_kwargs: dict[str, object] = {}
 
     def __enter__(self) -> _FakeDevice:
@@ -453,6 +454,7 @@ class _FakeDevice:
         sink = kwargs["sink"]
         for chunk in self._chunks:
             sink(chunk)
+        return self._result
 
 
 class _FakeChunk:
@@ -582,6 +584,121 @@ def test_read_span_bytes_raises_on_abi_skew_rather_than_degrading(
 
     with pytest.raises(RuntimeError, match="Rebuild the binding"):
         ar.read_span_bytes("/dev/sr0", 0, 1)
+
+
+class _FakeCacheDefeat(enum.IntEnum):
+    """A real IntEnum, as the binding's is, so the fake is no easier to use."""
+
+    OFF = 0
+    DONE = 1
+    FAILED = 2
+
+
+class _PreCacheDefeatDevice(_FakeDevice):
+    """A device from a binding older than 0.49.0: its ``read`` has no
+    ``cache_defeat`` keyword, so passing one raises ``TypeError``, as the real
+    signature does. Nothing translates that error, so it would end a rip."""
+
+    def read(self, lba: int, count: int, **kwargs: Any):
+        if "cache_defeat" in kwargs:
+            msg = "read() got an unexpected keyword argument 'cache_defeat'"
+            raise TypeError(msg)
+        return super().read(lba, count, **kwargs)
+
+
+def _cache_defeat_result(outcome: _FakeCacheDefeat) -> SimpleNamespace:
+    return SimpleNamespace(stats=SimpleNamespace(cache_defeat=outcome))
+
+
+def _binding_with_cache_defeat(device: _FakeDevice) -> _FakeBinding:
+    module = _binding_with(device)
+    module.features = frozenset({"cache_defeat"})  # type: ignore[attr-defined]
+    module.CacheDefeat = _FakeCacheDefeat  # type: ignore[attr-defined]
+    return module
+
+
+def test_read_span_bytes_asks_for_a_cache_defeat_when_the_engine_has_one(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Through the public entry point, so the keyword is shown to reach the read."""
+    device = _FakeDevice(
+        chunks=[_FakeChunk(1, b"\x00" * 2352)],
+        result=_cache_defeat_result(_FakeCacheDefeat.DONE),
+    )
+    _install(monkeypatch, _binding_with_cache_defeat(device))
+
+    ar.read_span_bytes("/dev/sr0", 0, 1, cache_defeat=True)
+
+    assert device.read_kwargs["cache_defeat"] is True
+
+
+def test_read_span_bytes_omits_cache_defeat_on_an_engine_without_it() -> None:
+    """Omitted, not passed as False: an older ``Device.read`` raises on the keyword
+    whatever its value, and nothing translates a ``TypeError``."""
+    device = _PreCacheDefeatDevice(chunks=[_FakeChunk(1, b"\xaa" * 2352)])
+
+    data = ar._read_span_binding(
+        _binding_with(device), "/dev/sr0", 0, 1, None, None, cache_defeat=True
+    )
+
+    assert data == b"\xaa" * 2352
+    assert "cache_defeat" not in device.read_kwargs
+
+
+def test_read_span_bytes_never_asks_for_a_cache_defeat_unless_told_to() -> None:
+    """The preview and the tools read through here too, and are not ladder rungs."""
+    device = _FakeDevice(chunks=[_FakeChunk(1, b"\x00" * 2352)])
+
+    ar._read_span_binding(
+        _binding_with_cache_defeat(device), "/dev/sr0", 0, 1, None, None
+    )
+
+    assert "cache_defeat" not in device.read_kwargs
+
+
+def test_a_cache_defeat_that_did_not_run_is_logged(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    device = _FakeDevice(
+        chunks=[_FakeChunk(1, b"\x00" * 2352)],
+        result=_cache_defeat_result(_FakeCacheDefeat.FAILED),
+    )
+    with caplog.at_level(logging.DEBUG, logger=ar.log.name):
+        ar._read_span_binding(
+            _binding_with_cache_defeat(device),
+            "/dev/sr0",
+            700,
+            1,
+            None,
+            None,
+            cache_defeat=True,
+        )
+
+    infos = [r for r in caplog.records if r.levelno == logging.INFO]
+    assert len(infos) == 1
+    assert "lba 700" in infos[0].getMessage()
+    assert "did not run (FAILED)" in infos[0].getMessage()
+
+
+def test_a_cache_defeat_that_ran_is_not_reported_above_debug(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    device = _FakeDevice(
+        chunks=[_FakeChunk(1, b"\x00" * 2352)],
+        result=_cache_defeat_result(_FakeCacheDefeat.DONE),
+    )
+    with caplog.at_level(logging.DEBUG, logger=ar.log.name):
+        ar._read_span_binding(
+            _binding_with_cache_defeat(device),
+            "/dev/sr0",
+            0,
+            1,
+            None,
+            None,
+            cache_defeat=True,
+        )
+
+    assert [r.levelno for r in caplog.records] == [logging.DEBUG]
 
 
 def test_read_span_binding_refuses_a_short_span() -> None:
