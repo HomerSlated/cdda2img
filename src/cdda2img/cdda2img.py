@@ -3758,10 +3758,11 @@ def _ladder_attempt(
     With a *cohort* (``displacement.cohort_blocks``) a re-read that does not match
     in place is also tested for a displaced copy of the track, and the outcome
     then says so: ``matched@40X,displaced@+12``. That record is the point as much
-    as the repair. On 2026-10-10 every re-read of seven tracks failed at 40, 32,
-    24 and 8x after a pass that had lost 12 samples, and nothing kept what those
-    re-reads held, so whether the drive stays displaced across a seek could not
-    be answered afterwards.
+    as the repair. On 2026-10-10 seven tracks failed after a pass that had lost 12
+    samples and each was recovered by a re-read at 4X, and nothing kept what the
+    re-reads held, so whether the drive stays displaced across a seek could not be
+    answered afterwards. PROV names the speed that matched, not the attempt, so it
+    does not show which other speeds were tried first.
     """
     from cdda2img import displacement
     from cdda2img.accudisc_reader import read_span_bytes
