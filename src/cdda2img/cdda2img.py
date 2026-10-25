@@ -3748,12 +3748,14 @@ def _ladder_attempt(
     n_tracks: int,
     responses: list,
     cohort: list | None,
-) -> tuple[bytes, str] | None:
+) -> tuple[tuple[bytes, str] | None, str]:
     """One targeted re-read of track ``idx`` (0-based) at *speed*.
 
-    Returns ``(corrected, outcome)`` when the re-read yields the track's
-    AccurateRip-matching audio, else ``None``. *corrected* is offset-corrected and
-    ready for :func:`_splice_corrected`. Geometry in :func:`_raw_track_window`.
+    Returns ``(hit, attempt)``. *hit* is ``(corrected, outcome)`` when the re-read
+    yields the track's AccurateRip-matching audio, else ``None``; *corrected* is
+    offset-corrected and ready for :func:`_splice_corrected`. *attempt* is this
+    read's entry in ``recovery_attempts_track_<n>`` (:func:`_attempt_record`),
+    returned on a miss as well as a match. Geometry in :func:`_raw_track_window`.
 
     With a *cohort* (``displacement.cohort_blocks``) a re-read that does not match
     in place is also tested for a displaced copy of the track, and the outcome
@@ -3761,8 +3763,10 @@ def _ladder_attempt(
     as the repair. On 2026-10-10 seven tracks failed after a pass that had lost 12
     samples and each was recovered by a re-read at 4X, and nothing kept what the
     re-reads held, so whether the drive stays displaced across a seek could not be
-    answered afterwards. PROV names the speed that matched, not the attempt, so it
-    does not show which other speeds were tried first.
+    answered afterwards. ``matched@<N>X`` names the speed that matched, as
+    requested; *attempt* records what every attempt asked for, what the drive ran
+    at, and whether the cache defeat ran (kgr, 2026-10-25), so the walk itself is
+    in PROV and not only its configuration.
 
     **Every attempt asks AccuDisc for a cache defeat** (kgr, 2026-10-22): one
     sector read 5000 away before the first transfer, so the attempt is not
@@ -3777,7 +3781,7 @@ def _ladder_attempt(
     feature-detects it).
     """
     from cdda2img import displacement
-    from cdda2img.accudisc_reader import read_span_bytes
+    from cdda2img.accudisc_reader import read_span_attempt
     from cdda2img.accuraterip import match_track_pcm
 
     w = _raw_track_window(
@@ -3787,7 +3791,7 @@ def _ladder_attempt(
         read_offset,
         margin=_LADDER_MARGIN if cohort else 0,
     )
-    window = read_span_bytes(
+    read = read_span_attempt(
         device,
         w.lo,
         w.hi - w.lo,
@@ -3795,14 +3799,16 @@ def _ladder_attempt(
         progress_cb=prog_cb,
         cache_defeat=True,
     )
+    attempt = _attempt_record(speed, read.speed_honoured_x, read.cache_defeat)
+    window = read.pcm
     corrected = _corrected_from_window(window, w, read_offset)
     _v1, _v2, conf_v1, conf_v2 = match_track_pcm(
         corrected, idx + 1, n_tracks, responses
     )
     if conf_v1 or conf_v2:
-        return corrected, f"matched@{speed}X"
+        return (corrected, f"matched@{speed}X"), attempt
     if not cohort:
-        return None
+        return None, attempt
     pad_front = (w.lo - w.first) * 588  # samples the window lacks at a disc edge
     pad_back = (w.last - w.hi) * 588
     found = displacement.displaced_in_window(
@@ -3815,9 +3821,20 @@ def _ladder_attempt(
         cohort,
     )
     if found is None:
-        return None
+        return None, attempt
     shift, data = found
-    return data, f"matched@{speed}X,{displacement.outcome(shift)}"
+    return (data, f"matched@{speed}X,{displacement.outcome(shift)}"), attempt
+
+
+def _attempt_record(speed: int, honoured: int | None, cache_defeat: str) -> str:
+    """One entry of ``recovery_attempts_track_<n>`` (rbi_spec §6.3):
+    ``<requested>><honoured>:<cache_defeat>``, e.g. ``32>24:done``.
+
+    ``?`` stands for an honoured speed nobody reported, never ``0``: a zero reads
+    as a speed somebody measured. A read that raised has no entry of this shape;
+    the loop writes ``<requested>:error`` for it.
+    """
+    return f"{speed}>{honoured if honoured else '?'}:{cache_defeat}"
 
 
 def _track_sector_window(
@@ -3907,7 +3924,7 @@ def _recover_failed_tracks(
     ui: TerminalUI | None,
     disc_damage: bytes | None = None,
     cohort: list | None = None,
-) -> dict[int, str]:
+) -> tuple[dict[int, str], dict[str, str]]:
     """Re-read each AR-failed track across the drive's speed ladder until it matches.
 
     For every failed track, walk *ladder* in the order given, ``n_passes`` times (total
@@ -3945,10 +3962,15 @@ def _recover_failed_tracks(
     :func:`_ladder_attempt`; without it every re-read is the track's own window
     and nothing else, as before.
 
-    Returns ``outcomes`` mapping track number → ``"matched@<N>X"``,
-    ``"matched@<N>X,displaced@<±S>"`` or ``"unrecovered"``.
+    Returns ``(outcomes, prov)``. ``outcomes`` maps track number →
+    ``"matched@<N>X"``, ``"matched@<N>X,displaced@<±S>"`` or ``"unrecovered"``.
+    ``prov`` holds ``recovery_attempts_track_<n>`` for every track the ladder
+    re-read: each attempt in the order it ran, including one whose read raised
+    (``<N>:error``), since an attempt that left no record is how the walk order
+    went unseen for three months.
     """
     outcomes: dict[int, str] = {}
+    prov: dict[str, str] = {}
     # The ladder as bound, repeated n_passes times: fastest first, so an early
     # high-speed match exits sooner. Never reorder it here (see the docstring).
     speeds = [s for _ in range(n_passes) for s in ladder]
@@ -3983,12 +4005,13 @@ def _recover_failed_tracks(
             disc_map_view.arm(lo, hi)
 
             matched = False
+            tried: list[str] = []
             for attempt, speed in enumerate(speeds, 1):
                 status_line[0] = f"Recover track {t} ({attempt}/{total_attempts})"
                 if ui is not None:
                     ui.set_status(status_line[0], 0.0)
                 try:
-                    hit = _ladder_attempt(
+                    hit, record = _ladder_attempt(
                         device,
                         track_lsns,
                         disc_last_lsn,
@@ -4002,8 +4025,10 @@ def _recover_failed_tracks(
                     )
                 except (RuntimeError, OSError) as exc:
                     log.warning("track %d re-read at %dX failed: %s", t, speed, exc)
+                    tried.append(f"{speed}:error")
                     continue
 
+                tried.append(record)
                 if hit is not None:
                     corrected, outcomes[t] = hit
                     _splice_corrected(
@@ -4015,8 +4040,9 @@ def _recover_failed_tracks(
 
             if not matched:
                 outcomes[t] = "unrecovered"  # keep the original audio
+            prov[f"recovery_attempts_track_{t}"] = ",".join(tried)
     disc_map_view.release()
-    return outcomes
+    return outcomes, prov
 
 
 #: Map states a re-read copy may be accepted from (span-recovery-plan.md §4.4).
@@ -4586,6 +4612,7 @@ def rip_image(  # noqa: C901
         # Speed-laddered AR recovery outcome (populated only if a track fails AR).
         recovery_outcomes: dict[int, str] = {}
         span_prov: dict[str, str] = {}  # flagged-span rung keys, merged below
+        ladder_prov: dict[str, str] = {}  # recovery_attempts_track_<n>, likewise
         recovery_ladder: list[int] = []
         # CTDB attempt outcome, kept whether it succeeded or declined — a declined
         # repair is the interesting case and used to leave no trace at all.
@@ -4811,7 +4838,7 @@ def rip_image(  # noqa: C901
             recovery_outcomes.update(span_outcomes)
             span_prov.update(span_keys)
             if recovery_ladder and failed_tracks:
-                outcomes = _recover_failed_tracks(
+                outcomes, attempts_prov = _recover_failed_tracks(
                     device,
                     failed_tracks,
                     final_track_lsns,
@@ -4827,6 +4854,7 @@ def rip_image(  # noqa: C901
                     ar_cohort or None,
                 )
                 recovery_outcomes.update(outcomes)
+                ladder_prov.update(attempts_prov)
                 # No restore here any more. The ladder leaves the drive at its last
                 # rung, and the `finally` at the end of this function puts it back to
                 # the rate captured at entry — which covers this path *and* the clean
@@ -4948,6 +4976,7 @@ def rip_image(  # noqa: C901
                     )
         for _t, _outcome in sorted(recovery_outcomes.items()):
             provenance[f"recovery_track_{_t}"] = _outcome
+        provenance.update(ladder_prov)
         # A whole-disc AR miss runs no recovery — the ladder is gated on a PARTIAL
         # mismatch, correctly, since re-reading every track is not a read-error
         # remedy. Without this the rip just fails to verify and says nothing about

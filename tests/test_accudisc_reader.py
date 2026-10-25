@@ -437,7 +437,10 @@ class _FakeDevice:
     def __init__(self, toc_src=None, chunks=(), result=None) -> None:
         self._toc_src = toc_src
         self._chunks = chunks
-        self._result = result
+        # The real `Device.read` always returns a result carrying `stats`.
+        self._result = (
+            result if result is not None else SimpleNamespace(stats=SimpleNamespace())
+        )
         self.read_kwargs: dict[str, object] = {}
 
     def __enter__(self) -> _FakeDevice:
@@ -526,7 +529,7 @@ def test_read_span_binding_reassembles_chunks_in_order() -> None:
         lambda done, total: seen.append((done, total)),
     )
 
-    assert data == b"\xaa" * 4704 + b"\xbb" * 2352
+    assert data.pcm == b"\xaa" * 4704 + b"\xbb" * 2352
     assert device.read_kwargs["lba"] == 100
     assert device.read_kwargs["count"] == 3
     assert device.read_kwargs["speed_x"] == 8
@@ -617,35 +620,109 @@ def _binding_with_cache_defeat(device: _FakeDevice) -> _FakeBinding:
     return module
 
 
-def test_read_span_bytes_asks_for_a_cache_defeat_when_the_engine_has_one(
+def test_read_span_attempt_asks_for_a_cache_defeat_when_the_engine_has_one(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Through the public entry point, so the keyword is shown to reach the read."""
+    """Through the public entry point, so the keyword is shown to reach the read
+    and the engine's answer to come back."""
     device = _FakeDevice(
         chunks=[_FakeChunk(1, b"\x00" * 2352)],
         result=_cache_defeat_result(_FakeCacheDefeat.DONE),
     )
     _install(monkeypatch, _binding_with_cache_defeat(device))
 
-    ar.read_span_bytes("/dev/sr0", 0, 1, cache_defeat=True)
+    read = ar.read_span_attempt("/dev/sr0", 0, 1, cache_defeat=True)
 
     assert device.read_kwargs["cache_defeat"] is True
+    assert read.cache_defeat == "done"
 
 
-def test_read_span_bytes_omits_cache_defeat_on_an_engine_without_it() -> None:
+def test_a_cache_defeat_that_did_not_run_is_reported_as_failed() -> None:
+    device = _FakeDevice(
+        chunks=[_FakeChunk(1, b"\x00" * 2352)],
+        result=_cache_defeat_result(_FakeCacheDefeat.FAILED),
+    )
+
+    read = ar._read_span_binding(
+        _binding_with_cache_defeat(device),
+        "/dev/sr0",
+        0,
+        1,
+        None,
+        None,
+        cache_defeat=True,
+    )
+
+    assert read.cache_defeat == "failed"
+
+
+def test_read_span_attempt_omits_cache_defeat_on_an_engine_without_it() -> None:
     """Omitted, not passed as False: an older ``Device.read`` raises on the keyword
-    whatever its value, and nothing translates a ``TypeError``."""
+    whatever its value, and nothing translates a ``TypeError``. The result says
+    ``off`` without reading a ``cache_defeat`` field that engine does not have."""
     device = _PreCacheDefeatDevice(chunks=[_FakeChunk(1, b"\xaa" * 2352)])
 
     data = ar._read_span_binding(
         _binding_with(device), "/dev/sr0", 0, 1, None, None, cache_defeat=True
     )
 
-    assert data == b"\xaa" * 2352
+    assert data.pcm == b"\xaa" * 2352
+    assert data.cache_defeat == "off"
     assert "cache_defeat" not in device.read_kwargs
 
 
-def test_read_span_bytes_never_asks_for_a_cache_defeat_unless_told_to() -> None:
+def test_read_span_attempt_reports_the_speed_the_drive_adopted() -> None:
+    """Asked for 32X, the drive ran at 24X: the honoured speed is the drive's
+    answer, so a test that returned the request would fail here."""
+    device = _FakeDevice(
+        chunks=[_FakeChunk(1, b"\x00" * 2352)],
+        result=SimpleNamespace(
+            stats=SimpleNamespace(
+                speed_requested_x=32, speed_honoured_x=24, speed_quantized=True
+            )
+        ),
+    )
+    module = _binding_with(device)
+    module.features = frozenset({"speed_honoured"})  # type: ignore[attr-defined]
+
+    read = ar._read_span_binding(module, "/dev/sr0", 0, 1, 32, None)
+
+    assert read.speed_honoured_x == 24
+
+
+@pytest.mark.parametrize(
+    ("features", "honoured"),
+    [(frozenset(), 24), (frozenset({"speed_honoured"}), 0)],
+    ids=["engine-cannot-report", "drive-did-not-answer"],
+)
+def test_an_unreported_honoured_speed_is_none(features, honoured) -> None:
+    """``None``, never ``0`` and never the request: either would read as a speed
+    somebody measured."""
+    device = _FakeDevice(
+        chunks=[_FakeChunk(1, b"\x00" * 2352)],
+        result=SimpleNamespace(stats=SimpleNamespace(speed_honoured_x=honoured)),
+    )
+    module = _binding_with(device)
+    module.features = features  # type: ignore[attr-defined]
+
+    read = ar._read_span_binding(module, "/dev/sr0", 0, 1, 32, None)
+
+    assert read.speed_honoured_x is None
+
+
+def test_read_span_bytes_never_asks_for_a_cache_defeat(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The preview and the tools read through here, and are not ladder rungs."""
+    device = _FakeDevice(chunks=[_FakeChunk(1, b"\x00" * 2352)])
+    _install(monkeypatch, _binding_with_cache_defeat(device))
+
+    assert ar.read_span_bytes("/dev/sr0", 0, 1) == b"\x00" * 2352
+
+    assert "cache_defeat" not in device.read_kwargs
+
+
+def test_read_span_attempt_never_asks_for_a_cache_defeat_unless_told_to() -> None:
     """The preview and the tools read through here too, and are not ladder rungs."""
     device = _FakeDevice(chunks=[_FakeChunk(1, b"\x00" * 2352)])
 
@@ -1931,7 +2008,11 @@ def test_read_span_writes_the_bindings_bytes_to_the_file(
     """
     fake = _FakeBinding()
     _install(monkeypatch, fake)
-    monkeypatch.setattr(ar, "_read_span_binding", lambda *a, **k: b"\x11\x22" * 8)
+    monkeypatch.setattr(
+        ar,
+        "_read_span_binding",
+        lambda *a, **k: ar.SpanRead(b"\x11\x22" * 8, None, "off"),
+    )
 
     out = tmp_path / "span.pcm"
     ar.read_span("/dev/sr0", 100, 2, out)
@@ -1949,7 +2030,8 @@ def test_read_span_progress_callback_survives_the_flip(
     monkeypatch.setattr(
         ar,
         "_read_span_binding",
-        lambda _m, _d, _s, _c, _sp, cb: seen.append(cb) or b"",
+        lambda _m, _d, _s, _c, _sp, cb: seen.append(cb)
+        or ar.SpanRead(b"", None, "off"),
     )
 
     def _cb(done: int, total: int) -> None:

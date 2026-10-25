@@ -37,11 +37,20 @@ def _patch(
     *,
     match_speed: int | None,
     fill: bytes = b"\xaa",
+    honoured: dict[int | None, int | None] | None = None,
+    defeat: str = "done",
 ) -> dict:
-    """Stub `read_span_bytes` (returns canned window bytes) + `match_track_pcm`
+    """Stub `read_span_attempt` (returns canned window bytes) + `match_track_pcm`
     (matches at one speed). Returns a state dict recording the reads.
 
-    Patches `read_span_bytes`, which is what `_ladder_attempt` actually calls.
+    *honoured* maps a requested speed to the one the fake drive reports adopting
+    (default: the request is honoured); *defeat* is the cache-defeat outcome every
+    read reports.
+
+    Patches `read_span_attempt`, which is what `_ladder_attempt` actually calls,
+    and returns its `SpanRead`, so a stub left on `read_span_bytes` intercepts
+    nothing and fails loudly rather than letting every attempt be recorded as an
+    error.
     These stubs patched `read_span` until 2026-08-01 and worked only because
     `read_span_bytes` was then implemented *through* it, via a temp file the
     subprocess needed. Retiring the CLI removed that indirection and the patch
@@ -59,14 +68,18 @@ def _patch(
         state["defeat"].append(cache_defeat)
         state["windows"].append((start, count))
         state["cur"] = read_speed
-        return fill * (count * _FRAME)
+        return adr.SpanRead(
+            pcm=fill * (count * _FRAME),
+            speed_honoured_x=(honoured or {}).get(read_speed, read_speed),
+            cache_defeat=defeat if cache_defeat else "off",
+        )
 
     def fake_match(raw, track, n_tracks, responses):
         if match_speed is not None and state["cur"] == match_speed:
             return "aaaaaaaa", "bbbbbbbb", 50, None  # conf_v1=50 → match
         return "aaaaaaaa", "bbbbbbbb", None, None
 
-    monkeypatch.setattr(adr, "read_span_bytes", fake_read_span)
+    monkeypatch.setattr(adr, "read_span_attempt", fake_read_span)
     monkeypatch.setattr(ar, "match_track_pcm", fake_match)
     return state
 
@@ -84,7 +97,7 @@ def test_recovery_stops_at_first_match_fastest_first(
     pcm = _disc_pcm(tmp_path)
     ladder = [32, 16, 8, 4]  # fastest first, as rungs_for binds it
 
-    outcomes = _recover_failed_tracks(
+    outcomes, _attempts = _recover_failed_tracks(
         "/dev/sr0",
         _failed(2),
         _LSNS,
@@ -131,7 +144,7 @@ def test_the_bound_ladder_is_walked_in_the_order_bound(
     assert rungs == [40, 32, 24, 8, 4]
     state = _patch(monkeypatch, match_speed=None)
 
-    outcomes = _recover_failed_tracks(
+    outcomes, _attempts = _recover_failed_tracks(
         "/dev/sr0",
         _failed(2),
         _LSNS,
@@ -211,7 +224,7 @@ def test_recovery_no_match_keeps_original_audio(
     pcm = _disc_pcm(tmp_path)
     ladder = [16, 8, 4]  # fastest first, as bound
 
-    outcomes = _recover_failed_tracks(
+    outcomes, _attempts = _recover_failed_tracks(
         "/dev/sr0",
         _failed(2),
         _LSNS,
@@ -244,16 +257,16 @@ def test_recovery_read_failure_consumes_attempt(
         if state["calls"] == 1:
             msg = "accudisc span read failed: boom"
             raise RuntimeError(msg)
-        return b"\xaa" * (count * _FRAME)
+        return adr.SpanRead(b"\xaa" * (count * _FRAME), read_speed, "done")
 
     def fake_match(raw, track, n_tracks, responses):
         return "a", "b", 50, None  # match as soon as a read succeeds
 
-    monkeypatch.setattr(adr, "read_span_bytes", flaky_read_span)
+    monkeypatch.setattr(adr, "read_span_attempt", flaky_read_span)
     monkeypatch.setattr(ar, "match_track_pcm", fake_match)
     pcm = _disc_pcm(tmp_path)
 
-    outcomes = _recover_failed_tracks(
+    outcomes, _attempts = _recover_failed_tracks(
         "/dev/sr0",
         _failed(2),
         _LSNS,
@@ -280,7 +293,7 @@ def test_recovery_last_track_clamps_window_and_splice(
     state = _patch(monkeypatch, match_speed=8)
     pcm = _disc_pcm(tmp_path)
 
-    outcomes = _recover_failed_tracks(
+    outcomes, _attempts = _recover_failed_tracks(
         "/dev/sr0",
         _failed(3),
         _LSNS,
@@ -311,7 +324,7 @@ def test_recovery_negative_offset_track_one(
     state = _patch(monkeypatch, match_speed=8)
     pcm = _disc_pcm(tmp_path)
 
-    outcomes = _recover_failed_tracks(
+    outcomes, _attempts = _recover_failed_tracks(
         "/dev/sr0",
         _failed(1),
         _LSNS,
@@ -354,18 +367,18 @@ def test_recovery_tui_status_is_per_attempt(
     ):
         if progress_cb is not None:  # emit one mid-window progress event
             progress_cb(5, 10)
-        return b"\xaa" * (count * _FRAME)
+        return adr.SpanRead(b"\xaa" * (count * _FRAME), read_speed, "done")
 
     def fake_match(raw, track, n_tracks, responses):
         return "a", "b", 50, None  # match on the first attempt (fastest speed)
 
-    monkeypatch.setattr(adr, "read_span_bytes", fake_read_span)
+    monkeypatch.setattr(adr, "read_span_attempt", fake_read_span)
     monkeypatch.setattr(ar, "match_track_pcm", fake_match)
 
     pcm = _disc_pcm(tmp_path)
     ladder = [16, 8, 4]  # as bound; 3 passes x 3 steps = 9 total attempts
 
-    outcomes = _recover_failed_tracks(
+    outcomes, _attempts = _recover_failed_tracks(
         "/dev/sr0",
         _failed(2),
         _LSNS,
@@ -475,3 +488,112 @@ def test_the_last_track_window_runs_to_the_lead_out():
     assert _track_sector_window(lsns, 0, 4999) == (0, 1000)
     assert _track_sector_window(lsns, 1, 4999) == (1000, 2000)
     assert _track_sector_window(lsns, 2, 4999) == (2000, 5000)
+
+
+# ---------------------------------------------------------------------------
+# recovery_attempts_track_<n>: the walk as it ran (kgr, 2026-10-25)
+# ---------------------------------------------------------------------------
+
+
+def _attempts(monkeypatch, tmp_path, ladder, passes, **patch) -> tuple[dict, dict]:
+    _patch(monkeypatch, **patch)
+    return _recover_failed_tracks(
+        "/dev/sr0",
+        _failed(2),
+        _LSNS,
+        _LAST_LSN,
+        _disc_pcm(tmp_path),
+        ["resp"],
+        _N_TRACKS,
+        ladder,
+        passes,
+        _OFFSET,
+        None,
+    )
+
+
+def test_every_attempt_is_recorded_in_the_order_it_ran(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A descending ladder with a quantized rung: the record names what each
+    attempt asked for and what the drive ran at, in walk order, and ends at the
+    match. Reversing the walk, swapping the two speeds or keeping only the match
+    each fails here."""
+    outcomes, prov = _attempts(
+        monkeypatch, tmp_path, [40, 32, 4], 1, match_speed=4, honoured={32: 24}
+    )
+
+    assert outcomes == {2: "matched@4X"}  # the requested speed, as before
+    assert prov == {"recovery_attempts_track_2": "40>40:done,32>24:done,4>4:done"}
+
+
+def test_an_unrecovered_track_lists_every_attempt_of_every_pass(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    outcomes, prov = _attempts(
+        monkeypatch, tmp_path, [16, 8], 2, match_speed=None, defeat="failed"
+    )
+
+    assert outcomes == {2: "unrecovered"}
+    assert prov == {
+        "recovery_attempts_track_2": "16>16:failed,8>8:failed,16>16:failed,8>8:failed"
+    }
+
+
+def test_an_unreported_honoured_speed_is_recorded_as_unknown(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _outcomes, prov = _attempts(
+        monkeypatch, tmp_path, [8], 1, match_speed=8, honoured={8: None}, defeat="off"
+    )
+
+    assert prov == {"recovery_attempts_track_2": "8>?:off"}
+
+
+def test_a_read_that_raised_is_recorded_where_it_happened(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The attempt whose read raised used up a rung, so it stays in the walk."""
+
+    def read(device, start, count, read_speed=None, progress_cb=None, **_kw):
+        if read_speed == 32:
+            msg = "accudisc span read failed: boom"
+            raise RuntimeError(msg)
+        return adr.SpanRead(b"\xaa" * (count * _FRAME), read_speed, "done")
+
+    def match(raw, track, n_tracks, responses):
+        return "a", "b", None, None
+
+    monkeypatch.setattr(adr, "read_span_attempt", read)
+    monkeypatch.setattr(ar, "match_track_pcm", match)
+
+    outcomes, prov = _recover_failed_tracks(
+        "/dev/sr0",
+        _failed(2),
+        _LSNS,
+        _LAST_LSN,
+        _disc_pcm(tmp_path),
+        ["resp"],
+        _N_TRACKS,
+        [40, 32, 4],
+        1,
+        _OFFSET,
+        None,
+    )
+
+    assert outcomes == {2: "unrecovered"}
+    assert prov == {"recovery_attempts_track_2": "40>40:done,32:error,4>4:done"}
+
+
+def test_rip_image_writes_the_attempts_into_prov() -> None:
+    """Wiring control: the record is useless if it never leaves the ladder."""
+    import inspect
+
+    import cdda2img.cdda2img as C
+
+    src = inspect.getsource(C.rip_image)
+    assert "outcomes, attempts_prov = _recover_failed_tracks(" in src
+    assert "ladder_prov.update(attempts_prov)" in src
+    assert src.index("ladder_prov.update(attempts_prov)") < src.index(
+        "provenance.update(ladder_prov)"
+    )

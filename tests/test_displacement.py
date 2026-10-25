@@ -285,16 +285,18 @@ def _drive(monkeypatch: pytest.MonkeyPatch, what_it_returns: np.ndarray) -> list
         device, start, count, read_speed=None, progress_cb=None, cache_defeat=False
     ):
         reads.append((start, count))
-        return raw[start * 2352 : (start + count) * 2352]
+        return adr.SpanRead(
+            raw[start * 2352 : (start + count) * 2352], read_speed, "done"
+        )
 
-    monkeypatch.setattr(adr, "read_span_bytes", fake_read_span)
+    monkeypatch.setattr(adr, "read_span_attempt", fake_read_span)
     return reads
 
 
 def _ladder(tmp_path: Path, first_pass: np.ndarray, responses: list, cohort):
     pcm = tmp_path / "all_tracks.pcm"
     first_pass.astype("<u4").tofile(pcm)
-    outcomes = C._recover_failed_tracks(
+    outcomes, _attempts = C._recover_failed_tracks(
         "/dev/sr0",
         [types.SimpleNamespace(track=4)],
         _LSNS,

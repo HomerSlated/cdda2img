@@ -953,9 +953,11 @@ def _log_speed_adopted(stats: Any, what: str, module: Any) -> None:
     never ran at poisons every comparison drawn against it afterwards.
 
     Scope, stated because it is easy to over-read: these are the **pass** speed, set
-    once and read back once. The recovery ladder moves speed per rung mid-read, and a
-    scalar pair cannot record that — AccuDisc said so explicitly rather than widening
-    the field to look like it covers it. The pre-flight answer there is
+    once and read back once. The AR-recovery ladder makes one read per rung, so the
+    same pair does describe each of its attempts (:class:`SpanRead`,
+    ``recovery_attempts_track_<n>``). An engine-side ``speed_ladder`` moves speed
+    mid-read, and a scalar pair cannot record that — AccuDisc said so explicitly
+    rather than widening the field to look like it covers it. The pre-flight answer there is
     ``probe_speed_ladder(points=3)``'s ``QUANTIZED`` verdict, which is the drive
     telling us directly (their `speeds.c:163-166` — the only exact clause in that
     verdict function, no radius caveat).
@@ -1536,7 +1538,7 @@ def read_span(
             module, device, start_lba, count, read_speed, progress_cb
         ),
     )
-    output_pcm.write_bytes(data)
+    output_pcm.write_bytes(data.pcm)
 
 
 def _read_span_binding(
@@ -1548,7 +1550,7 @@ def _read_span_binding(
     progress_cb: Callable[[int, int], None] | None,
     *,
     cache_defeat: bool = False,
-) -> bytes:
+) -> SpanRead:
     """Span read straight into memory — no temp file, no filesystem round-trip.
 
     Uses ``Device.read()`` with our own sink rather than the binding's
@@ -1608,8 +1610,10 @@ def _read_span_binding(
             speed_x=read_speed or 0,
             **extra,
         )
+    defeat = "off"
     if extra:
         _log_cache_defeat(result.stats, start_lba, module)
+        defeat = module.CacheDefeat(result.stats.cache_defeat).name.lower()
 
     # Length is a guarantee on the subprocess path — AccuDisc zero-fills
     # hard-unreadable sectors, so the output file is always exactly `count`
@@ -1628,7 +1632,11 @@ def _read_span_binding(
             f"lba {start_lba} — refusing a short span, it would splice silently"
         )
         raise RuntimeError(msg)
-    return bytes(buf)
+    return SpanRead(
+        pcm=bytes(buf),
+        speed_honoured_x=_speed_x_or_none(module, result.stats),
+        cache_defeat=defeat,
+    )
 
 
 def _log_cache_defeat(stats: Any, start_lba: int, module: Any) -> None:
@@ -1653,7 +1661,28 @@ def _log_cache_defeat(stats: Any, start_lba: int, module: Any) -> None:
     )
 
 
-def read_span_bytes(
+@dataclass(frozen=True)
+class SpanRead:
+    """One span read and what the engine said about it, for :func:`read_span_attempt`.
+
+    *speed_honoured_x* is the speed the drive reported adopting, or ``None`` when
+    the engine cannot report it or the drive did not answer (:func:`_speed_x_or_none`).
+    A span read sets one speed and AccuDisc runs no ladder of its own inside it, so
+    one value describes the whole read.
+
+    *cache_defeat* is ``"done"`` or ``"failed"`` from the engine's own
+    ``ReadStats.cache_defeat`` when one was asked for, and ``"off"`` when none was:
+    either the caller did not ask or the engine has no such option. ``"off"`` is
+    decided here, never read from the stats, because on an engine before 0.49.0
+    the field does not exist.
+    """
+
+    pcm: bytes
+    speed_honoured_x: int | None
+    cache_defeat: str
+
+
+def read_span_attempt(
     device: str,
     start_lba: int,
     count: int,
@@ -1661,24 +1690,17 @@ def read_span_bytes(
     progress_cb: Callable[[int, int], None] | None = None,
     *,
     cache_defeat: bool = False,
-) -> bytes:
-    """:func:`read_span` returning the PCM, for callers that never wanted a file.
+) -> SpanRead:
+    """:func:`read_span_bytes` plus the speed the drive ran at and the cache defeat.
 
-    Every caller of ``read_span`` bar one immediately did ``read_bytes()`` and
-    unlinked — a full filesystem round-trip for bytes that only ever wanted to be
-    in memory, repeated ``recovery_passes * ladder_rungs`` times per failed track.
-    That temp file was an implementation detail of the subprocess, which could not
-    express "give me the bytes"; naming the call for what it wanted rather than
-    for how it was then implemented is what let the library swap in underneath
-    without touching a single call site.
-
-    Bounded reads only — one track is ~50 MB at worst. Use :func:`read_span` when
-    the destination genuinely is a file, and :func:`read_disc_c2` for a whole disc.
+    The recovery ladder's read. It records both per attempt in PROV
+    (``recovery_attempts_track_<n>``, kgr, 2026-10-25), because ``matched@<N>X``
+    names the speed it asked for and a drive can quantize that request.
 
     *cache_defeat* asks AccuDisc for one far read before the first transfer
     (:data:`_FEATURE_CACHE_DEFEAT`). The recovery ladder sets it on every attempt
-    (kgr, 2026-10-22). On an engine without the capability the read goes ahead
-    as before, and whether it ran is logged by :func:`_log_cache_defeat`.
+    (kgr, 2026-10-22). On an engine without the capability the keyword is omitted,
+    the read goes ahead as before and the result says ``"off"``.
     """
     module = _binding("span read")
     return _call(
@@ -1694,6 +1716,33 @@ def read_span_bytes(
             cache_defeat=cache_defeat,
         ),
     )
+
+
+def read_span_bytes(
+    device: str,
+    start_lba: int,
+    count: int,
+    read_speed: int | None = None,
+    progress_cb: Callable[[int, int], None] | None = None,
+) -> bytes:
+    """:func:`read_span` returning the PCM, for callers that never wanted a file.
+
+    Every caller of ``read_span`` bar one immediately did ``read_bytes()`` and
+    unlinked — a full filesystem round-trip for bytes that only ever wanted to be
+    in memory, repeated ``recovery_passes * ladder_rungs`` times per failed track.
+    That temp file was an implementation detail of the subprocess, which could not
+    express "give me the bytes"; naming the call for what it wanted rather than
+    for how it was then implemented is what let the library swap in underneath
+    without touching a single call site.
+
+    Bounded reads only — one track is ~50 MB at worst. Use :func:`read_span` when
+    the destination genuinely is a file, and :func:`read_disc_c2` for a whole disc.
+    The recovery ladder uses :func:`read_span_attempt`, which also reports the
+    speed the drive ran at and the cache defeat.
+    """
+    return read_span_attempt(
+        device, start_lba, count, read_speed=read_speed, progress_cb=progress_cb
+    ).pcm
 
 
 #: C2 error-pointer bytes per sector (one bit per 8-bit audio word, 2352/8).
