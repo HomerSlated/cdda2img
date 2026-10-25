@@ -19,7 +19,9 @@ replaces the former three (`cdda2img/docs/reference/RECOVERY.md`,
 on either side; the component numbering (§2) is the cross-reference key both
 projects cite.
 
-Last updated: 2026-07-20 (three-doc consolidation + the 3-disc recovery
+Last updated: 2026-10-25 (displacement re-slice 2.3a, flagged-span rung 2.5a,
+and three changes to the speed ladder 2.5: walk order, cache defeat, per-attempt
+PROV). Before that: 2026-07-20 (three-doc consolidation + the 3-disc recovery
 test-suite report, §12). Prior substantive dates preserved inline.
 
 ---
@@ -37,14 +39,15 @@ That sequence *is* the strategy.
 | **Triage** | C1/C2/CU census (2.12) | Plextor vendor opcode | AccuDisc driver + status surface |
 | **Gates** | AR v1/v2 (2.4), CTDB CRC (2.2) — absolute; intra-read (2.6), overlap (2.7) — relative | DB coverage / nothing | absolute → cdda2img; relative → AccuDisc |
 | **Locators** | C2 pointers (2.1), zero-fill erasures (2.8), RS syndromes | C2-capable drive / nothing | AccuDisc (C2, zero-fill); cdda2img (RS) |
-| **Repairers** | CTDB RS parity (2.3); cross-pass consensus (2.11, planned) | CTDB coverage / nothing | cdda2img (parity); AccuDisc (consensus) |
-| **Re-acquirers** | speed-ladder sweeps (2.5), retry ladder (2.9), mode-page tuning (2.10) | nothing | AccuDisc read engine + driver |
+| **Repairers** | CTDB RS parity (2.3); displacement re-slice (2.3a); cross-pass consensus (2.11, planned) | CTDB coverage / AR coverage / nothing | cdda2img (parity, re-slice); AccuDisc (consensus) |
+| **Re-acquirers** | speed-ladder sweeps (2.5), flagged-span re-reads (2.5a, opt-in), retry ladder (2.9), mode-page tuning (2.10) | nothing | AccuDisc read engine + driver |
 | **Infrastructure** | offset-domain management (2.13) | known drive offset | shared: AccuDisc supplies the offset, cdda2img owns the domain |
 
 **The exit chain on a failed gate** (the load-bearing idea):
 
-> CTDB parity repair (zero extra reads) → multi-pass speed-ladder sweep (extra
-> reads, gate-verified) → store best-effort + log `unrecovered`.
+> CTDB parity repair (zero extra reads) → displacement re-slice (zero extra
+> reads, 2.3a) → flagged-span re-reads (opt-in, 2.5a) → multi-pass speed-ladder
+> sweep (extra reads, gate-verified) → store best-effort + log `unrecovered`.
 
 The two repair exits are **alternatives tried in cost order — never run together
 for the same incident.** If parity repairs, the sweep never runs. The one
@@ -171,6 +174,39 @@ read-engine side; "caller" means cdda2img (or any application driving AccuDisc).
   the C2 bitmap / zero-fill marks); always double-gated by CTDB CRC + AR before
   commit. Non-destructive (works on a copy).
 
+### 2.3a Displacement re-slice (zero reads)
+
+- **Name**: displacement check — `cdda2img._displacement_stage` → `displacement.py`
+  (2026-10-10).
+- **Role**: repairer, zero extra reads. A drive can drop or repeat a few samples
+  mid-stream and carry on: every later byte is right and in the wrong place. C2
+  raises no flag, every later track fails AccurateRip, and CTDB declines with
+  `damage exceeds RS capacity`. The check finds the shift at which each failed
+  track verifies and re-slices it from the capture.
+- **Evidence**: a clean pressed disc (second Tracy Chapman, PX-716A, whole pass at
+  40x) returned tracks 6 to 11 bit-intact and 12 samples early, twice in four
+  passes. Both failing rips recorded `ctdb_offset=+18` = 30 − 12 (control: a clean
+  raw copy gives +30). Before the check existed, the ladder re-read those tracks and
+  recovered each at 4X.
+- **AccuDisc status**: not involved (no reads).
+- **cdda2img status**: included, always on, after CTDB (2.3) and before the re-read
+  rungs (2.5a, 2.5). The track holding the slip cannot be placed and goes to the
+  ladder.
+- **Three rules keep a coincidence from being written**, each pinned by a test with
+  a control: (1) only dBAR blocks that matched a *verified* track at shift 0 are
+  used, because another pressing's cohort matches intact audio at a non-zero shift;
+  (2) a shift is nominated by the frame-450 sum and confirmed by the whole-track
+  sum, and without frame-450 data it must be confirmed on a second track; (3) a
+  shifted window may reach no further past either end of the capture than the
+  track's own window does, since zeros there sit in AccurateRip's exclusion zone
+  and would pass. Search radius: AccurateRip's own 2939 samples.
+- **PROV**: `recovery_track_<n>=displaced@+12` (12 samples lost before the track,
+  so it arrived early); `displacement_check=found|none` says the check ran.
+- **Combinations**: the ladder (2.5) tests its own re-reads the same way, reading
+  5 sectors either side of the track; a re-read that is itself displaced is used
+  and recorded as `matched@40X,displaced@+12`, which says the displacement survived
+  a fresh seek. Gated by AR (2.4) throughout.
+
 ### 2.4 AccurateRip v1/v2 checksums
 
 - **Name**: AccurateRip per-track v1/v2 checksums + submission confidences (+ the
@@ -198,14 +234,43 @@ read-engine side; "caller" means cdda2img (or any application driving AccuDisc).
 ### 2.5 Multi-pass reads at varying speeds
 
 - **Name**: speed-ladder sweeps — whole-track re-reads across the drive's probed
-  discrete speeds, fastest→slowest, `recovery_passes` sweeps.
+  discrete speeds, fastest→slowest, `recovery_passes` sweeps. **Walked
+  fastest-first only since 2026-10-22** (see *Walk order* below).
 - **Role**: re-acquirer. The unconditional fallback: needs no drive feature and
   no parity, only a gate.
 - **AccuDisc status**: primitive supported. Span reads at `--speed X`, speed never
   auto-restored; the caller owns the sweep loop. Per-sector speed diversity via
-  `--ladder` inside one invocation.
+  `--ladder` inside one invocation. **Whole-span cache defeat since 0.49.0**
+  (`Device.read(..., cache_defeat=True)`, `9356782`, 2026-10-22): one READ CD of
+  one sector 5000 sectors before the span (after it, below LBA 5000) before the
+  first transfer; no retry, and it never fails the read; the outcome is
+  `ReadStats.cache_defeat` (`OFF`/`DONE`/`FAILED`). Distinct from the per-sector
+  seek-away inside the retry ladder (2.9). Measured on the LITE-ON only: a
+  one-sector far read gave 3/3 fresh reads, while spans of 49 to 196 sectors
+  re-read with nothing between came back cached 15/15 (2026-09-18). Not measured
+  on the PX-716A.
 - **cdda2img status**: included (`_recover_failed_tracks`; AccuDisc engine since
-  the c2read→AccuDisc flip, 2026-07-11 — previously cd-paranoia, R2).
+  the c2read→AccuDisc flip, 2026-07-11 — previously cd-paranoia, R2). **Every
+  attempt asks for the cache defeat** (kgr, 2026-10-22), feature-detected: on an
+  older engine the keyword is omitted, since an unknown keyword raises `TypeError`
+  and nothing translates it.
+- **Walk order** (fixed 2026-10-22; kgr ruled fastest-first, because slow reads
+  were not necessarily more successful). `recovery_profile.rungs_for` is the one
+  place the order is decided, and `--ad-ladder` is walked as written. Until then
+  the loop reversed whatever it was given, a leftover from the ascending
+  `probe_speed_ladder` it was written against. Once `e5c37ff` (2026-07-25) bound a
+  fastest-first ladder, **every rip walked slowest-first** while PROV
+  `recovery_ladder` listed the speeds fastest first. No test noticed, because
+  every test fed an ascending ladder. Auditing containers written before
+  2026-10-22: the walk is the reverse of `recovery_ladder` in both periods. On
+  2026-10-10 that misreading produced a false report that re-reads at 40, 32, 24
+  and 8X had failed; 4X was the first rung tried.
+- **Recorded per attempt** (2026-10-25): PROV `recovery_attempts_track_<n>` lists
+  every attempt in the order it ran, as `<requested>><honoured>:<cache_defeat>`,
+  e.g. `40>40:done,32>24:failed,4>4:done`; `?` = honoured speed unreported, `off`
+  = an engine without the option, `<N>:error` = the read raised.
+  `recovery_track_<n>=matched@<N>X` still names the requested speed.
+  `recovery_ladder` is configuration; this key is the execution.
 - **Dependencies**: a settable read speed (`accudisc_reader.set_speed` → AccuDisc's
   `Device.set_speed`, which prefers SET STREAMING and falls back to
   `CDROM_SELECT_SPEED`); requires an external gate (AR) to know when to stop.
@@ -235,15 +300,17 @@ read-engine side; "caller" means cdda2img (or any application driving AccuDisc).
   wait for it. `--ad-speed 16` printed "Ripping disc at 16x…" while the drive was
   audibly at 8x. **A later, better measurement of the same quantity does not replace
   an earlier one that something consumes earlier.**
-- **Still uncovered — the ladder.** `speed_honoured_x` is the *pass* speed, read back
-  once when applied. The recovery ladder moves speed per rung mid-read, and a scalar
-  pair cannot record that; AccuDisc said so explicitly rather than widening the field
-  to look like it covers it. The available answer is `probe_speed_ladder(points=3)`'s
-  `QUANTIZED` verdict — the drive reporting a lower speed than requested for that
-  rung, asked *before* the read. It is the only exact clause in their verdict function
-  (no rate comparison, no radius caveat). **Do not add a page-2A read-back per rung**:
-  every rung re-read already costs a seek and a MODE SENSE on each is a per-sector tax
-  on the recovery path — if it is worth paying it belongs in the engine.
+- **The ladder's speeds are covered since 2026-10-25.** This bullet used to say
+  the recovery ladder moves speed per rung mid-read, so a scalar
+  `speed_honoured_x` could not record it. That is true of an engine-side
+  `--ladder` / `speed_ladder` inside one read, and AccuDisc said so rather than
+  widening the field. It was never true of cdda2img's ladder, which makes one read
+  per rung with a single `speed_x` and no engine-side ladder (`speed_ladder`
+  defaults to none, checked against the 0.49.0 binding). So the engine's own
+  answer describes each attempt exactly, and it is recorded per attempt (above).
+  **Do not add a page-2A read-back per rung**: every rung re-read already costs a
+  seek and a MODE SENSE on each is a per-sector tax on the recovery path. The
+  engine's answer costs nothing extra.
 - **Conflicts**: alternative exit to parity repair (2.3). Not self-sufficient —
   without a gate there is nothing to verify a candidate against.
 - **Combinations**: sequential after parity-repair failure; each attempt
@@ -251,6 +318,34 @@ read-engine side; "caller" means cdda2img (or any application driving AccuDisc).
   via `match_track_pcm` in the raw offset domain (2.13); spliced sample-exactly on
   first match. Evidence: 6/6 recoveries on the damaged reference disc, no
   consistent winning speed — the *sweep* is the mechanism.
+
+### 2.5a Flagged-span re-reads (opt-in, never run on hardware)
+
+- **Name**: flagged-span rung — `--profile span-flagged` (`granularity = "span"`).
+- **Role**: re-acquirer, cheaper than 2.5. It re-reads only the sectors the capture
+  pass flagged, clustered into padded spans (`span_gap`, `span_pad`), for up to
+  `passes` passes at speeds taken from the ladder.
+- **AccuDisc status**: supported (`read_span_detail`: per-sector status map, C2,
+  and the Q-position lane; needs `caller_map_buffers` and the sub-Q map).
+- **cdda2img status**: included, **opt-in only, and never exercised on a drive**
+  (`_recover_flagged_spans`, 2026-09-24). kgr ruled that its H1/H2 bench runs will
+  not happen, under the replacement PX-716A's minimal-testing terms, so the
+  profile stays `experimental` and `track-ladder` stays the default indefinitely.
+  Design and measurements: `span-recovery-plan.md`.
+- **Acceptance** (a filter, not a certificate): a copy is used only when the read
+  had `verify_passes >= 2`, the map state is `OK`/`RECOVERED`, its own C2 block
+  is all zero, and it is outside the widened Q-position lane. On the LITE-ON all
+  four held for wrong sectors (AccuDisc §18w), so **AccurateRip alone decides**:
+  accepted copies are overlaid in memory and the file is written only on a match
+  (1.1's invariant). The newest accepted copy replaces the previous one, and no
+  sector is retired before the gate passes.
+- **PROV**: `recovery_track_<n>=span_matched@p<k>` (matched after pass `<k>`).
+- **Combinations**: after CTDB (2.3) and the displacement re-slice (2.3a), before
+  2.5. Tracks it recovers are removed from the ladder's list; everything else goes
+  to the ladder unchanged. It declines (PROV `span_declined`) without a damage map,
+  AR responses, engine support, or with `recovery_passes = 0`.
+- **Unmeasured**: `span_gap = 8`, `span_pad = 4`. The captures they were to be tuned
+  against were deleted under the scratch rule.
 
 ### 2.6 Intra-read verification
 
@@ -304,7 +399,10 @@ read-engine side; "caller" means cdda2img (or any application driving AccuDisc).
   ~5000 sectors away so the drive cannot serve its cache.
 - **Role**: re-acquirer (micro scale — within one pass, per sector).
 - **AccuDisc status**: supported (`--retries K`, seek-away, sense classification).
-- **cdda2img status**: included (used inside every sweep read).
+- **cdda2img status**: included (used inside every sweep read). Not the same as
+  the whole-span `cache_defeat` the ladder asks for before each attempt (2.5):
+  this one runs between per-sector retries inside a read, that one once before a
+  read's first transfer.
 - **Conflicts**: interacts with mode-page tuning (2.10): drive-internal retries
   (default 10) multiply with ours.
 - **Combinations**: nested inside every read of the speed sweep (2.5); sense-key
@@ -512,7 +610,8 @@ is a **stochastic lottery**. Consequences, all observed:
   gate-verified, recover at the same rate (6/6).
 
 Implementation shape (shipped): ladder probed per drive; fastest→slowest ×
-`recovery_passes` (fast attempts are cheap, spend them first); each attempt is a
+`recovery_passes` (fast attempts are cheap, spend them first; from 2026-07-25 to
+2026-10-22 the loop actually walked slowest-first, see 2.5); each attempt is a
 raw window read → offset-corrected slice → `match_track_pcm` → sample-exact
 splice of the *verified corrected bytes* at `track_start*2352 + read_offset*4`.
 Splicing corrected bytes at the shifted position means the ±offset samples that
@@ -2044,4 +2143,4 @@ That set lets a future reader distinguish "we never checked" from "we checked
 thoroughly and this disc cannot be verified" — which is the only useful thing
 left to say about it.
 
-Blake3 085c7cc2464f56582583690c1d93bee9298f51d7e8867be7a44b8e3a32938409
+Blake3 e69b3ea6de0cecc73240b5ac3b7e85447b637257bc4914846cefc6c9394f1481
