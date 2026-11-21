@@ -19,9 +19,11 @@ replaces the former three (`cdda2img/docs/reference/RECOVERY.md`,
 on either side; the component numbering (§2) is the cross-reference key both
 projects cite.
 
-Last updated: 2026-11-21 (the bench strategies run in the rip, 2.5b; cache
-defeat measured on the PX-716A, 2.5; the 2026-09-24 ruling keeping the span rung
-off hardware rescinded, 2.5a). Before that: 2026-10-25 (displacement re-slice
+Last updated: 2026-11-21, evening (the automatic recovery chain, 2.5c; perfect
+archival or nothing, 1 and 1.2: a rip with any unverified track writes nothing).
+Earlier the same day: the bench strategies run in the rip, 2.5b; cache defeat
+measured on the PX-716A, 2.5; the 2026-09-24 ruling keeping the span rung off
+hardware rescinded, 2.5a. Before that: 2026-10-25 (displacement re-slice
 2.3a, flagged-span rung 2.5a, and three changes to the speed ladder 2.5: walk
 order, cache defeat, per-attempt PROV). Before that: 2026-07-20 (three-doc consolidation + the 3-disc recovery
 test-suite report, §12). Prior substantive dates preserved inline.
@@ -48,9 +50,11 @@ That sequence *is* the strategy.
 **The exit chain on a failed gate** (the load-bearing idea):
 
 > CTDB parity repair (zero extra reads) → displacement re-slice (zero extra
-> reads, 2.3a) → flagged-span re-reads (opt-in, 2.5a) → multi-pass speed-ladder
-> sweep (extra reads, gate-verified), **or instead of it** a bench strategy chosen
-> by the profile (2.5b) → store best-effort + log `unrecovered`.
+> reads, 2.3a) → **the automatic recovery chain** (2.5c): every re-reading
+> profile, in an order chosen from each track's damage, until every track
+> verifies → **if any track still fails, abort: nothing is written** (since
+> 2026-11-21; until then the rip stored best-effort audio and logged
+> `unrecovered`).
 
 The two repair exits are **alternatives tried in cost order — never run together
 for the same incident.** If parity repairs, the sweep never runs. The one
@@ -95,8 +99,10 @@ clothes, which is exactly what §1.1 forbids.
    judge.
 2. **Absolute gates outrank relative ones** (§1.1).
 3. **Exits in cost order.** Zero extra reads (parity repair) before targeted
-   re-reads (sweep) before giving up honestly (store best-effort, log
-   `unrecovered`, never splice unverified data).
+   re-reads (sweep) before giving up honestly: never splice unverified data,
+   and since 2026-11-21 never write a container with an unverified track at all
+   ("the objective is perfect archival", kgr). The user still has the disc; the
+   abort leaves a failure report with every query and every recovery read.
 4. **Erasures beat errors.** An RS code corrects twice as many known-position
    erasures as unknown-position errors. Much of the toolkit (C2 capture,
    zero-fill) exists to convert the latter into the former.
@@ -361,9 +367,9 @@ read-engine side; "caller" means cdda2img (or any application driving AccuDisc).
 - **Name**: the recovery bench's arms as rip strategies: `sector-hammer`,
   `sector-runup`, `span-fixed`, `max-variation`, `whole-disc` (the profiles of
   those names, or any profile with the same fields).
-- **Role**: re-acquirer, **in place of** the speed ladder (2.5), never before it.
-  Each stands alone (kgr, 2026-11-21): a track it does not recover is
-  `unrecovered`, not handed on.
+- **Role**: re-acquirer, as stages of the automatic recovery chain (2.5c) since
+  the evening of 2026-11-21. (That morning each stood alone, in place of the
+  speed ladder; the chain superseded that.)
 - **History**: until 2026-11-21 these profiles did not run as named. The rip read
   only `granularity = "track"`/`"span"`, so `max-variation` ran as `track-ladder`
   and the other four as `track-constant`, while PROV `recovery_profile` named
@@ -380,8 +386,11 @@ read-engine side; "caller" means cdda2img (or any application driving AccuDisc).
   `--max-attempts`, 8) within `budget_s`. `whole-disc` reads `[0, lead-out)` once
   per pass and tests every failed track against that read, keeping only their
   windows (`accudisc_reader.read_span_windows`).
-- **Additions over the bench**: a cache defeat on every read (2.5; kgr,
-  2026-11-21); every read recorded.
+- **Additions over the bench**: a cache defeat on every read but the whole-disc
+  one (AccuDisc 2026-11-21j: its far target lies past the lead-out); every read
+  recorded; and **the speed changes on every read**, stepping through the
+  admitted ladder, except in a `ladder = "single"` profile (`span-fixed`), which
+  holds `recovery_speed` (2.5c).
 - **PROV**: `recovery_strategy`, `recovery_seed` (`max-variation`, so its random
   reads can be regenerated), `strategy_targets_track_<n>`,
   `strategy_reads_track_<n>` (`<start>+<count>@<requested>><honoured>:<cache_defeat>`
@@ -393,15 +402,54 @@ read-engine side; "caller" means cdda2img (or any application driving AccuDisc).
   `sector-runup` 2/20, `sector-hammer` 2/20, `span-fixed` 1/16; against
   `track-ladder` 19/20. All five profiles are `experimental`: the plans were
   scored on a drive, this implementation has not run on one.
-- **Not comparable to the bench without care**: the cache defeat; the profiles'
-  `speed = "max"` (40x) against the bench's `base_speed = 32`; the bench's fixed
-  ladder (`40,32,24,16,8,4`) against the per-disc admitted one; budgets (bench
-  240–300 s, profiles 120–600 s); targets (bench: C2-flagged sectors of a 32x
-  capture; rip: the damage lane of its own capture pass, the final sector
-  excluded).
-- **Open** (kgr, 2026-11-21): the fixed-speed strategies read at one speed, so a
-  speed that is itself the cause of failure is repeated on every read. How the
-  strategies and the ladder should be ordered and combined is under discussion.
+- **Not comparable to the bench without care**: the cache defeat; the speed
+  stepping (the bench held one speed, `base_speed = 32`, for every arm but
+  `track-ladder` and `max-variation`); the bench's fixed ladder
+  (`40,32,24,16,8,4`) against the per-disc admitted one; budgets (bench 240–300 s,
+  profiles 120–600 s); targets (bench: C2-flagged sectors of a 32x capture; rip:
+  the damage lane of its own capture pass, the final sector excluded).
+
+### 2.5c The automatic recovery chain (not yet run on hardware)
+
+- **Name**: `_recovery_chain` (kgr, 2026-11-21: "The selection should be
+  automatic according to the damage profile, do a speed ladder run per profile,
+  switch automatically to another profile upon failure, and run the full list
+  of profiles to exhaustion, terminating early as soon as all tracks are
+  recovered, or aborting with an error").
+- **Role**: re-acquirer; the whole of the re-read side. Runs when no profile is
+  named. `--profile X` (or `default_profile`) restricts it to stage `X`; only
+  `--ad-*` flags still take the single-ladder path of 2.5.
+- **Order**: per failed track, by `n`, the sectors the capture pass flagged in
+  it (the bench found `n`, not radius, decides which strategy wins):
+  - **none flagged**: `track-ladder`, `track-constant` (the sector shapes would aim
+    at the track's first sector; the span rung has nothing to read);
+  - **1 to 5** (the bench's threshold): `span-flagged`, `max-variation`,
+    `track-ladder`, `track-constant`, `sector-runup`, `span-fixed`,
+    `sector-hammer`;
+  - **more than 5**: `track-ladder`, `track-constant`, `span-flagged`,
+    `max-variation`, `sector-runup`, `span-fixed`, `sector-hammer`;
+  - then one `whole-disc` stage shared by every track still failing, since one
+    read serves them all.
+
+  The order is the July bench's evidence turned into a rule, and is meant to be
+  revised from real rips: PROV records every stage and every read.
+- **Speed**: a profile's `ladder` field is its whole speed policy. `full` reads
+  each attempt at the next admitted rung; `single` holds `recovery_speed`
+  (config or `--recovery-speed`, default 32, snapped to the nearest admitted
+  rung). Shipped `single`: `track-constant` and `span-fixed`, which kgr kept
+  fixed so they stay distinct. `--recovery-speed auto` holds, per track, the
+  rung whose speed-ladder re-read flagged the fewest C2 errors (the ladder asks
+  for C2 for this), the slowest admitted rung until such a re-read has run.
+- **Stopping**: each stage gates its own writes on AccurateRip, and the chain
+  stops at a track's first match. `recovery_ceiling_s` (default 0, none) bounds
+  the whole chain; a rip it stops says so (`recovery_ceiling_hit`), so "raise
+  the ceiling" is not mistaken for "the disc cannot be recovered".
+- **PROV**: `recovery_damage_track_<n>` (`3:low`), `recovery_chain_track_<n>`
+  (`span-flagged:miss,max-variation:hit`), `recovery_speed`, and under `auto`
+  `recovery_speed_track_<n>` and `recovery_c2_track_<n>`. Each stage's own keys
+  carry a `__<stage>` suffix so that no two stages overwrite each other's read
+  records. A rip whose chain fails writes no container; the same record goes to
+  the failure report.
 
 ### 2.6 Intra-read verification
 
@@ -2199,4 +2247,4 @@ That set lets a future reader distinguish "we never checked" from "we checked
 thoroughly and this disc cannot be verified" — which is the only useful thing
 left to say about it.
 
-Blake3 9b719902a7f4fb39d868218b272670080048a865870521d52c54d42f9f77e71d
+Blake3 54206f22fc4b654cd7944190241f6484430e9c07bc1bf6619402ac1ff2d867a4
