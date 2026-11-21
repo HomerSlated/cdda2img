@@ -26,7 +26,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-from cdda2img.accudisc_reader import read_disc_c2
+from cdda2img.accudisc_reader import read_disc_c2, track1_pregap_from_fulltoc
 from cdda2img.subq_toc import build_rip_info
 from cdda2img.toc_parser import ParsedDisc, parse_toc
 
@@ -147,9 +147,9 @@ def main() -> int:
             fulltoc.read_bytes(),
             sub.read_bytes(),
             cdtext.read_bytes() if cdtext.exists() else None,
-            # No AccuDisc Toc here (a saved dump, or the CLI capture): track 1's
-            # pre-gap comes from the full TOC itself, the same rule AccuDisc uses.
-            track1_pregap=None,
+            # AccuDisc folds the saved dump itself (0.50.0), so offline parity
+            # takes track 1's pre-gap from the engine exactly as a rip does.
+            track1_pregap=track1_pregap_from_fulltoc(fulltoc.read_bytes()),
         )
         if info.prov:
             print(f"subq provenance: {info.prov}")

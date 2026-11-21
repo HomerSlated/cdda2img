@@ -61,15 +61,15 @@ def build_rip_info(
     sub_data: bytes,
     cdtext_raw: bytes | None = None,
     *,
-    track1_pregap: int | None,
+    track1_pregap: int,
 ) -> RipInfo:
     """Build a :class:`RipInfo` from single-pass captures.
 
-    *track1_pregap* is AccuDisc's ``Track.pregap`` for the first audio track,
-    which the rip gets from its own disc read (``accudisc_reader.read_disc_c2``).
-    It is required, so every caller says where track 1's pre-gap comes from:
-    ``None`` is for offline callers holding only a saved full TOC, since AccuDisc
-    computes it only from a live drive (:func:`_track1_pregap`).
+    *track1_pregap* is AccuDisc's ``Track.pregap`` for the first audio track:
+    the rip takes it from its own disc read (``accudisc_reader.read_disc_c2``),
+    an offline caller from the saved dump
+    (``accudisc_reader.track1_pregap_from_fulltoc``). It is required and has no
+    fallback, so this module no longer derives the value itself.
 
     The returned RipInfo carries read-stage provenance keys in ``prov``
     (``toc_source``, Q-frame stats, per-track ISRC vote counts). Raises
@@ -185,7 +185,7 @@ def build_rip_info(
     )
 
 
-def _track1_pregap(track: int, start: int, accudisc_pregap: int | None) -> int:
+def _track1_pregap(track: int, start: int, accudisc_pregap: int) -> int:
     """Track 1's program-area pre-gap: AccuDisc's ``Track.pregap``, checked.
 
     The rule is the same on both sides: the first track's INDEX 01 LBA in the full
@@ -196,11 +196,10 @@ def _track1_pregap(track: int, start: int, accudisc_pregap: int | None) -> int:
     and the disc ID, so it raises rather than picking one; ``_rip_disc_stage``
     turns that into a failed rip.
 
-    ``None`` (no AccuDisc TOC: an offline caller with a saved full TOC) falls
-    back to the full TOC's own value, which is the same number by the shared rule.
+    Since AccuDisc 0.50.0 an offline caller gets the value from the saved dump
+    too, so there is no fallback: our copy of the rule is gone (the §182 §3
+    order, completed 2026-11-21).
     """
-    if accudisc_pregap is None:
-        return start
     if accudisc_pregap != start:
         msg = (
             f"track {track}: AccuDisc reports a {accudisc_pregap}-frame pre-gap but "

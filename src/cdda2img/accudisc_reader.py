@@ -1123,6 +1123,11 @@ _FEATURE_SUBQ_MAP = "subq_map"
 #: rip instead of degrading the read.
 _FEATURE_CACHE_DEFEAT = "cache_defeat"
 
+#: ``toc_from_full_toc`` (0.50.0, AccuDisc ``f93d1bd``, 2026-11-21): a ``Toc``
+#: folded from saved READ TOC format-2 bytes with no device, by the same code
+#: ``read_toc_src`` runs live, so a dump and a live read cannot disagree.
+_FEATURE_TOC_FROM_FULL_TOC = "toc_from_full_toc"
+
 
 def _has_feature(module: Any, name: str) -> bool:
     """Whether the binding publishes capability *name* in ``accudisc.features``.
@@ -1445,6 +1450,29 @@ def _read_disc_binding(
                 **extra,
             )
     _log_read_caveats(result.stats, "read", module)
+    return _first_audio_pregap(toc)
+
+
+def track1_pregap_from_fulltoc(fulltoc_raw: bytes) -> int:
+    """AccuDisc's ``Track.pregap`` for the first audio track of a **saved** full TOC.
+
+    For offline callers that hold a format-2 dump and no drive
+    (``tools/toc_parity.py``, ``tools/recovery_bench.py``). Pure: no device is
+    opened. *fulltoc_raw* is what ``read_full_toc_raw`` returns, length field
+    included. Raises ``RuntimeError`` when the engine predates 0.50.0 or cannot
+    fold the bytes; it never falls back to a rule of our own, which is what this
+    replaced (kgr, 2026-11-21).
+    """
+    module = _binding("toc from full toc")
+    if not _has_feature(module, _FEATURE_TOC_FROM_FULL_TOC):
+        msg = (
+            "this AccuDisc cannot fold a saved full TOC (toc_from_full_toc needs "
+            "0.50.0); rebuild it"
+        )
+        raise RuntimeError(msg)
+    toc, _info = _call(
+        module, "toc from full toc", lambda: module.toc_from_full_toc(fulltoc_raw)
+    )
     return _first_audio_pregap(toc)
 
 

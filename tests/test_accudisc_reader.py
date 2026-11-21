@@ -3168,3 +3168,34 @@ def test_the_disc_read_returns_accudiscs_first_track_pregap(
     )
     assert got == pregap
     assert device.calls.count("toc") == 1  # no extra command for it
+
+
+def _toc_binding(pregap: int, features: frozenset[str]) -> _FakeBinding:
+    module = _FakeBinding()
+    module.features = features  # type: ignore[attr-defined]
+    calls: list[bytes] = []
+
+    def toc_from_full_toc(raw: bytes):
+        calls.append(raw)
+        toc = SimpleNamespace(audio_tracks=(SimpleNamespace(pregap=pregap),))
+        return toc, SimpleNamespace()
+
+    module.toc_from_full_toc = toc_from_full_toc  # type: ignore[attr-defined]
+    module.calls = calls  # type: ignore[attr-defined]
+    return module
+
+
+def test_a_saved_full_toc_gets_accudiscs_pregap(monkeypatch) -> None:
+    """Offline callers (toc_parity, recovery_bench) take track 1's pre-gap from
+    AccuDisc 0.50.0's pure fold of the dump, with no device opened."""
+    module = _toc_binding(33, frozenset({"toc_from_full_toc"}))
+    _install(monkeypatch, module)
+    assert ar.track1_pregap_from_fulltoc(b"RAW") == 33
+    assert module.calls == [b"RAW"]  # type: ignore[attr-defined]
+
+
+def test_an_engine_without_the_fold_is_refused_not_worked_around(monkeypatch) -> None:
+    """No fallback to a rule of our own: that copy is what this replaced."""
+    _install(monkeypatch, _toc_binding(33, frozenset()))
+    with pytest.raises(RuntimeError, match=r"0\.50\.0"):
+        ar.track1_pregap_from_fulltoc(b"RAW")

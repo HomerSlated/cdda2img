@@ -1067,13 +1067,17 @@ def geometry_from_fulltoc(
     pregaps/ISRC, which do not move AR/CDDB disc IDs), so an **empty** sub is
     sufficient here — it degrades pregaps to defaults with a warning while leaving
     ``track_lsns``/``disc_last_lsn`` exact."""
+    from cdda2img.accudisc_reader import track1_pregap_from_fulltoc
     from cdda2img.cddb import compute_cddb_disc_id
     from cdda2img.subq_toc import build_rip_info
 
     try:
-        # Only the boundaries are used here, which track 1's pre-gap does not move.
-        info = build_rip_info(fulltoc_raw, b"", track1_pregap=None)
-    except ValueError:
+        info = build_rip_info(
+            fulltoc_raw,
+            b"",
+            track1_pregap=track1_pregap_from_fulltoc(fulltoc_raw),
+        )
+    except (ValueError, RuntimeError):
         return None
     cddb_id = int(compute_cddb_disc_id(info.track_lsns, info.disc_last_lsn), 16)
     return info.track_lsns, info.disc_last_lsn, cddb_id

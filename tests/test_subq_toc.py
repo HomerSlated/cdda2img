@@ -88,7 +88,7 @@ _SUB = _sub_stream((1, 1, 0, 10), (2, 0, 0, 5), (2, 1, 0, 15))
 
 
 def test_build_geometry_and_pregap():
-    info = build_rip_info(_TOC, _SUB, track1_pregap=None)
+    info = build_rip_info(_TOC, _SUB, track1_pregap=0)
     t1, t2 = info.disc.tracks
     assert (t1.start_frame, t1.pregap_frames, t1.duration_frames) == (0, 0, 10)
     assert (t2.start_frame, t2.pregap_frames, t2.duration_frames) == (10, 5, 15)
@@ -143,7 +143,7 @@ def test_track1_pregap_round_trips_through_toc():
 
 def test_build_control_flags_and_aggregate():
     sub = _sub_stream((1, 1, 0x1, 10), (2, 0, 0x2, 5), (2, 1, 0x2, 15))
-    info = build_rip_info(_TOC, sub, track1_pregap=None)
+    info = build_rip_info(_TOC, sub, track1_pregap=0)
     t1, t2 = info.disc.tracks
     assert t1.pre_emphasis is True
     assert t2.copy_permitted is True
@@ -153,12 +153,12 @@ def test_build_control_flags_and_aggregate():
 def test_build_index_points_relative_to_audio_start():
     # INDEX 02 span starting 5 frames into track 2's audio.
     sub = _sub_stream((1, 1, 0, 10), (2, 0, 0, 5), (2, 1, 0, 5), (2, 2, 0, 10))
-    info = build_rip_info(_TOC, sub, track1_pregap=None)
+    info = build_rip_info(_TOC, sub, track1_pregap=0)
     assert info.disc.tracks[1].index_points == [5]
 
 
 def test_build_degrades_without_anchorable_sub():
-    info = build_rip_info(_TOC, b"\x00" * (CD_SUBCODE_SIZE * 4), track1_pregap=None)
+    info = build_rip_info(_TOC, b"\x00" * (CD_SUBCODE_SIZE * 4), track1_pregap=0)
     _t1, t2 = info.disc.tracks
     assert (t2.start_frame, t2.pregap_frames) == (15, 0)  # TOC-only geometry
     assert info.disc.pre_emphasis is None  # uncaptured, not False
@@ -171,7 +171,7 @@ def test_build_degrades_without_anchorable_sub():
 def test_an_empty_capture_still_records_its_q_count():
     """A rip that requested raw sub and received none must leave ``0/0`` rather
     than no key, or the collapse check would read it as "no witness"."""
-    info = build_rip_info(_TOC, b"", track1_pregap=None)
+    info = build_rip_info(_TOC, b"", track1_pregap=0)
     assert info.prov is not None
     assert info.prov["subq_q_valid"] == "0/0"
 
@@ -179,7 +179,7 @@ def test_an_empty_capture_still_records_its_q_count():
 def test_q_valid_counts_every_crc_good_frame():
     """Control for the collapse witness: a well-formed stream reports every frame."""
     sub = _sub_stream((1, 1, 0, 10), (2, 0, 0, 5), (2, 1, 0, 5), (2, 2, 0, 10))
-    info = build_rip_info(_TOC, sub, track1_pregap=None)
+    info = build_rip_info(_TOC, sub, track1_pregap=0)
     n = len(sub) // CD_SUBCODE_SIZE
     assert info.prov is not None
     assert info.prov["subq_q_valid"] == f"{n}/{n}"
@@ -195,7 +195,7 @@ def test_real_fulltoc_with_boundary_sub_slice(fixtures_dir=None):
     fixtures = Path(__file__).parent / "fixtures"
     fulltoc = (fixtures / "tracy.fulltoc").read_bytes()
     sub = (fixtures / "subq_track2_boundary.sub").read_bytes()
-    info = build_rip_info(fulltoc, sub, track1_pregap=None)
+    info = build_rip_info(fulltoc, sub, track1_pregap=0)
     assert len(info.disc.tracks) == 11
     assert info.disc.catalog == "7559607740206"  # 3 MCN frames clear the floor
     t2 = info.disc.tracks[1]
@@ -223,7 +223,7 @@ def test_matching_cdtext_is_kept():
     fulltoc = (_FIXTURES / "tracy.fulltoc").read_bytes()
     sub = (_FIXTURES / "subq_track2_boundary.sub").read_bytes()
     cdtext = (_FIXTURES / "cdemu_utf8.cdtext").read_bytes()
-    info = build_rip_info(fulltoc, sub, cdtext, track1_pregap=None)
+    info = build_rip_info(fulltoc, sub, cdtext, track1_pregap=0)
     assert info.disc.album == "Tracy Chapman"
     assert info.disc.tracks[0].title == "Talkin\u2019 Bout a Revolution"
     assert info.prov is not None
@@ -234,7 +234,7 @@ def test_mismatched_cdtext_is_discarded():
     # The same 11-track Tracy CD-Text against a 2-track disc: the range cannot
     # describe this disc, so it is dropped and no title survives.
     cdtext = (_FIXTURES / "cdemu_utf8.cdtext").read_bytes()
-    info = build_rip_info(_TOC, _SUB, cdtext, track1_pregap=None)
+    info = build_rip_info(_TOC, _SUB, cdtext, track1_pregap=0)
     assert info.disc.album == ""
     assert info.disc.tracks[0].title == ""
     assert info.prov is not None
@@ -276,14 +276,14 @@ def test_accudiscs_track1_pregap_is_checked_against_the_full_toc() -> None:
         build_rip_info(_TOC, _SUB, track1_pregap=33)
 
 
-def test_an_offline_caller_gets_the_full_tocs_own_value() -> None:
-    """``None``: a saved dump and no AccuDisc Toc to ask, so the full TOC's own
-    INDEX 01 is used, which is the same number by the shared rule."""
+def test_there_is_no_fallback_to_our_own_rule() -> None:
+    """Since AccuDisc 0.50.0 every caller has AccuDisc's value, so a caller that
+    passes none is a bug, not an offline case: it fails the check rather than
+    silently using the full TOC's INDEX 01 (§182 §3, completed 2026-11-21)."""
     toc = _fulltoc({1: 33, 2: 15000}, 30000)
     sub = _sub_stream((1, 0, 0, 33), (1, 1, 0, 15000 - 33), (2, 1, 0, 15000))
-    a = build_rip_info(toc, sub, track1_pregap=None)
-    b = build_rip_info(toc, sub, track1_pregap=33)
-    assert a.disc.tracks[0].pregap_frames == b.disc.tracks[0].pregap_frames == 33
+    with pytest.raises(ValueError, match="disagree"):
+        build_rip_info(toc, sub, track1_pregap=None)  # type: ignore[arg-type]
 
 
 def test_the_parameter_is_required() -> None:
