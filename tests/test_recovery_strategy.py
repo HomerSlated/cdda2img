@@ -258,8 +258,8 @@ def test_sector_hammer_repairs_the_flagged_sector_and_nothing_else(
     assert reads.calls[0]["windows"] == [(100, 200)]
 
 
-def test_every_read_asks_for_a_cache_defeat(monkeypatch, tmp_path) -> None:
-    """kgr, 2026-11-21: always request it, which the bench never did."""
+def test_every_sector_read_asks_for_a_cache_defeat(monkeypatch, tmp_path) -> None:
+    """Short repeated windows are what the defeat exists for (AccuDisc 11-21j)."""
     _o, _p, _pcm, reads = _run(
         monkeypatch,
         tmp_path,
@@ -439,3 +439,19 @@ def test_a_strategy_runs_instead_of_the_ladder_never_before_it() -> None:
     assert "_recover_failed_tracks" in orelse
     body = "".join(ast.unparse(s) for s in branches[0].body)
     assert "_recover_failed_tracks" not in body
+
+
+def test_the_whole_disc_read_asks_for_no_cache_defeat(monkeypatch, tmp_path) -> None:
+    """AccuDisc 11-21j: its far target lies past the lead-out, so it would fail on
+    every pass, and the disc's start cannot be cached after a pass that ended at
+    the lead-out. kgr adopted their table."""
+    _o, _p, _pcm, reads = _run(
+        monkeypatch,
+        tmp_path,
+        _profile(granularity="whole-disc", passes=2),
+        bad={50},
+        failed=[1],
+        reads=_Reads(stale=True),
+    )
+    assert len(reads.calls) == 2
+    assert all(c["cache_defeat"] is False for c in reads.calls)

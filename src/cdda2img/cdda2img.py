@@ -4289,13 +4289,21 @@ def _strategy_attempt(
     req: ReadReq,
     windows: list[tuple[int, int]],
     prog_cb: Callable[[int, int], None] | None,
+    *,
+    cache_defeat: bool = True,
 ) -> tuple[list[bytes] | None, str]:
     """One strategy read, keeping *windows*. Returns ``(pieces, record)``.
 
     *pieces* is ``None`` when the read raised; *record* is its entry in
     ``strategy_reads_track_<n>`` either way: ``<start>+<count>@`` followed by the
     ladder's ``<requested>><honoured>:<cache_defeat>``, or ``<requested>:error``.
-    Every read asks for a cache defeat (kgr, 2026-11-21).
+
+    A cache defeat is asked for on every read except the whole-disc one
+    (AccuDisc 2026-11-21j, adopted by kgr): its far target for a read starting
+    at LBA 0 lies past the lead-out, so it would fail on every pass, and the
+    start of the disc cannot be in the cache after a pass that ended at the
+    lead-out. Every other shape repeats or overlaps the previous read's window,
+    which is the case the defeat exists for.
     """
     from cdda2img.accudisc_reader import read_span_windows
 
@@ -4308,7 +4316,7 @@ def _strategy_attempt(
             windows,
             read_speed=req.speed,
             progress_cb=prog_cb,
-            cache_defeat=True,
+            cache_defeat=cache_defeat,
         )
     except (RuntimeError, OSError) as exc:
         log.warning("strategy read %s%dX failed: %s", where, req.speed, exc)
@@ -4575,7 +4583,9 @@ class _StrategyRun:
                 break
             self._status(f"Whole-disc re-read ({k}/{self.profile.passes})")
             windows = [(st.window.lo, st.window.hi) for st in remaining]
-            pieces, record = _strategy_attempt(self.device, req, windows, self.prog_cb)
+            pieces, record = _strategy_attempt(
+                self.device, req, windows, self.prog_cb, cache_defeat=False
+            )
             for st in remaining:
                 st.reads.append(record)
             if pieces is None:
