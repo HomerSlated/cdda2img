@@ -109,6 +109,20 @@
 # attempts = passes x ladder steps). 0 disables the laddered recovery. Default: 3
 # recovery_passes = 3
 
+# The automatic recovery chain. When no --profile is given, each track that fails
+# AccurateRip after CTDB and the displacement check is tried with every recovery
+# profile in an order chosen from its damage (how many sectors the first pass
+# flagged), reading at a different speed on each attempt; a whole-disc re-read for
+# every track still failing comes last. Two stages deliberately read at one fixed
+# speed: track-constant and span-fixed. recovery_speed is that speed in X, snapped
+# to the nearest speed the drive admits on the disc. Default: 32
+# recovery_speed = 32
+
+# Wall-clock ceiling on the whole recovery chain, in seconds. 0 runs every stage to
+# exhaustion. A rip stopped by the ceiling aborts and says so, so the remedy (raise
+# this) is distinguishable from a disc the chain could not recover. Default: 0
+# recovery_ceiling_s = 0
+
 # Recovery profile used when neither --profile nor any --ad-* flag is given. A
 # profile is a complete recovery specification, named after the strategy the bench
 # measured. `cdda2img rip --list-profiles` shows what is installed; the shipped set

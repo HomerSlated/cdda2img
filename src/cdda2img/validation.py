@@ -537,6 +537,12 @@ CONFIG_SCHEMA = Schema(
         "auto": FieldSpec((bool,), default=False),
         "embedart": FieldSpec((bool,), default=False),
         "recovery_passes": FieldSpec((int,), default=3),
+        # The automatic recovery chain (kgr, 2026-11-21): the one speed the two
+        # fixed-speed stages (track-constant, span-fixed) read at, snapped to the
+        # nearest rung the drive admits on this disc; and a wall-clock ceiling on
+        # the whole chain, 0 meaning run every stage to exhaustion.
+        "recovery_speed": FieldSpec((int,), default=32),
+        "recovery_ceiling_s": FieldSpec((int,), default=0),
         "c2_recovery": FieldSpec(
             (str,), default="auto", enum=frozenset({"auto", "on", "off"})
         ),
@@ -584,6 +590,16 @@ CONFIG_SCHEMA = Schema(
         ),
         # 0 disables the AR-recovery ladder entirely (documented); the ceiling is a
         # guard against a typo committing the drive to a multi-day sweep.
+        SanityRule(
+            "recovery_speed",
+            "must be between 1 and 72 (an X rate)",
+            lambda d: 1 <= d["recovery_speed"] <= 72,
+        ),
+        SanityRule(
+            "recovery_ceiling_s",
+            "must not be negative (0 = no ceiling)",
+            lambda d: d["recovery_ceiling_s"] >= 0,
+        ),
         SanityRule(
             "recovery_passes",
             "must be between 0 (disabled) and 100",

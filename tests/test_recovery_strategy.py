@@ -367,8 +367,13 @@ def test_max_variation_records_a_seed_that_regenerates_its_reads(
             6,
         )
     )
-    assert [(c["start"], c["count"], c["speed"]) for c in reads.calls] == [
-        (r.start, r.count, r.speed) for r in expected
+    # The seed regenerates the sectors; the speed steps through the ladder, one
+    # rung per read (kgr, 2026-11-21), whatever the plan drew.
+    assert [(c["start"], c["count"]) for c in reads.calls] == [
+        (r.start, r.count) for r in expected
+    ]
+    assert [c["speed"] for c in reads.calls] == [
+        _LADDER[i % len(_LADDER)] for i in range(len(expected))
     ]
 
 
@@ -455,3 +460,45 @@ def test_the_whole_disc_read_asks_for_no_cache_defeat(monkeypatch, tmp_path) -> 
     )
     assert len(reads.calls) == 2
     assert all(c["cache_defeat"] is False for c in reads.calls)
+
+
+def test_the_runner_steps_and_span_fixed_holds(monkeypatch, tmp_path) -> None:
+    from cdda2img import accudisc_reader as ar2
+
+    reads = _Reads(stale=True)
+    monkeypatch.setattr(ar2, "read_span_windows", reads)
+    monkeypatch.setattr("cdda2img.accuraterip.match_track_pcm", _match)
+    lane = bytes(1 if lba == 150 else 0 for lba in range(_LEADOUT))
+    for kind, prof, fixed, expected in (
+        (
+            "sector-hammer",
+            _profile(granularity="sector", passes=6),
+            None,
+            _LADDER + _LADDER[:1],
+        ),
+        (
+            "span-fixed",
+            _profile(granularity="sector", span=64, passes=3),
+            24,
+            [24, 24, 24],
+        ),
+    ):
+        reads.calls.clear()
+        pcm = _disc(tmp_path, {150})
+        app._recover_by_strategy(
+            kind,
+            prof,
+            device="/dev/sr0",
+            failed_tracks=[SimpleNamespace(track=2)],
+            track_lsns=_LSNS,
+            disc_last_lsn=_LEADOUT - 1,
+            pcm_file=pcm,
+            responses=[["block"]],
+            ladder=_LADDER,
+            read_offset=0,
+            disc_damage=lane,
+            ui=None,
+            seed=1,
+            fixed_speed=fixed,
+        )
+        assert [c["speed"] for c in reads.calls] == expected, kind

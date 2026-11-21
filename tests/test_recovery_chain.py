@@ -1,0 +1,243 @@
+"""The automatic recovery chain (kgr, 2026-11-21).
+
+"The selection should be automatic according to the damage profile, do a speed
+ladder run per profile, switch automatically to another profile upon failure,
+and run the full list of profiles to exhaustion, terminating early as soon as
+all tracks are recovered, or aborting with an error."
+
+Stages are replaced by fakes here: the stages themselves are the span rung, the
+speed ladder and the bench strategies, each tested in its own file. What is
+tested is the order, the stopping rule, the shared whole-disc stage, the record,
+the ceiling, and which existing code each stage hands its track to.
+"""
+
+from __future__ import annotations
+
+import inspect
+from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
+
+from cdda2img import cdda2img as app
+
+
+def _ctx(**over: object) -> app._ChainContext:
+    ctx = app._ChainContext(
+        device="/dev/sr0",
+        track_lsns=[0, 100, 200],
+        disc_last_lsn=299,
+        pcm_file=Path("/nonexistent"),
+        responses=[["block"]],
+        ladder=[40, 32, 24, 8, 4],
+        fixed_speed=32,
+        read_offset=0,
+        disc_damage=None,
+        ui=None,
+        cohort=None,
+    )
+    return ctx._replace(**over)
+
+
+def _lane(flagged: set[int]) -> bytes:
+    return bytes(1 if lba in flagged else 0 for lba in range(300))
+
+
+def _fake_stages(monkeypatch, hits: dict[str, set[int]]):
+    """Each stage recovers the tracks listed for it; returns the call log."""
+    calls: list[tuple[str, tuple[int, ...]]] = []
+
+    def stage(name, results, _ctx):
+        tracks = tuple(r.track for r in results)
+        calls.append((name, tracks))
+        got = {
+            t: (f"{name}@ok" if t in hits.get(name, set()) else "unrecovered")
+            for t in tracks
+        }
+        return got, {f"strategy_reads_track_{t}": f"{name}-reads" for t in tracks}
+
+    monkeypatch.setattr(app, "_run_chain_stage", stage)
+    return calls
+
+
+# ---- classes, order, speed ------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("n", "cls"), [(0, "none"), (1, "low"), (5, "low"), (6, "high")]
+)
+def test_the_damage_class_threshold_is_the_benchs(n: int, cls: str) -> None:
+    assert app._damage_class(n) == cls
+
+
+def test_every_shipped_profile_is_in_the_chain() -> None:
+    """Full utilisation of all recovery profiles: none may be left uninvokable."""
+    from cdda2img.recovery_profile import list_profiles
+
+    used = set(app._CHAIN_ORDER["low"]) | set(app._CHAIN_ORDER["high"]) | {"whole-disc"}
+    assert used == set(list_profiles())
+
+
+def test_nothing_flagged_gets_only_whole_track_shapes() -> None:
+    """The sector shapes would aim at the track's first sector; the span rung
+    has nothing to read."""
+    assert app._CHAIN_ORDER["none"] == ("track-ladder", "track-constant")
+
+
+def test_light_damage_starts_targeted_and_heavy_damage_with_the_ladder() -> None:
+    assert app._CHAIN_ORDER["low"][:2] == ("span-flagged", "max-variation")
+    assert app._CHAIN_ORDER["high"][0] == "track-ladder"
+
+
+@pytest.mark.parametrize(
+    ("speed", "ladder", "snapped"),
+    [
+        (32, [40, 32, 24, 8, 4], 32),
+        (32, [8, 4], 8),
+        (28, [32, 24], 24),
+        (99, [40, 32], 40),
+    ],
+)
+def test_the_fixed_speed_snaps_to_an_admitted_rung(speed, ladder, snapped) -> None:
+    assert app._snap_to_ladder(speed, ladder) == snapped
+
+
+# ---- the runner ----------------------------------------------------------------------
+
+
+def test_a_light_track_walks_its_order_and_stops_at_the_first_hit(monkeypatch) -> None:
+    calls = _fake_stages(monkeypatch, {"track-ladder": {2}})
+    ctx = _ctx(disc_damage=_lane({150, 151}))
+    outcomes, prov = app._recovery_chain(ctx, [SimpleNamespace(track=2)], 32, 0)
+    assert [c[0] for c in calls] == ["span-flagged", "max-variation", "track-ladder"]
+    assert outcomes == {2: "track-ladder@ok"}
+    assert prov["recovery_damage_track_2"] == "2:low"
+    assert prov["recovery_chain_track_2"] == (
+        "span-flagged:miss,max-variation:miss,track-ladder:hit"
+    )
+    assert prov["recovery_speed"] == "32X>32X"
+
+
+def test_stage_keys_never_overwrite_each_other(monkeypatch) -> None:
+    _fake_stages(monkeypatch, {"track-ladder": {2}})
+    _o, prov = app._recovery_chain(
+        _ctx(disc_damage=_lane({150})), [SimpleNamespace(track=2)], 32, 0
+    )
+    assert prov["strategy_reads_track_2__span_flagged"] == "span-flagged-reads"
+    assert prov["strategy_reads_track_2__max_variation"] == "max-variation-reads"
+    assert "strategy_reads_track_2" not in prov
+
+
+def test_unrecovered_tracks_share_one_whole_disc_stage(monkeypatch) -> None:
+    calls = _fake_stages(monkeypatch, {"whole-disc": {1}})
+    tracks = [SimpleNamespace(track=1), SimpleNamespace(track=2)]
+    outcomes, prov = app._recovery_chain(_ctx(), tracks, 32, 0)
+    assert calls[-1] == ("whole-disc", (1, 2))
+    assert [c for c in calls if c[0] == "whole-disc"] == [("whole-disc", (1, 2))]
+    assert outcomes == {1: "whole-disc@ok", 2: "unrecovered"}
+    assert prov["recovery_chain_track_2"].endswith("whole-disc:miss")
+    assert prov["recovery_damage_track_1"] == "0:none"
+
+
+def test_a_recovered_track_is_not_read_again(monkeypatch) -> None:
+    calls = _fake_stages(monkeypatch, {"track-ladder": {1}})
+    tracks = [SimpleNamespace(track=1), SimpleNamespace(track=2)]
+    app._recovery_chain(_ctx(), tracks, 32, 0)
+    assert ("whole-disc", (2,)) in calls
+    assert all(1 not in t for name, t in calls if name != "track-ladder")
+
+
+def test_every_stage_runs_to_exhaustion_without_a_ceiling(monkeypatch) -> None:
+    calls = _fake_stages(monkeypatch, {})
+    app._recovery_chain(
+        _ctx(disc_damage=_lane({150})), [SimpleNamespace(track=2)], 32, 0
+    )
+    assert [c[0] for c in calls] == [*app._CHAIN_ORDER["low"], "whole-disc"]
+
+
+def test_the_ceiling_stops_the_chain_and_says_so(monkeypatch) -> None:
+    calls = _fake_stages(monkeypatch, {})
+    clock = iter([0.0, 0.0, 100.0, 100.0, 100.0, 100.0, 100.0, 100.0])
+    monkeypatch.setattr("time.monotonic", lambda: next(clock, 100.0))
+    outcomes, prov = app._recovery_chain(_ctx(), [SimpleNamespace(track=2)], 32, 10)
+    assert len(calls) == 1  # the deadline passed after the first stage
+    assert prov["recovery_ceiling_hit"] == "10"
+    assert outcomes == {2: "unrecovered"}
+
+
+def test_an_exhausted_chain_is_not_reported_as_a_ceiling(monkeypatch) -> None:
+    _fake_stages(monkeypatch, {})
+    _o, prov = app._recovery_chain(_ctx(), [SimpleNamespace(track=2)], 32, 0)
+    assert "recovery_ceiling_hit" not in prov
+
+
+def test_the_abort_names_the_ceiling_and_the_chain() -> None:
+    from cdda2img import rip_abort as ra
+
+    track = SimpleNamespace(track=2, confidence_v1=None, confidence_v2=None)
+    prov = {
+        "recovery_ceiling_hit": "600",
+        "recovery_chain_track_2": "track-ladder:miss",
+    }
+    with pytest.raises(ra.RipAborted) as exc:
+        app._require_every_track_verified([track], {2: "unrecovered"}, prov)
+    text = " ".join(exc.value.details)  # type: ignore[attr-defined]
+    assert "recovery_ceiling_s" in text
+    assert "track-ladder:miss" in text
+
+
+# ---- each stage hands its track to the existing code ---------------------------------
+
+
+def test_each_stage_reaches_the_code_that_runs_its_profile(monkeypatch) -> None:
+    seen: dict[str, tuple | list | bool] = {}
+
+    def ladder(device, results, lsns, last, pcm, resp, n, ladder, passes, *a):
+        seen["ladder"] = list(ladder)
+        return {}, {}
+
+    def strategy(kind, profile, **kw):
+        seen["strategy"] = (kind, kw["fixed_speed"], kw["ladder"])
+        return {}, {}
+
+    def spans(*a):
+        seen["spans"] = True
+        return {}, {}
+
+    monkeypatch.setattr(app, "_recover_failed_tracks", ladder)
+    monkeypatch.setattr(app, "_recover_by_strategy", strategy)
+    monkeypatch.setattr(app, "_recover_flagged_spans", spans)
+    monkeypatch.setattr(app, "_span_rung_decline", lambda *a: None)
+    ctx = _ctx(disc_damage=_lane({150}), fixed_speed=24)
+    r = [SimpleNamespace(track=2)]
+
+    app._run_chain_stage("track-ladder", r, ctx)
+    assert seen["ladder"] == [40, 32, 24, 8, 4]
+    app._run_chain_stage("track-constant", r, ctx)
+    assert seen["ladder"] == [24]  # the fixed recovery_speed, alone
+    app._run_chain_stage("max-variation", r, ctx)
+    assert seen["strategy"] == ("max-variation", 24, [40, 32, 24, 8, 4])
+    app._run_chain_stage("span-fixed", r, ctx)
+    strategy_seen = seen["strategy"]
+    assert isinstance(strategy_seen, tuple)
+    assert strategy_seen[0] == "span-fixed"
+    app._run_chain_stage("span-flagged", r, ctx)
+    assert seen["spans"] is True
+
+
+def test_a_declined_span_stage_is_a_recorded_miss(monkeypatch) -> None:
+    got, prov = app._run_chain_stage(
+        "span-flagged", [SimpleNamespace(track=2)], _ctx(disc_damage=None)
+    )
+    assert got == {}
+    assert prov == {"span_declined": "no_damage_map"}
+
+
+# ---- wiring --------------------------------------------------------------------------
+
+
+def test_the_chain_runs_only_when_no_profile_was_named() -> None:
+    src = inspect.getsource(app.rip_image)
+    branch = src[src.index('and bound.source == "builtin"') - 200 :]
+    assert "_recovery_chain(" in branch[:2000]
+    assert src.index('bound.source == "builtin"') < src.index("_recovery_chain(")

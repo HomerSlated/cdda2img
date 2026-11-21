@@ -3647,6 +3647,16 @@ def _require_every_track_verified(
     if not failed:
         return
     details = [f"track {t}: {outcomes.get(t, 'no recovery ran')}" for t in failed]
+    if "recovery_ceiling_hit" in provenance:
+        details.append(
+            f"The recovery ceiling ({provenance['recovery_ceiling_hit']} s) stopped the"
+            " chain before every stage ran: raise recovery_ceiling_s (0 = none) to let"
+            " it finish, rather than concluding the disc cannot be recovered."
+        )
+    for t in failed:
+        chain = provenance.get(f"recovery_chain_track_{t}")
+        if chain:
+            details.append(f"track {t} chain: {chain}")
     raise RipAborted(
         EXIT_INVESTIGATE,
         f"{len(failed)} of {len(tracks)} track(s) did not verify against"
@@ -4801,6 +4811,7 @@ def _recover_by_strategy(
     disc_damage: bytes | None,
     ui: TerminalUI | None,
     seed: int,
+    fixed_speed: int | None = None,
 ) -> tuple[dict[int, str], dict[str, str]]:
     """Run one of the bench's recovery strategies **instead of** the speed ladder.
 
@@ -4862,6 +4873,7 @@ def _recover_by_strategy(
             prog_cb=prog_cb,
             pcm_fh=pcm_fh,
             outcomes=outcomes,
+            fixed_speed=fixed_speed,
         )
         if kind == "whole-disc":
             run.whole_disc(tracks)
@@ -4894,6 +4906,20 @@ class _StrategyRun:
     prog_cb: Callable[[int, int], None] | None
     pcm_fh: BinaryIO
     outcomes: dict[int, str]
+    fixed_speed: int | None = None
+
+    def speed_for(self, i: int) -> int:
+        """The speed of read *i*: the next rung of the admitted ladder, cycling.
+
+        kgr, 2026-11-21: a fixed speed repeats a speed that may itself be the cause
+        of the failure, so every strategy's reads step through the ladder, one rung
+        per read. ``span-fixed`` is the exception he kept: it reads at the one
+        ``recovery_speed``, which is what makes it a fixed-span control. The plan
+        in ``strategy_reads`` chooses the sectors; this chooses the speed.
+        """
+        if self.kind == "span-fixed" and self.fixed_speed is not None:
+            return self.fixed_speed
+        return self.ladder[i % len(self.ladder)]
 
     @property
     def leadout(self) -> int:
@@ -4965,9 +4991,10 @@ class _StrategyRun:
         if self.ui is None:
             print(f"  Recovering track {st.track} ({self.kind})…")
         deadline = time.monotonic() + self.profile.budget_s
-        for k, req in enumerate(self._reads(st.track, flagged), 1):
+        for k, planned in enumerate(self._reads(st.track, flagged), 1):
             if time.monotonic() > deadline:
                 break
+            req = replace(planned, speed=self.speed_for(k - 1))
             self._status(f"Recover track {st.track} ({k}/{self.profile.passes})")
             pieces, record = _strategy_attempt(
                 self.device, req, [(w.lo, w.hi)], self.prog_cb
@@ -5001,9 +5028,10 @@ class _StrategyRun:
             print(f"  Re-reading the whole disc for {len(tracks)} track(s)…")
         deadline = time.monotonic() + self.profile.budget_s
         remaining = list(tracks)
-        for k, req in enumerate(self._reads(remaining[0].track, []), 1):
+        for k, planned in enumerate(self._reads(remaining[0].track, []), 1):
             if not remaining or time.monotonic() > deadline:
                 break
+            req = replace(planned, speed=self.speed_for(k - 1))
             self._status(f"Whole-disc re-read ({k}/{self.profile.passes})")
             windows = [(st.window.lo, st.window.hi) for st in remaining]
             pieces, record = _strategy_attempt(
@@ -5027,6 +5055,237 @@ class _StrategyRun:
                 if corrected is not None:
                     self._commit(st, corrected, k)
             remaining = [st for st in remaining if st.track not in self.outcomes]
+
+
+#: The chain's threshold between a lightly and a heavily damaged track, in
+#: flagged sectors: the bench's (run3 aggregate: max-variation "must fall back to
+#: the ladder above n~5"), adopted by kgr 2026-11-21. Recorded per track.
+_LOW_N_MAX = 5
+
+#: The automatic recovery chain's order per damage class (kgr, 2026-11-21). A
+#: track with nothing flagged gets only the whole-track shapes: the sector shapes
+#: would aim at its first sector and the span rung has nothing to read. Light
+#: damage starts with the cheap targeted shapes the bench found fastest at low n;
+#: heavy damage starts with the speed ladder, the only shape reliable at n = 47.
+#: The bench's weakest shapes come last in both. One shared ``whole-disc`` stage
+#: follows for every track still failing, since one read serves them all.
+_CHAIN_ORDER = {
+    "none": ("track-ladder", "track-constant"),
+    "low": (
+        "span-flagged",
+        "max-variation",
+        "track-ladder",
+        "track-constant",
+        "sector-runup",
+        "span-fixed",
+        "sector-hammer",
+    ),
+    "high": (
+        "track-ladder",
+        "track-constant",
+        "span-flagged",
+        "max-variation",
+        "sector-runup",
+        "span-fixed",
+        "sector-hammer",
+    ),
+}
+
+
+def _snap_to_ladder(speed: int, ladder: list[int]) -> int:
+    """The admitted rung nearest *speed* (ties go to the slower rung). A disc the
+    drive throttles may admit nothing near the configured speed: in July the
+    PX-716A admitted only ``[8, 4]`` on a degraded ABBA *Gold*."""
+    return min(ladder, key=lambda r: (abs(r - speed), r))
+
+
+def _damage_class(flagged: int) -> str:
+    if flagged == 0:
+        return "none"
+    return "low" if flagged <= _LOW_N_MAX else "high"
+
+
+class _ChainContext(NamedTuple):
+    """What every chain stage needs, so each stage call stays one line."""
+
+    device: str
+    track_lsns: list[int]
+    disc_last_lsn: int
+    pcm_file: Path
+    responses: list
+    ladder: list[int]
+    fixed_speed: int
+    read_offset: int
+    disc_damage: bytes | None
+    ui: TerminalUI | None
+    cohort: list | None
+
+
+def _run_chain_stage(
+    stage: str, results: list, ctx: _ChainContext
+) -> tuple[dict[int, str], dict[str, str]]:
+    """Run one shipped profile over *results*; return ``(outcomes, prov)``.
+
+    *outcomes* maps a recovered track to how it matched; any other value
+    (``unrecovered``) or absence is a miss. The stage reuses the code each
+    profile already runs on its own: the span rung, the speed ladder (with its
+    displaced-re-read test and per-attempt record), and the bench strategies.
+    """
+    import secrets
+
+    from cdda2img.recovery_profile import load_profile
+    from cdda2img.strategy_reads import strategy_kind
+
+    profile = load_profile(stage)
+    n_tracks = len(ctx.track_lsns)
+    if stage == "span-flagged":
+        reason = _span_rung_decline(ctx.disc_damage, ctx.responses, 1)
+        if reason is not None or ctx.disc_damage is None:
+            return {}, {"span_declined": reason or "no_damage_map"}
+        return _recover_flagged_spans(
+            ctx.device,
+            results,
+            ctx.track_lsns,
+            ctx.disc_last_lsn,
+            ctx.pcm_file,
+            ctx.responses,
+            n_tracks,
+            ctx.ladder,
+            profile,
+            ctx.read_offset,
+            ctx.disc_damage,
+            ctx.ui,
+        )
+    if stage in ("track-ladder", "track-constant"):
+        return _recover_failed_tracks(
+            ctx.device,
+            results,
+            ctx.track_lsns,
+            ctx.disc_last_lsn,
+            ctx.pcm_file,
+            ctx.responses,
+            n_tracks,
+            ctx.ladder if stage == "track-ladder" else [ctx.fixed_speed],
+            profile.passes,
+            ctx.read_offset,
+            ctx.ui,
+            ctx.disc_damage,
+            ctx.cohort,
+        )
+    return _recover_by_strategy(
+        strategy_kind(profile) or stage,
+        profile,
+        device=ctx.device,
+        failed_tracks=results,
+        track_lsns=ctx.track_lsns,
+        disc_last_lsn=ctx.disc_last_lsn,
+        pcm_file=ctx.pcm_file,
+        responses=ctx.responses,
+        ladder=ctx.ladder,
+        read_offset=ctx.read_offset,
+        disc_damage=ctx.disc_damage,
+        ui=ctx.ui,
+        seed=secrets.randbits(32),
+        fixed_speed=ctx.fixed_speed,
+    )
+
+
+def _stage_keys(prov: dict[str, str], stage: str) -> dict[str, str]:
+    """A stage's PROV keys, suffixed with the stage so two stages that write the
+    same key for one track (every strategy writes ``strategy_reads_track_<n>``)
+    do not overwrite each other (rbi_spec ``recovery_chain_track_<n>``)."""
+    tag = stage.replace("-", "_")
+    return {f"{k}__{tag}": v for k, v in prov.items()}
+
+
+def _flagged_in_track(ctx: _ChainContext, track: int) -> int:
+    """Sectors the capture pass flagged in *track*'s raw window, the disc's final
+    sector excluded (a lead-out artefact), as the span rung counts them."""
+    from cdda2img.span_planner import locate_targets
+
+    if not ctx.disc_damage:
+        return 0
+    w = _raw_track_window(ctx.track_lsns, ctx.disc_last_lsn, track - 1, ctx.read_offset)
+    return len(
+        locate_targets(ctx.disc_damage, w.lo, w.hi - w.lo, exclude=(ctx.disc_last_lsn,))
+    )
+
+
+def _chain_one_track(
+    result: object,
+    order: tuple[str, ...],
+    ctx: _ChainContext,
+    expired: Callable[[], bool],
+    prov: dict[str, str],
+    outcomes: dict[int, str],
+) -> list[str]:
+    """Run *order* on one track until a stage matches; return the chain record."""
+    t = result.track  # type: ignore[attr-defined]
+    chain: list[str] = []
+    for stage in order:
+        if expired():
+            break
+        got, stage_prov = _run_chain_stage(stage, [result], ctx)
+        prov.update(_stage_keys(stage_prov, stage))
+        hit = got.get(t, "unrecovered") != "unrecovered"
+        chain.append(f"{stage}:{'hit' if hit else 'miss'}")
+        if hit:
+            outcomes[t] = got[t]
+            break
+    return chain
+
+
+def _recovery_chain(
+    ctx: _ChainContext, failed_tracks: list, recovery_speed: int, ceiling_s: int
+) -> tuple[dict[int, str], dict[str, str]]:
+    """The automatic recovery chain (kgr, 2026-11-21): every shipped profile, in
+    an order chosen from each track's damage, until every track verifies.
+
+    Per track: count the sectors the capture pass flagged, pick the order for
+    that class (:data:`_CHAIN_ORDER`), and run each stage on that track alone
+    until one matches AccurateRip. Then one ``whole-disc`` stage for every track
+    still failing. Every stage gates its own writes on AccurateRip, so a stage
+    that misses leaves the track's audio exactly as it found it.
+
+    *ceiling_s* > 0 bounds the whole chain in wall time; when it stops the chain,
+    ``recovery_ceiling_hit`` says so, so the abort can tell "raise the ceiling"
+    from "the chain was exhausted". Returns ``(outcomes, prov)``: a recovered
+    track maps to how it matched, an unrecovered one to ``unrecovered``.
+    """
+    import time
+
+    deadline = time.monotonic() + ceiling_s if ceiling_s > 0 else None
+
+    def expired() -> bool:
+        return deadline is not None and time.monotonic() > deadline
+
+    prov: dict[str, str] = {
+        "recovery_speed": f"{recovery_speed}X>{ctx.fixed_speed}X",
+    }
+    outcomes: dict[int, str] = {}
+    chains: dict[int, list[str]] = {}
+    for result in failed_tracks:
+        flagged = _flagged_in_track(ctx, result.track)
+        cls = _damage_class(flagged)
+        prov[f"recovery_damage_track_{result.track}"] = f"{flagged}:{cls}"
+        chains[result.track] = _chain_one_track(
+            result, _CHAIN_ORDER[cls], ctx, expired, prov, outcomes
+        )
+    remaining = [r for r in failed_tracks if r.track not in outcomes]
+    if remaining and not expired():
+        got, stage_prov = _run_chain_stage("whole-disc", remaining, ctx)
+        prov.update(_stage_keys(stage_prov, "whole-disc"))
+        for r in remaining:
+            hit = got.get(r.track, "unrecovered") != "unrecovered"
+            chains[r.track].append(f"whole-disc:{'hit' if hit else 'miss'}")
+            if hit:
+                outcomes[r.track] = got[r.track]
+    if expired() and any(r.track not in outcomes for r in failed_tracks):
+        prov["recovery_ceiling_hit"] = str(ceiling_s)
+    for t, chain in chains.items():
+        prov[f"recovery_chain_track_{t}"] = ",".join(chain)
+        outcomes.setdefault(t, "unrecovered")
+    return outcomes, prov
 
 
 def _span_rung_decline(
@@ -5638,83 +5897,116 @@ def rip_image(  # noqa: C901
                 if bound is not None and bound.profile is not None
                 else cfg.recovery_passes
             )
-            span_outcomes, span_keys, failed_tracks = _run_span_rung(
-                bound.profile if bound is not None else None,
-                failed_tracks,
-                device=device,
-                track_lsns=final_track_lsns,
-                disc_last_lsn=final_disc_last_lsn,
-                pcm_file=temp.pcm_file,
-                responses=ar_responses,
-                ladder=list(bound.ladder) if bound is not None else [],
-                recovery_passes=cfg.recovery_passes,
-                read_offset=read_offset,
-                disc_damage=disc_damage,
-                ui=ui,
-            )
-            recovery_outcomes.update(span_outcomes)
-            span_prov.update(span_keys)
-            # A bench strategy (sector-* / span-fixed / max-variation / whole-disc,
-            # picked from the profile's FIELDS) runs instead of the speed ladder and
-            # stands alone (kgr, 2026-11-21). It needs the same preconditions the
-            # ladder does: AR responses to gate with, recovery enabled, and a bound
-            # ladder to take its speeds from.
-            from cdda2img.strategy_reads import strategy_kind as _strategy_kind
-
-            bound_profile = bound.profile if bound is not None else None
-            strategy_kind = (
-                _strategy_kind(bound_profile) if bound_profile is not None else None
-            )
+            # kgr, 2026-11-21: with no profile named, every recovery profile is used,
+            # in an order chosen from each track's damage, until every track
+            # verifies (_recovery_chain). A named profile (or --ad-* flags) runs
+            # that profile alone, as before.
             if (
-                strategy_kind is not None
-                and bound_profile is not None
+                bound is not None
+                and bound.source == "builtin"
                 and recovery_ladder
                 and failed_tracks
             ):
-                import secrets
-
-                outcomes, strategy_keys = _recover_by_strategy(
-                    strategy_kind,
-                    bound_profile,
+                chain_outcomes, chain_prov = _recovery_chain(
+                    _ChainContext(
+                        device=device,
+                        track_lsns=final_track_lsns,
+                        disc_last_lsn=final_disc_last_lsn,
+                        pcm_file=temp.pcm_file,
+                        responses=ar_responses,
+                        ladder=recovery_ladder,
+                        fixed_speed=_snap_to_ladder(
+                            cfg.recovery_speed, recovery_ladder
+                        ),
+                        read_offset=read_offset,
+                        disc_damage=disc_damage,
+                        ui=ui,
+                        cohort=ar_cohort or None,
+                    ),
+                    failed_tracks,
+                    cfg.recovery_speed,
+                    cfg.recovery_ceiling_s,
+                )
+                recovery_outcomes.update(chain_outcomes)
+                ladder_prov.update(chain_prov)
+            else:
+                span_outcomes, span_keys, failed_tracks = _run_span_rung(
+                    bound.profile if bound is not None else None,
+                    failed_tracks,
                     device=device,
-                    failed_tracks=failed_tracks,
                     track_lsns=final_track_lsns,
                     disc_last_lsn=final_disc_last_lsn,
                     pcm_file=temp.pcm_file,
                     responses=ar_responses,
-                    ladder=recovery_ladder,
+                    ladder=list(bound.ladder) if bound is not None else [],
+                    recovery_passes=cfg.recovery_passes,
                     read_offset=read_offset,
                     disc_damage=disc_damage,
                     ui=ui,
-                    seed=secrets.randbits(32),
                 )
-                recovery_outcomes.update(outcomes)
-                ladder_prov.update(strategy_keys)
-            elif recovery_ladder and failed_tracks:
-                outcomes, attempts_prov = _recover_failed_tracks(
-                    device,
-                    failed_tracks,
-                    final_track_lsns,
-                    final_disc_last_lsn,
-                    temp.pcm_file,
-                    ar_responses,
-                    len(final_track_lsns),
-                    recovery_ladder,
-                    recovery_passes,
-                    read_offset,
-                    ui,
-                    disc_damage,
-                    ar_cohort or None,
+                recovery_outcomes.update(span_outcomes)
+                span_prov.update(span_keys)
+                # A bench strategy (sector-* / span-fixed / max-variation / whole-disc,
+                # picked from the profile's FIELDS) runs instead of the speed ladder and
+                # stands alone (kgr, 2026-11-21). It needs the same preconditions the
+                # ladder does: AR responses to gate with, recovery enabled, and a bound
+                # ladder to take its speeds from.
+                from cdda2img.strategy_reads import strategy_kind as _strategy_kind
+
+                bound_profile = bound.profile if bound is not None else None
+                strategy_kind = (
+                    _strategy_kind(bound_profile) if bound_profile is not None else None
                 )
-                recovery_outcomes.update(outcomes)
-                ladder_prov.update(attempts_prov)
-                # No restore here any more. The ladder leaves the drive at its last
-                # rung, and the `finally` at the end of this function puts it back to
-                # the rate captured at entry — which covers this path *and* the clean
-                # rip that never reaches it. Restoring twice was not harmful, but the
-                # old call restored to MAX while the finally restores as-found, so
-                # leaving both would have made the drive's final state depend on
-                # whether recovery happened to run.
+                if (
+                    strategy_kind is not None
+                    and bound_profile is not None
+                    and recovery_ladder
+                    and failed_tracks
+                ):
+                    import secrets
+
+                    outcomes, strategy_keys = _recover_by_strategy(
+                        strategy_kind,
+                        bound_profile,
+                        device=device,
+                        failed_tracks=failed_tracks,
+                        track_lsns=final_track_lsns,
+                        disc_last_lsn=final_disc_last_lsn,
+                        pcm_file=temp.pcm_file,
+                        responses=ar_responses,
+                        ladder=recovery_ladder,
+                        read_offset=read_offset,
+                        disc_damage=disc_damage,
+                        ui=ui,
+                        seed=secrets.randbits(32),
+                    )
+                    recovery_outcomes.update(outcomes)
+                    ladder_prov.update(strategy_keys)
+                elif recovery_ladder and failed_tracks:
+                    outcomes, attempts_prov = _recover_failed_tracks(
+                        device,
+                        failed_tracks,
+                        final_track_lsns,
+                        final_disc_last_lsn,
+                        temp.pcm_file,
+                        ar_responses,
+                        len(final_track_lsns),
+                        recovery_ladder,
+                        recovery_passes,
+                        read_offset,
+                        ui,
+                        disc_damage,
+                        ar_cohort or None,
+                    )
+                    recovery_outcomes.update(outcomes)
+                    ladder_prov.update(attempts_prov)
+                    # No restore here any more. The ladder leaves the drive at its last
+                    # rung, and the `finally` at the end of this function puts it back to
+                    # the rate captured at entry — which covers this path *and* the clean
+                    # rip that never reaches it. Restoring twice was not harmful, but the
+                    # old call restored to MAX while the finally restores as-found, so
+                    # leaving both would have made the drive's final state depend on
+                    # whether recovery happened to run.
 
             rip_type = f"{rip_type}+c2rec"
             _ui_status(ui, "Verifying AccurateRip (re-read)…")

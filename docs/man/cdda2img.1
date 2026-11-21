@@ -108,10 +108,22 @@ track is then intact but out of place, which raises no C2 flag, fails
 AccurateRip, and looks to CTDB like damage beyond its capacity.
 The check finds the shift at which a failed track verifies and re\-slices the
 track from the audio already captured, writing it only on an AccurateRip match.
-Only for tracks neither exit recovered does the drive spin again: each failed track\(cqs sector
-window is re\-read across the drive\(cqs admitted speed ladder, fastest to
-slowest, and the first AccurateRip\-verified result is spliced in
-sample\-exactly.
+Only for tracks neither exit recovered does the drive spin again.
+With no
+.B \-\-profile
+given, every recovery profile is used in an order chosen from how damaged each
+track is (how many sectors the first pass flagged): a lightly damaged track is
+first re\-read at its flagged sectors, a heavily damaged one across the drive\(cqs
+admitted speed ladder, and each profile follows in turn until the track matches
+AccurateRip; a whole\-disc re\-read for every track still failing comes last.
+Every re\-read uses a different speed from the one before, except two profiles
+that deliberately hold one speed
+.RB ( track\-constant " and " span\-fixed ,
+at the configured
+.BR recovery_speed ).
+The first AccurateRip\-verified result is spliced in sample\-exactly.
+.B recovery_ceiling_s
+bounds the whole chain in time (0, the default, lets it run to exhaustion).
 A track that never matches keeps its original audio \(em an unverified splice is
 never written.
 .PP
