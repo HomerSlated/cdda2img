@@ -235,3 +235,24 @@ def test_no_identified_release_matches_nothing(monkeypatch, tmp_path) -> None:
     )
     with pytest.raises(ra.RipAborted):
         app._require_acoustid_identity(_disc(1, group=None), pcm, {}, None)
+
+
+def test_the_consensus_avoids_the_captures_own_speed(monkeypatch, tmp_path) -> None:
+    """With --ad-speed 32 the capture ran at 32; a re-read at 32 would be the
+    same-speed agreement the proof exists to rule out."""
+    first = tmp_path / "disc.pcm"
+    _capture(first, 4)
+    calls: list[int | None] = []
+
+    def read(device, out, read_speed=None, map_cb=None, **_k):
+        calls.append(read_speed)
+        _capture(out, 4)
+        if map_cb is not None:
+            map_cb(SimpleNamespace(damage=bytearray(4)))
+        return 0
+
+    monkeypatch.setattr("cdda2img.accudisc_reader.read_disc_c2", read)
+    monkeypatch.setattr("cdda2img.accudisc_reader.drive_supports_c2", lambda _d: True)
+    monkeypatch.setattr("cdda2img.drive_speed.admitted_ladder", lambda _d: [40, 32, 24])
+    app._digital_media_consensus("/dev/sr0", first, bytes(4), None, capture_speed=32)
+    assert calls == [40]

@@ -2523,6 +2523,23 @@ def _run_metadata_lookups(
             stage7_meta = strip_pressing_mbid(dm)
             disc = _merge_into_disc(stage7_meta, disc)
 
+    # Discogs again, when its first look had no barcode and a MusicBrainz
+    # fallback has since identified the release (found 2026-11-21 by replaying
+    # real discs: ABBA *Gold* through the duration match, Toca under
+    # --digital-media through the ISRC tally, both aborted on a Discogs that ran
+    # before the release was known).
+    disc, chosen_barcode, discogs_hit = _discogs_after_fallback(
+        disc,
+        ui,
+        provenance,
+        chosen_barcode,
+        discogs_hit,
+        identified_release=(
+            provenance.get("duration_match_release")
+            or (mb_result.meta.mb_release_id if mb_result.meta else None)
+        ),
+    )
+
     # CDDB applied DEAD LAST — zero-trust gap-filler, now the absolute lowest
     # precedence (below even stage-7). By now CD-Text, MB, Discogs, AcoustID and
     # the stage-7 duration match have all had their turn, so this only fills
@@ -3558,8 +3575,14 @@ def _digital_media_consensus(
     pcm_file: Path,
     disc_damage: bytes | None,
     ui: TerminalUI | None,
+    capture_speed: int | None = None,
 ) -> dict[str, str]:
     """Prove a ``--digital-media`` rip's audio by byte-identical reads.
+
+    *capture_speed* is the rate the capture pass asked for (``--ad-speed``);
+    ``None`` means the drive's own management, taken as its fastest rung. The
+    re-reads avoid it: a re-read at the capture's own speed is the same-speed
+    agreement this proof exists to rule out.
 
     No disc-ID database holds such a disc, so AccurateRip cannot. Instead the
     capture is read again in full at a **different** admitted rung, and the two
@@ -3587,7 +3610,8 @@ def _digital_media_consensus(
         )
     ladder = drive_speed.admitted_ladder(device)
     extra = 1 if has_c2 else 2
-    rungs = [x for x in ladder if x != ladder[0]][:extra] or ladder[:1]
+    captured_at = capture_speed or ladder[0]
+    rungs = [x for x in ladder if x != captured_at][:extra] or ladder[:1]
     while len(rungs) < extra:
         rungs.append(rungs[-1])
     for k, speed in enumerate(rungs, 2):
@@ -3685,6 +3709,49 @@ def _require_every_track_verified(
         details,
         provenance,
     )
+
+
+def _discogs_after_fallback(
+    disc: RBIDisc,
+    ui: TerminalUI | None,
+    provenance: dict[str, str],
+    chosen_barcode: str | None,
+    discogs_hit: DiscMeta | None,
+    *,
+    identified_release: str | None,
+) -> tuple[RBIDisc, str | None, DiscMeta | None]:
+    """Give Discogs a second look once a MusicBrainz fallback knows the release.
+
+    Discogs is asked straight after the disc-ID lookup, by barcode. When that
+    lookup found nothing (a disc-ID miss, or ``--digital-media``, which skips it)
+    there is no barcode to search, so Discogs records ``no_barcode_to_search``
+    and, under the archival rule, the rip aborts, although the ISRC tally or the
+    duration match then identify the release, barcode included. This repeats the
+    Discogs search and the MB-to-Discogs link check against that release, and
+    recomputes ``lookup_status_discogs``. A no-op whenever the first look had a
+    barcode, or no fallback identified anything. Returns the possibly updated
+    ``(disc, chosen_barcode, discogs_hit)`` the resolver reads.
+    """
+    if provenance.get("discogs_barcode_outcome") != "no_barcode_to_search":
+        return disc, chosen_barcode, discogs_hit
+    if identified_release is None and not disc.barcode:
+        return disc, chosen_barcode, discogs_hit
+    from cdda2img import discogs_lookup as _discogs
+
+    disc, chosen, hit = _prepopulate_from_discogs(
+        disc, ui, barcode_hints=[], provenance=provenance
+    )
+    linked = _discogs_barcode_corroborate(
+        disc, provenance, selected_release_id=identified_release
+    )
+    searched = int(provenance.get("discogs_barcode_matches", "0"))
+    provenance["lookup_status_discogs"] = _r12_status(
+        attempted=_discogs.is_available(),
+        has_data=searched > 0 or linked,
+        errored=False,
+    )
+    provenance["discogs_second_look"] = identified_release or "barcode"
+    return disc, chosen or chosen_barcode, hit or discogs_hit
 
 
 def _mb_prepop_alone(
@@ -5792,7 +5859,11 @@ def rip_image(  # noqa: C901
 
             ar_verify = ARVerifyResult()
             digital_prov = _digital_media_consensus(
-                device, temp.pcm_file, disc_damage, ui
+                device,
+                temp.pcm_file,
+                disc_damage,
+                ui,
+                capture_speed=strategy.read_speed if strategy is not None else None,
             )
         else:
             _ui_status(ui, "Verifying AccurateRip…")

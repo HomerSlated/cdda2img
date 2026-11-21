@@ -23,6 +23,7 @@ import pytest
 from cdda2img import cdda2img as app
 from cdda2img import query_log
 from cdda2img import rip_abort as ra
+from cdda2img.rbi_format import RBIDisc
 
 
 def _v(exc: pytest.ExceptionInfo) -> ra.RipAborted:
@@ -433,3 +434,70 @@ def test_cddb_exchanges_are_recorded() -> None:
     assert rec.service == "CDDB"
     assert rec.query == "cddb query 09121513 19 150 0"
     assert rec.outcome.startswith("202 No match")
+
+
+# ---- Discogs gets a second look once a fallback knows the release ---------------
+# Found 2026-11-21 by tools/archival_replay.py against the live services: ABBA
+# Gold (duration match) and Toca under --digital-media (ISRC tally) both aborted
+# on a Discogs that had been asked before any release was identified.
+
+
+def test_discogs_is_asked_again_once_a_fallback_identified_the_release(
+    monkeypatch,
+) -> None:
+    calls: list[str] = []
+
+    def prepop(disc, ui, barcode_hints, provenance):
+        calls.append("search")
+        provenance["discogs_barcode_matches"] = "2"
+        provenance["discogs_barcode_outcome"] = "ambiguous_2"
+        return disc, "5099", None
+
+    def link(disc, provenance, selected_release_id):
+        calls.append(f"link:{selected_release_id}")
+        return True
+
+    monkeypatch.setattr(app, "_prepopulate_from_discogs", prepop)
+    monkeypatch.setattr(app, "_discogs_barcode_corroborate", link)
+    monkeypatch.setattr("cdda2img.discogs_lookup.is_available", lambda: True)
+    prov = {
+        "discogs_barcode_outcome": "no_barcode_to_search",
+        "lookup_status_discogs": "empty",
+    }
+    disc = RBIDisc(album="", artist="")
+    _d, chosen, _hit = app._discogs_after_fallback(
+        disc, None, prov, None, None, identified_release="rel-1"
+    )
+    assert calls == ["search", "link:rel-1"]
+    assert prov["lookup_status_discogs"] == "OK"
+    assert prov["discogs_second_look"] == "rel-1"
+    assert chosen == "5099"
+
+
+@pytest.mark.parametrize(
+    ("outcome", "release"),
+    [("ambiguous_23", "rel-1"), ("no_barcode_to_search", None)],
+    ids=["first-look-sufficed", "nothing-identified"],
+)
+def test_no_second_look_when_it_cannot_help(monkeypatch, outcome, release) -> None:
+    monkeypatch.setattr(
+        app, "_prepopulate_from_discogs", lambda *a, **k: pytest.fail("asked again")
+    )
+    prov = {"discogs_barcode_outcome": outcome}
+    app._discogs_after_fallback(
+        RBIDisc(album="", artist=""),
+        None,
+        prov,
+        None,
+        None,
+        identified_release=release,
+    )
+    assert "discogs_second_look" not in prov
+
+
+def test_the_second_look_follows_the_fallbacks() -> None:
+    src = inspect.getsource(app._run_metadata_lookups)
+    assert src.index("duration_match_lookup(") < src.index("_discogs_after_fallback(")
+    assert src.index("_discogs_after_fallback(") < src.index(
+        "_collect_metadata_proposals("
+    )
