@@ -81,6 +81,20 @@ _MIN_AR_CONFIDENCE = (
 SILENCE_PAD_DUR = "2"  # seconds of post-track silence (Red Book inter-track gap)
 
 
+def _recovery_speed_arg(value: str) -> int | str:
+    """``--recovery-speed``: an X rate 1..72, or ``auto``."""
+    if value == "auto":
+        return value
+    try:
+        speed = int(value)
+    except ValueError:
+        speed = 0
+    if not 1 <= speed <= 72:
+        msg = f"expected an X rate between 1 and 72, or 'auto': {value!r}"
+        raise argparse.ArgumentTypeError(msg)
+    return speed
+
+
 class _Parser(argparse.ArgumentParser):
     """argparse with usage errors on exit status 1, not 2.
 
@@ -460,10 +474,10 @@ def parse_args() -> argparse.Namespace:
     )
     r_cmd.add_argument(
         "--recovery-speed",
-        type=int,
+        type=_recovery_speed_arg,
         default=None,
         metavar="X",
-        help="The one speed the recovery chain's fixed-speed stages (track-constant, span-fixed) read at, snapped to the nearest speed the drive admits on the disc; every other stage changes speed on each read (default: from config, 32)",
+        help="The one speed the recovery chain's fixed-speed stages (track-constant, span-fixed) read at, snapped to the nearest speed the drive admits on the disc; 'auto' holds, per track, the speed whose earlier re-read flagged the fewest C2 errors. Every other stage changes speed on each read (default: from config, 32)",
     )
     media = r_cmd.add_mutually_exclusive_group()
     media.add_argument(
@@ -4233,8 +4247,13 @@ def _ladder_attempt(
     n_tracks: int,
     responses: list,
     cohort: list | None,
-) -> tuple[tuple[bytes, str] | None, str]:
+    c2: bool = False,
+) -> tuple[tuple[bytes, str] | None, str, int | None]:
     """One targeted re-read of track ``idx`` (0-based) at *speed*.
+
+    Returns ``(hit, attempt, c2_flagged)``; *c2_flagged* is the sectors a C2
+    pointer fired in when *c2* asked for them (``recovery_speed = "auto"``), else
+    ``None``.
 
     Returns ``(hit, attempt)``. *hit* is ``(corrected, outcome)`` when the re-read
     yields the track's AccurateRip-matching audio, else ``None``; *corrected* is
@@ -4283,6 +4302,7 @@ def _ladder_attempt(
         read_speed=speed,
         progress_cb=prog_cb,
         cache_defeat=True,
+        c2=c2,
     )
     attempt = _attempt_record(speed, read.speed_honoured_x, read.cache_defeat)
     window = read.pcm
@@ -4291,9 +4311,9 @@ def _ladder_attempt(
         corrected, idx + 1, n_tracks, responses
     )
     if conf_v1 or conf_v2:
-        return (corrected, f"matched@{speed}X"), attempt
+        return (corrected, f"matched@{speed}X"), attempt, read.c2_flagged
     if not cohort:
-        return None, attempt
+        return None, attempt, read.c2_flagged
     pad_front = (w.lo - w.first) * 588  # samples the window lacks at a disc edge
     pad_back = (w.last - w.hi) * 588
     found = displacement.displaced_in_window(
@@ -4306,9 +4326,13 @@ def _ladder_attempt(
         cohort,
     )
     if found is None:
-        return None, attempt
+        return None, attempt, read.c2_flagged
     shift, data = found
-    return (data, f"matched@{speed}X,{displacement.outcome(shift)}"), attempt
+    return (
+        (data, f"matched@{speed}X,{displacement.outcome(shift)}"),
+        attempt,
+        read.c2_flagged,
+    )
 
 
 def _attempt_record(speed: int, honoured: int | None, cache_defeat: str) -> str:
@@ -4409,8 +4433,13 @@ def _recover_failed_tracks(
     ui: TerminalUI | None,
     disc_damage: bytes | None = None,
     cohort: list | None = None,
+    c2: bool = False,
 ) -> tuple[dict[int, str], dict[str, str]]:
     """Re-read each AR-failed track across the drive's speed ladder until it matches.
+
+    *c2* asks every re-read for C2 pointers and records how many sectors each
+    flagged as ``recovery_c2_track_<n>`` (``40X:12,32X:3``), which is what
+    ``recovery_speed = "auto"`` chooses its rung from (2026-11-21).
 
     For every failed track, walk *ladder* in the order given, ``n_passes`` times (total
     ``n_passes x len(ladder)`` attempts), re-reading the track's raw sector window
@@ -4491,12 +4520,13 @@ def _recover_failed_tracks(
 
             matched = False
             tried: list[str] = []
+            c2_seen: list[str] = []
             for attempt, speed in enumerate(speeds, 1):
                 status_line[0] = f"Recover track {t} ({attempt}/{total_attempts})"
                 if ui is not None:
                     ui.set_status(status_line[0], 0.0)
                 try:
-                    hit, record = _ladder_attempt(
+                    hit, record, flagged = _ladder_attempt(
                         device,
                         track_lsns,
                         disc_last_lsn,
@@ -4507,6 +4537,7 @@ def _recover_failed_tracks(
                         n_tracks,
                         responses,
                         cohort,
+                        c2,
                     )
                 except (RuntimeError, OSError) as exc:
                     log.warning("track %d re-read at %dX failed: %s", t, speed, exc)
@@ -4514,6 +4545,8 @@ def _recover_failed_tracks(
                     continue
 
                 tried.append(record)
+                if flagged is not None:
+                    c2_seen.append(f"{speed}X:{flagged}")
                 if hit is not None:
                     corrected, outcomes[t] = hit
                     _splice_corrected(
@@ -4526,6 +4559,8 @@ def _recover_failed_tracks(
             if not matched:
                 outcomes[t] = "unrecovered"  # keep the original audio
             prov[f"recovery_attempts_track_{t}"] = ",".join(tried)
+            if c2_seen:
+                prov[f"recovery_c2_track_{t}"] = ",".join(c2_seen)
     disc_map_view.release()
     return outcomes, prov
 
@@ -5128,6 +5163,28 @@ class _ChainContext(NamedTuple):
     disc_damage: bytes | None
     ui: TerminalUI | None
     cohort: list | None
+    #: recovery_speed = "auto": the ladder captures C2, and a track's fixed-speed
+    #: stages hold the rung whose re-read flagged fewest (_fewest_c2).
+    auto_speed: bool = False
+
+
+def _initial_fixed_speed(speed: int | str, ladder: list[int]) -> int:
+    """The fixed-speed stages' speed before any evidence: the configured one
+    snapped to the ladder, or for ``auto`` the slowest admitted rung, used only
+    until a track's ladder re-reads say which rung came closest."""
+    if speed == "auto":
+        return min(ladder)
+    return _snap_to_ladder(int(speed), ladder)
+
+
+def _fewest_c2(record: str) -> tuple[int, int]:
+    """``(speed, flagged)`` of the rung whose re-read flagged fewest, from
+    ``recovery_c2_track_<n>`` (``40X:12,32X:3``); ties go to the slower rung."""
+    pairs = []
+    for item in record.split(","):
+        speed, flagged = item.split(":")
+        pairs.append((int(speed.rstrip("X")), int(flagged)))
+    return min(pairs, key=lambda p: (p[1], p[0]))
 
 
 def _run_chain_stage(
@@ -5182,6 +5239,7 @@ def _run_chain_stage(
             ctx.ui,
             ctx.disc_damage,
             ctx.cohort,
+            c2=ctx.auto_speed and profile.ladder == "full",
         )
     kind = strategy_kind(profile)
     if kind is None:  # unreachable for a validated profile; refuse, never guess
@@ -5237,11 +5295,18 @@ def _chain_one_track(
     """Run *order* on one track until a stage matches; return the chain record."""
     t = result.track  # type: ignore[attr-defined]
     chain: list[str] = []
+    if ctx.auto_speed:
+        prov[f"recovery_speed_track_{t}"] = f"{ctx.fixed_speed}X:no_c2_data"
     for stage in order:
         if expired():
             break
         got, stage_prov = _run_chain_stage(stage, [result], ctx)
         prov.update(_stage_keys(stage_prov, stage))
+        c2_record = stage_prov.get(f"recovery_c2_track_{t}")
+        if ctx.auto_speed and c2_record:
+            speed, flagged = _fewest_c2(c2_record)
+            ctx = ctx._replace(fixed_speed=speed)
+            prov[f"recovery_speed_track_{t}"] = f"{speed}X:c2={flagged}"
         hit = got.get(t, "unrecovered") != "unrecovered"
         chain.append(f"{stage}:{'hit' if hit else 'miss'}")
         if hit:
@@ -5253,7 +5318,7 @@ def _chain_one_track(
 def _recovery_chain(
     ctx: _ChainContext,
     failed_tracks: list,
-    recovery_speed: int,
+    recovery_speed: int | str,
     ceiling_s: int,
     only: str | None = None,
 ) -> tuple[dict[int, str], dict[str, str]]:
@@ -5283,7 +5348,9 @@ def _recovery_chain(
         return deadline is not None and time.monotonic() > deadline
 
     prov: dict[str, str] = {
-        "recovery_speed": f"{recovery_speed}X>{ctx.fixed_speed}X",
+        "recovery_speed": "auto"
+        if ctx.auto_speed
+        else f"{recovery_speed}X>{ctx.fixed_speed}X",
     }
     outcomes: dict[int, str] = {}
     chains: dict[int, list[str]] = {}
@@ -5469,7 +5536,7 @@ def rip_image(  # noqa: C901
     strategy: ResolvedStrategy | None = None,
     network_preflight: str | None = None,
     media_override: str | None = None,
-    recovery_speed: int | None = None,
+    recovery_speed: int | str | None = None,
 ) -> Path | None:
     """Rip *device* into an RBI container, or write nothing at all.
 
@@ -5942,9 +6009,10 @@ def rip_image(  # noqa: C901
                         pcm_file=temp.pcm_file,
                         responses=ar_responses,
                         ladder=recovery_ladder,
-                        fixed_speed=_snap_to_ladder(
+                        fixed_speed=_initial_fixed_speed(
                             recovery_speed or cfg.recovery_speed, recovery_ladder
                         ),
+                        auto_speed=(recovery_speed or cfg.recovery_speed) == "auto",
                         read_offset=read_offset,
                         disc_damage=disc_damage,
                         ui=ui,

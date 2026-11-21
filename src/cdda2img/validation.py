@@ -515,7 +515,7 @@ CONFIG_SCHEMA = Schema(
         # fixed-speed stages (track-constant, span-fixed) read at, snapped to the
         # nearest rung the drive admits on this disc; and a wall-clock ceiling on
         # the whole chain, 0 meaning run every stage to exhaustion.
-        "recovery_speed": FieldSpec((int,), default=32),
+        "recovery_speed": FieldSpec((int, str), default=32),
         "recovery_ceiling_s": FieldSpec((int,), default=0),
         "c2_recovery": FieldSpec(
             (str,), default="auto", enum=frozenset({"auto", "on", "off"})
@@ -566,8 +566,12 @@ CONFIG_SCHEMA = Schema(
         # guard against a typo committing the drive to a multi-day sweep.
         SanityRule(
             "recovery_speed",
-            "must be between 1 and 72 (an X rate)",
-            lambda d: 1 <= d["recovery_speed"] <= 72,
+            'must be an X rate between 1 and 72, or "auto" (the rung whose earlier'
+            " re-read flagged the fewest C2 errors)",
+            lambda d: d["recovery_speed"] == "auto"
+            or (
+                isinstance(d["recovery_speed"], int) and 1 <= d["recovery_speed"] <= 72
+            ),
         ),
         SanityRule(
             "recovery_ceiling_s",

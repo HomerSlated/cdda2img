@@ -1655,6 +1655,7 @@ def _read_span_binding(
     progress_cb: Callable[[int, int], None] | None,
     *,
     cache_defeat: bool = False,
+    c2: bool = False,
 ) -> SpanRead:
     """Span read straight into memory — no temp file, no filesystem round-trip.
 
@@ -1683,7 +1684,7 @@ def _read_span_binding(
     transports enter the same ``accudisc_read()``, so this is structural rather
     than a coincidence to re-verify per release.
     """
-    got = _read_windows_binding(
+    got = _windowed_read(c2)(
         module,
         device,
         start_lba,
@@ -1697,6 +1698,7 @@ def _read_span_binding(
         pcm=got.pieces[0],
         speed_honoured_x=got.speed_honoured_x,
         cache_defeat=got.cache_defeat,
+        c2_flagged=got.c2_flagged[0] if got.c2_flagged is not None else None,
     )
 
 
@@ -1712,6 +1714,9 @@ def _read_windows_binding(
     cache_defeat: bool = False,
 ) -> WindowsRead:
     """One read of ``[start_lba, start_lba + count)`` keeping only *windows*.
+
+    :func:`_read_windows_with_c2` is the variant that also counts C2-flagged
+    sectors; callers choose between the two (:func:`_windowed_read`).
 
     The body :func:`_read_span_binding` always had, with the sink generalised from
     "keep everything" to "keep these LBA ranges". A whole-disc recovery pass needs
@@ -1798,6 +1803,128 @@ def _read_windows_binding(
     )
 
 
+def _windowed_read(c2: bool) -> Callable[..., WindowsRead]:
+    """The windowed read to use: with C2 pointers counted, or audio only."""
+    return _read_windows_with_c2 if c2 else _read_windows_binding
+
+
+def _read_windows_with_c2(
+    module: Any,
+    device: str,
+    start_lba: int,
+    count: int,
+    windows: list[tuple[int, int]],
+    read_speed: int | None,
+    progress_cb: Callable[[int, int], None] | None,
+    *,
+    cache_defeat: bool = False,
+) -> WindowsRead:
+    """:func:`_read_windows_binding` with C2 pointers (2026-11-21).
+
+    Each record is the audio followed by its 294-byte C2 block. The audio of every
+    sector inside a window is kept; the C2 block only counts: a sector any pointer
+    fired in is flagged (``WindowsRead.c2_flagged``, per window). The recovery
+    chain's ``recovery_speed = "auto"`` holds the rung whose re-read flagged
+    fewest.
+    """
+    end_lba = start_lba + count
+    clipped = [(max(lo, start_lba), min(hi, end_lba)) for lo, hi in windows]
+    bufs = [bytearray(max(0, hi - lo) * _SECTOR_BYTES) for lo, hi in clipped]
+    flagged = [0] * len(clipped)
+    record = _SECTOR_BYTES + _C2_BYTES
+    done = 0
+
+    def collect(chunk: Any) -> None:
+        nonlocal done
+        if chunk.sector_len != record or chunk.nsec * record != len(chunk.data):
+            msg = (
+                f"span read with C2 returned {chunk.sector_len}-byte records, "
+                f"expected {record} — refusing to reassemble"
+            )
+            raise RuntimeError(msg)
+        _keep_c2_records(
+            memoryview(chunk.data), start_lba + done, chunk.nsec, clipped, bufs, flagged
+        )
+        done += chunk.nsec
+        if progress_cb is not None:
+            progress_cb(done, count)
+
+    result, defeat = _defeated_read(
+        module,
+        device,
+        start_lba,
+        count,
+        collect,
+        read_speed,
+        cache_defeat,
+        c2=module.C2.PTRS,
+    )
+    if done != count:
+        msg = (
+            f"span read delivered {done} of {count} sectors from lba {start_lba} "
+            "— refusing a short span, it would splice silently"
+        )
+        raise RuntimeError(msg)
+    return WindowsRead(
+        pieces=[bytes(buf) for buf in bufs],
+        speed_honoured_x=_speed_x_or_none(module, result.stats),
+        cache_defeat=defeat,
+        c2_flagged=flagged,
+    )
+
+
+def _keep_c2_records(
+    data: memoryview,
+    first_lba: int,
+    nsec: int,
+    clipped: list[tuple[int, int]],
+    bufs: list[bytearray],
+    flagged: list[int],
+) -> None:
+    """Copy each in-window sector's audio and count its C2 block."""
+    record = _SECTOR_BYTES + _C2_BYTES
+    for i in range(nsec):
+        lba = first_lba + i
+        for k, (lo, hi) in enumerate(clipped):
+            if lo <= lba < hi:
+                at = i * record
+                off = (lba - lo) * _SECTOR_BYTES
+                bufs[k][off : off + _SECTOR_BYTES] = data[at : at + _SECTOR_BYTES]
+                if any(data[at + _SECTOR_BYTES : at + record]):
+                    flagged[k] += 1
+
+
+def _defeated_read(
+    module: Any,
+    device: str,
+    start_lba: int,
+    count: int,
+    sink: Callable[[Any], None],
+    read_speed: int | None,
+    cache_defeat: bool,
+    **read_kw: Any,
+) -> tuple[Any, str]:
+    """``Device.read`` with the optional cache defeat; ``(result, defeat)``."""
+    extra: dict[str, Any] = {}
+    if cache_defeat and _has_feature(module, _FEATURE_CACHE_DEFEAT):
+        extra["cache_defeat"] = True
+    with module.Device(device) as dev:
+        result = dev.read(
+            start_lba,
+            count,
+            sink=sink,
+            copy=False,
+            speed_x=read_speed or 0,
+            **read_kw,
+            **extra,
+        )
+    defeat = "off"
+    if extra:
+        _log_cache_defeat(result.stats, start_lba, module)
+        defeat = module.CacheDefeat(result.stats.cache_defeat).name.lower()
+    return result, defeat
+
+
 def _log_cache_defeat(stats: Any, start_lba: int, module: Any) -> None:
     """Say whether a requested cache defeat ran, from the engine's own answer.
 
@@ -1839,6 +1966,8 @@ class SpanRead:
     pcm: bytes
     speed_honoured_x: int | None
     cache_defeat: str
+    #: Sectors a C2 pointer fired in; ``None`` when C2 was not asked for.
+    c2_flagged: int | None = None
 
 
 def read_span_attempt(
@@ -1849,8 +1978,12 @@ def read_span_attempt(
     progress_cb: Callable[[int, int], None] | None = None,
     *,
     cache_defeat: bool = False,
+    c2: bool = False,
 ) -> SpanRead:
     """:func:`read_span_bytes` plus the speed the drive ran at and the cache defeat.
+
+    *c2* also counts the sectors a C2 pointer fired in (``SpanRead.c2_flagged``),
+    for ``recovery_speed = "auto"``.
 
     The recovery ladder's read. It records both per attempt in PROV
     (``recovery_attempts_track_<n>``, kgr, 2026-10-25), because ``matched@<N>X``
@@ -1873,6 +2006,7 @@ def read_span_attempt(
             read_speed,
             progress_cb,
             cache_defeat=cache_defeat,
+            c2=c2,
         ),
     )
 
@@ -1885,6 +2019,8 @@ class WindowsRead:
     pieces: list[bytes]
     speed_honoured_x: int | None
     cache_defeat: str
+    #: Per window, sectors a C2 pointer fired in; ``None`` when C2 was not asked.
+    c2_flagged: list[int] | None = None
 
 
 def read_span_windows(

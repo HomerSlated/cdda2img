@@ -3244,3 +3244,34 @@ def test_media_check_reads_both_signals(monkeypatch, profiles, atip, kind) -> No
     got = ar.media_check("/dev/sr0", sleep=lambda _s: None)
     assert got.kind == kind
     assert "profile=" in got.evidence and "atip=" in got.evidence
+
+
+def test_a_c2_span_read_keeps_the_audio_and_counts_flagged_sectors(monkeypatch) -> None:
+    """recovery_speed = "auto" (2026-11-21): each record is audio + 294 bytes of
+    C2; the audio is kept, a non-zero C2 block flags its sector."""
+    rec = 2352 + 294
+    data = (
+        _sector(10)
+        + bytes(294)
+        + _sector(11)
+        + b"\x01"
+        + bytes(293)
+        + _sector(12)
+        + bytes(294)
+    )
+    chunk = _FakeChunk(3, data, sector_len=rec)
+    device = _FakeDevice(chunks=[chunk])
+    module = _binding_with(device)
+    module.C2 = SimpleNamespace(PTRS="ptrs")  # type: ignore[attr-defined]
+    got = ar._read_windows_with_c2(module, "/dev/sr0", 10, 3, [(10, 13)], None, None)
+    assert got.pieces == [_sector(10) + _sector(11) + _sector(12)]
+    assert got.c2_flagged == [1]
+    assert device.read_kwargs["c2"] == "ptrs"
+
+
+def test_a_c2_span_read_refuses_records_of_the_wrong_width() -> None:
+    device = _FakeDevice(chunks=[_FakeChunk(1, _sector(0), sector_len=2352)])
+    module = _binding_with(device)
+    module.C2 = SimpleNamespace(PTRS="ptrs")  # type: ignore[attr-defined]
+    with pytest.raises(RuntimeError, match="refusing to reassemble"):
+        ar._read_windows_with_c2(module, "/dev/sr0", 0, 1, [(0, 1)], None, None)

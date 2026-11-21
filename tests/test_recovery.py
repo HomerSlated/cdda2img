@@ -39,6 +39,7 @@ def _patch(
     fill: bytes = b"\xaa",
     honoured: dict[int | None, int | None] | None = None,
     defeat: str = "done",
+    c2_by_speed: dict[int | None, int] | None = None,
 ) -> dict:
     """Stub `read_span_attempt` (returns canned window bytes) + `match_track_pcm`
     (matches at one speed). Returns a state dict recording the reads.
@@ -62,9 +63,16 @@ def _patch(
     state: dict = {"speeds": [], "windows": [], "cur": None, "defeat": []}
 
     def fake_read_span(
-        device, start, count, read_speed=None, progress_cb=None, cache_defeat=False
+        device,
+        start,
+        count,
+        read_speed=None,
+        progress_cb=None,
+        cache_defeat=False,
+        c2=False,
     ):
         state["speeds"].append(read_speed)
+        state.setdefault("c2", []).append(c2)
         state["defeat"].append(cache_defeat)
         state["windows"].append((start, count))
         state["cur"] = read_speed
@@ -72,6 +80,7 @@ def _patch(
             pcm=fill * (count * _FRAME),
             speed_honoured_x=(honoured or {}).get(read_speed, read_speed),
             cache_defeat=defeat if cache_defeat else "off",
+            c2_flagged=(c2_by_speed or {}).get(read_speed, 0) if c2 else None,
         )
 
     def fake_match(raw, track, n_tracks, responses):
@@ -95,7 +104,7 @@ def test_recovery_stops_at_first_match_fastest_first(
 ) -> None:
     state = _patch(monkeypatch, match_speed=8)
     pcm = _disc_pcm(tmp_path)
-    ladder = [32, 16, 8, 4]  # fastest first, as rungs_for binds it
+    ladder = [32, 16, 8, 4]  # fastest first, as bind_ladder binds it
 
     outcomes, _attempts = _recover_failed_tracks(
         "/dev/sr0",
@@ -254,7 +263,13 @@ def test_recovery_read_failure_consumes_attempt(
     state: dict = {"calls": 0}
 
     def flaky_read_span(
-        device, start, count, read_speed=None, progress_cb=None, cache_defeat=False
+        device,
+        start,
+        count,
+        read_speed=None,
+        progress_cb=None,
+        cache_defeat=False,
+        c2=False,
     ):
         state["calls"] += 1
         if state["calls"] == 1:
@@ -366,7 +381,13 @@ def test_recovery_tui_status_is_per_attempt(
             statuses.append((text, progress))
 
     def fake_read_span(
-        device, start, count, read_speed=None, progress_cb=None, cache_defeat=False
+        device,
+        start,
+        count,
+        read_speed=None,
+        progress_cb=None,
+        cache_defeat=False,
+        c2=False,
     ):
         if progress_cb is not None:  # emit one mid-window progress event
             progress_cb(5, 10)
@@ -600,3 +621,41 @@ def test_rip_image_writes_the_attempts_into_prov() -> None:
     assert src.index("ladder_prov.update(attempts_prov)") < src.index(
         "provenance.update(ladder_prov)"
     )
+
+
+def test_the_ladder_records_c2_per_rung_only_when_asked(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """recovery_speed = "auto" holds the rung whose re-read flagged fewest
+    (2026-11-21); the record is what it chooses from."""
+    state = _patch(monkeypatch, match_speed=None, c2_by_speed={32: 12, 16: 3, 8: 5})
+    _o, prov = _recover_failed_tracks(
+        "/dev/sr0",
+        _failed(2),
+        _LSNS,
+        _LAST_LSN,
+        _disc_pcm(tmp_path),
+        ["resp"],
+        _N_TRACKS,
+        [32, 16, 8],
+        1,
+        _OFFSET,
+        None,
+        c2=True,
+    )
+    assert prov["recovery_c2_track_2"] == "32X:12,16X:3,8X:5"
+    assert all(state["c2"])
+    _o, prov = _recover_failed_tracks(
+        "/dev/sr0",
+        _failed(2),
+        _LSNS,
+        _LAST_LSN,
+        _disc_pcm(tmp_path),
+        ["resp"],
+        _N_TRACKS,
+        [32],
+        1,
+        _OFFSET,
+        None,
+    )
+    assert "recovery_c2_track_2" not in prov

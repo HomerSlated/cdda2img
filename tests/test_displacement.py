@@ -282,7 +282,13 @@ def _drive(monkeypatch: pytest.MonkeyPatch, what_it_returns: np.ndarray) -> list
     reads: list[tuple[int, int]] = []
 
     def fake_read_span(
-        device, start, count, read_speed=None, progress_cb=None, cache_defeat=False
+        device,
+        start,
+        count,
+        read_speed=None,
+        progress_cb=None,
+        cache_defeat=False,
+        c2=False,
     ):
         reads.append((start, count))
         return adr.SpanRead(

@@ -115,7 +115,9 @@
 # flagged), reading at a different speed on each attempt; a whole-disc re-read for
 # every track still failing comes last. Two stages deliberately read at one fixed
 # speed: track-constant and span-fixed. recovery_speed is that speed in X, snapped
-# to the nearest speed the drive admits on the disc. Default: 32
+# to the nearest speed the drive admits on the disc. "auto" instead holds, for
+# each track, the speed whose earlier speed-ladder re-read of that track flagged
+# the fewest C2 errors. Default: 32
 # recovery_speed = 32
 
 # Wall-clock ceiling on the whole recovery chain, in seconds. 0 runs every stage to

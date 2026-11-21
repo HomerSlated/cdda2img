@@ -192,7 +192,7 @@ def test_the_abort_names_the_ceiling_and_the_chain() -> None:
 def test_each_stage_reaches_the_code_that_runs_its_profile(monkeypatch) -> None:
     seen: dict[str, tuple | list | bool] = {}
 
-    def ladder(device, results, lsns, last, pcm, resp, n, ladder, passes, *a):
+    def ladder(device, results, lsns, last, pcm, resp, n, ladder, passes, *a, **k):
         seen["ladder"] = list(ladder)
         return {}, {}
 
@@ -301,5 +301,90 @@ def test_recovery_speed_is_a_cli_option_over_the_config(monkeypatch) -> None:
     monkeypatch.setattr("sys.argv", ["cdda2img", "rip"])
     assert app.parse_args().recovery_speed is None  # the config's value applies
     src = inspect.getsource(app.rip_image)
-    # Both uses: the snapped fixed speed, and the requested speed PROV records.
-    assert src.count("recovery_speed or cfg.recovery_speed") == 2
+    # Every use: the initial fixed speed, the auto flag, and the requested speed
+    # PROV records.
+    assert src.count("recovery_speed or cfg.recovery_speed") == 3
+
+
+# ---- recovery_speed = "auto": the rung that came closest (2026-11-21) -----------
+
+
+@pytest.mark.parametrize(
+    ("record", "best"),
+    [
+        ("40X:12,32X:3,24X:5", (32, 3)),
+        ("40X:3,8X:3", (8, 3)),  # a tie goes to the slower rung
+        ("24X:0", (24, 0)),
+    ],
+)
+def test_fewest_c2(record: str, best: tuple[int, int]) -> None:
+    assert app._fewest_c2(record) == best
+
+
+def test_auto_starts_at_the_slowest_rung_until_there_is_evidence() -> None:
+    assert app._initial_fixed_speed("auto", [40, 32, 8]) == 8
+    assert app._initial_fixed_speed(32, [40, 32, 8]) == 32
+
+
+def test_auto_holds_the_rung_the_ladder_found_closest(monkeypatch) -> None:
+    held: list[int] = []
+
+    def stage(name, results, ctx):
+        t = results[0].track
+        if name == "track-ladder":
+            return {t: "unrecovered"}, {f"recovery_c2_track_{t}": "40X:9,24X:2,8X:4"}
+        if name == "track-constant":
+            held.append(ctx.fixed_speed)
+        return {t: "unrecovered"}, {}
+
+    monkeypatch.setattr(app, "_run_chain_stage", stage)
+    ctx = _ctx(fixed_speed=4, auto_speed=True)
+    _o, prov = app._recovery_chain(ctx, [SimpleNamespace(track=1)], "auto", 0)
+    assert held == [24]
+    assert prov["recovery_speed_track_1"] == "24X:c2=2"
+    assert prov["recovery_speed"] == "auto"
+
+
+def test_auto_without_ladder_evidence_says_so(monkeypatch) -> None:
+    _fake_stages(monkeypatch, {})
+    ctx = _ctx(fixed_speed=4, auto_speed=True)
+    _o, prov = app._recovery_chain(
+        ctx, [SimpleNamespace(track=1)], "auto", 0, only="track-constant"
+    )
+    assert prov["recovery_speed_track_1"] == "4X:no_c2_data"
+
+
+def test_only_auto_asks_the_ladder_for_c2(monkeypatch) -> None:
+    seen: list[bool] = []
+
+    def ladder(*_a, c2=False, **_k):
+        seen.append(c2)
+        return {}, {}
+
+    monkeypatch.setattr(app, "_recover_failed_tracks", ladder)
+    r = [SimpleNamespace(track=2)]
+    app._run_chain_stage("track-ladder", r, _ctx(auto_speed=True))
+    app._run_chain_stage("track-ladder", r, _ctx(auto_speed=False))
+    app._run_chain_stage("track-constant", r, _ctx(auto_speed=True))
+    assert seen == [True, False, False]
+
+
+@pytest.mark.parametrize(
+    ("value", "ok"), [("auto", True), ("32", True), ("0", False), ("fast", False)]
+)
+def test_the_cli_accepts_a_rate_or_auto(monkeypatch, value: str, ok: bool) -> None:
+    monkeypatch.setattr("sys.argv", ["cdda2img", "rip", "--recovery-speed", value])
+    if ok:
+        app.parse_args()
+    else:
+        with pytest.raises(SystemExit):
+            app.parse_args()
+
+
+def test_the_config_accepts_a_rate_or_auto() -> None:
+    from cdda2img.validation import CONFIG_SCHEMA, validate
+
+    assert validate({"recovery_speed": "auto"}, CONFIG_SCHEMA) == []
+    assert validate({"recovery_speed": 24}, CONFIG_SCHEMA) == []
+    assert validate({"recovery_speed": "fast"}, CONFIG_SCHEMA)
+    assert validate({"recovery_speed": 0}, CONFIG_SCHEMA)

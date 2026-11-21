@@ -274,9 +274,12 @@ Overrides the
 configuration key for this run.
 Default: from config, ask (prompt if TTY, skip otherwise).
 .TP
-.BI \-\-recovery\-speed " X"
+.BI \-\-recovery\-speed " X\fR|\fBauto"
 The one speed, in X, that the recovery chain's fixed\-speed profiles read at,
 snapped to the nearest speed the drive admits on the disc.
+.B auto
+holds, for each track, the speed whose earlier re\-read of that track flagged the
+fewest C2 errors (the slowest admitted speed until such a re\-read has run).
 Every other profile changes speed on each read.
 Default: the configuration's
 .BR recovery_speed ,
