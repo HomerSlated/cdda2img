@@ -3330,6 +3330,11 @@ def _unanswered_services(provenance: dict[str, str]) -> list[str]:
 
 EXIT_WRITTEN_UNVERIFIED = 4
 
+#: The rip was aborted and nothing was written: AccurateRip holds the disc and
+#: matched none of its tracks (kgr, 2026-11-21: "An archive with no provenance is
+#: pointless"). Until then such a rip wrote its container and exited 4.
+EXIT_NOT_WRITTEN = 5
+
 #: Below this share of CRC-good Q frames a rip's subchannel was sliced from the
 #: wrong bytes. The two bounds, both from 2026-09-14 evidence:
 #:
@@ -3359,6 +3364,8 @@ class RipOutcome(NamedTuple):
 
     unanswered: list[str]
     failed_checks: list[str]
+    #: Why the rip was aborted with nothing written (stderr text), else None.
+    aborted: str | None = None
 
 
 def _q_valid_fraction(value: str | None) -> float | None:
@@ -3386,26 +3393,18 @@ def _failed_checks(provenance: dict[str, str]) -> list[str]:
     only since 2026-09-14, so fed a stored container's PROV this would assert a
     confirmed match that was never confirmed.
 
-    Neither check refuses the rip; both make it exit 4. Each can also happen with
-    good audio, so the container is kept for inspection rather than discarded:
-    AccurateRip matches nothing for a pressing it does not hold, and a drive that
-    returns subchannel before C2 (the LITE-ON LH-20A1S does) collapses Q while its
-    audio is correct. What they cannot be is ignored, which is what happened on
+    The Q check does not refuse the rip; it makes it exit 4 and the container is
+    kept for inspection, because Q can collapse with good audio: a drive that
+    returns subchannel before C2 (the LITE-ON LH-20A1S does) zeroes Q while its
+    audio is correct. What it cannot be is ignored, which is what happened on
     2026-09-14: that drive's rip, misframed on 22 sectors in 23, verified 0/11 and
     exited 0 with "No errors occurred" in its sealed log.
+
+    A total AccurateRip miss is no longer a check here. Since 2026-11-21 it aborts
+    the rip before anything is written (:func:`_total_miss_message`), so a fresh
+    provenance that reaches this function never carries ``ar_total_miss``.
     """
     failed: list[str] = []
-    miss = provenance.get("ar_total_miss")
-    if miss is not None:
-        text = "AccurateRip holds this disc and matched none of its tracks"
-        candidates = provenance.get("ar_offset_candidates")
-        if miss == "offset_mismatch" and candidates:
-            text += (
-                f" (a checksum-confirmed match exists at read offset"
-                f" {candidates.split(',')[0]}: a wrong drive offset, or a pressing"
-                " AccurateRip holds only at that offset)"
-            )
-        failed.append(text)
     fraction = _q_valid_fraction(provenance.get("subq_q_valid"))
     if fraction is not None and fraction < _MIN_Q_VALID_FRACTION:
         failed.append(
@@ -3413,6 +3412,44 @@ def _failed_checks(provenance: dict[str, str]) -> list[str]:
             f" ({fraction:.1%}), the signature of a misframed read"
         )
     return failed
+
+
+def _total_miss_message(provenance: dict[str, str]) -> str:
+    """The stderr text for a rip aborted on a total AccurateRip miss.
+
+    It carries the offset search's diagnosis, because with no container written
+    the PROV keys that used to hold it go nowhere. A confirmed candidate offset is
+    named with what to do about it, but **not** as a verdict: a disc AccurateRip
+    holds in several pressings verifies at several offsets, so the candidate is
+    either a wrong drive offset or a pressing held only at that offset. Any other
+    failed check (a collapsed Q count) is appended: a misframed read is the likelier
+    cause of a 0/N than the offset, and should be read first.
+    """
+    lines = [
+        "Rip aborted, nothing written: AccurateRip holds this disc and none of its"
+        " tracks verified."
+    ]
+    miss = provenance.get("ar_total_miss")
+    candidates = provenance.get("ar_offset_candidates")
+    if miss == "offset_mismatch" and candidates:
+        first = candidates.split(",")[0]
+        delta = provenance.get("ar_offset_suggests", "?")
+        lines.append(
+            f"A whole-track checksum matches at read offset {first}"
+            f" (candidates: {candidates}; {delta} from the offset used). Either this"
+            " drive's read_offset is wrong, so set it in its [[drives]] entry and"
+            " re-rip, or AccurateRip holds this pressing only at that offset."
+        )
+    elif miss == "no_offset_verifies":
+        lines.append(
+            "It verifies at no read offset within AccurateRip's search radius: the"
+            " audio differs from every submitted copy (damage, a misread, or a"
+            " pressing AccurateRip does not hold)."
+        )
+    elif miss == "offset_probe_failed":
+        lines.append("The offset search itself failed, so no cause could be named.")
+    lines.extend(f"Also: {reason}." for reason in _failed_checks(provenance))
+    return "\n".join(lines)
 
 
 def _interactive(auto: bool) -> bool:
@@ -3506,6 +3543,8 @@ def _warn_ar_total_miss(ui: TerminalUI | None) -> None:
     skipped them silently, and the offset search that follows ran with no output
     either. Printed first so it covers that wait, however long it turns out to be.
     """
+    import sys
+
     if ui is not None:
         ui.pause()
     print(
@@ -3513,7 +3552,8 @@ def _warn_ar_total_miss(ui: TerminalUI | None) -> None:
         " whole disc\n"
         "   that is wrong everywhere (a wrong drive offset, a pressing AccurateRip"
         " does not\n"
-        "   hold, or a bad burn). Searching for an offset that does verify…"
+        "   hold, or a bad burn). Searching for an offset that does verify…",
+        file=sys.stderr,
     )
     if ui is not None:
         ui.resume()
@@ -3576,6 +3616,8 @@ def _diagnose_total_ar_miss(
     What this does is convert "verification failed, no reason given" into a named
     cause the user can act on. `ar_offset_candidates` lists what would have
     verified; `ar_offset_suggests` names the delta from the offset actually used.
+    Since 2026-11-21 the rip is aborted and nothing is written, so these keys
+    reach the user only through :func:`_total_miss_message` on stderr.
     """
     try:
         from cdda2img.accuraterip import detect_offset, fetch_ar_responses
@@ -4398,7 +4440,9 @@ def rip_image(  # noqa: C901
     Returns a :class:`RipOutcome`: the required services the written container
     records as ``down`` (:func:`_unanswered_services`, exit 3) and the
     verifications its provenance records as failed (:func:`_failed_checks`,
-    exit 4). Both are empty when no container was written.
+    exit 4). Both are empty when no container was written. ``aborted`` carries
+    the stderr text when the rip was refused on a total AccurateRip miss (exit 5,
+    nothing written).
     """
     import sys
 
@@ -4559,6 +4603,7 @@ def rip_image(  # noqa: C901
 
     track_preview: TrackPreview | None = None
     rbi_path: Path | None = None
+    aborted: str | None = None
     # Captured BEFORE anything asks the drive for a rate, and handed back in the
     # `finally` below. AccuDisc documents `read_req.speed_x` as deliberately NOT
     # restored on exit (accudisc.h:1414) — a recovery loop steps rungs without
@@ -4983,7 +5028,8 @@ def rip_image(  # noqa: C901
         # why. Diagnostic only: the audio is untouched, because an offset that
         # verifies is not automatically the right one to store (a widely-pressed
         # disc verifies at several at once).
-        if _ar_has_total_mismatch(ar_verify.tracks):
+        total_miss = _ar_has_total_mismatch(ar_verify.tracks)
+        if total_miss:
             _warn_ar_total_miss(ui)
             _ui_status(ui, "Searching for a verifying offset…")
             provenance.update(
@@ -5009,26 +5055,34 @@ def rip_image(  # noqa: C901
         ar_summary = format_ar_report(
             ar_verify.tracks, read_offset=read_offset, reachable=ar_verify.reachable
         )
-        rbi_path = _finalize_import(
-            disc,
-            temp.pcm_file,
-            provenance,
-            output_stem,
-            loudness,
-            output,
-            arip_block=arip_block,
-            rlog_builder=rlog_builder,
-            ui=ui,
-            low_dr_threshold=low_dr_threshold,
-            cddb_track_lsns=info.track_lsns,
-            cddb_disc_last_lsn=info.disc_last_lsn,
-            cddb_server=cfg.cddb_server,
-            ar_summary=ar_summary,
-            tui=tui,
-            duplicate_policy=duplicate_policy,
-            auto=auto,
-            preferred_country=cfg.preferred_country,
-        )
+        # kgr, 2026-11-21: "An archive with no provenance is pointless." A disc
+        # AccurateRip holds with no track verified is refused before
+        # _finalize_import, which is the first thing that touches the output path
+        # or the catalogue, so an existing container of the same name survives.
+        # The message is printed by the caller once the TUI has stopped.
+        if total_miss:
+            aborted = _total_miss_message(provenance)
+        else:
+            rbi_path = _finalize_import(
+                disc,
+                temp.pcm_file,
+                provenance,
+                output_stem,
+                loudness,
+                output,
+                arip_block=arip_block,
+                rlog_builder=rlog_builder,
+                ui=ui,
+                low_dr_threshold=low_dr_threshold,
+                cddb_track_lsns=info.track_lsns,
+                cddb_disc_last_lsn=info.disc_last_lsn,
+                cddb_server=cfg.cddb_server,
+                ar_summary=ar_summary,
+                tui=tui,
+                duplicate_policy=duplicate_policy,
+                auto=auto,
+                preferred_country=cfg.preferred_country,
+            )
     finally:
         _stop_preview(track_preview)
         if ui is not None:
@@ -5041,6 +5095,8 @@ def rip_image(  # noqa: C901
             drive_speed.restore_drive_speed(device, entry_speed_x)
         temp.cleanup()
 
+    if aborted is not None:
+        return RipOutcome([], [], aborted)
     unanswered = _unanswered_services(provenance) if rbi_path is not None else []
     failed_checks = _failed_checks(provenance) if rbi_path is not None else []
     if extract and rbi_path is not None:
@@ -5250,9 +5306,19 @@ def _report_unanswered(unanswered: list[str]) -> int:
 
 
 def _report_rip_outcome(outcome: RipOutcome) -> int:
-    """Report a finished rip and return its exit code: 4 for a failed check, else
-    whatever :func:`_report_unanswered` says. 4 wins because re-running once a
-    service is back does not fix audio that did not verify."""
+    """Report a finished rip and return its exit code: 5 when it was aborted with
+    nothing written, 4 for a failed check, else whatever :func:`_report_unanswered`
+    says. 4 wins over 3 because re-running once a service is back does not fix
+    audio that did not verify.
+
+    The abort text goes to **stderr** (kgr, 2026-11-21), and is printed here rather
+    than inside ``rip_image`` because the TUI has stopped by now."""
+    if outcome.aborted is not None:
+        import sys
+
+        print(outcome.aborted, file=sys.stderr)
+        print(f"Exit status {EXIT_NOT_WRITTEN}.", file=sys.stderr)
+        return EXIT_NOT_WRITTEN
     if not outcome.failed_checks:
         return _report_unanswered(outcome.unanswered)
     if outcome.unanswered:
@@ -5271,7 +5337,8 @@ def _report_rip_outcome(outcome: RipOutcome) -> int:
 
 def _dispatch(args: argparse.Namespace) -> int:
     """Run the subcommand; return the exit code (0; 3 written without a required
-    service; 4 written but failed a recorded verification, rip only)."""
+    service; 4 written but failed a recorded verification, rip only; 5 rip aborted
+    with nothing written, AccurateRip holding the disc and verifying no track)."""
     if args.cmd == "create":
         from cdda2img.config import load_config
 

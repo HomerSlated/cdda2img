@@ -908,8 +908,9 @@ def format_ar_report(
     # results cannot tell a wrong offset from a misread or a pressing AccurateRip
     # does not hold. The LITE-ON LH-20A1S rip (2026-09-14) printed that advice for
     # a drive that already had an entry and a correct offset, while its audio was
-    # misframed. The rip's own diagnosis (PROV `ar_total_miss`) is the place a
-    # cause is recorded, and only with a confirmed checksum behind it.
+    # misframed. The rip's own diagnosis (`_total_miss_message`, on stderr when
+    # the rip is aborted; PROV `ar_total_miss` before 2026-11-21) is the place a
+    # cause is named, and only with a confirmed checksum behind it.
     if n_ok == 0:
         max_conf = max(r.max_confidence or 0 for r in results)
         return (

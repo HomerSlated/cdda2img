@@ -6,10 +6,13 @@ verified 0/11 against a disc AccurateRip holds at confidence 200, its subchannel
 passed its CRC on no sector at all, and it exited 0, catalogued, with "No errors
 occurred" sealed into its log.
 
-Neither signal refuses the rip. Both occur with good audio too: a pressing
-AccurateRip does not hold, or a drive returning subchannel before C2 at a correct
-stride, which zeroes Q exactly as misframing does. So the container is kept and
-the exit status says to check it.
+A collapsed Q count does not refuse the rip: a drive returning subchannel before
+C2 at a correct stride zeroes Q exactly as misframing does, with good audio. So the
+container is kept and the exit status says to check it.
+
+The AccurateRip half changed on 2026-11-21 (kgr: "An archive with no provenance is
+pointless"). A disc AccurateRip holds with no track verified now aborts the rip:
+nothing is written, the diagnosis goes to stderr, and the exit status is 5.
 """
 
 from __future__ import annotations
@@ -28,22 +31,31 @@ def test_a_clean_rip_fails_nothing() -> None:
 
 
 @pytest.mark.parametrize("miss", ["no_offset_verifies", "offset_probe_failed"])
-def test_a_total_accuraterip_miss_is_a_failed_check(miss: str) -> None:
-    (reason,) = app._failed_checks({"ar_total_miss": miss})
-    assert "matched none of its tracks" in reason
-    assert "offset" not in reason  # no offset claim without a confirmed match
+def test_a_total_accuraterip_miss_is_an_abort_not_a_failed_check(miss: str) -> None:
+    """A total miss no longer reaches exit 4: it aborts, so `_failed_checks` must
+    not double-report it, and the abort text names no offset without a confirmed
+    match."""
+    assert app._failed_checks({"ar_total_miss": miss}) == []
+    text = app._total_miss_message({"ar_total_miss": miss})
+    assert text.startswith("Rip aborted, nothing written")
+    assert "none of its tracks verified" in text
+    assert "read offset -" not in text
+    assert "[[drives]]" not in text
 
 
 def test_a_confirmed_offset_candidate_is_named_without_blaming_the_offset() -> None:
-    """The evidence-backed replacement for the removed "add a [[drives]] entry"
-    hint: a confirmed match is reported, with both of its explanations."""
-    (reason,) = app._failed_checks({
+    """With no container, the abort text is the only place the offset search's
+    result survives: a confirmed match is reported, with both of its explanations
+    and the delta to act on."""
+    text = app._total_miss_message({
         "ar_total_miss": "offset_mismatch",
         "ar_offset_candidates": "-669,0",
         "ar_offset_suggests": "-675",
     })
-    assert "read offset -669" in reason
-    assert "pressing" in reason
+    assert "read offset -669" in text
+    assert "-675 from the offset used" in text
+    assert "[[drives]]" in text
+    assert "pressing" in text
 
 
 @pytest.mark.parametrize(
@@ -98,12 +110,13 @@ def test_the_q_count_subq_toc_writes_is_the_one_failed_checks_reads() -> None:
     assert any("subchannel Q" in reason for reason in failed)
 
 
-def test_both_checks_are_reported() -> None:
-    failed = app._failed_checks({
-        "ar_total_miss": "no_offset_verifies",
-        "subq_q_valid": "0/100",
-    })
-    assert len(failed) == 2
+def test_a_collapsed_q_count_is_carried_into_the_abort_text() -> None:
+    """A misframed read is the likelier cause of a 0/N than the offset, so an abort
+    must still say the Q count collapsed: before 2026-11-21 that was the second
+    of two exit-4 reasons, and the abort must not drop it."""
+    prov = {"ar_total_miss": "no_offset_verifies", "subq_q_valid": "0/100"}
+    text = app._total_miss_message(prov)
+    assert "Also: subchannel Q passed its CRC on 0/100" in text
 
 
 def test_report_exit_codes_and_precedence(capsys) -> None:
@@ -121,6 +134,54 @@ def test_report_exit_codes_and_precedence(capsys) -> None:
     # One exit status is announced, not two contradictory ones.
     assert "Exit status 4" in out
     assert "Exit status 3" not in out
+
+
+def test_an_aborted_rip_exits_5_on_stderr_only(capsys) -> None:
+    """kgr, 2026-11-21: the notice goes to stderr. Exit 5, not 4: 4's contract
+    is that a container was written."""
+    outcome = app.RipOutcome([], [], "Rip aborted, nothing written: X.")
+    rc = app._report_rip_outcome(outcome)
+    captured = capsys.readouterr()
+    assert rc == app.EXIT_NOT_WRITTEN == 5
+    assert captured.out == ""
+    assert "Rip aborted, nothing written: X." in captured.err
+    assert "Exit status 5" in captured.err
+
+
+def test_a_total_miss_writes_no_container() -> None:
+    """The one call that creates the container and touches the catalogue sits in
+    the ELSE arm of the total-miss gate, and an aborted rip returns before the
+    exit-3/exit-4 bookkeeping. Reading the source rather than driving a whole rip,
+    as the neighbouring tests do."""
+    tree = ast.parse(textwrap.dedent(inspect.getsource(app.rip_image)))
+    finalize = [
+        n
+        for n in ast.walk(tree)
+        if isinstance(n, ast.Call)
+        and isinstance(n.func, ast.Name)
+        and n.func.id == "_finalize_import"
+    ]
+    assert len(finalize) == 1
+    gates = [
+        n
+        for n in ast.walk(tree)
+        if isinstance(n, ast.If) and ast.unparse(n.test) == "total_miss"
+    ]
+    guarded = [
+        g
+        for g in gates
+        if any(finalize[0] in list(ast.walk(stmt)) for stmt in g.orelse)
+        and any("_total_miss_message" in ast.unparse(stmt) for stmt in g.body)
+    ]
+    assert len(guarded) == 1, "_finalize_import is not gated on the total miss"
+    early = [
+        n
+        for n in ast.walk(tree)
+        if isinstance(n, ast.If)
+        and ast.unparse(n.test) == "aborted is not None"
+        and any(isinstance(stmt, ast.Return) for stmt in n.body)
+    ]
+    assert len(early) == 1
 
 
 def test_rip_returns_its_failed_checks_only_for_a_written_container() -> None:

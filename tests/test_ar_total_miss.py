@@ -154,9 +154,11 @@ def test_the_skipped_repair_is_announced(capsys: pytest.CaptureFixture[str]) -> 
     on 2026-09-23, as a rip that stalled and failed with no reason. The notice must
     name the skip and the search that follows it."""
     C._warn_ar_total_miss(None)
-    out = capsys.readouterr().out
-    assert "no repair was attempted" in out
-    assert "Searching for an offset" in out
+    captured = capsys.readouterr()
+    # stderr since 2026-11-21 (kgr): the rip is about to be aborted.
+    assert captured.out == ""
+    assert "no repair was attempted" in captured.err
+    assert "Searching for an offset" in captured.err
 
 
 def test_the_notice_is_wired_ahead_of_the_offset_search() -> None:
