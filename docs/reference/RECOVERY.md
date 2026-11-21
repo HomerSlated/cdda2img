@@ -19,9 +19,11 @@ replaces the former three (`cdda2img/docs/reference/RECOVERY.md`,
 on either side; the component numbering (§2) is the cross-reference key both
 projects cite.
 
-Last updated: 2026-10-25 (displacement re-slice 2.3a, flagged-span rung 2.5a,
-and three changes to the speed ladder 2.5: walk order, cache defeat, per-attempt
-PROV). Before that: 2026-07-20 (three-doc consolidation + the 3-disc recovery
+Last updated: 2026-11-21 (the bench strategies run in the rip, 2.5b; cache
+defeat measured on the PX-716A, 2.5; the 2026-09-24 ruling keeping the span rung
+off hardware rescinded, 2.5a). Before that: 2026-10-25 (displacement re-slice
+2.3a, flagged-span rung 2.5a, and three changes to the speed ladder 2.5: walk
+order, cache defeat, per-attempt PROV). Before that: 2026-07-20 (three-doc consolidation + the 3-disc recovery
 test-suite report, §12). Prior substantive dates preserved inline.
 
 ---
@@ -40,14 +42,15 @@ That sequence *is* the strategy.
 | **Gates** | AR v1/v2 (2.4), CTDB CRC (2.2) — absolute; intra-read (2.6), overlap (2.7) — relative | DB coverage / nothing | absolute → cdda2img; relative → AccuDisc |
 | **Locators** | C2 pointers (2.1), zero-fill erasures (2.8), RS syndromes | C2-capable drive / nothing | AccuDisc (C2, zero-fill); cdda2img (RS) |
 | **Repairers** | CTDB RS parity (2.3); displacement re-slice (2.3a); cross-pass consensus (2.11, planned) | CTDB coverage / AR coverage / nothing | cdda2img (parity, re-slice); AccuDisc (consensus) |
-| **Re-acquirers** | speed-ladder sweeps (2.5), flagged-span re-reads (2.5a, opt-in), retry ladder (2.9), mode-page tuning (2.10) | nothing | AccuDisc read engine + driver |
+| **Re-acquirers** | speed-ladder sweeps (2.5), flagged-span re-reads (2.5a, opt-in), bench strategies (2.5b, opt-in, in place of 2.5), retry ladder (2.9), mode-page tuning (2.10) | nothing | AccuDisc read engine + driver |
 | **Infrastructure** | offset-domain management (2.13) | known drive offset | shared: AccuDisc supplies the offset, cdda2img owns the domain |
 
 **The exit chain on a failed gate** (the load-bearing idea):
 
 > CTDB parity repair (zero extra reads) → displacement re-slice (zero extra
 > reads, 2.3a) → flagged-span re-reads (opt-in, 2.5a) → multi-pass speed-ladder
-> sweep (extra reads, gate-verified) → store best-effort + log `unrecovered`.
+> sweep (extra reads, gate-verified), **or instead of it** a bench strategy chosen
+> by the profile (2.5b) → store best-effort + log `unrecovered`.
 
 The two repair exits are **alternatives tried in cost order — never run together
 for the same incident.** If parity repairs, the sweep never runs. The one
@@ -236,8 +239,9 @@ read-engine side; "caller" means cdda2img (or any application driving AccuDisc).
 - **Name**: speed-ladder sweeps — whole-track re-reads across the drive's probed
   discrete speeds, fastest→slowest, `recovery_passes` sweeps. **Walked
   fastest-first only since 2026-10-22** (see *Walk order* below).
-- **Role**: re-acquirer. The unconditional fallback: needs no drive feature and
-  no parity, only a gate.
+- **Role**: re-acquirer. The fallback for every profile except the five bench
+  strategies, which run instead of it (2.5b): needs no drive feature and no
+  parity, only a gate.
 - **AccuDisc status**: primitive supported. Span reads at `--speed X`, speed never
   auto-restored; the caller owns the sweep loop. Per-sector speed diversity via
   `--ladder` inside one invocation. **Whole-span cache defeat since 0.49.0**
@@ -247,8 +251,12 @@ read-engine side; "caller" means cdda2img (or any application driving AccuDisc).
   `ReadStats.cache_defeat` (`OFF`/`DONE`/`FAILED`). Distinct from the per-sector
   seek-away inside the retry ladder (2.9). Measured on the LITE-ON only: a
   one-sector far read gave 3/3 fresh reads, while spans of 49 to 196 sectors
-  re-read with nothing between came back cached 15/15 (2026-09-18). Not measured
-  on the PX-716A.
+  re-read with nothing between came back cached 15/15 (2026-09-18). **Measured on
+  the original PX-716A on 2026-11-21** (AccuDisc 2026-11-21d, through the USB
+  bridge, no speed set): a back-to-back re-read of a 24-sector span took ≤2.19 ms
+  (cache); after the far read it took 51–70 ms (disc), 3 instances of 3. Not
+  measured: whether the SET CD SPEED the ladder sends on every attempt flushes the
+  cache by itself. The defeat is at worst redundant.
 - **cdda2img status**: included (`_recover_failed_tracks`; AccuDisc engine since
   the c2read→AccuDisc flip, 2026-07-11 — previously cd-paranoia, R2). **Every
   attempt asks for the cache defeat** (kgr, 2026-10-22), feature-detected: on an
@@ -319,7 +327,7 @@ read-engine side; "caller" means cdda2img (or any application driving AccuDisc).
   first match. Evidence: 6/6 recoveries on the damaged reference disc, no
   consistent winning speed — the *sweep* is the mechanism.
 
-### 2.5a Flagged-span re-reads (opt-in, never run on hardware)
+### 2.5a Flagged-span re-reads (opt-in, not yet run on hardware)
 
 - **Name**: flagged-span rung — `--profile span-flagged` (`granularity = "span"`).
 - **Role**: re-acquirer, cheaper than 2.5. It re-reads only the sectors the capture
@@ -327,11 +335,12 @@ read-engine side; "caller" means cdda2img (or any application driving AccuDisc).
   `passes` passes at speeds taken from the ladder.
 - **AccuDisc status**: supported (`read_span_detail`: per-sector status map, C2,
   and the Q-position lane; needs `caller_map_buffers` and the sub-Q map).
-- **cdda2img status**: included, **opt-in only, and never exercised on a drive**
-  (`_recover_flagged_spans`, 2026-09-24). kgr ruled that its H1/H2 bench runs will
-  not happen, under the replacement PX-716A's minimal-testing terms, so the
-  profile stays `experimental` and `track-ladder` stays the default indefinitely.
-  Design and measurements: `span-recovery-plan.md`.
+- **cdda2img status**: included, **opt-in only, and not yet exercised on a drive**
+  (`_recover_flagged_spans`, 2026-09-24). kgr ruled on 2026-09-24 that its H1/H2
+  bench runs would not happen, under the replacement PX-716A's minimal-testing
+  terms, and **rescinded that ruling on 2026-11-21**; no run has happened since.
+  The profile stays `experimental` and `track-ladder` stays the default. Design
+  and measurements: `span-recovery-plan.md`.
 - **Acceptance** (a filter, not a certificate): a copy is used only when the read
   had `verify_passes >= 2`, the map state is `OK`/`RECOVERED`, its own C2 block
   is all zero, and it is outside the widened Q-position lane. On the LITE-ON all
@@ -346,6 +355,53 @@ read-engine side; "caller" means cdda2img (or any application driving AccuDisc).
   AR responses, engine support, or with `recovery_passes = 0`.
 - **Unmeasured**: `span_gap = 8`, `span_pad = 4`. The captures they were to be tuned
   against were deleted under the scratch rule.
+
+### 2.5b Bench strategies in the rip (opt-in, not yet run on hardware)
+
+- **Name**: the recovery bench's arms as rip strategies: `sector-hammer`,
+  `sector-runup`, `span-fixed`, `max-variation`, `whole-disc` (the profiles of
+  those names, or any profile with the same fields).
+- **Role**: re-acquirer, **in place of** the speed ladder (2.5), never before it.
+  Each stands alone (kgr, 2026-11-21): a track it does not recover is
+  `unrecovered`, not handed on.
+- **History**: until 2026-11-21 these profiles did not run as named. The rip read
+  only `granularity = "track"`/`"span"`, so `max-variation` ran as `track-ladder`
+  and the other four as `track-constant`, while PROV `recovery_profile` named
+  them. Every claim a container makes about these strategies before that date is
+  a claim about the ladder.
+- **cdda2img status**: included (`_recover_by_strategy`; plans in
+  `cdda2img.strategy_reads`, which `tools/strategy_bench.py` imports, so the plan
+  scored and the plan run are one definition; moved verbatim, identical over 448
+  cases). The plan is chosen from the profile's **fields**
+  (`strategy_reads.strategy_kind`: `granularity`, `variation`, `run_up`, `span`),
+  never its name. Each read is spliced into an in-memory working copy of the
+  track, AccurateRip is checked after every read, and only a match is written
+  (1.1's invariant), as on the bench. `passes` is reads per track (the bench's
+  `--max-attempts`, 8) within `budget_s`. `whole-disc` reads `[0, lead-out)` once
+  per pass and tests every failed track against that read, keeping only their
+  windows (`accudisc_reader.read_span_windows`).
+- **Additions over the bench**: a cache defeat on every read (2.5; kgr,
+  2026-11-21); every read recorded.
+- **PROV**: `recovery_strategy`, `recovery_seed` (`max-variation`, so its random
+  reads can be regenerated), `strategy_targets_track_<n>`,
+  `strategy_reads_track_<n>` (`<start>+<count>@<requested>><honoured>:<cache_defeat>`
+  per read), `recovery_track_<n>=strategy_matched@a<k>`. When a strategy ran,
+  `recovery_ladder`/`recovery_passes` describe what it could use, not a walked
+  ladder (rbi_spec).
+- **Bench evidence** (July 2026, original PX-716A, 4 discs, n=3/cell):
+  `max-variation` 13/20 (fastest at low n, 0/9 at high n), `whole-disc` 11/20,
+  `sector-runup` 2/20, `sector-hammer` 2/20, `span-fixed` 1/16; against
+  `track-ladder` 19/20. All five profiles are `experimental`: the plans were
+  scored on a drive, this implementation has not run on one.
+- **Not comparable to the bench without care**: the cache defeat; the profiles'
+  `speed = "max"` (40x) against the bench's `base_speed = 32`; the bench's fixed
+  ladder (`40,32,24,16,8,4`) against the per-disc admitted one; budgets (bench
+  240–300 s, profiles 120–600 s); targets (bench: C2-flagged sectors of a 32x
+  capture; rip: the damage lane of its own capture pass, the final sector
+  excluded).
+- **Open** (kgr, 2026-11-21): the fixed-speed strategies read at one speed, so a
+  speed that is itself the cause of failure is repeated on every read. How the
+  strategies and the ladder should be ordered and combined is under discussion.
 
 ### 2.6 Intra-read verification
 
@@ -2143,4 +2199,4 @@ That set lets a future reader distinguish "we never checked" from "we checked
 thoroughly and this disc cannot be verified" — which is the only useful thing
 left to say about it.
 
-Blake3 e69b3ea6de0cecc73240b5ac3b7e85447b637257bc4914846cefc6c9394f1481
+Blake3 9b719902a7f4fb39d868218b272670080048a865870521d52c54d42f9f77e71d
