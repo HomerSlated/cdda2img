@@ -243,16 +243,20 @@ def lookups_available(monkeypatch):
     monkeypatch.setattr(discogs_lookup, "is_available", lambda: True)
 
 
-def test_rip_requires_accuraterip_and_musicbrainz(lookups_available):
+def test_rip_requires_every_contributing_service(lookups_available):
+    """kgr, 2026-11-21: every service that contributes to the container is
+    required. CTDB is the one exception: when it is down, the recovery profiles
+    run instead."""
     services = services_for("rip", cddb_server="example.org:1234")
-    assert _keys(services, required=True) == {"accuraterip", "musicbrainz"}
-    assert _keys(services, required=False) == {
-        "ctdb",
-        "coverart",
+    assert _keys(services, required=True) == {
+        "accuraterip",
+        "musicbrainz",
         "cddb",
+        "coverart",
         "acoustid",
         "discogs",
     }
+    assert _keys(services, required=False) == {"ctdb"}
     cddb = next(s for s in services if s.key == "cddb")
     assert cddb.targets == ("cddb://example.org:1234",)
 
@@ -433,3 +437,59 @@ def test_import_info_does_not_touch_the_network(monkeypatch, tmp_path):
     ):
         app._dispatch(args)
     pre.assert_not_called()
+
+
+# ---- archival (rip): never "continue", never --allow-offline (kgr, 2026-11-21) ----
+
+
+def test_an_archival_prompt_offers_no_continue() -> None:
+    from cdda2img import network_preflight as npf
+
+    answers = iter(["c", "continue", "r"])
+    assert npf._prompt(lambda _q: next(answers), archival=True) == "retry"
+    assert npf._prompt(lambda _q: "c", archival=False) == "continue"  # control
+
+
+def test_an_archival_run_refuses_even_with_allow_offline() -> None:
+    from cdda2img import network_preflight as npf
+
+    down = npf.ProbeResult(npf.replace(npf.ACCURATERIP, required=True), "down", "x")
+    with pytest.raises(npf.NetworkUnavailable, match="complete archive"):
+        npf.run_preflight(
+            [down.service],
+            interactive=False,
+            allow_offline=True,
+            probe=lambda _s: down,
+            out=lambda _l: None,
+            archival=True,
+        )
+    # Control: the same outage proceeds for a non-archival run with the flag.
+    out = npf.run_preflight(
+        [down.service],
+        interactive=False,
+        allow_offline=True,
+        probe=lambda _s: down,
+        out=lambda _l: None,
+    )
+    assert out.down
+
+
+def test_rip_has_no_allow_offline_flag(monkeypatch) -> None:
+    from cdda2img import cdda2img as app
+
+    monkeypatch.setattr("sys.argv", ["cdda2img", "rip", "--allow-offline"])
+    with pytest.raises(SystemExit) as exc:
+        app.parse_args()
+    assert isinstance(exc.value, SystemExit)
+    assert exc.value.code == 1  # usage errors exit 1, not argparse's 2
+
+
+def test_a_usage_error_exits_1(monkeypatch) -> None:
+    """2 means "retry later" (rip_abort); a usage error is "fix the command"."""
+    from cdda2img import cdda2img as app
+
+    monkeypatch.setattr("sys.argv", ["cdda2img", "no-such-command"])
+    with pytest.raises(SystemExit) as exc:
+        app.parse_args()
+    assert isinstance(exc.value, SystemExit)
+    assert exc.value.code == 1

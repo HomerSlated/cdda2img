@@ -231,6 +231,8 @@ def _fetch_ar(
     Responses larger than ``_AR_DBAR_MAX`` are treated as malformed: body
     is dropped, transport is still recorded (the server *did* answer).
     """
+    from cdda2img import query_log
+
     last_transport: str | None = None
     for base, name in ((_AR_BASE_HTTPS, "https"), (_AR_BASE_HTTP, "http")):
         url = _ar_url(track_count, id1, id2, cddb_id, base=base)
@@ -240,6 +242,7 @@ def _fetch_ar(
                 # read(N+1) detects oversize without unbounded buffering.
                 body = resp.read(_AR_DBAR_MAX + 1)
         except urllib.error.HTTPError as exc:
+            query_log.record("AccurateRip", url, f"HTTP {exc.code}", str(exc.reason))
             if exc.code == 404:
                 log.debug("AccurateRip %s: disc not found (404)", name)
                 # 404 is a legitimate negative — same disc will 404 over HTTP too.
@@ -254,8 +257,10 @@ def _fetch_ar(
                 last_transport = name
             continue
         except (urllib.error.URLError, OSError) as exc:
+            query_log.record("AccurateRip", url, f"network: {exc}")
             log.warning("AccurateRip %s fetch failed: %s", name, exc)
             continue
+        query_log.record("AccurateRip", url, "200", query_log.summarise_bytes(body))
         if len(body) > _AR_DBAR_MAX:
             log.warning(
                 "AccurateRip %s response > %d bytes; rejecting as malformed",

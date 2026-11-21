@@ -175,12 +175,24 @@ After a successful rip, the per\-track AccurateRip v1/v2 checksums are computed
 and verified against the AccurateRip database.
 Results are printed as a report.
 A partial mismatch triggers the recovery described above.
-If the disc is in AccurateRip and no track verifies, the rip is aborted:
-no container is written, the cause found by an offset search is printed on
-standard error, and the rip exits with status 5 (see
-.BR "EXIT STATUS" ).
-A disc AccurateRip does not hold, or a rip during which AccurateRip could not be
-reached, is still written.
+.B rip
+writes a container only when every track verified against AccurateRip and every
+service answered.
+Anything else aborts the rip, writes nothing, and exits with status 2 or 3 (see
+.BR "EXIT STATUS" ),
+leaving a failure report under
+.I $XDG_STATE_HOME/cdda2img/reports/
+whose path is printed on standard error.
+The report holds the reason, what the rip had established, and every online
+query with its answer (credentials removed).
+The cases are:
+AccurateRip unreachable (2);
+AccurateRip not holding the disc, which is treated as a fault in the query until
+shown otherwise (3);
+no track verifying, with the cause an offset search found (3);
+a track still failing after recovery (3);
+a subchannel Q stream too damaged to supply pre\-gaps, ISRCs and the MCN (3);
+MusicBrainz unreachable (2).
 .PP
 .BI "cdda2img rip " "[options]"
 .TP
@@ -236,18 +248,19 @@ Overrides the
 .B duplicate_catalogue_entry
 configuration key for this run.
 Default: from config, ask (prompt if TTY, skip otherwise).
-.TP
+.PP
+Before the disc is read,
+.B rip
+checks that every network service the container depends on is answering:
+AccurateRip, MusicBrainz, CDDB, the Cover Art Archive, AcoustID and Discogs.
+CUETools DB is the one exception, being used only for repair.
+If any is down the rip does not start: an interactive run offers to retry or
+abort, and an unattended one exits with status 2.
+There is no
 .B \-\-allow\-offline
-Proceed even if AccurateRip or MusicBrainz is unreachable.
-Before any audio is read, copied or transcoded,
-.B cdda2img
-checks that the network services the pipeline depends on are answering.
-If a required one is not, an interactive run asks whether to retry, continue or abort;
-a non\-interactive run (no TTY, or
-.BR \-\-auto )
-refuses to start unless this flag is given.
-Services that did not answer are recorded in the container's PROV block as
-.BR network_preflight .
+for
+.BR rip :
+a container cannot be complete without those services.
 .TP
 .BR \-\-auto ", " \-\-no\-auto
 Skip the interactive metadata menu and accept the best\-guess result
@@ -1522,46 +1535,32 @@ cdda2img mount album.rbi \-\-slot 1 \-\-mnt\-dir /tmp/mnt
 .RE
 .\"
 .SH EXIT STATUS
+Each code names the one further action it calls for.
 .TP
 .B 0
 Success.
 .TP
 .B 1
-Error (file not found, unsupported format, checksum mismatch, validation failure).
+Fix the command, the configuration or the input, then re\-run: a usage error,
+a file not found, an unsupported format, a checksum mismatch, a validation
+failure, an invalid configuration.
 .TP
-.B 3
-.BR rip " or " import
-wrote a container, but a service its provenance depends on did not answer
-(AccurateRip for a rip, MusicBrainz for both): the container records that
-service as
+.B 2
+Wait and re\-run unchanged: a network service did not answer.
+.B rip
+wrote nothing.
+.B import
+writes its container and exits 2 when MusicBrainz did not answer, recording it
+as
 .B down
 in its provenance.
-Re-run once the service is reachable.
-On a terminal without
-.BR \-\-auto ,
-a service that fails mid-run is first offered for retry; an unattended run
-continues without it.
 .TP
-.B 4
+.B 3
+Investigate:
 .B rip
-wrote a container that failed a verification recorded in its provenance:
-almost no subchannel Q frames passed their CRC
-.RB ( subq_q_valid
-below 7.5%), which is what a misframed read looks like.
-The container is kept, because this can also happen with good audio (a drive
-returning its fields in a non-standard order), but its audio should not be
-trusted until checked.
-Takes precedence over 3.
-.TP
-.B 5
-.B rip
-was aborted and wrote nothing: AccurateRip holds the disc and matched none of
-its tracks.
-The message on standard error names any read offset at which a whole-track
-checksum does match.
-That is either a wrong drive read offset (correct it in
-.B [[drives]]
-and rip again) or a pressing AccurateRip holds only at that offset.
+wrote nothing, because the disc, the drive or the query was at fault, and
+re\-running unchanged will fail the same way.
+The failure report named on standard error says why.
 .TP
 .B 130
 Interrupted by SIGINT

@@ -234,7 +234,7 @@ and do the opposite of what was asked. Named here so it is not reintroduced.
 offset is not silent: `_diagnose_total_ar_miss` fires on an all-tracks AccurateRip
 miss and names the confirmed candidate offsets and the delta from the offset actually
 used (in PROV until 2026-11-21; since then the rip is aborted with nothing written and
-the diagnosis goes to stderr, exit 5). That is precisely the failure mode a
+the diagnosis goes to stderr, exit 3 since the exit codes were consolidated). That is precisely the failure mode a
 hand-entered offset produces, and it is already diagnosed.
 
 **Weigh the flag against the measurement path before building it.**
@@ -3117,7 +3117,7 @@ the database it was never empty and the `no_offset_verifies` branch was unreacha
 LITE-ON rip misframed by libata's PIO fallback (0/11) sealed `ar_offset_suggests=-6`
 against a correct offset. Only `confirmed` candidates count now, and a total miss exits 4
 (`_failed_checks`). **Superseded 2026-11-21 (kgr):** a total miss now aborts the rip,
-writes no container and exits 5, with the diagnosis on stderr (`_total_miss_message`). Containers written before the fix carry `offset_mismatch` that is not
+writes no container and exits 3 (5 until the exit codes were consolidated the same day), with the diagnosis on stderr and in the failure report (`_total_miss_message`). Containers written before the fix carry `offset_mismatch` that is not
 evidence of any offset.
 
 #### Original item (2026-07-24)

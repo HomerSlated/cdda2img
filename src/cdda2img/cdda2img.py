@@ -7,12 +7,13 @@ import functools
 import importlib.metadata
 import logging
 import re
+import sys
 import textwrap
 import threading
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import TYPE_CHECKING, NamedTuple
+from typing import TYPE_CHECKING, NamedTuple, NoReturn
 
 if TYPE_CHECKING:
     import random
@@ -56,6 +57,7 @@ from cdda2img.rbi_format import (
     RBIDisc,
     format_original,
 )
+from cdda2img.rip_abort import EXIT_INVESTIGATE, EXIT_RETRY_LATER, RipAborted
 from cdda2img.silence import trim_silence_cd_da
 from cdda2img.toc import (
     build_toc_entries,
@@ -74,8 +76,20 @@ _MIN_AR_CONFIDENCE = (
 SILENCE_PAD_DUR = "2"  # seconds of post-track silence (Red Book inter-track gap)
 
 
+class _Parser(argparse.ArgumentParser):
+    """argparse with usage errors on exit status 1, not 2.
+
+    2 means "retry later" here (``rip_abort``), and a usage error's further action
+    is "fix the command", which is 1's. Subparsers inherit the class
+    (``add_subparsers`` defaults ``parser_class`` to the parent's type)."""
+
+    def error(self, message: str) -> NoReturn:
+        self.print_usage(sys.stderr)
+        self.exit(1, f"{self.prog}: error: {message}\n")
+
+
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
+    parser = _Parser(
         prog="cdda2img",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=textwrap.dedent("""\
@@ -438,12 +452,6 @@ def parse_args() -> argparse.Namespace:
         action=argparse.BooleanOptionalAction,
         default=None,
         help="Skip the interactive metadata menu; accept the best-guess result automatically (default: from config, false)",
-    )
-    r_cmd.add_argument(
-        "--allow-offline",
-        action="store_true",
-        default=False,
-        help="Proceed even if AccurateRip or MusicBrainz is unreachable. Without it, a non-interactive run refuses to start (an interactive one asks); either way the container records what was unavailable (PROV network_preflight)",
     )
     r_cmd.add_argument(
         "--extract",
@@ -2544,8 +2552,13 @@ def _finalize_import(
     duplicate_policy: str | None = None,
     auto: bool = False,
     preferred_country: list[str] | None = None,
+    archival: bool = False,
 ) -> Path:
     """Shared post-rip/import pipeline: lookups → metadata menu → TOC → RG → container.
+
+    *archival* (``rip``): a service that did not answer aborts the run
+    (:func:`_require_service_answers`) before the metadata menu, so nobody sits
+    through a menu for a container that cannot be written (kgr, 2026-11-21).
 
     The remote-metadata lookups and their precedence merge are delegated to
     ``_run_metadata_lookups`` (disc-baked CD-Text > MB > Discogs > AcoustID >
@@ -2582,6 +2595,7 @@ def _finalize_import(
             _offer_service_retry, ui, interactive=_interactive(auto)
         ),
     )
+    _require_service_answers(provenance, archival=archival)
 
     # Identify the original release BEFORE the menu so the user sees
     # "Original: <title> (<year>)" in the initial summary. The menu's
@@ -3311,11 +3325,10 @@ def _rip_disc_stage(
     return info, "accudisc", (c2_file if want_c2 else None), disc_damage
 
 
-EXIT_WRITTEN_WITH_CAVEATS = 3
-
-# The PROV status keys of the services a container's provenance depends on, and the
-# name to report. A container recording `down` for one of these was written without
-# that service's answer: `_dispatch` exits 3 for it (man page, EXIT STATUS).
+# The PROV status keys of the services an IMPORTED container's provenance depends
+# on, and the name to report. An import recording `down` for one of these was
+# written without that service's answer and exits 2 (`rip_abort.EXIT_RETRY_LATER`).
+# A rip never gets this far: it aborts instead (`_require_service_answers`).
 _REQUIRED_SERVICE_STATUS = {
     "lookup_status_accuraterip": "AccurateRip",
     "lookup_status_mb": "MusicBrainz",
@@ -3330,13 +3343,6 @@ def _unanswered_services(provenance: dict[str, str]) -> list[str]:
         if provenance.get(key) == "down"
     ]
 
-
-EXIT_WRITTEN_UNVERIFIED = 4
-
-#: The rip was aborted and nothing was written: AccurateRip holds the disc and
-#: matched none of its tracks (kgr, 2026-11-21: "An archive with no provenance is
-#: pointless"). Until then such a rip wrote its container and exited 4.
-EXIT_NOT_WRITTEN = 5
 
 #: Below this share of CRC-good Q frames a rip's subchannel was sliced from the
 #: wrong bytes. The two bounds, both from 2026-09-14 evidence:
@@ -3362,15 +3368,6 @@ EXIT_NOT_WRITTEN = 5
 _MIN_Q_VALID_FRACTION = 0.075
 
 
-class RipOutcome(NamedTuple):
-    """What ``_dispatch`` needs from a finished rip to choose its exit status."""
-
-    unanswered: list[str]
-    failed_checks: list[str]
-    #: Why the rip was aborted with nothing written (stderr text), else None.
-    aborted: str | None = None
-
-
 def _q_valid_fraction(value: str | None) -> float | None:
     """``subq_q_valid`` (``"<valid>/<sectors>"``) as a fraction; None if absent or malformed.
 
@@ -3388,71 +3385,163 @@ def _q_valid_fraction(value: str | None) -> float | None:
     return valid / total if total > 0 else 0.0
 
 
-def _failed_checks(provenance: dict[str, str]) -> list[str]:
-    """Verifications this rip's provenance records as failed, as sentences.
+def _require_usable_q(prov: dict[str, str]) -> None:
+    """Abort when the subchannel Q stream cannot supply what the archive needs.
 
-    **Fresh provenance only**, from the rip that just ran. The sentences assume
-    this version's semantics: `offset_mismatch` has meant "checksum-confirmed"
-    only since 2026-09-14, so fed a stored container's PROV this would assert a
-    confirmed match that was never confirmed.
+    kgr, 2026-11-21 (rule b): write only if the container can be built in full
+    "without relying on damaged or missing Q channel data". Track starts and the
+    lead-out come from the full TOC, but the pre-gaps, INDEX points, MCN and ISRCs
+    come only from Q, each majority-voted with a two-sighting floor. So a partly
+    degraded Q is fine and a collapsed one is not: the rip aborts when the stream
+    could not be anchored to an LBA (``subq_layout=unanchored``) or when fewer
+    than :data:`_MIN_Q_VALID_FRACTION` of its frames passed their CRC, the
+    signature of a misframed read. A track that genuinely has no ISRC cannot be
+    told from one whose ISRC was never seen, so health is judged across the disc,
+    not per field.
 
-    The Q check does not refuse the rip; it makes it exit 4 and the container is
-    kept for inspection, because Q can collapse with good audio: a drive that
-    returns subchannel before C2 (the LITE-ON LH-20A1S does) zeroes Q while its
-    audio is correct. What it cannot be is ignored, which is what happened on
-    2026-09-14: that drive's rip, misframed on 22 sectors in 23, verified 0/11 and
-    exited 0 with "No errors occurred" in its sealed log.
-
-    A total AccurateRip miss is no longer a check here. Since 2026-11-21 it aborts
-    the rip before anything is written (:func:`_total_miss_message`), so a fresh
-    provenance that reaches this function never carries ``ar_total_miss``.
+    Until 2026-11-21 a collapse wrote the container and exited 4, because Q can
+    collapse with good audio (the LITE-ON returns subchannel before C2). The
+    audio may still be right; the container would not be complete.
     """
-    failed: list[str] = []
-    fraction = _q_valid_fraction(provenance.get("subq_q_valid"))
-    if fraction is not None and fraction < _MIN_Q_VALID_FRACTION:
-        failed.append(
-            f"subchannel Q passed its CRC on {provenance['subq_q_valid']} sectors"
-            f" ({fraction:.1%}), the signature of a misframed read"
+    fraction = _q_valid_fraction(prov.get("subq_q_valid"))
+    collapsed = fraction is not None and fraction < _MIN_Q_VALID_FRACTION
+    unanchored = prov.get("subq_layout") == "unanchored"
+    if not (collapsed or unanchored):
+        return
+    details = []
+    if collapsed:
+        details.append(
+            f"Subchannel Q passed its CRC on {prov.get('subq_q_valid')} sectors"
+            f" ({fraction:.1%}; the floor is {_MIN_Q_VALID_FRACTION:.1%}), the"
+            " signature of a misframed read."
         )
-    return failed
+    if unanchored:
+        details.append("The Q stream could not be anchored to any LBA.")
+    details.append(
+        "Pre-gaps, INDEX points, the MCN and the ISRCs come only from Q, so the"
+        " container could not be complete. Check the drive's subchannel order and"
+        " transfer framing (CLAUDE.md, the LITE-ON libata note) before re-ripping."
+    )
+    raise RipAborted(
+        EXIT_INVESTIGATE,
+        "the subchannel Q stream is unusable",
+        details,
+        {k: v for k, v in prov.items() if k.startswith(("subq_", "toc_"))},
+    )
 
 
-def _total_miss_message(provenance: dict[str, str]) -> str:
-    """The stderr text for a rip aborted on a total AccurateRip miss.
+def _require_accuraterip_answer(tracks: list, reachable: bool, cddb_id: int) -> None:
+    """Abort unless AccurateRip answered and holds this disc.
 
-    It carries the offset search's diagnosis, because with no container written
-    the PROV keys that used to hold it go nowhere. A confirmed candidate offset is
-    named with what to do about it, but **not** as a verdict: a disc AccurateRip
-    holds in several pressings verifies at several offsets, so the candidate is
-    either a wrong drive offset or a pressing held only at that offset. Any other
-    failed check (a collapsed Q count) is appended: a misframed read is the likelier
-    cause of a 0/N than the offset, and should be read first.
+    Unreachable is exit 2 (re-run when it answers). "Not in the database" is exit
+    3, and treated as **our** defect first: every past instance turned out to be
+    an error in our code, with the disc there all along (kgr, 2026-11-21;
+    memory: verify the key before blaming the server). The exact URL asked and the
+    answer are in the failure report's query log.
     """
-    lines = [
-        "Rip aborted, nothing written: AccurateRip holds this disc and none of its"
-        " tracks verified."
+    context = {"cddb_id": f"{cddb_id:08x}", "tracks": str(len(tracks))}
+    if not reachable:
+        raise RipAborted(
+            EXIT_RETRY_LATER,
+            "AccurateRip did not answer, so nothing could be verified",
+            [
+                "Both HTTPS and HTTP failed, or the server answered only with an"
+                " error. The queries are in the report."
+            ],
+            context,
+        )
+    if not any(r.max_confidence is not None for r in tracks):
+        raise RipAborted(
+            EXIT_INVESTIGATE,
+            "AccurateRip has no record of this disc ID",
+            [
+                "Every earlier 'not in the database' was a fault in how the disc ID"
+                " or the URL was built, with the disc present all along. Check the"
+                " exact URL in the report (its IDs come from the track starts and"
+                " the lead-out) before concluding the disc is absent.",
+                "A CD-R burned from a digital-only release can never be in"
+                " AccurateRip; that case is --digital-media's.",
+            ],
+            context,
+        )
+
+
+def _require_every_track_verified(
+    tracks: list, outcomes: dict[int, str], provenance: dict[str, str]
+) -> None:
+    """Abort unless every track verified against AccurateRip after recovery.
+
+    kgr, 2026-11-21: "any outcome other than 100% AR verified tracks should not
+    result in an RBI being written". A track recovery could not match keeps its
+    original audio in memory only; nothing is written. The report carries the
+    whole provenance gathered so far, which includes every recovery read
+    (``recovery_attempts_track_<n>``, ``strategy_reads_track_<n>``).
+    """
+    failed = [
+        r.track for r in tracks if r.confidence_v1 is None and r.confidence_v2 is None
     ]
+    if not failed:
+        return
+    details = [f"track {t}: {outcomes.get(t, 'no recovery ran')}" for t in failed]
+    raise RipAborted(
+        EXIT_INVESTIGATE,
+        f"{len(failed)} of {len(tracks)} track(s) did not verify against"
+        " AccurateRip after recovery",
+        details,
+        provenance,
+    )
+
+
+def _require_service_answers(provenance: dict[str, str], *, archival: bool) -> None:
+    """Abort a rip when a service it needs did not answer (kgr, 2026-11-21).
+
+    Called after the metadata lookups and before the menu, for an *archival*
+    pipeline (``rip``) only. MusicBrainz ``down`` is exit 2: re-run when it
+    answers.
+    """
+    if not archival:
+        return
+    if provenance.get("lookup_status_mb") == "down":
+        raise RipAborted(
+            EXIT_RETRY_LATER,
+            "MusicBrainz did not answer",
+            [f"Reason: {provenance.get('lookup_error_mb', 'unknown')}."],
+            provenance,
+        )
+
+
+def _total_miss_message(provenance: dict[str, str]) -> tuple[str, list[str]]:
+    """``(reason, details)`` for a rip aborted on a total AccurateRip miss.
+
+    The details carry the offset search's diagnosis, which with no container
+    written survives only here and in the failure report. A confirmed candidate
+    offset is named with what to do about it, but **not** as a verdict: a disc
+    AccurateRip holds in several pressings verifies at several offsets, so the
+    candidate is either a wrong drive offset or a pressing held only at that
+    offset.
+    """
+    reason = "AccurateRip holds this disc and none of its tracks verified"
+    details: list[str] = []
     miss = provenance.get("ar_total_miss")
     candidates = provenance.get("ar_offset_candidates")
     if miss == "offset_mismatch" and candidates:
         first = candidates.split(",")[0]
         delta = provenance.get("ar_offset_suggests", "?")
-        lines.append(
+        details.append(
             f"A whole-track checksum matches at read offset {first}"
             f" (candidates: {candidates}; {delta} from the offset used). Either this"
             " drive's read_offset is wrong, so set it in its [[drives]] entry and"
             " re-rip, or AccurateRip holds this pressing only at that offset."
         )
     elif miss == "no_offset_verifies":
-        lines.append(
+        details.append(
             "It verifies at no read offset within AccurateRip's search radius: the"
             " audio differs from every submitted copy (damage, a misread, or a"
             " pressing AccurateRip does not hold)."
         )
     elif miss == "offset_probe_failed":
-        lines.append("The offset search itself failed, so no cause could be named.")
-    lines.extend(f"Also: {reason}." for reason in _failed_checks(provenance))
-    return "\n".join(lines)
+        details.append("The offset search itself failed, so no cause could be named.")
+    return reason, details
 
 
 def _interactive(auto: bool) -> bool:
@@ -3524,24 +3613,10 @@ def _verify_ar_with_retry(
     return result
 
 
-def _warn_ar_unreachable(ui: TerminalUI | None) -> None:
-    """Say plainly that the rip is unverified, and why nothing tried to repair it."""
-    if ui is not None:
-        ui.pause()
-    print(
-        "   Warning: AccurateRip could not be reached, so this rip is NOT verified.\n"
-        "   CTDB parity repair and re-read recovery both need AccurateRip, and did not"
-        " run.\n"
-        "   Re-rip once AccurateRip is reachable to verify (and if need be repair) it."
-    )
-    if ui is not None:
-        ui.resume()
-
-
 def _warn_ar_total_miss(ui: TerminalUI | None) -> None:
     """Say that no repair ran on a whole-disc miss, and why, before the offset search.
 
-    The twin of :func:`_warn_ar_unreachable`. Both repair exits are gated on a
+    Both repair exits are gated on a
     PARTIAL mismatch, so a total miss skips them by design; until 2026-09-24 it
     skipped them silently, and the offset search that follows ran with no output
     either. Printed first so it covers that wait, however long it turns out to be.
@@ -4760,15 +4835,14 @@ def rip_image(  # noqa: C901
     keep_rbi: bool = True,
     strategy: ResolvedStrategy | None = None,
     network_preflight: str | None = None,
-) -> RipOutcome:
-    """Rip *device* into an RBI container.
+) -> Path | None:
+    """Rip *device* into an RBI container, or write nothing at all.
 
-    Returns a :class:`RipOutcome`: the required services the written container
-    records as ``down`` (:func:`_unanswered_services`, exit 3) and the
-    verifications its provenance records as failed (:func:`_failed_checks`,
-    exit 4). Both are empty when no container was written. ``aborted`` carries
-    the stderr text when the rip was refused on a total AccurateRip miss (exit 5,
-    nothing written).
+    Returns the container's path: ``None`` only when ``--extract --no-keep-rbi``
+    removed it after extraction. A rip that cannot build a complete, fully
+    AccurateRip-verified container raises :class:`~cdda2img.rip_abort.RipAborted`
+    instead, from whichever gate found the problem (kgr, 2026-11-21). The
+    ``finally`` below still restores the drive and removes the scratch.
     """
     import sys
 
@@ -4929,7 +5003,9 @@ def rip_image(  # noqa: C901
 
     track_preview: TrackPreview | None = None
     rbi_path: Path | None = None
-    aborted: str | None = None
+    from cdda2img import query_log
+
+    query_log.start()
     # Captured BEFORE anything asks the drive for a rate, and handed back in the
     # `finally` below. AccuDisc documents `read_req.speed_x` as deliberately NOT
     # restored on exit (accudisc.h:1414) — a recovery loop steps rungs without
@@ -4954,6 +5030,8 @@ def rip_image(  # noqa: C901
             ui=ui,
             read_speed=strategy.read_speed if strategy is not None else None,
         )
+
+        _require_usable_q(info.prov or {})
 
         track_count = len(info.disc.tracks)
         total_s = info.disc.total_seconds
@@ -5013,12 +5091,10 @@ def rip_image(  # noqa: C901
         )
         if ui is not None:
             ui.resume()
-        if not ar_verify.reachable:
-            # Both repair paths are keyed on an AR mismatch and need AR to re-verify
-            # what they splice, so with AR unreachable neither can run and skipping
-            # them is correct. What was wrong is that it happened silently, beneath a
-            # report that blamed the database.
-            _warn_ar_unreachable(ui)
+        # kgr, 2026-11-21: without AccurateRip's answer nothing can be verified,
+        # and without a verified rip nothing is written. Both gates come before
+        # any repair read, so a rip that is going to abort spends no drive time.
+        _require_accuraterip_answer(ar_verify.tracks, ar_verify.reachable, cddb_id)
 
         # CTDB parity repair FIRST (above the re-read ladder): error-only ctanalyse on the
         # raw PCM (network parity, zero extra reads), with C2 erasures if the C2 path
@@ -5417,34 +5493,35 @@ def rip_image(  # noqa: C901
         ar_summary = format_ar_report(
             ar_verify.tracks, read_offset=read_offset, reachable=ar_verify.reachable
         )
-        # kgr, 2026-11-21: "An archive with no provenance is pointless." A disc
-        # AccurateRip holds with no track verified is refused before
-        # _finalize_import, which is the first thing that touches the output path
-        # or the catalogue, so an existing container of the same name survives.
-        # The message is printed by the caller once the TUI has stopped.
+        # kgr, 2026-11-21: a container is written only when every track verified.
+        # Both gates sit before _finalize_import, the first thing that touches the
+        # output path or the catalogue, so an existing container of the same name
+        # survives; main() reports the abort once the TUI has stopped.
         if total_miss:
-            aborted = _total_miss_message(provenance)
-        else:
-            rbi_path = _finalize_import(
-                disc,
-                temp.pcm_file,
-                provenance,
-                output_stem,
-                loudness,
-                output,
-                arip_block=arip_block,
-                rlog_builder=rlog_builder,
-                ui=ui,
-                low_dr_threshold=low_dr_threshold,
-                cddb_track_lsns=info.track_lsns,
-                cddb_disc_last_lsn=info.disc_last_lsn,
-                cddb_server=cfg.cddb_server,
-                ar_summary=ar_summary,
-                tui=tui,
-                duplicate_policy=duplicate_policy,
-                auto=auto,
-                preferred_country=cfg.preferred_country,
-            )
+            reason, details = _total_miss_message(provenance)
+            raise RipAborted(EXIT_INVESTIGATE, reason, details, provenance)
+        _require_every_track_verified(ar_verify.tracks, recovery_outcomes, provenance)
+        rbi_path = _finalize_import(
+            disc,
+            temp.pcm_file,
+            provenance,
+            output_stem,
+            loudness,
+            output,
+            arip_block=arip_block,
+            rlog_builder=rlog_builder,
+            ui=ui,
+            low_dr_threshold=low_dr_threshold,
+            cddb_track_lsns=info.track_lsns,
+            cddb_disc_last_lsn=info.disc_last_lsn,
+            cddb_server=cfg.cddb_server,
+            ar_summary=ar_summary,
+            tui=tui,
+            duplicate_policy=duplicate_policy,
+            auto=auto,
+            preferred_country=cfg.preferred_country,
+            archival=True,
+        )
     finally:
         _stop_preview(track_preview)
         if ui is not None:
@@ -5457,10 +5534,6 @@ def rip_image(  # noqa: C901
             drive_speed.restore_drive_speed(device, entry_speed_x)
         temp.cleanup()
 
-    if aborted is not None:
-        return RipOutcome([], [], aborted)
-    unanswered = _unanswered_services(provenance) if rbi_path is not None else []
-    failed_checks = _failed_checks(provenance) if rbi_path is not None else []
     if extract and rbi_path is not None:
         extract_image(
             rbi_path,
@@ -5474,15 +5547,12 @@ def rip_image(  # noqa: C901
             normalize=False,
             output=None,
         )
-        # A rip that failed a recorded verification keeps its container whatever
-        # --no-keep-rbi says. Exit 4 tells the user to check it, and the PROV that
-        # explains why lives only in the container; deleting it would leave the
-        # extracted FLACs as the only record, unverified and unexplained.
-        if not keep_rbi and not failed_checks:
+        # Only a complete, fully verified container reaches this point, so
+        # --no-keep-rbi can always be honoured.
+        if not keep_rbi:
             rbi_path.unlink()
-        elif not keep_rbi:
-            print(f"  Kept {rbi_path.name} despite --no-keep-rbi: it did not verify.")
-    return RipOutcome(unanswered, failed_checks)
+            return None
+    return rbi_path
 
 
 def _confirm_overwrite(output_paths: list[Path]) -> bool:
@@ -5651,6 +5721,7 @@ def _network_preflight(
         services_for(pipeline, cddb_server=cddb_server),
         interactive=sys.stdin.isatty() and not auto,
         allow_offline=allow_offline,
+        archival=pipeline == "rip",
     )
     return outcome.prov_value
 
@@ -5661,46 +5732,16 @@ def _report_unanswered(unanswered: list[str]) -> int:
         return 0
     print(
         f"  Written without an answer from: {', '.join(unanswered)}."
-        f" Exit status {EXIT_WRITTEN_WITH_CAVEATS}; re-run once"
+        f" Exit status {EXIT_RETRY_LATER}; re-run once"
         f" {'it is' if len(unanswered) == 1 else 'they are'} reachable."
     )
-    return EXIT_WRITTEN_WITH_CAVEATS
-
-
-def _report_rip_outcome(outcome: RipOutcome) -> int:
-    """Report a finished rip and return its exit code: 5 when it was aborted with
-    nothing written, 4 for a failed check, else whatever :func:`_report_unanswered`
-    says. 4 wins over 3 because re-running once a service is back does not fix
-    audio that did not verify.
-
-    The abort text goes to **stderr** (kgr, 2026-11-21), and is printed here rather
-    than inside ``rip_image`` because the TUI has stopped by now."""
-    if outcome.aborted is not None:
-        import sys
-
-        print(outcome.aborted, file=sys.stderr)
-        print(f"Exit status {EXIT_NOT_WRITTEN}.", file=sys.stderr)
-        return EXIT_NOT_WRITTEN
-    if not outcome.failed_checks:
-        return _report_unanswered(outcome.unanswered)
-    if outcome.unanswered:
-        print(
-            f"  Written without an answer from: {', '.join(outcome.unanswered)}"
-            " (re-running once it is reachable fixes that part)."
-        )
-    for reason in outcome.failed_checks:
-        print(f"  Not verified: {reason}.")
-    print(
-        f"  Exit status {EXIT_WRITTEN_UNVERIFIED}: the rip was written but not"
-        " verified; check it before trusting its audio."
-    )
-    return EXIT_WRITTEN_UNVERIFIED
+    return EXIT_RETRY_LATER
 
 
 def _dispatch(args: argparse.Namespace) -> int:
-    """Run the subcommand; return the exit code (0; 3 written without a required
-    service; 4 written but failed a recorded verification, rip only; 5 rip aborted
-    with nothing written, AccurateRip holding the disc and verifying no track)."""
+    """Run the subcommand; return the exit code (``rip_abort``: 0, or 2 when
+    ``import`` wrote a container without a required service's answer). A rip that
+    cannot write a complete container raises ``RipAborted`` instead."""
     if args.cmd == "create":
         from cdda2img.config import load_config
 
@@ -5763,24 +5804,24 @@ def _dispatch(args: argparse.Namespace) -> int:
         preflight = _network_preflight(
             "rip",
             auto=auto,
-            allow_offline=args.allow_offline,
+            allow_offline=False,
             cddb_server=cfg.cddb_server,
         )
-        return _report_rip_outcome(
-            rip_image(
-                args.device,
-                loudness=args.loudness,
-                output=args.output,
-                preview=args.preview if args.preview is not None else cfg.preview,
-                tui=args.tui if args.tui is not None else cfg.tui,
-                low_dr_threshold=cfg.low_dr_threshold,
-                duplicate_policy=args.duplicate,
-                auto=auto,
-                extract=args.extract,
-                keep_rbi=not args.no_keep_rbi,
-                strategy=strategy,
-                network_preflight=preflight,
-            )
+        # A rip either writes a complete container or raises RipAborted, which
+        # main() turns into a failure report and exit 2 or 3.
+        rip_image(
+            args.device,
+            loudness=args.loudness,
+            output=args.output,
+            preview=args.preview if args.preview is not None else cfg.preview,
+            tui=args.tui if args.tui is not None else cfg.tui,
+            low_dr_threshold=cfg.low_dr_threshold,
+            duplicate_policy=args.duplicate,
+            auto=auto,
+            extract=args.extract,
+            keep_rbi=not args.no_keep_rbi,
+            strategy=strategy,
+            network_preflight=preflight,
         )
     elif args.cmd == "import":
         if args.info:
@@ -5984,6 +6025,27 @@ def _install_log_handler(*, verbose: bool) -> None:
     mb_log.addHandler(RetryNotice())
 
 
+def _dispatch_reporting_aborts(args: argparse.Namespace) -> int:
+    """:func:`_dispatch`, with the two "nothing was written" outcomes turned into
+    their exit codes: a rip abort (failure report, then 2 or 3) and a network
+    preflight refusal (2, re-run when the service answers)."""
+    from cdda2img.network_preflight import NetworkUnavailable
+    from cdda2img.rip_abort import report_to_stderr, write_report
+
+    try:
+        return _dispatch(args)
+    except RipAborted as e:
+        try:
+            report = write_report(e)
+        except OSError as exc:
+            print(f"Could not write the failure report: {exc}", file=sys.stderr)
+            report = None
+        return report_to_stderr(e, report)
+    except NetworkUnavailable as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return EXIT_RETRY_LATER
+
+
 def main() -> None:
     from cdda2img.recovery_profile import ProfileError
 
@@ -6012,7 +6074,7 @@ def main() -> None:
             raise SystemExit(1) from None
         _run_startup_checks(args)
     try:
-        rc = _dispatch(args)
+        rc = _dispatch_reporting_aborts(args)
     except FileNotFoundError as e:
         print(f"Error: {e.filename}: no such file or directory")
         raise SystemExit(1) from None

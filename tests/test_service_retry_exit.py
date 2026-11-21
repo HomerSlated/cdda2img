@@ -1,4 +1,9 @@
-"""Mid-run service retry, and exit status 3 for a container written without them.
+"""Mid-run service retry, and the exit status for a run that lacked a service.
+
+Since 2026-11-21 a ``rip`` never writes a container without every service's
+answer: it aborts (``rip_abort``, exit 2). This file keeps ``import``'s rule,
+written without MusicBrainz exits 2, which is the same further action
+("re-run when it answers"), renumbered from 3.
 
 The pre-flight asks before a run starts. A service can still fail mid-run, and
 until 2026-09-13 that was only recorded: ``lookup_status_accuraterip=down`` or
@@ -298,10 +303,10 @@ def test_unanswered_services(prov, expected) -> None:
 def test_report_unanswered(capsys) -> None:
     assert app._report_unanswered([]) == 0
     assert capsys.readouterr().out == ""
-    assert app._report_unanswered(["MusicBrainz"]) == 3
+    assert app._report_unanswered(["MusicBrainz"]) == 2
     out = capsys.readouterr().out
     assert "Written without an answer from: MusicBrainz." in out
-    assert "Exit status 3" in out
+    assert "Exit status 2" in out
 
 
 def _run_main(rc: int) -> int:
@@ -338,12 +343,10 @@ def _dispatch(monkeypatch, argv: list[str], pipeline: str, unanswered: object):
 
 
 @pytest.mark.parametrize("unanswered", [["AccurateRip"], []], ids=["down", "clean"])
-def test_rip_and_import_return_their_exit_code(
+def test_import_returns_its_exit_code(
     monkeypatch, tmp_path, unanswered: list[str]
 ) -> None:
-    expected = 3 if unanswered else 0
-    rip = app.RipOutcome(unanswered, [])
-    assert _dispatch(monkeypatch, ["rip"], "rip_image", rip) == expected
+    expected = 2 if unanswered else 0
     src = tmp_path / "x.toc"
     src.write_text("")
     assert (
@@ -352,13 +355,22 @@ def test_rip_and_import_return_their_exit_code(
     )
 
 
-@pytest.mark.parametrize("unanswered", [["MusicBrainz"], []], ids=["and-down", "only"])
-def test_a_rip_that_failed_a_check_exits_4_through_dispatch_and_main(
-    monkeypatch, unanswered: list[str]
-) -> None:
-    """End to end from a pipeline result to the process exit status: the reporter
-    is tested on its own, but only this proves `_dispatch` routes a rip through it
-    and `main` raises the code."""
-    rip = app.RipOutcome(unanswered, ["AccurateRip matched none of its tracks"])
-    assert _dispatch(monkeypatch, ["rip"], "rip_image", rip) == 4
-    assert _run_main(4) == 4
+def test_a_rip_that_returns_exits_0(monkeypatch) -> None:
+    """A rip that returns wrote a complete container; anything else raised."""
+    assert _dispatch(monkeypatch, ["rip"], "rip_image", Path("x.rbi")) == 0
+
+
+def test_a_rip_abort_reaches_main_as_its_exit_code(monkeypatch, tmp_path) -> None:
+    """End to end: RipAborted raised from the pipeline becomes a written report
+    and the abort's exit code."""
+    from cdda2img import rip_abort as ra
+
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
+
+    def boom(*_a, **_k):
+        raise ra.RipAborted(ra.EXIT_INVESTIGATE, "track 3 did not verify")
+
+    monkeypatch.setattr(app, "_dispatch", boom)
+    assert app._dispatch_reporting_aborts(argparse.Namespace()) == 3
+    (report,) = (tmp_path / "cdda2img" / "reports").iterdir()
+    assert "track 3 did not verify" in report.read_text()

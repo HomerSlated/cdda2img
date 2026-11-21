@@ -125,8 +125,12 @@ def services_for(pipeline: str, *, cddb_server: str | None) -> list[Service]:
         *([DISCOGS] if discogs_lookup.is_available() else []),
     ]
     if pipeline == "rip":
-        required = [ACCURATERIP, MUSICBRAINZ]
-        advisory = [CTDB, COVERART, cddb, *optional]
+        # kgr, 2026-11-21: a rip writes a container only when every service that
+        # contributes data, metadata or PROV answered, so all of them are
+        # required. CTDB is the one exception: it is asked only during repair, and
+        # when it is down the recovery profiles run instead.
+        required = [ACCURATERIP, MUSICBRAINZ, cddb, COVERART, *optional]
+        advisory = [CTDB]
     elif pipeline == "import":
         required = [MUSICBRAINZ]
         advisory = [COVERART, cddb, *optional]
@@ -278,14 +282,23 @@ def format_report(outcome: PreflightOutcome) -> list[str]:
     return lines
 
 
-def _prompt(input_fn: Callable[[str], str] = input) -> str:
-    """Ask what to do about a required service being down. Empty input aborts."""
+def _prompt(input_fn: Callable[[str], str] = input, *, archival: bool = False) -> str:
+    """Ask what to do about a required service being down. Empty input aborts.
+
+    An *archival* run (``rip``) is not offered "continue": it would only read the
+    disc to abort later, since the container cannot be written without the
+    service (kgr, 2026-11-21).
+    """
+    question = (
+        "  [r]etry or [a]bort? [r/A] "
+        if archival
+        else "  [r]etry, [c]ontinue anyway, or [a]bort? [r/c/A] "
+    )
     while True:
-        answer = input_fn("  [r]etry, [c]ontinue anyway, or [a]bort? [r/c/A] ")
-        answer = answer.strip().lower()
+        answer = input_fn(question).strip().lower()
         if answer in ("r", "retry"):
             return "retry"
-        if answer in ("c", "continue"):
+        if not archival and answer in ("c", "continue"):
             return "continue"
         if answer in ("", "a", "abort"):
             return "abort"
@@ -298,8 +311,13 @@ def _proceed(
     allow_offline: bool,
     prompt: Callable[[], str],
     out: Callable[[str], None],
+    archival: bool = False,
 ) -> bool:
-    """True to proceed, False to probe again; raises when the run must not start."""
+    """True to proceed, False to probe again; raises when the run must not start.
+
+    *archival* (``rip``): a required service that is down always stops the run,
+    whatever *allow_offline* says, and "continue" is never offered.
+    """
     for line in format_report(outcome):
         out(line)
     if not outcome.required_down:
@@ -315,15 +333,22 @@ def _proceed(
             return True
         msg = f"aborted: required network service(s) unavailable: {required}"
         raise NetworkUnavailable(msg)
-    if allow_offline:
+    if allow_offline and not archival:
         out(
             "  --allow-offline: continuing; the container will record what was unavailable."
         )
         return True
-    msg = (
-        f"required network service(s) unavailable: {required}. Re-run once they "
-        "recover, or pass --allow-offline to proceed and record the gap in the container."
-    )
+    if archival:
+        msg = (
+            f"required network service(s) unavailable: {required}. A rip needs every "
+            "one of them to build a complete archive; re-run once they recover."
+        )
+    else:
+        msg = (
+            f"required network service(s) unavailable: {required}. Re-run once they "
+            "recover, or pass --allow-offline to proceed and record the gap in the "
+            "container."
+        )
     raise NetworkUnavailable(msg)
 
 
@@ -333,9 +358,10 @@ def run_preflight(
     interactive: bool,
     allow_offline: bool,
     probe: Callable[[Service], ProbeResult] = probe_service,
-    prompt: Callable[[], str] = _prompt,
+    prompt: Callable[[], str] | None = None,
     out: Callable[[str], None] = print,
     deadline: float = DEADLINE,
+    archival: bool = False,
 ) -> PreflightOutcome:
     """Check *services*, apply the policy, and return what was found.
 
@@ -360,7 +386,8 @@ def run_preflight(
             outcome,
             interactive=interactive,
             allow_offline=allow_offline,
-            prompt=prompt,
+            prompt=prompt or (lambda: _prompt(archival=archival)),
             out=out,
+            archival=archival,
         ):
             return outcome
