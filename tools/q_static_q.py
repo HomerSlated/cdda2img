@@ -42,9 +42,13 @@ Caveats that belong in any report of the output, not in a footnote:
   plausible-looking number from one or two frames.
 
 Usage:
-    uv run python tools/q_static_q.py private/bench/runs/run8/*.sub
-    uv run python tools/q_static_q.py --depth 12 --draws 40 --strata run8/*.sub
-    uv run python tools/q_static_q.py --depth 9 --json private/bench/runs/run6/*.sub
+    uv run python tools/q_static_q.py /var/tmp/CAPTURES/*.sub
+    uv run python tools/q_static_q.py --depth 12 --draws 40 --strata /var/tmp/CAPTURES/*.sub
+    uv run python tools/q_static_q.py --depth 9 --json /var/tmp/CAPTURES/*.sub
+
+The arguments are repeated raw P-W captures of one disc. The run6 to run8 captures
+this tool was written against were deleted in the 2026-10-13 cleanup (scratch scope
+rule); their results survive as ``q_intersection.*`` under ``private/bench/runs/``.
 """
 
 from __future__ import annotations

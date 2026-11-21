@@ -25,7 +25,11 @@ PX-716A) and a displaced one differs from that.
     uv run python tools/slip_probe.py capture --start 57535 --count 15160 \\
         --speed 40 --out /var/tmp/slip_probe
     uv run python tools/slip_probe.py locate --dir /var/tmp/slip_probe \\
-        --ref "rips/cdda2img/Tracy Chapman (second copy).rbi"
+        --ref path/to/verified.rbi
+
+``--ref`` must be an AccurateRip-verified RBI of the *same pressing*. The 2026-10-10
+reference (the second Tracy Chapman copy) was deleted in the 2026-10-13 cleanup, so a
+new run needs a fresh verified rip of whichever disc is being probed.
 
 Scratch scope rule: ``--out`` goes on real disk (never /tmp) and is deleted before
 the session that made it ends.

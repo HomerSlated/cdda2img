@@ -34,7 +34,11 @@ the tool exists to measure.
 
 Usage:
     uv run python tools/q_frame_stability.py CAPTURE.sub [CAPTURE.sub ...]
-    uv run python tools/q_frame_stability.py --json private/bench/runs/run6/*.sub
+    uv run python tools/q_frame_stability.py --json /var/tmp/CAPTURES/*.sub
+
+The run6 to run8 captures this tool was written against were deleted in the
+2026-10-13 cleanup (scratch scope rule); their results survive as
+``q_intersection.*`` under ``private/bench/runs/``.
 """
 
 from __future__ import annotations
