@@ -125,6 +125,32 @@ Tracks it does not recover still go to the speed ladder.
 this profile is experimental and has never been run on real hardware; it is
 validated only by offline tests, and it is never selected by default.
 .PP
+The profiles
+.BR max\-variation ,
+.BR whole\-disc ,
+.BR sector\-hammer ,
+.B sector\-runup
+and
+.B span\-fixed
+replace the speed ladder with the read plan of the recovery bench strategy they
+are named after.
+.B max\-variation
+re\-reads around a random flagged sector with a random run\-up, tail and ladder
+speed each time;
+.B whole\-disc
+re\-reads the whole disc at one speed and tests every failed track against it;
+the other three re\-read a flagged sector alone, after a fixed run\-up, or at the
+end of a fixed span.
+Each read asks the drive to bypass its cache, each read is recorded in the
+container's provenance, and a track is written only when it matches AccurateRip.
+A track the strategy does not recover keeps its original audio and is not handed
+to the speed ladder.
+.B NOTE:
+all five are experimental: the strategies were measured on a drive, but their
+implementation in
+.B rip
+has so far been validated only by offline tests.
+.PP
 If no track verifies at all, neither exit runs: re\-reading cannot fix a disc
 that is wrong everywhere (a wrong drive offset, a pressing AccurateRip does not
 hold, or a bad burn).

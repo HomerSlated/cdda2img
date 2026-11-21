@@ -5,8 +5,9 @@
 #
 # EXPERIMENTAL and OPT-IN (`--profile span-flagged` only). It has NEVER run on
 # hardware: the H1/H2 bench runs in the plan were cancelled on 2026-09-24 under the
-# replacement PX-716A's minimal-testing terms, so it is validated offline alone and
-# stays opt-in indefinitely. track-ladder remains the default.
+# replacement PX-716A's minimal-testing terms, a ruling rescinded on 2026-11-21, so
+# a run may now happen; until one does it is validated offline alone. track-ladder
+# remains the default.
 #
 # span_gap / span_pad are UNMEASURED. The captures the plan meant to tune them
 # against were deleted under the scratch rule. pad = 4 matches the ±4 margin

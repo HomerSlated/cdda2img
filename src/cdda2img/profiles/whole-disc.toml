@@ -4,8 +4,19 @@
 # variation of any single-speed arm — a fresh whole-disc pass came back clean ~27%
 # of the time on the disc where sector-hammer scored 0/25. That contrast is the
 # original evidence that variation, not targeting, drives recovery.
+#
+# In the rip since 2026-11-21 (cdda2img.strategy_reads, the bench's own read plan,
+# picked from these fields rather than this file's name): it stands alone, so a
+# track it does not recover is not handed to the speed ladder; every read asks
+# AccuDisc for a cache defeat, which the bench did not; and `passes` is reads per
+# track (the bench's --max-attempts, 8), bounded by budget_s. Here one whole-disc
+# read serves every failed track, so passes and budget_s cover them all together.
+#
+# EXPERIMENTAL until a hardware run of this code reproduces the bench (kgr,
+# 2026-11-21): the read plan was scored on a drive, this implementation has not
+# been.
 name         = "whole-disc"
-experimental = false
+experimental = true
 
 sub          = true
 c2           = true
@@ -13,7 +24,7 @@ c2           = true
 granularity  = "whole-disc"
 ladder       = "single"
 speed        = "max"
-passes       = 3
+passes       = 8
 variation    = "none"
 
 ctdb         = "auto"

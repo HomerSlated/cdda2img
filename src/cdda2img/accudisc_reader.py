@@ -1578,7 +1578,45 @@ def _read_span_binding(
     transports enter the same ``accudisc_read()``, so this is structural rather
     than a coincidence to re-verify per release.
     """
-    buf = bytearray(count * _SECTOR_BYTES)
+    got = _read_windows_binding(
+        module,
+        device,
+        start_lba,
+        count,
+        [(start_lba, start_lba + count)],
+        read_speed,
+        progress_cb,
+        cache_defeat=cache_defeat,
+    )
+    return SpanRead(
+        pcm=got.pieces[0],
+        speed_honoured_x=got.speed_honoured_x,
+        cache_defeat=got.cache_defeat,
+    )
+
+
+def _read_windows_binding(
+    module: Any,
+    device: str,
+    start_lba: int,
+    count: int,
+    windows: list[tuple[int, int]],
+    read_speed: int | None,
+    progress_cb: Callable[[int, int], None] | None,
+    *,
+    cache_defeat: bool = False,
+) -> WindowsRead:
+    """One read of ``[start_lba, start_lba + count)`` keeping only *windows*.
+
+    The body :func:`_read_span_binding` always had, with the sink generalised from
+    "keep everything" to "keep these LBA ranges". A whole-disc recovery pass needs
+    one continuous read of the disc (that is the strategy) but only the windows of
+    the tracks that failed, and keeping all of it would hold ~800 MB in memory.
+    Each window is clipped to the read; a window outside it comes back empty.
+    """
+    end_lba = start_lba + count
+    clipped = [(max(lo, start_lba), min(hi, end_lba)) for lo, hi in windows]
+    bufs = [bytearray(max(0, hi - lo) * _SECTOR_BYTES) for lo, hi in clipped]
     pos = 0
 
     def collect(chunk: Any) -> None:
@@ -1591,7 +1629,23 @@ def _read_span_binding(
             )
             raise RuntimeError(msg)
         size = chunk.nsec * chunk.sector_len
-        buf[pos : pos + size] = chunk.data
+        c_lo = start_lba + pos // _SECTOR_BYTES
+        c_hi = c_lo + chunk.nsec
+        for (lo, hi), buf in zip(clipped, bufs, strict=True):
+            a, b = max(lo, c_lo), min(hi, c_hi)
+            if a < b:
+                src = memoryview(chunk.data)[
+                    (a - c_lo) * _SECTOR_BYTES : (b - c_lo) * _SECTOR_BYTES
+                ]
+                if len(src) != (b - a) * _SECTOR_BYTES:
+                    # bytearray slice assignment resizes on a length mismatch,
+                    # which would shift every later byte of the window silently.
+                    msg = (
+                        f"span read chunk at lba {c_lo} carried {len(chunk.data)} "
+                        f"bytes for {chunk.nsec} sectors — refusing to reassemble"
+                    )
+                    raise RuntimeError(msg)
+                buf[(a - lo) * _SECTOR_BYTES : (b - lo) * _SECTOR_BYTES] = src
         pos += size
         if progress_cb is not None:
             progress_cb(pos // _SECTOR_BYTES, count)
@@ -1626,14 +1680,14 @@ def _read_span_binding(
     # sample-exact offset, so a short buffer is silent audio corruption rather
     # than a failure. The sector_len guard above covers the wrong *width*; this
     # covers the wrong *count*, which is the same defect one axis over.
-    if pos != len(buf):
+    if pos != count * _SECTOR_BYTES:
         msg = (
             f"span read delivered {pos // _SECTOR_BYTES} of {count} sectors from "
             f"lba {start_lba} — refusing a short span, it would splice silently"
         )
         raise RuntimeError(msg)
-    return SpanRead(
-        pcm=bytes(buf),
+    return WindowsRead(
+        pieces=[bytes(buf) for buf in bufs],
         speed_honoured_x=_speed_x_or_none(module, result.stats),
         cache_defeat=defeat,
     )
@@ -1711,6 +1765,51 @@ def read_span_attempt(
             device,
             start_lba,
             count,
+            read_speed,
+            progress_cb,
+            cache_defeat=cache_defeat,
+        ),
+    )
+
+
+@dataclass(frozen=True)
+class WindowsRead:
+    """One read through :func:`read_span_windows`: the kept windows, in the order
+    asked, and the same engine answers :class:`SpanRead` carries."""
+
+    pieces: list[bytes]
+    speed_honoured_x: int | None
+    cache_defeat: str
+
+
+def read_span_windows(
+    device: str,
+    start_lba: int,
+    count: int,
+    windows: list[tuple[int, int]],
+    read_speed: int | None = None,
+    progress_cb: Callable[[int, int], None] | None = None,
+    *,
+    cache_defeat: bool = False,
+) -> WindowsRead:
+    """Read ``[start_lba, start_lba + count)`` once and keep only *windows*.
+
+    The recovery strategies' read (``cdda2img.strategy_reads``). The drive
+    streams the whole range, which is what the strategy specifies (a run-up, or
+    the whole disc), and memory holds only the ``[lo, hi)`` LBA ranges asked for,
+    each clipped to the read. Otherwise as :func:`read_span_attempt`, including the
+    cache defeat and the speed the drive reported.
+    """
+    module = _binding("span read")
+    return _call(
+        module,
+        "span read",
+        lambda: _read_windows_binding(
+            module,
+            device,
+            start_lba,
+            count,
+            windows,
             read_speed,
             progress_cb,
             cache_defeat=cache_defeat,

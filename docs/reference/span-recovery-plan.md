@@ -1,6 +1,6 @@
 # Flagged-span recovery rung — plan
 
-Status: **IMPLEMENTED, opt-in, never run on hardware** (2026-09-24). `_recover_flagged_spans`
+Status: **IMPLEMENTED, opt-in, not yet run on hardware.** *2026-11-21: kgr rescinded the 2026-09-24 ruling below, so H1/H2 may run again; none has yet, and the status that follows is otherwise unchanged.* (2026-09-24) `_recover_flagged_spans`
 and the `span-flagged` profile ship; kgr ruled on 2026-09-24 that H1 and H2 (§6) will **not**
 run, under the replacement PX-716A's minimal-testing terms, so the profile stays opt-in and
 `experimental` indefinitely (§7.2's promotion condition can no longer be met). The v6.1

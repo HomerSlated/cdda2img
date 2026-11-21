@@ -365,6 +365,68 @@ PROFILE_SCHEMA = Schema(
             'run_up > 0 requires granularity="sector" or "span"',
             lambda d: d["run_up"] <= 0 or d["granularity"] in _SECTOR_SHAPED,
         ),
+        # The bench strategies (cdda2img.strategy_reads, 2026-11-21). The rip picks
+        # one from these fields (strategy_reads.strategy_kind), so every
+        # combination it could not place, or would place by ignoring a field, is
+        # refused here rather than run as something else.
+        SanityRule(
+            "span",
+            "span and run_up cannot both be set: span-fixed and sector-runup are "
+            "different strategies",
+            lambda d: d["span"] <= 0 or d["run_up"] <= 0,
+        ),
+        SanityRule(
+            "variation",
+            'variation="full" (max-variation) requires granularity="sector"',
+            lambda d: d["variation"] != "full" or d["granularity"] == "sector",
+        ),
+        SanityRule(
+            "variation",
+            'variation="full" draws its own run-up and tail, so run_up and span '
+            "must be 0",
+            lambda d: d["variation"] != "full" or (d["run_up"] <= 0 and d["span"] <= 0),
+        ),
+        SanityRule(
+            "variation",
+            'variation="speed" is not a strategy at granularity="sector" or '
+            '"whole-disc" (use variation="full" or "none")',
+            lambda d: (
+                d["variation"] != "speed"
+                or d["granularity"] not in {"sector", "whole-disc"}
+            ),
+        ),
+        SanityRule(
+            "ladder",
+            'a fixed-speed strategy (granularity="sector" without '
+            'variation="full", or "whole-disc") reads at one speed and needs '
+            'ladder="single"',
+            lambda d: (
+                d["ladder"] == "single"
+                or d["granularity"] not in {"sector", "whole-disc"}
+                or d["variation"] == "full"
+            ),
+        ),
+        SanityRule(
+            "verify_passes",
+            "verify_passes is a span-rung engine knob; the strategies at granularity="
+            '"sector" or "whole-disc" do not read it',
+            lambda d: d["verify_passes"] <= 0
+            or d["granularity"] not in {"sector", "whole-disc"},
+        ),
+        SanityRule(
+            "overlap_sectors",
+            "overlap_sectors is a span-rung engine knob; the strategies at granularity="
+            '"sector" or "whole-disc" do not read it',
+            lambda d: d["overlap_sectors"] <= 0
+            or d["granularity"] not in {"sector", "whole-disc"},
+        ),
+        SanityRule(
+            "c2_retries",
+            "c2_retries is a span-rung engine knob; the strategies at granularity="
+            '"sector" or "whole-disc" do not read it',
+            lambda d: d["c2_retries"] <= 0
+            or d["granularity"] not in {"sector", "whole-disc"},
+        ),
         SanityRule(
             "span_gap",
             'span_gap > 0 requires granularity="span"',

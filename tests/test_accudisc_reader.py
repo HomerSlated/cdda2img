@@ -3067,3 +3067,72 @@ def test_span_detail_a_clean_q_lane_widens_to_nothing(
     out = ar.read_span_detail("/dev/sr0", 100, n)
     assert not any(out.position_suspect)
     assert not any(out.q_misposition)
+
+
+# ---- read_span_windows: one read, only the windows kept (2026-11-21) ----------
+
+
+def _sector(lba: int) -> bytes:
+    """A sector whose bytes name its LBA, so a misplaced copy is visible."""
+    return lba.to_bytes(4, "little") * (2352 // 4)
+
+
+def test_read_windows_binding_keeps_only_the_windows_asked_for() -> None:
+    """A whole-disc recovery read must not hold the whole disc in memory: each
+    window is clipped to the read, filled at the right place across chunk
+    boundaries, and a window outside the read comes back empty."""
+    chunks = [
+        _FakeChunk(2, _sector(10) + _sector(11)),
+        _FakeChunk(2, _sector(12) + _sector(13)),
+        _FakeChunk(2, _sector(14) + _sector(15)),
+    ]
+    device = _FakeDevice(chunks=chunks)
+    got = ar._read_windows_binding(
+        _binding_with(device),
+        "/dev/sr0",
+        10,
+        6,
+        [(8, 12), (13, 20), (30, 40)],
+        None,
+        None,
+    )
+    assert got.pieces == [
+        _sector(10) + _sector(11),
+        _sector(13) + _sector(14) + _sector(15),
+        b"",
+    ]
+    assert device.read_kwargs["count"] == 6  # the drive still streams the range
+
+
+def test_read_windows_binding_refuses_a_chunk_shorter_than_it_claims() -> None:
+    """bytearray slice assignment resizes on a length mismatch, which would shift
+    every later byte of a window without an error."""
+    device = _FakeDevice(chunks=[_FakeChunk(2, _sector(0))])  # one sector of data
+    with pytest.raises(RuntimeError, match="refusing to reassemble"):
+        ar._read_windows_binding(
+            _binding_with(device), "/dev/sr0", 0, 2, [(0, 2)], None, None
+        )
+
+
+def test_read_windows_binding_still_refuses_a_short_read() -> None:
+    device = _FakeDevice(chunks=[_FakeChunk(1, _sector(0))])
+    with pytest.raises(RuntimeError, match="refusing a short span"):
+        ar._read_windows_binding(
+            _binding_with(device), "/dev/sr0", 0, 2, [(0, 2)], None, None
+        )
+
+
+def test_read_span_windows_asks_for_the_cache_defeat_and_reports_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    device = _FakeDevice(
+        chunks=[_FakeChunk(1, _sector(5))],
+        result=_cache_defeat_result(_FakeCacheDefeat.DONE),
+    )
+    _install(monkeypatch, _binding_with_cache_defeat(device))
+
+    got = ar.read_span_windows("/dev/sr0", 5, 1, [(0, 100)], cache_defeat=True)
+
+    assert device.read_kwargs["cache_defeat"] is True
+    assert got.cache_defeat == "done"
+    assert got.pieces == [_sector(5)]

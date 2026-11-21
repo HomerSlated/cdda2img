@@ -178,8 +178,13 @@ def test_a_sector_shaped_field_requires_sector_granularity(field_name: str) -> N
         {"name": "p", field_name: 4, "granularity": "track"}, PROFILE_SCHEMA
     )
     assert _where(errors) == [field_name]
+    # ladder="single": a fixed-speed sector strategy needs one (2026-11-21), and
+    # this control is about the sector-shaped field alone.
     assert (
-        validate({"name": "p", field_name: 4, "granularity": "sector"}, PROFILE_SCHEMA)
+        validate(
+            {"name": "p", field_name: 4, "granularity": "sector", "ladder": "single"},
+            PROFILE_SCHEMA,
+        )
         == []
     )
 
@@ -229,7 +234,8 @@ def test_a_clustering_field_requires_span_granularity(
     """Narrower than the sector-shaped rule, deliberately: clustering is what turns
     a damage MAP into spans, so it is meaningless even at fixed-size "sector"."""
     errors = validate(
-        {"name": "p", field_name: 4, "granularity": granularity}, PROFILE_SCHEMA
+        {"name": "p", field_name: 4, "granularity": granularity, "ladder": "single"},
+        PROFILE_SCHEMA,
     )
     assert _where(errors) == [field_name]
 

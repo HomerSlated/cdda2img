@@ -55,17 +55,10 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from cdda2img.strategy_reads import STRATEGIES, strategy_reads, track_bounds
+
 _SECTOR_BYTES = 2352
 _C2_BYTES = 294
-
-
-@dataclass
-class ReadReq:
-    """One read a strategy asks for: sectors [start, start+count) at a given speed."""
-
-    start: int
-    count: int
-    speed: int
 
 
 @dataclass
@@ -141,78 +134,12 @@ def _verify_track(
     return c1 is not None or c2 is not None
 
 
-def _track_bounds(track: int, track_lsns: list[int], leadout: int) -> tuple[int, int]:
-    start = track_lsns[track - 1]
-    end = track_lsns[track] if track < len(track_lsns) else leadout
-    return start, end
-
-
 # --- strategies ----------------------------------------------------------------
 #
-# Each is a generator of ReadReq. The runner splices every read into a working copy
-# of the baseline and checks AR after each one, so a strategy only has to describe
-# WHICH sectors to re-read, at what speed, in what order.
-
-
-def _strategy_reads(
-    name: str,
-    track: int,
-    flagged: list[int],
-    track_lsns: list[int],
-    leadout: int,
-    ladder: list[int],
-    base_speed: int,
-    runup: int,
-    span: int,
-    rng: random.Random,
-    max_attempts: int,
-):
-    start, end = _track_bounds(track, track_lsns, leadout)
-    in_track = [s for s in flagged if start <= s < end] or [start]
-
-    for i in range(max_attempts):
-        if name == "sector-hammer":
-            lba = in_track[i % len(in_track)]
-            yield ReadReq(lba, 1, base_speed)
-        elif name == "sector-runup":
-            lba = in_track[i % len(in_track)]
-            s = max(start, lba - runup)
-            yield ReadReq(s, lba - s + 1 + 2, base_speed)
-        elif name == "track-constant":
-            yield ReadReq(start, end - start, base_speed)
-        elif name == "track-ladder":
-            yield ReadReq(start, end - start, ladder[i % len(ladder)])
-        elif name == "whole-disc":
-            yield ReadReq(0, leadout, base_speed)
-        elif name == "span-fixed":
-            # The control that separates SPAN SIZE from VARIATION. max-variation wins
-            # while reading 145-664 sectors; sector-runup fails reading 35. Those two
-            # differ in span AND in speed/run-up randomness, so the first run could not
-            # say which mattered. This arm is a fixed large span at a constant speed:
-            # if it wins as often as max-variation, span size is the whole story and
-            # the randomness is incidental.
-            lba = in_track[i % len(in_track)]
-            s = max(start, lba - span)
-            yield ReadReq(s, lba - s + 1 + 2, base_speed)
-        elif name == "max-variation":
-            lba = rng.choice(in_track)
-            k = rng.choice([0, 8, 32, 128, 512])
-            s = max(0, lba - k)
-            yield ReadReq(s, lba - s + 1 + rng.choice([2, 16, 64]), rng.choice(ladder))
-        else:  # pragma: no cover - guarded at parse time
-            msg = f"unknown strategy {name}"
-            raise ValueError(msg)
-
-
-STRATEGIES = [
-    "sector-hammer",
-    "sector-runup",
-    "track-constant",
-    "track-ladder",
-    "whole-disc",
-    "span-fixed",
-    "max-variation",
-]
+# The read plans live in cdda2img.strategy_reads, shared with the rip path since
+# 2026-11-21, so what the bench scores and what `rip --profile` runs are one
+# definition. Each is a generator of ReadReq; the runner splices every read into a
+# working copy of the baseline and checks AR after each one.
 
 
 def run_trial(
@@ -242,7 +169,7 @@ def run_trial(
     attempts = 0
     sectors = 0
 
-    for req in _strategy_reads(
+    for req in strategy_reads(
         name,
         track,
         flagged,
@@ -408,7 +335,7 @@ def main(argv: list[str] | None = None) -> int:
         # that has nothing to do with the strategy. That case must be distinguishable
         # from a genuine sector-level failure, and the count alone cannot do it.
         for t in failing:
-            t_start, t_end = _track_bounds(t, lsns, leadout)
+            t_start, t_end = track_bounds(t, lsns, leadout)
             in_t = [f for f in flagged if t_start <= f < t_end]
             note = (
                 "  <-- NO C2 TARGET: sector strategies cannot aim" if not in_t else ""

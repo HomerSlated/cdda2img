@@ -9,12 +9,13 @@ import logging
 import re
 import textwrap
 import threading
-from collections.abc import Callable
-from dataclasses import replace
+from collections.abc import Callable, Iterator
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, NamedTuple
 
 if TYPE_CHECKING:
+    import random
     from typing import BinaryIO
 
     from cdda2img.accudisc_reader import ReadLanes, SpanDetail
@@ -28,6 +29,7 @@ if TYPE_CHECKING:
     from cdda2img.rbi_format import RipInfo
     from cdda2img.recovery_profile import Profile, ResolvedStrategy
     from cdda2img.rip_log import RipLogBuilder
+    from cdda2img.strategy_reads import ReadReq
     from cdda2img.terminal_ui import TerminalUI
     from cdda2img.track_preview import TrackPreview
 
@@ -4207,8 +4209,9 @@ def _recover_flagged_spans(
 
     ``profile.budget_s`` bounds each track's passes in wall time.
 
-    **Never run on hardware** (kgr, 2026-09-24): the H1/H2 bench runs in the plan
-    were cancelled under the replacement drive's minimal-testing terms, so this is
+    **Not yet run on hardware.** The H1/H2 bench runs in the plan were cancelled
+    on 2026-09-24 under the replacement drive's minimal-testing terms; that ruling
+    was rescinded on 2026-11-21 (kgr), but no run has happened since. This is
     reachable only through ``--profile span-flagged`` and is validated offline
     alone.
 
@@ -4278,6 +4281,318 @@ def _recover_flagged_spans(
                 else:
                     prov[f"span_accepted_unverified_track_{t}"] = str(len(targets))
     return outcomes, prov
+
+
+def _strategy_attempt(
+    device: str,
+    req: ReadReq,
+    windows: list[tuple[int, int]],
+    prog_cb: Callable[[int, int], None] | None,
+) -> tuple[list[bytes] | None, str]:
+    """One strategy read, keeping *windows*. Returns ``(pieces, record)``.
+
+    *pieces* is ``None`` when the read raised; *record* is its entry in
+    ``strategy_reads_track_<n>`` either way: ``<start>+<count>@`` followed by the
+    ladder's ``<requested>><honoured>:<cache_defeat>``, or ``<requested>:error``.
+    Every read asks for a cache defeat (kgr, 2026-11-21).
+    """
+    from cdda2img.accudisc_reader import read_span_windows
+
+    where = f"{req.start}+{req.count}@"
+    try:
+        got = read_span_windows(
+            device,
+            req.start,
+            req.count,
+            windows,
+            read_speed=req.speed,
+            progress_cb=prog_cb,
+            cache_defeat=True,
+        )
+    except (RuntimeError, OSError) as exc:
+        log.warning("strategy read %s%dX failed: %s", where, req.speed, exc)
+        return None, f"{where}{req.speed}:error"
+    record = where + _attempt_record(req.speed, got.speed_honoured_x, got.cache_defeat)
+    return got.pieces, record
+
+
+def _overlay_and_match(
+    working: bytearray,
+    w: _RawWindow,
+    piece: bytes,
+    read_start: int,
+    read_offset: int,
+    track: int,
+    n_tracks: int,
+    responses: list,
+) -> bytes | None:
+    """Splice one read's piece of the window into *working* and AR-verify it.
+
+    *working* is the track's raw window **in memory**, carrying every earlier
+    read of this track, exactly as the bench's working copy did. Returns the
+    corrected track on a match, else ``None``; nothing is written to the file
+    here.
+    """
+    from cdda2img.accuraterip import match_track_pcm
+
+    if not piece:
+        return None
+    off = (max(w.lo, read_start) - w.lo) * _R6_BYTES_PER_FRAME
+    working[off : off + len(piece)] = piece
+    corrected = _corrected_from_window(bytes(working), w, read_offset)
+    _v1, _v2, conf_v1, conf_v2 = match_track_pcm(corrected, track, n_tracks, responses)
+    return corrected if conf_v1 or conf_v2 else None
+
+
+class _StrategyTrack(NamedTuple):
+    """One failed track under a recovery strategy: its window, the in-memory
+    working copy of that window, and the reads made for it."""
+
+    track: int
+    window: _RawWindow
+    working: bytearray
+    reads: list[str]
+
+
+def _recover_by_strategy(
+    kind: str,
+    profile: Profile,
+    *,
+    device: str,
+    failed_tracks: list,
+    track_lsns: list[int],
+    disc_last_lsn: int,
+    pcm_file: Path,
+    responses: list,
+    ladder: list[int],
+    read_offset: int,
+    disc_damage: bytes | None,
+    ui: TerminalUI | None,
+    seed: int,
+) -> tuple[dict[int, str], dict[str, str]]:
+    """Run one of the bench's recovery strategies **instead of** the speed ladder.
+
+    *kind* comes from :func:`cdda2img.strategy_reads.strategy_kind`, i.e. from the
+    profile's fields. The reads are the bench's own plan
+    (:func:`~cdda2img.strategy_reads.strategy_reads`, shared with
+    ``tools/strategy_bench.py``), and so is the rule around them: every read is
+    spliced into an in-memory working copy of the track, the track is checked
+    against AccurateRip after each read, and only a match is written to
+    *pcm_file*. A track that never matches keeps its audio byte-identical, as on
+    the ladder. What the bench lacked and this adds: a cache defeat on every read
+    (kgr, 2026-11-21), and the record of every read in PROV.
+
+    **It stands alone** (kgr, 2026-11-21): a track it does not recover is
+    ``unrecovered``, not handed to the ladder. ``profile.passes`` is reads per
+    track (the bench's ``--max-attempts``) and ``profile.budget_s`` bounds each
+    track's reads in wall time. ``whole-disc`` reads the disc once per pass and
+    tests every remaining track against that read, so there the two bound all
+    the tracks together.
+
+    *seed* drives ``max-variation``'s random choices and is recorded
+    (``recovery_seed``) so its reads can be regenerated. Returns
+    ``(outcomes, prov)``: ``strategy_matched@a<k>`` or ``unrecovered`` per track,
+    and ``recovery_strategy``, ``strategy_targets_track_<n>`` and
+    ``strategy_reads_track_<n>`` (rbi_spec §6.3).
+    """
+    import random
+
+    prov: dict[str, str] = {"recovery_strategy": kind}
+    if kind == "max-variation":
+        prov["recovery_seed"] = str(seed)
+    # Seeded and recorded on purpose: the point is that the reads can be regenerated.
+    rng = random.Random(seed)  # noqa: S311
+    status_line = [""]
+    prog_cb = _recovery_status_cb(ui, status_line)
+    outcomes: dict[int, str] = {}
+
+    with pcm_file.open("r+b") as pcm_fh:
+        tracks: list[_StrategyTrack] = []
+        for result in failed_tracks:
+            w = _raw_track_window(
+                track_lsns, disc_last_lsn, result.track - 1, read_offset
+            )
+            pcm_fh.seek(w.lo * _R6_BYTES_PER_FRAME)
+            working = bytearray(pcm_fh.read((w.hi - w.lo) * _R6_BYTES_PER_FRAME))
+            tracks.append(_StrategyTrack(result.track, w, working, []))
+        run = _StrategyRun(
+            kind=kind,
+            profile=profile,
+            device=device,
+            track_lsns=track_lsns,
+            disc_last_lsn=disc_last_lsn,
+            responses=responses,
+            ladder=ladder,
+            read_offset=read_offset,
+            rng=rng,
+            ui=ui,
+            status_line=status_line,
+            prog_cb=prog_cb,
+            pcm_fh=pcm_fh,
+            outcomes=outcomes,
+        )
+        if kind == "whole-disc":
+            run.whole_disc(tracks)
+        else:
+            for st in tracks:
+                n = run.sector_track(st, disc_damage)
+                prov[f"strategy_targets_track_{st.track}"] = str(n)
+    for st in tracks:
+        outcomes.setdefault(st.track, "unrecovered")  # keep the original audio
+        prov[f"strategy_reads_track_{st.track}"] = ",".join(st.reads)
+    return outcomes, prov
+
+
+@dataclass
+class _StrategyRun:
+    """The loop state :func:`_recover_by_strategy` shares between its two shapes,
+    held on one object so neither loop carries a dozen parameters."""
+
+    kind: str
+    profile: Profile
+    device: str
+    track_lsns: list[int]
+    disc_last_lsn: int
+    responses: list
+    ladder: list[int]
+    read_offset: int
+    rng: random.Random
+    ui: TerminalUI | None
+    status_line: list[str]
+    prog_cb: Callable[[int, int], None] | None
+    pcm_fh: BinaryIO
+    outcomes: dict[int, str]
+
+    @property
+    def leadout(self) -> int:
+        return self.disc_last_lsn + 1
+
+    @property
+    def file_size(self) -> int:
+        return self.leadout * _R6_BYTES_PER_FRAME
+
+    @property
+    def n_tracks(self) -> int:
+        return len(self.track_lsns)
+
+    def _reads(self, track: int, flagged: list[int]) -> Iterator[ReadReq]:
+        from cdda2img.strategy_reads import strategy_reads
+
+        return strategy_reads(
+            self.kind,
+            track,
+            flagged,
+            self.track_lsns,
+            self.leadout,
+            self.ladder,
+            self.ladder[0],
+            self.profile.run_up,
+            self.profile.span,
+            self.rng,
+            self.profile.passes,
+        )
+
+    def _status(self, text: str) -> None:
+        self.status_line[0] = text
+        if self.ui is not None:
+            self.ui.set_status(text, 0.0)
+
+    def _commit(self, st: _StrategyTrack, corrected: bytes, k: int) -> None:
+        _splice_corrected(
+            self.pcm_fh,
+            corrected,
+            self.track_lsns[st.track - 1],
+            self.read_offset,
+            self.file_size,
+        )
+        self.outcomes[st.track] = f"strategy_matched@a{k}"
+
+    def sector_track(self, st: _StrategyTrack, disc_damage: bytes | None) -> int:
+        """Run a sector strategy on one track; returns how many flagged sectors
+        it had to aim at (``0``: every read aims at the track's first sector)."""
+        import time
+
+        from cdda2img.span_planner import locate_targets
+        from cdda2img.strategy_reads import track_bounds
+
+        w = st.window
+        flagged = (
+            list(
+                locate_targets(
+                    disc_damage,
+                    w.lo,
+                    w.hi - w.lo,
+                    exclude=(self.disc_last_lsn,),
+                )
+            )
+            if disc_damage
+            else []
+        )
+        lo, hi = track_bounds(st.track, self.track_lsns, self.leadout)
+        n_targets = sum(1 for lba in flagged if lo <= lba < hi)
+        if self.ui is None:
+            print(f"  Recovering track {st.track} ({self.kind})…")
+        deadline = time.monotonic() + self.profile.budget_s
+        for k, req in enumerate(self._reads(st.track, flagged), 1):
+            if time.monotonic() > deadline:
+                break
+            self._status(f"Recover track {st.track} ({k}/{self.profile.passes})")
+            pieces, record = _strategy_attempt(
+                self.device, req, [(w.lo, w.hi)], self.prog_cb
+            )
+            st.reads.append(record)
+            if pieces is None:
+                continue
+            corrected = _overlay_and_match(
+                st.working,
+                w,
+                pieces[0],
+                req.start,
+                self.read_offset,
+                st.track,
+                self.n_tracks,
+                self.responses,
+            )
+            if corrected is not None:
+                self._commit(st, corrected, k)
+                break
+        return n_targets
+
+    def whole_disc(self, tracks: list[_StrategyTrack]) -> None:
+        """Read the whole disc once per pass; test every remaining track against
+        that one read. A match is written; the rest wait for the next pass."""
+        import time
+
+        if not tracks:
+            return
+        if self.ui is None:
+            print(f"  Re-reading the whole disc for {len(tracks)} track(s)…")
+        deadline = time.monotonic() + self.profile.budget_s
+        remaining = list(tracks)
+        for k, req in enumerate(self._reads(remaining[0].track, []), 1):
+            if not remaining or time.monotonic() > deadline:
+                break
+            self._status(f"Whole-disc re-read ({k}/{self.profile.passes})")
+            windows = [(st.window.lo, st.window.hi) for st in remaining]
+            pieces, record = _strategy_attempt(self.device, req, windows, self.prog_cb)
+            for st in remaining:
+                st.reads.append(record)
+            if pieces is None:
+                continue
+            for st, piece in zip(remaining, pieces, strict=True):
+                corrected = _overlay_and_match(
+                    st.working,
+                    st.window,
+                    piece,
+                    req.start,
+                    self.read_offset,
+                    st.track,
+                    self.n_tracks,
+                    self.responses,
+                )
+                if corrected is not None:
+                    self._commit(st, corrected, k)
+            remaining = [st for st in remaining if st.track not in self.outcomes]
 
 
 def _span_rung_decline(
@@ -4882,7 +5197,43 @@ def rip_image(  # noqa: C901
             )
             recovery_outcomes.update(span_outcomes)
             span_prov.update(span_keys)
-            if recovery_ladder and failed_tracks:
+            # A bench strategy (sector-* / span-fixed / max-variation / whole-disc,
+            # picked from the profile's FIELDS) runs instead of the speed ladder and
+            # stands alone (kgr, 2026-11-21). It needs the same preconditions the
+            # ladder does: AR responses to gate with, recovery enabled, and a bound
+            # ladder to take its speeds from.
+            from cdda2img.strategy_reads import strategy_kind as _strategy_kind
+
+            bound_profile = bound.profile if bound is not None else None
+            strategy_kind = (
+                _strategy_kind(bound_profile) if bound_profile is not None else None
+            )
+            if (
+                strategy_kind is not None
+                and bound_profile is not None
+                and recovery_ladder
+                and failed_tracks
+            ):
+                import secrets
+
+                outcomes, strategy_keys = _recover_by_strategy(
+                    strategy_kind,
+                    bound_profile,
+                    device=device,
+                    failed_tracks=failed_tracks,
+                    track_lsns=final_track_lsns,
+                    disc_last_lsn=final_disc_last_lsn,
+                    pcm_file=temp.pcm_file,
+                    responses=ar_responses,
+                    ladder=recovery_ladder,
+                    read_offset=read_offset,
+                    disc_damage=disc_damage,
+                    ui=ui,
+                    seed=secrets.randbits(32),
+                )
+                recovery_outcomes.update(outcomes)
+                ladder_prov.update(strategy_keys)
+            elif recovery_ladder and failed_tracks:
                 outcomes, attempts_prov = _recover_failed_tracks(
                     device,
                     failed_tracks,

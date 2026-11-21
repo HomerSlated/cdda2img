@@ -4,6 +4,12 @@
 # 0/3 on every hard target. Kept because it is the cheapest arm that still gives the
 # drive a streaming approach to the defect, and because a negative result is only
 # useful if the arm that produced it stays runnable.
+#
+# In the rip since 2026-11-21 (cdda2img.strategy_reads, the bench's own read plan,
+# picked from these fields rather than this file's name): it stands alone, so a
+# track it does not recover is not handed to the speed ladder; every read asks
+# AccuDisc for a cache defeat, which the bench did not; and `passes` is reads per
+# track (the bench's --max-attempts, 8), bounded by budget_s per track.
 name         = "sector-runup"
 experimental = true
 
@@ -13,7 +19,7 @@ c2           = true
 granularity  = "sector"
 ladder       = "single"
 speed        = "max"
-passes       = 3
+passes       = 8
 run_up       = 32
 variation    = "none"
 

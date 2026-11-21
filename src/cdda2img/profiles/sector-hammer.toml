@@ -7,6 +7,12 @@
 # This is the shape the pre-bench `_recover_rung` used. It is kept as the control
 # that anchors the low end of the variation axis — deleting it would leave the
 # ranking with no zero point.
+#
+# In the rip since 2026-11-21 (cdda2img.strategy_reads, the bench's own read plan,
+# picked from these fields rather than this file's name): it stands alone, so a
+# track it does not recover is not handed to the speed ladder; every read asks
+# AccuDisc for a cache defeat, which the bench did not; and `passes` is reads per
+# track (the bench's --max-attempts, 8), bounded by budget_s per track.
 name         = "sector-hammer"
 experimental = true
 
@@ -16,7 +22,7 @@ c2           = true
 granularity  = "sector"
 ladder       = "single"
 speed        = "max"
-passes       = 3
+passes       = 8
 variation    = "none"
 
 ctdb         = "auto"

@@ -4,7 +4,10 @@ A *profile* is a complete recovery specification — what to capture, what to re
 and how, and which adjuncts to allow — named after the strategy the bench actually
 measured (accudisc-migration-plan.md §9.1/§9.2). Seven shipped profiles are the
 seven arms of that bench; their success rates live in each file's header comment.
-The eighth, ``span-flagged``, is not an arm: an opt-in rung never run on hardware.
+Since 2026-11-21 the rip runs each arm's own read plan (``cdda2img.strategy_reads``,
+chosen from the profile's fields); before then all but the span rung ran as the
+speed ladder. The eighth, ``span-flagged``, is not an arm: an opt-in rung not yet
+run on hardware.
 
 Resolution has exactly four rungs (§9.4), in priority order:
 

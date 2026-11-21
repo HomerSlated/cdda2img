@@ -8,6 +8,12 @@
 # Result: 1/16 (0.06) against max-variation's 2/3 on the same target with the same
 # splice rule. Span size is therefore NOT the story — the variation is. Keeping the
 # arm keeps that conclusion falsifiable on the next disc.
+#
+# In the rip since 2026-11-21 (cdda2img.strategy_reads, the bench's own read plan,
+# picked from these fields rather than this file's name): it stands alone, so a
+# track it does not recover is not handed to the speed ladder; every read asks
+# AccuDisc for a cache defeat, which the bench did not; and `passes` is reads per
+# track (the bench's --max-attempts, 8), bounded by budget_s per track.
 name         = "span-fixed"
 experimental = true
 
@@ -17,7 +23,7 @@ c2           = true
 granularity  = "sector"
 ladder       = "single"
 speed        = "max"
-passes       = 3
+passes       = 8
 span         = 512
 variation    = "none"
 

@@ -1,6 +1,7 @@
 """The flagged-span recovery rung (span-recovery-plan.md §4), offline.
 
-Never run on hardware (kgr, 2026-09-24): these tests are the rung's only
+Not yet run on hardware (the 2026-09-24 ruling against it was rescinded on
+2026-11-21, but no run has happened): these tests are the rung's only
 validation, so they are built to fail on the mistakes that matter.
 
 * The audio is a per-sector **ramp**, never silence: silence is also what a

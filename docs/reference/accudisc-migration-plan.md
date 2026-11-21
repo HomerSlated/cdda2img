@@ -511,6 +511,23 @@ target); **n (flagged sectors in the track), not damage radius, governs** which 
 wins (ABBA inner-edge t1 n=1 == outer-edge disc t19 n=1). Values are provisional data;
 the validator + resolution are the stable interface.
 
+**2026-11-21 note (kgr, option 2).** Until this date the table above described profiles
+the rip did not run: only `track-ladder`, `track-constant` and `span-flagged` did what
+their names say, and the other five ran as the speed ladder while PROV named them.
+They now run the bench's own read plans (`cdda2img.strategy_reads`, which
+`tools/strategy_bench.py` imports), chosen from the fields, each standing alone (an
+unrecovered track is not handed to the ladder), with a cache defeat on every read. In
+the schema below: `passes` means reads per track for `granularity = "sector"` and
+`"whole-disc"` (the bench's `--max-attempts`, 8); fixed-speed strategies need
+`ladder = "single"`; `variation = "speed"` is refused at those two granularities; and
+`max-variation` and `whole-disc` are `experimental = true` until a hardware run of the
+new code. Where the rip still differs from what was scored: a cache defeat on every
+read; the profiles' `speed = "max"` binds 40x where the bench read at `base_speed = 32`;
+the bench's ladder was fixed (`40,32,24,16,8,4`) where the rip's is admitted per disc;
+the budgets differ (bench 240 to 300 s, profiles 120 to 600 s); and the bench aimed at
+any C2-flagged sector of a capture at 32x, where the rip aims at the damage lane of its
+own capture pass, the disc's final sector excluded.
+
 ### 9.2 Profile schema (one shape; folds the §8 axes in as fields)
 
 ```toml
