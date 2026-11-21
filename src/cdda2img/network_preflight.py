@@ -124,7 +124,12 @@ def services_for(pipeline: str, *, cddb_server: str | None) -> list[Service]:
         *([ACOUSTID] if acoustid_lookup.is_available() else []),
         *([DISCOGS] if discogs_lookup.is_available() else []),
     ]
-    if pipeline == "rip":
+    if pipeline == "rip-digital":
+        # --digital-media: no disc-ID database can hold the disc, so AccurateRip,
+        # CDDB and CTDB are not asked at all; the rest are required as for rip.
+        required = [MUSICBRAINZ, COVERART, *optional]
+        advisory = []
+    elif pipeline == "rip":
         # kgr, 2026-11-21: a rip writes a container only when every service that
         # contributes data, metadata or PROV answered, so all of them are
         # required. CTDB is the one exception: it is asked only during repair, and

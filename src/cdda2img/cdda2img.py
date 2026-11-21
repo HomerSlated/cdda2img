@@ -57,7 +57,12 @@ from cdda2img.rbi_format import (
     RBIDisc,
     format_original,
 )
-from cdda2img.rip_abort import EXIT_INVESTIGATE, EXIT_RETRY_LATER, RipAborted
+from cdda2img.rip_abort import (
+    EXIT_FIX_INVOCATION,
+    EXIT_INVESTIGATE,
+    EXIT_RETRY_LATER,
+    RipAborted,
+)
 from cdda2img.silence import trim_silence_cd_da
 from cdda2img.toc import (
     build_toc_entries,
@@ -452,6 +457,22 @@ def parse_args() -> argparse.Namespace:
         action=argparse.BooleanOptionalAction,
         default=None,
         help="Skip the interactive metadata menu; accept the best-guess result automatically (default: from config, false)",
+    )
+    media = r_cmd.add_mutually_exclusive_group()
+    media.add_argument(
+        "--cdr",
+        dest="media_override",
+        action="store_const",
+        const="cdr",
+        default=None,
+        help="The disc is a recordable copy of a pressed CD (or its type could not be determined): rip it with the normal pipeline. AccurateRip must still verify every track. Without this, a recordable disc is refused",
+    )
+    media.add_argument(
+        "--digital-media",
+        dest="media_override",
+        action="store_const",
+        const="digital_media",
+        help="The disc was made from a digital-only release, which no disc-ID database can hold: skip AccurateRip, CTDB, CDDB and the MusicBrainz disc-ID lookup, prove the audio by byte-identical reads at different speeds, and identify it by AcoustID on every track",
     )
     r_cmd.add_argument(
         "--extract",
@@ -2283,6 +2304,7 @@ def _run_metadata_lookups(
     ui: TerminalUI | None,
     _shadow_out: dict[str, object] | None = None,
     retry_service: Callable[[str, str], bool] | None = None,
+    digital_media: bool = False,
 ) -> tuple[RBIDisc, MBPrepopResult]:
     """Run every remote metadata lookup and merge results into *disc* in
     precedence order: disc-baked CD-Text > MusicBrainz > Discogs > AcoustID
@@ -2344,8 +2366,8 @@ def _run_metadata_lookups(
                 log.warning("CDDB query failed; continuing without it: %s", exc)
             mb_result = mb_future.result()
     else:
-        mb_result = prepopulate_from_mb(
-            disc, verbose=mb_verbose, preferred_country=preferred_country
+        mb_result = _mb_prepop_alone(
+            disc, mb_verbose, preferred_country, digital_media=digital_media
         )
 
     mb_result = _retry_mb_lookup(
@@ -2377,7 +2399,7 @@ def _run_metadata_lookups(
         mb_result.mb_candidate_artist,
     )
     provenance["lookup_status_mb"] = _r12_status(
-        attempted=True,
+        attempted=not digital_media,
         has_data=mb_result.match_count > 0,
         errored=mb_result.lookup_error is not None,
     )
@@ -2555,6 +2577,7 @@ def _finalize_import(
     auto: bool = False,
     preferred_country: list[str] | None = None,
     archival: bool = False,
+    digital_media: bool = False,
 ) -> Path:
     """Shared post-rip/import pipeline: lookups → metadata menu → TOC → RG → container.
 
@@ -2596,8 +2619,11 @@ def _finalize_import(
         retry_service=functools.partial(
             _offer_service_retry, ui, interactive=_interactive(auto)
         ),
+        digital_media=digital_media,
     )
-    _require_service_answers(provenance, archival=archival)
+    _archival_gates(
+        disc, pcm_file, provenance, ui, archival=archival, digital_media=digital_media
+    )
 
     # Identify the original release BEFORE the menu so the user sees
     # "Original: <title> (<year>)" in the initial summary. The menu's
@@ -3469,6 +3495,141 @@ def _require_accuraterip_answer(tracks: list, reachable: bool, cddb_id: int) -> 
         )
 
 
+def _require_media_decision(kind: str, evidence: str, override: str | None) -> None:
+    """Refuse a disc whose type needs the user's word (kgr, 2026-11-21).
+
+    A recordable disc, or one whose type could not be determined, needs
+    ``--cdr`` (a copy of a pressed CD: the normal pipeline, AccurateRip still
+    verifying every track) or ``--digital-media`` (made from a digital-only
+    release: no disc-ID lookups). Unknown is refused rather than guessed, since
+    the override costs the user one flag (AccuDisc 2026-11-21j). Exit 1: the
+    action is to re-run with the right flag. ``--digital-media`` on a pressed disc
+    is refused too: it would skip AccurateRip for a disc AccurateRip can verify.
+    """
+    hint = [
+        f"Media check: {evidence}.",
+        "If it is a recordable copy of a pressed CD, re-run with --cdr.",
+        "If it was made from a digital-only release, re-run with --digital-media.",
+    ]
+    if kind == "pressed":
+        if override == "digital_media":
+            raise RipAborted(
+                EXIT_FIX_INVOCATION,
+                "--digital-media was given for a pressed disc",
+                [
+                    f"Media check: {evidence}.",
+                    "A pressed disc can be verified against AccurateRip; re-run"
+                    " without --digital-media.",
+                ],
+            )
+        return
+    if override is None:
+        reason = (
+            "the disc is recordable (CD-R/RW)"
+            if kind == "recordable"
+            else "the disc's type could not be determined"
+        )
+        raise RipAborted(EXIT_FIX_INVOCATION, reason, hint)
+
+
+def _digital_media_consensus(
+    device: str,
+    pcm_file: Path,
+    disc_damage: bytes | None,
+    ui: TerminalUI | None,
+) -> dict[str, str]:
+    """Prove a ``--digital-media`` rip's audio by byte-identical reads.
+
+    No disc-ID database holds such a disc, so AccurateRip cannot. Instead the
+    capture is read again in full at a **different** admitted rung, and the two
+    must agree byte for byte. A different rung, not the same one: read errors are
+    stable per speed, so two reads at one speed can agree on the same wrong
+    bytes. With C2 the capture and every re-read must also flag nothing; a drive
+    without C2 cannot vouch for a read that way, so a third read at a third rung
+    is required instead. Any disagreement, or any C2 flag, aborts (exit 3): there
+    is no AccurateRip to verify a repair against. Returns PROV
+    ``digital_media_consensus``.
+    """
+    from cdda2img import drive_speed
+    from cdda2img.accudisc_reader import drive_supports_c2, read_disc_c2
+
+    has_c2 = drive_supports_c2(device)
+    if has_c2 and disc_damage is not None and any(disc_damage):
+        flagged = sum(1 for b in disc_damage if b)
+        raise RipAborted(
+            EXIT_INVESTIGATE,
+            f"the capture flagged C2 errors on {flagged} sector(s)",
+            [
+                "Under --digital-media nothing can verify a repaired read, so the"
+                " capture must be clean. Clean the disc or try another drive."
+            ],
+        )
+    ladder = drive_speed.admitted_ladder(device)
+    extra = 1 if has_c2 else 2
+    rungs = [x for x in ladder if x != ladder[0]][:extra] or ladder[:1]
+    while len(rungs) < extra:
+        rungs.append(rungs[-1])
+    for k, speed in enumerate(rungs, 2):
+        _ui_status(ui, f"Digital media: verifying read {k} at {speed}X…")
+        again = pcm_file.with_name(f"consensus-{k}.pcm")
+        lanes: list[ReadLanes] = []
+        read_disc_c2(device, again, read_speed=speed, map_cb=lanes.append)
+        try:
+            diff = _first_difference(pcm_file, again)
+        finally:
+            again.unlink(missing_ok=True)
+        if diff is not None:
+            first, count = diff
+            raise RipAborted(
+                EXIT_INVESTIGATE,
+                f"read {k} at {speed}X disagrees with the capture",
+                [
+                    f"{count} sector(s) differ, the first at LBA {first}.",
+                    "Under --digital-media the audio is proved only by reads that"
+                    " agree; clean the disc or try another drive.",
+                ],
+            )
+        if has_c2 and lanes and any(lanes[0].damage):
+            raise RipAborted(
+                EXIT_INVESTIGATE,
+                f"read {k} at {speed}X flagged C2 errors",
+                ["Every read must be clean under --digital-media."],
+            )
+    speeds = ",".join(["capture", *(f"{x}X" for x in rungs)])
+    return {
+        "digital_media_consensus": (
+            f"{len(rungs) + 1}@{speeds}:{'clean' if has_c2 else 'unavailable'}"
+        )
+    }
+
+
+def _first_difference(a: Path, b: Path) -> tuple[int, int] | None:
+    """``(first_lba, differing_sectors)`` between two raw captures, or ``None``
+    when they are byte-identical. A length difference counts every missing
+    sector."""
+    sector = _R6_BYTES_PER_FRAME
+    first: int | None = None
+    count = 0
+    lba = 0
+    with a.open("rb") as fa, b.open("rb") as fb:
+        while True:
+            ca, cb = fa.read(sector * 512), fb.read(sector * 512)
+            if not ca and not cb:
+                break
+            if ca != cb:
+                n = max(len(ca), len(cb)) // sector + 1
+                for i in range(n):
+                    if (
+                        ca[i * sector : (i + 1) * sector]
+                        != cb[i * sector : (i + 1) * sector]
+                    ):
+                        count += 1
+                        if first is None:
+                            first = lba + i
+            lba += max(len(ca), len(cb)) // sector
+    return None if first is None else (first, count)
+
+
 def _require_every_track_verified(
     tracks: list, outcomes: dict[int, str], provenance: dict[str, str]
 ) -> None:
@@ -3492,6 +3653,24 @@ def _require_every_track_verified(
         " AccurateRip after recovery",
         details,
         provenance,
+    )
+
+
+def _mb_prepop_alone(
+    disc: RBIDisc,
+    verbose: bool,
+    preferred_country: list[str],
+    *,
+    digital_media: bool,
+) -> MBPrepopResult:
+    """The MusicBrainz prepop when no CDDB query runs beside it. Under
+    ``--digital-media`` the disc-ID lookup is skipped: no index can hold it."""
+    from cdda2img.mb_lookup import prepopulate_from_mb, prepopulate_without_disc_id
+
+    if digital_media:
+        return prepopulate_without_disc_id(disc, verbose=verbose)
+    return prepopulate_from_mb(
+        disc, verbose=verbose, preferred_country=preferred_country
     )
 
 
@@ -3537,7 +3716,9 @@ def _service_gap(service: str, key: str, provenance: dict[str, str]) -> str | No
     return "did not answer" if value == "down" else f"answered nothing found ({value})"
 
 
-def _require_service_answers(provenance: dict[str, str], *, archival: bool) -> None:
+def _require_service_answers(
+    provenance: dict[str, str], *, archival: bool, digital_media: bool = False
+) -> None:
     """Abort a rip when a service it needs contributed nothing (kgr, 2026-11-21).
 
     "A service that answers 'nothing found' has failed to provide data needed to
@@ -3557,9 +3738,15 @@ def _require_service_answers(provenance: dict[str, str], *, archival: bool) -> N
 
     if not archival:
         return
+    # --digital-media asks no disc-ID database, and CDDB is one.
+    services = [
+        (service, key)
+        for service, key in _ARCHIVAL_SERVICES
+        if not (digital_media and service == "CDDB")
+    ]
     gaps = [
         (service, why)
-        for service, key in _ARCHIVAL_SERVICES
+        for service, key in services
         if (why := _service_gap(service, key, provenance)) is not None
     ]
     if not gaps:
@@ -3576,6 +3763,78 @@ def _require_service_answers(provenance: dict[str, str], *, archival: bool) -> N
         ],
         provenance,
     )
+
+
+def _archival_gates(
+    disc: RBIDisc,
+    pcm_file: Path,
+    provenance: dict[str, str],
+    ui: TerminalUI | None,
+    *,
+    archival: bool,
+    digital_media: bool,
+) -> None:
+    """The pre-menu gates of an archival run: every service answered, and under
+    ``--digital-media`` every track fingerprints to the identified release."""
+    _require_service_answers(provenance, archival=archival, digital_media=digital_media)
+    if archival and digital_media:
+        _require_acoustid_identity(disc, pcm_file, provenance, ui)
+
+
+def _require_acoustid_identity(
+    disc: RBIDisc, pcm_file: Path, provenance: dict[str, str], ui: TerminalUI | None
+) -> None:
+    """Under ``--digital-media``, every track's fingerprint must match the release.
+
+    With no disc ID the identification rests on CD-Text, the ISRC tally or the
+    duration match; AcoustID is the only evidence tying the audio itself to that
+    release (kgr, 2026-11-21: a digital release "still has a fingerprint, a
+    MusicBrainz entry, cover art ... everything but a disc-id"). A track matches
+    when one of its fingerprint's recordings appears on the identified release
+    group. Measured on Toca (20th Anniversary Edition): tracks 1 and 2 both list
+    it among 211 and 87 candidate releases. Writes ``acoustid_tracks_matched``;
+    any unmatched track aborts (exit 3, the per-track answers in the report).
+    """
+    import tempfile
+    import wave
+
+    from cdda2img import acoustid_lookup
+
+    group = disc.mb_release_group_id
+    unmatched: list[int] = []
+    _ui_status(ui, "Digital media: fingerprinting every track…")
+    with tempfile.TemporaryDirectory(dir=pcm_file.parent) as td:
+        offset = 0
+        for entry in disc.tracks:
+            offset += entry.pregap_frames * _R6_BYTES_PER_FRAME
+            size = entry.duration_frames * _R6_BYTES_PER_FRAME
+            with open(pcm_file, "rb") as f:
+                f.seek(offset)
+                pcm = f.read(size)
+            offset += size
+            wav = Path(td) / f"track-{entry.track_number:02d}.wav"
+            with wave.open(str(wav), "wb") as w:
+                w.setnchannels(2)
+                w.setsampwidth(2)
+                w.setframerate(44100)
+                w.writeframes(pcm)
+            hits = acoustid_lookup.fingerprint_and_lookup(wav)
+            if not group or not any(h.mb_release_group_id == group for h in hits):
+                unmatched.append(entry.track_number)
+    n = len(disc.tracks)
+    provenance["acoustid_tracks_matched"] = f"{n - len(unmatched)}/{n}"
+    if unmatched:
+        raise RipAborted(
+            EXIT_INVESTIGATE,
+            f"{len(unmatched)} of {n} track(s) did not fingerprint to the identified"
+            " release",
+            [
+                f"Release group: {group or 'none identified'}.",
+                f"Unmatched tracks: {', '.join(map(str, unmatched))}; every"
+                " fingerprint query and its candidates are in the report.",
+            ],
+            provenance,
+        )
 
 
 def _require_cover_art(provenance: dict[str, str], *, archival: bool) -> None:
@@ -4924,6 +5183,7 @@ def rip_image(  # noqa: C901
     keep_rbi: bool = True,
     strategy: ResolvedStrategy | None = None,
     network_preflight: str | None = None,
+    media_override: str | None = None,
 ) -> Path | None:
     """Rip *device* into an RBI container, or write nothing at all.
 
@@ -5105,6 +5365,14 @@ def rip_image(  # noqa: C901
     # anywhere, and a rip that raised left it throttled too.
     entry_speed_x = drive_speed.current_speed_x(device)
     try:
+        # What is in the drive, before anything else reads it (kgr, 2026-11-21): a
+        # recordable disc is refused unless the user says what it is.
+        from cdda2img.accudisc_reader import media_check
+
+        media = media_check(device)
+        _require_media_decision(media.kind, media.evidence, media_override)
+        digital_media = media_override == "digital_media"
+
         # Grab track 1 first (drive is single-use), then play it on a loop in
         # the background while the rest of the rip runs.
         track_preview = _start_track_preview(device, temp.base, ui, enabled=preview)
@@ -5161,29 +5429,42 @@ def rip_image(  # noqa: C901
         ar_cohort: list = []
         _ar_transport: str | None = None
 
-        _ui_status(ui, "Verifying AccurateRip…")
-        ar_verify = _verify_ar_with_retry(
-            lambda: verify_rip(
-                temp.pcm_file,
-                final_track_lsns,
-                final_disc_last_lsn,
-                read_offset=ar_offset,
-                cddb_id=cddb_id,
-            ),
-            ui,
-            interactive=_interactive(auto),
-        )
-        if ui is not None:
-            ui.pause()
-        print_ar_report(
-            ar_verify.tracks, read_offset=read_offset, reachable=ar_verify.reachable
-        )
-        if ui is not None:
-            ui.resume()
-        # kgr, 2026-11-21: without AccurateRip's answer nothing can be verified,
-        # and without a verified rip nothing is written. Both gates come before
-        # any repair read, so a rip that is going to abort spends no drive time.
-        _require_accuraterip_answer(ar_verify.tracks, ar_verify.reachable, cddb_id)
+        digital_prov: dict[str, str] = {}
+        if digital_media:
+            # No disc-ID database can hold this disc: the audio is proved by
+            # byte-identical reads at different speeds instead. An empty result
+            # leaves every AccurateRip-keyed stage below (repair, recovery, the
+            # end gates) with nothing to act on.
+            from cdda2img.accuraterip import ARVerifyResult
+
+            ar_verify = ARVerifyResult()
+            digital_prov = _digital_media_consensus(
+                device, temp.pcm_file, disc_damage, ui
+            )
+        else:
+            _ui_status(ui, "Verifying AccurateRip…")
+            ar_verify = _verify_ar_with_retry(
+                lambda: verify_rip(
+                    temp.pcm_file,
+                    final_track_lsns,
+                    final_disc_last_lsn,
+                    read_offset=ar_offset,
+                    cddb_id=cddb_id,
+                ),
+                ui,
+                interactive=_interactive(auto),
+            )
+            if ui is not None:
+                ui.pause()
+            print_ar_report(
+                ar_verify.tracks, read_offset=read_offset, reachable=ar_verify.reachable
+            )
+            if ui is not None:
+                ui.resume()
+            # kgr, 2026-11-21: without AccurateRip's answer nothing can be
+            # verified, and without a verified rip nothing is written. Both gates
+            # come before any repair read, so a doomed rip spends no drive time.
+            _require_accuraterip_answer(ar_verify.tracks, ar_verify.reachable, cddb_id)
 
         # CTDB parity repair FIRST (above the re-read ladder): error-only ctanalyse on the
         # raw PCM (network parity, zero extra reads), with C2 erasures if the C2 path
@@ -5483,8 +5764,13 @@ def rip_image(  # noqa: C901
             drive_name=drive_name,
             read_offset=read_offset,
         )
-        rlog_builder.ar_results = ar_verify.tracks
-        rlog_builder.ar_reachable = ar_verify.reachable
+        if digital_media:
+            rlog_builder.digital_media_consensus = digital_prov.get(
+                "digital_media_consensus"
+            )
+        else:
+            rlog_builder.ar_results = ar_verify.tracks
+            rlog_builder.ar_reachable = ar_verify.reachable
         rlog_builder.cddb_id = cddb_id
 
         output_stem = sanitize_title(disc.album) or device.lstrip("/").replace("/", "_")
@@ -5506,7 +5792,14 @@ def rip_image(  # noqa: C901
             provenance["arip_transport"] = ar_verify.transport
         if ar_verify.dbar_b3sum is not None:
             provenance["arip_dbar_b3sum"] = ar_verify.dbar_b3sum
-        provenance["lookup_status_accuraterip"] = ar_verify.lookup_status
+        provenance["lookup_status_accuraterip"] = (
+            "disabled" if digital_media else ar_verify.lookup_status
+        )
+        provenance["media_type"] = media.kind
+        provenance["media_evidence"] = media.evidence
+        if media_override is not None:
+            provenance["media_override"] = media_override
+        provenance.update(digital_prov)
         if network_preflight is not None:
             provenance["network_preflight"] = network_preflight
         provenance.update(span_prov)
@@ -5601,8 +5894,8 @@ def rip_image(  # noqa: C901
             rlog_builder=rlog_builder,
             ui=ui,
             low_dr_threshold=low_dr_threshold,
-            cddb_track_lsns=info.track_lsns,
-            cddb_disc_last_lsn=info.disc_last_lsn,
+            cddb_track_lsns=None if digital_media else info.track_lsns,
+            cddb_disc_last_lsn=None if digital_media else info.disc_last_lsn,
             cddb_server=cfg.cddb_server,
             ar_summary=ar_summary,
             tui=tui,
@@ -5610,6 +5903,7 @@ def rip_image(  # noqa: C901
             auto=auto,
             preferred_country=cfg.preferred_country,
             archival=True,
+            digital_media=digital_media,
         )
     finally:
         _stop_preview(track_preview)
@@ -5839,7 +6133,7 @@ def _network_preflight(
         services_for(pipeline, cddb_server=cddb_server),
         interactive=sys.stdin.isatty() and not auto,
         allow_offline=allow_offline,
-        archival=pipeline == "rip",
+        archival=pipeline.startswith("rip"),
     )
     return outcome.prov_value
 
@@ -5921,7 +6215,7 @@ def _dispatch(args: argparse.Namespace) -> int:
         auto = args.auto if args.auto is not None else cfg.auto
         _require_rip_services_configured()
         preflight = _network_preflight(
-            "rip",
+            "rip-digital" if args.media_override == "digital_media" else "rip",
             auto=auto,
             allow_offline=False,
             cddb_server=cfg.cddb_server,
@@ -5941,6 +6235,7 @@ def _dispatch(args: argparse.Namespace) -> int:
             keep_rbi=not args.no_keep_rbi,
             strategy=strategy,
             network_preflight=preflight,
+            media_override=args.media_override,
         )
     elif args.cmd == "import":
         if args.info:

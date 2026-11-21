@@ -53,6 +53,9 @@ class RipLogBuilder:
         # this the sealed log would record "not present in database" for a query
         # that was never answered (rbi_spec §6.6).
         self.ar_reachable: bool = True
+        # Under --digital-media (2026-11-21) AccurateRip does not apply and
+        # ar_results stays None; this records what proved the audio instead.
+        self.digital_media_consensus: str | None = None
         self.cddb_id: int | None = None
         self._created: str = datetime.datetime.now(datetime.timezone.utc).isoformat(
             timespec="seconds"
@@ -136,6 +139,11 @@ class RipLogBuilder:
         lines.append("")
 
         lines.append("Conclusive status report:")
+        if self.digital_media_consensus is not None:
+            lines.append(
+                "  Verification: digital media (no disc-ID database holds it);"
+                f" byte-identical reads {self.digital_media_consensus}"
+            )
         if self.ar_results is not None:
             n = len(self.ar_results)
             if not self.ar_reachable:

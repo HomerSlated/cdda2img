@@ -256,6 +256,25 @@ Overrides the
 .B duplicate_catalogue_entry
 configuration key for this run.
 Default: from config, ask (prompt if TTY, skip otherwise).
+.TP
+.B \-\-cdr
+The disc is a recordable copy of a pressed CD, or its type could not be
+determined: rip it with the normal pipeline.
+AccurateRip must still verify every track.
+Without this flag (or
+.BR \-\-digital\-media ),
+.B rip
+refuses a recordable disc, and one whose type it cannot determine, with
+status 1.
+.TP
+.B \-\-digital\-media
+The disc was made from a digital\-only release, which no disc\-ID database can
+hold: AccurateRip, CTDB, CDDB and the MusicBrainz disc\-ID lookup are skipped.
+The audio is proved instead by a second full read at a different speed that must
+be byte\-identical, with no C2 error on either (a third read at a third speed on
+a drive without C2), and identified by AcoustID: every track must fingerprint to
+the release found from CD\-Text, the ISRCs or the disc's duration.
+Refused for a pressed disc.
 .PP
 Before the disc is read,
 .B rip

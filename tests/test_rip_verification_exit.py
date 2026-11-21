@@ -225,7 +225,10 @@ def test_musicbrainz_down_aborts_only_an_archival_run() -> None:
 
 def test_the_service_gate_runs_before_the_metadata_menu() -> None:
     src = inspect.getsource(app._finalize_import)
-    assert src.index("_require_service_answers(") < src.index("run_metadata_menu(")
+    assert src.index("_archival_gates(") < src.index("run_metadata_menu(")
+    gates = inspect.getsource(app._archival_gates)
+    assert "_require_service_answers(" in gates
+    assert "_require_acoustid_identity(" in gates
 
 
 # ---- the report and the exit codes ----------------------------------------------

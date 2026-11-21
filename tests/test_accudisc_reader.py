@@ -3199,3 +3199,48 @@ def test_an_engine_without_the_fold_is_refused_not_worked_around(monkeypatch) ->
     _install(monkeypatch, _toc_binding(33, frozenset()))
     with pytest.raises(RuntimeError, match=r"0\.50\.0"):
         ar.track1_pregap_from_fulltoc(b"RAW")
+
+
+# ---- media_check: pressed, recordable or unknown (AccuDisc 2026-11-21j) -------
+
+
+class _MediaDevice:
+    def __init__(self, profiles, atip) -> None:
+        self._profiles = list(profiles)
+        self._atip = atip
+        self.probes = 0
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return None
+
+    def probe_disc(self):
+        self.probes += 1
+        return SimpleNamespace(profile=self._profiles.pop(0))
+
+    def read_atip(self):
+        if isinstance(self._atip, Exception):
+            raise self._atip
+        return self._atip
+
+
+@pytest.mark.parametrize(
+    ("profiles", "atip", "kind"),
+    [
+        ([0x08], None, "pressed"),
+        ([0x09], None, "recordable"),  # profile alone is enough
+        ([0x0A], None, "recordable"),  # CD-RW
+        ([0x08], object(), "recordable"),  # ATIP beats a CD-ROM profile
+        ([0x08], RuntimeError("ERR_SENSE"), "unknown"),  # any raise: could not tell
+        ([0, 0], None, "unknown"),  # no profile even after the settle
+        ([0, 0x08], None, "pressed"),  # profile 0 just after a tray close
+    ],
+)
+def test_media_check_reads_both_signals(monkeypatch, profiles, atip, kind) -> None:
+    device = _MediaDevice(profiles, atip)
+    _install(monkeypatch, _binding_with(device))  # type: ignore[arg-type]
+    got = ar.media_check("/dev/sr0", sleep=lambda _s: None)
+    assert got.kind == kind
+    assert "profile=" in got.evidence and "atip=" in got.evidence

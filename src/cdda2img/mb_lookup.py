@@ -1775,6 +1775,16 @@ def _prepop_multimatch(
     return MBPrepopResult(disc, hints, len(matches), rejected_inconsistent=rejected)
 
 
+def prepopulate_without_disc_id(
+    disc: RBIDisc, *, verbose: bool = True
+) -> MBPrepopResult:
+    """MusicBrainz identification for a disc no disc-ID index can hold
+    (``--digital-media``, 2026-11-21): skip the disc-ID lookup and go straight to
+    the R4 ISRC tally. The stage-7 duration match follows in the caller, as it
+    does after any disc-ID miss."""
+    return _prepop_zero_match(disc, [], verbose=verbose)
+
+
 def prepopulate_from_mb(
     disc: RBIDisc,
     *,

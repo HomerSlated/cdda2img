@@ -52,6 +52,7 @@ import functools
 import inspect
 import logging
 import sys
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, NamedTuple, TypeVar
@@ -1451,6 +1452,63 @@ def _read_disc_binding(
             )
     _log_read_caveats(result.stats, "read", module)
     return _first_audio_pregap(toc)
+
+
+@dataclass(frozen=True)
+class MediaCheck:
+    """What the loaded disc is: ``pressed``, ``recordable`` or ``unknown``.
+
+    *evidence* is PROV ``media_evidence`` (``profile=0x0009,atip=present``).
+    """
+
+    kind: str
+    evidence: str
+
+
+#: CD-R and CD-RW (MMC GET CONFIGURATION current profiles), and CD-ROM.
+_PROFILE_RECORDABLE = frozenset({0x09, 0x0A})
+_PROFILE_PRESSED = 0x08
+
+
+def media_check(
+    device: str, *, settle_s: float = 1.5, sleep: Callable[[float], None] = time.sleep
+) -> MediaCheck:
+    """Classify the loaded disc from AccuDisc's two signals (their 2026-11-21j).
+
+    **Recordable** if the drive's current profile is CD-R/CD-RW **or** the disc
+    carries ATIP: the pre-groove identity is physically present on recordable
+    media and survives finalising, while the profile is the drive's opinion.
+    **Pressed** only if the profile is CD-ROM **and** there is no ATIP.
+    **Unknown** for anything else, including **any** exception from the ATIP read
+    (a drive that rejects the command raises ``ERR_SENSE``, not just
+    ``ERR_UNSUPPORTED``) and a profile the drive did not report.
+
+    A PX-716A answers profile 0 for about a second after a tray close while it
+    becomes ready, and ``probe_disc`` does not wait (only ``Device.load`` does),
+    so a missing profile is retried once after *settle_s*.
+    """
+    module = _binding("media check")
+
+    def _run() -> MediaCheck:
+        with module.Device(device) as dev:
+            profile = dev.probe_disc().profile
+            if not profile:
+                sleep(settle_s)
+                profile = dev.probe_disc().profile
+            try:
+                atip = "present" if dev.read_atip() is not None else "absent"
+            except Exception as exc:  # any raise means "could not tell"
+                atip = f"error:{type(exc).__name__}"
+        evidence = (
+            f"profile={'none' if not profile else f'0x{profile:04x}'},atip={atip}"
+        )
+        if profile in _PROFILE_RECORDABLE or atip == "present":
+            return MediaCheck("recordable", evidence)
+        if profile == _PROFILE_PRESSED and atip == "absent":
+            return MediaCheck("pressed", evidence)
+        return MediaCheck("unknown", evidence)
+
+    return _call(module, "media check", _run)
 
 
 def track1_pregap_from_fulltoc(fulltoc_raw: bytes) -> int:
