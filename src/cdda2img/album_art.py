@@ -35,6 +35,7 @@ from av.video.codeccontext import VideoCodecContext
 from av.video.frame import VideoFrame
 from mutagen import File as _MutagenFile  # type: ignore[import-untyped]  # LINT-004
 
+from cdda2img import query_log
 from cdda2img.net import NETWORK_TIMEOUT
 from cdda2img.rbi_format import (
     ART_BLOCK_VERSION,
@@ -131,8 +132,16 @@ def _http_get(url: str, max_bytes: int, headers: dict[str, str] | None = None) -
     req = urllib.request.Request(  # noqa: S310
         url, headers={"User-Agent": _USER_AGENT, **(headers or {})}
     )
-    with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT) as resp:  # noqa: S310
-        data = resp.read(max_bytes + 1)
+    try:
+        with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT) as resp:  # noqa: S310
+            data = resp.read(max_bytes + 1)
+    except urllib.error.HTTPError as exc:
+        query_log.record("Cover Art Archive", url, f"HTTP {exc.code}", str(exc.reason))
+        raise
+    except (urllib.error.URLError, OSError) as exc:
+        query_log.record("Cover Art Archive", url, f"network: {exc}")
+        raise
+    query_log.record("Cover Art Archive", url, "200", query_log.summarise_bytes(data))
     if len(data) > max_bytes:
         msg = f"response exceeds {max_bytes} bytes"
         raise ValueError(msg)

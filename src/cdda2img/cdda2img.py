@@ -2383,6 +2383,7 @@ def _run_metadata_lookups(
     )
     if mb_result.lookup_error is not None:
         provenance["lookup_error_mb"] = mb_result.lookup_error
+    _record_mb_identification(provenance, mb_result)
 
     # Discogs (catalogue / label / country).
     from cdda2img import discogs_lookup as _discogs
@@ -2475,6 +2476,7 @@ def _run_metadata_lookups(
             # authoritative — route through the C2 chokepoint before merging,
             # keeping the release group, exactly as the ISRC-tally fallback does.
             provenance["duration_match_release"] = dm.mb_release_id or "?"
+            provenance.setdefault("mb_identified_via", "duration_match")
             stage7_meta = strip_pressing_mbid(dm)
             disc = _merge_into_disc(stage7_meta, disc)
 
@@ -2680,6 +2682,7 @@ def _finalize_import(
         provenance["lookup_status_art"] = "OK"
     else:
         provenance["lookup_status_art"] = "empty"
+    _require_cover_art(provenance, archival=archival)
 
     if output is None:
         new_stem = sanitize_title(disc.album)
@@ -3492,22 +3495,108 @@ def _require_every_track_verified(
     )
 
 
-def _require_service_answers(provenance: dict[str, str], *, archival: bool) -> None:
-    """Abort a rip when a service it needs did not answer (kgr, 2026-11-21).
+def _record_mb_identification(provenance: dict[str, str], mb_result) -> None:
+    """PROV ``mb_identified_via`` for the disc-ID and ISRC-tally paths (rbi_spec).
 
-    Called after the metadata lookups and before the menu, for an *archival*
-    pipeline (``rip``) only. MusicBrainz ``down`` is exit 2: re-run when it
-    answers.
+    ``lookup_status_mb`` describes the disc-ID lookup alone, so a fallback's hit
+    needs its own key; the stage-7 duration match sets it where it runs.
     """
+    if mb_result.match_count > 0:
+        provenance["mb_identified_via"] = "disc_id"
+    elif mb_result.meta is not None:
+        provenance["mb_identified_via"] = "isrc_tally"
+
+
+#: The services whose answer a rip container needs, by the PROV key that records
+#: it and the ``query_log`` name its queries are filed under. Cover art has its
+#: own gate because it is fetched after the menu (:func:`_require_cover_art`).
+_ARCHIVAL_SERVICES = (
+    ("MusicBrainz", "mb_identified_via"),
+    ("CDDB", "lookup_status_cddb"),
+    ("Discogs", "lookup_status_discogs"),
+    ("AcoustID", "lookup_status_acoustid"),
+)
+
+
+def _service_gap(service: str, key: str, provenance: dict[str, str]) -> str | None:
+    """Why *service* contributed nothing, or ``None`` when it did."""
+    value = provenance.get(key)
+    if key == "mb_identified_via":
+        if value:
+            return None
+        status = provenance.get("lookup_status_mb", "absent")
+        if status == "down":
+            return f"did not answer ({provenance.get('lookup_error_mb', 'unknown')})"
+        return "identified no release (disc ID, ISRC tally and duration match)"
+    if value == "OK":
+        return None
+    if value is None:
+        return "was never queried"
+    if value == "disabled":
+        return "is not configured"
+    return "did not answer" if value == "down" else f"answered nothing found ({value})"
+
+
+def _require_service_answers(provenance: dict[str, str], *, archival: bool) -> None:
+    """Abort a rip when a service it needs contributed nothing (kgr, 2026-11-21).
+
+    "A service that answers 'nothing found' has failed to provide data needed to
+    construct the archive, so we need to abort." Judged per **service**, after its
+    own fallbacks: MusicBrainz counts as answered when any of its three paths
+    identified the release. Called after the metadata lookups and before the menu,
+    for an *archival* pipeline (``rip``) only.
+
+    Exit 2 (re-run unchanged) only when every service that came up empty also
+    failed to answer at the network level (``query_log.errored``); several
+    lookups return an empty result on a network error, so their own status
+    cannot tell the two apart. Anything else is 3: "nothing found" will not change
+    on a re-run, and the exact queries in the report are what to check, since
+    "this would not be the first time we searched for the wrong thing".
+    """
+    from cdda2img import query_log
+
     if not archival:
         return
-    if provenance.get("lookup_status_mb") == "down":
-        raise RipAborted(
-            EXIT_RETRY_LATER,
-            "MusicBrainz did not answer",
-            [f"Reason: {provenance.get('lookup_error_mb', 'unknown')}."],
-            provenance,
-        )
+    gaps = [
+        (service, why)
+        for service, key in _ARCHIVAL_SERVICES
+        if (why := _service_gap(service, key, provenance)) is not None
+    ]
+    if not gaps:
+        return
+    transient = all(
+        "did not answer" in why or query_log.errored(service) for service, why in gaps
+    )
+    raise RipAborted(
+        EXIT_RETRY_LATER if transient else EXIT_INVESTIGATE,
+        f"{', '.join(s for s, _ in gaps)} provided no data for the archive",
+        [
+            f"{service} {why}; its queries and answers are in the report."
+            for service, why in gaps
+        ],
+        provenance,
+    )
+
+
+def _require_cover_art(provenance: dict[str, str], *, archival: bool) -> None:
+    """Abort a rip whose cover art could not be fetched: the ART block is part of
+    the container (kgr, 2026-11-21). Same exit rule as
+    :func:`_require_service_answers`."""
+    from cdda2img import query_log
+
+    if not archival or provenance.get("lookup_status_art") == "OK":
+        return
+    raise RipAborted(
+        EXIT_RETRY_LATER
+        if query_log.errored("Cover Art Archive")
+        else EXIT_INVESTIGATE,
+        "no cover art was found for the release",
+        [
+            "Every art URL tried and its answer are in the report; check the release"
+            " and release-group IDs they were built from."
+        ],
+        provenance,
+    )
 
 
 def _total_miss_message(provenance: dict[str, str]) -> tuple[str, list[str]]:
@@ -5703,6 +5792,35 @@ def mount_image(
     print(f"Unload:  cdemu unload {slot_used}")
 
 
+def _require_rip_services_configured() -> None:
+    """Refuse a rip, before the drive is touched, when Discogs or AcoustID is not
+    configured (kgr, 2026-11-21: mandatory).
+
+    Without Discogs the container loses the label, catalogue number and country
+    wherever MusicBrainz lacks them, plus the cross-database barcode check and the
+    original-year check. Without AcoustID it loses the evidence that the audio
+    belongs to the selected release, and the gate that stops ``--auto`` committing
+    a wrong one. Either way the archive could not be complete, and both keys are
+    free. Raises ``RuntimeError``, which ``main`` reports with exit 1 ("fix the
+    configuration").
+    """
+    from cdda2img import acoustid_lookup, discogs_lookup
+
+    missing = []
+    if not discogs_lookup.is_available():
+        missing.append(
+            "Discogs: DISCOGS_TOKEN not set (free at discogs.com/settings/developers)"
+        )
+    if not acoustid_lookup.is_available():
+        missing.append(f"AcoustID: {acoustid_lookup.unavailability_reason()}")
+    if missing:
+        msg = (
+            "a rip needs Discogs and AcoustID to build a complete archive:\n  "
+            + "\n  ".join(missing)
+        )
+        raise RuntimeError(msg)
+
+
 def _network_preflight(
     pipeline: str, *, auto: bool, allow_offline: bool, cddb_server: str | None
 ) -> str:
@@ -5801,6 +5919,7 @@ def _dispatch(args: argparse.Namespace) -> int:
             config_default=cfg.default_profile,
         )
         auto = args.auto if args.auto is not None else cfg.auto
+        _require_rip_services_configured()
         preflight = _network_preflight(
             "rip",
             auto=auto,

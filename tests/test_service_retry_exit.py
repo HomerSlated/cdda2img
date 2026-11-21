@@ -336,6 +336,7 @@ def _dispatch(monkeypatch, argv: list[str], pipeline: str, unanswered: object):
     with (
         patch("cdda2img.config.load_config", return_value=cfg),
         patch.object(app, "_network_preflight", return_value="ok"),
+        patch.object(app, "_require_rip_services_configured"),
         patch("cdda2img.recovery_profile.resolve_recovery", return_value=None),
         patch.object(app, pipeline, return_value=unanswered),
     ):

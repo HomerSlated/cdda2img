@@ -23,6 +23,7 @@ from collections.abc import Iterable
 from dataclasses import replace
 from datetime import date
 
+from cdda2img import query_log
 from cdda2img.lookup_result import DiscMeta, TrackMeta
 
 log = logging.getLogger(__name__)
@@ -104,9 +105,15 @@ class _CddbSession:
         return self._file.readline().strip()
 
     def cmd(self, line: str) -> str:
-        """Send *line* and return the first response line (stripped)."""
+        """Send *line* and return the first response line (stripped).
+
+        Every exchange is recorded (``query_log``): the failure report must show
+        the exact query and the server's answer (kgr, 2026-11-21).
+        """
         self._send(line)
-        return self.readline()
+        answer = self.readline()
+        query_log.record("CDDB", line, answer or "(no answer)")
+        return answer
 
     def read_until_dot(self) -> list[str]:
         """Read lines until a bare '.' line (or EOF); return them without the dot."""
@@ -116,6 +123,9 @@ class _CddbSession:
             if not raw or raw.rstrip("\r\n") == ".":
                 break
             lines.append(raw.rstrip("\r\n"))
+        query_log.record(
+            "CDDB", "(response body)", f"{len(lines)} line(s)", "\n".join(lines)
+        )
         return lines
 
 
@@ -369,6 +379,7 @@ def query_cddb(
             )
         except OSError as exc:
             last_exc = exc
+            query_log.record("CDDB", f"connect {host}:{port}", f"network: {exc}")
             log.debug(
                 "CDDB attempt %d/%d failed (%s:%d): %s",
                 attempt + 1,

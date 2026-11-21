@@ -205,8 +205,18 @@ def test_the_rip_finalize_is_archival() -> None:
     assert kw.get("archival") == "True"
 
 
+_ANSWERED = {
+    "mb_identified_via": "disc_id",
+    "lookup_status_mb": "OK",
+    "lookup_status_cddb": "OK",
+    "lookup_status_discogs": "OK",
+    "lookup_status_acoustid": "OK",
+}
+
+
 def test_musicbrainz_down_aborts_only_an_archival_run() -> None:
-    prov = {"lookup_status_mb": "down", "lookup_error_mb": "503"}
+    prov = {**_ANSWERED, "lookup_status_mb": "down", "lookup_error_mb": "503"}
+    del prov["mb_identified_via"]
     app._require_service_answers(prov, archival=False)  # import keeps its rules
     with pytest.raises(ra.RipAborted) as exc:
         app._require_service_answers(prov, archival=True)
@@ -291,3 +301,132 @@ def test_query_log_redacts_and_caps(monkeypatch) -> None:
     assert "client=<redacted>" in rec.query
     assert "truncated" in rec.detail
     assert len(rec.detail) < query_log.MAX_DETAIL + 200
+
+
+# ---- every service must contribute (stage 2, kgr 2026-11-21) -----------------
+
+
+@pytest.mark.parametrize(
+    ("change", "code"),
+    [
+        ({"lookup_status_cddb": "empty"}, ra.EXIT_INVESTIGATE),
+        ({"lookup_status_discogs": "empty"}, ra.EXIT_INVESTIGATE),
+        ({"lookup_status_acoustid": "empty"}, ra.EXIT_INVESTIGATE),
+        ({"lookup_status_cddb": "down"}, ra.EXIT_RETRY_LATER),
+        ({"lookup_status_discogs": "disabled"}, ra.EXIT_INVESTIGATE),
+        ({"lookup_status_acoustid": None}, ra.EXIT_INVESTIGATE),
+    ],
+    ids=[
+        "cddb-empty",
+        "discogs-empty",
+        "acoustid-empty",
+        "cddb-down",
+        "disabled",
+        "never",
+    ],
+)
+def test_a_service_that_contributed_nothing_aborts(change, code) -> None:
+    prov = {**_ANSWERED, **{k: v for k, v in change.items() if v is not None}}
+    for k, v in change.items():
+        if v is None:
+            del prov[k]
+    with pytest.raises(ra.RipAborted) as exc:
+        app._require_service_answers(prov, archival=True)
+    assert _v(exc).code == code
+
+
+def test_every_service_answered_passes() -> None:
+    app._require_service_answers(dict(_ANSWERED), archival=True)
+
+
+@pytest.mark.parametrize("via", ["disc_id", "isrc_tally", "duration_match"])
+def test_musicbrainz_is_judged_per_service_not_per_query(via: str) -> None:
+    """A disc-ID miss that a fallback resolved is MusicBrainz having answered."""
+    prov = {**_ANSWERED, "lookup_status_mb": "empty", "mb_identified_via": via}
+    app._require_service_answers(prov, archival=True)
+
+
+def test_an_empty_answer_after_a_network_error_is_retry_later() -> None:
+    """Discogs returns [] on a network error, so its status says empty; the query
+    log is what shows it never really answered."""
+    query_log.start()
+    query_log.record("Discogs", "GET https://api.discogs.com/x", "network: timed out")
+    prov = {**_ANSWERED, "lookup_status_discogs": "empty"}
+    with pytest.raises(ra.RipAborted) as exc:
+        app._require_service_answers(prov, archival=True)
+    assert _v(exc).code == ra.EXIT_RETRY_LATER
+
+
+def test_one_real_miss_beside_an_outage_is_investigated() -> None:
+    """Re-running fixes the outage, not the miss; the miss decides the code."""
+    query_log.start()
+    query_log.record("Discogs", "GET https://api.discogs.com/x", "network: timed out")
+    prov = {
+        **_ANSWERED,
+        "lookup_status_discogs": "empty",
+        "lookup_status_acoustid": "empty",
+    }
+    with pytest.raises(ra.RipAborted) as exc:
+        app._require_service_answers(prov, archival=True)
+    assert _v(exc).code == ra.EXIT_INVESTIGATE
+
+
+def test_missing_cover_art_aborts_an_archival_run() -> None:
+    query_log.start()
+    app._require_cover_art({"lookup_status_art": "OK"}, archival=True)
+    app._require_cover_art({"lookup_status_art": "empty"}, archival=False)
+    with pytest.raises(ra.RipAborted) as exc:
+        app._require_cover_art({"lookup_status_art": "empty"}, archival=True)
+    assert _v(exc).code == ra.EXIT_INVESTIGATE
+
+
+def test_the_art_gate_runs_before_the_container_is_built() -> None:
+    src = inspect.getsource(app._finalize_import)
+    assert src.index("fetch_cover(") < src.index("_require_cover_art(")
+    assert src.index("_require_cover_art(") < src.index("build_container(")
+
+
+def test_mb_identified_via_names_the_path() -> None:
+    prov: dict[str, str] = {}
+    app._record_mb_identification(prov, SimpleNamespace(match_count=2, meta=None))
+    assert prov == {"mb_identified_via": "disc_id"}
+    prov = {}
+    app._record_mb_identification(prov, SimpleNamespace(match_count=0, meta=object()))
+    assert prov == {"mb_identified_via": "isrc_tally"}
+    prov = {}
+    app._record_mb_identification(prov, SimpleNamespace(match_count=0, meta=None))
+    assert prov == {}
+
+
+def test_a_rip_refuses_without_discogs_or_acoustid(monkeypatch) -> None:
+    monkeypatch.delenv("DISCOGS_TOKEN", raising=False)
+    monkeypatch.delenv("ACOUSTID_API_KEY", raising=False)
+    with pytest.raises(RuntimeError, match="Discogs and AcoustID") as exc:
+        app._require_rip_services_configured()
+    assert "DISCOGS_TOKEN" in str(exc.value)
+    assert "ACOUSTID_API_KEY" in str(exc.value)
+
+
+def test_the_configuration_check_runs_before_the_drive(monkeypatch) -> None:
+    src = inspect.getsource(app._dispatch)
+    rip = src[src.index('"rip"') :]
+    assert rip.index("_require_rip_services_configured()") < rip.index("rip_image(")
+
+
+def test_cddb_exchanges_are_recorded() -> None:
+    """The CDDB query is the disc ID and offsets we sent; a wrong one is exactly
+    what the report exists to expose."""
+    import io
+
+    from cdda2img.cddb import _CddbSession
+
+    sess = _CddbSession.__new__(_CddbSession)
+    sent: list[bytes] = []
+    sess._sock = SimpleNamespace(sendall=sent.append)  # type: ignore[attr-defined]
+    sess._file = io.StringIO("202 No match for disc ID 09121513.\n")  # type: ignore[attr-defined]
+    query_log.start()
+    assert sess.cmd("cddb query 09121513 19 150 0").startswith("202")
+    (rec,) = query_log.records()
+    assert rec.service == "CDDB"
+    assert rec.query == "cddb query 09121513 19 150 0"
+    assert rec.outcome.startswith("202 No match")

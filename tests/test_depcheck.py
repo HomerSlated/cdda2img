@@ -210,9 +210,37 @@ def test_doctor_is_clean_apart_from_the_out_of_tree_disc_engine(
     assert _required_failures(depcheck._check_python()) == []
     assert _required_failures(depcheck._check_package_data()) == []
 
+    # The disc engine and the service credentials are the two groups a runner
+    # cannot supply: AccuDisc is out of tree, and CI holds no Discogs or AcoustID
+    # key. Neither excuses a required failure anywhere else.
     engine = _required_failures(depcheck._check_accudisc())
-    assert depcheck.run_doctor() == (1 if engine else 0)
+    keys = _required_failures(depcheck._check_service_keys())
+    assert depcheck.run_doctor() == (1 if engine or keys else 0)
     assert "required missing" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("env", [k for k, _s, _w in depcheck.SERVICE_KEYS])
+def test_a_missing_service_key_is_a_required_failure(
+    monkeypatch: pytest.MonkeyPatch, env: str
+) -> None:
+    """rip refuses to start without them (kgr, 2026-11-21), so doctor must say so."""
+    for k, _s, _w in depcheck.SERVICE_KEYS:
+        monkeypatch.setenv(k, "x")
+    monkeypatch.delenv(env)
+    assert _required_failures(depcheck._check_service_keys()) == [env]
+
+
+def test_doctor_names_the_same_keys_rip_requires() -> None:
+    """depcheck is stdlib-only, so it cannot import the lookups; pin the names."""
+    import inspect
+
+    from cdda2img import acoustid_lookup, discogs_lookup
+
+    src = inspect.getsource(discogs_lookup.is_available) + inspect.getsource(
+        acoustid_lookup.is_available
+    )
+    for env, _s, _w in depcheck.SERVICE_KEYS:
+        assert env in src
 
 
 def test_doctor_fails_when_a_required_dependency_is_missing(

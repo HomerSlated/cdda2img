@@ -93,3 +93,42 @@ def records() -> list[QueryRecord]:
     """Every record since :func:`start`, in the order they were made."""
     with _LOCK:
         return list(_RECORDS)
+
+
+def _render(value: object) -> str:
+    return value.decode("utf-8", "replace") if isinstance(value, bytes) else repr(value)
+
+
+def call(service: str, fn, *args, **kwargs):
+    """Call ``fn(*args, **kwargs)`` and record it: the call as the query, and the
+    result (or the exception) as the answer. Re-raises whatever *fn* raised.
+
+    For a client library whose own HTTP is not ours to reach (musicbrainzngs),
+    the call and its arguments are the exact query we made: they determine the
+    URL, and a wrong argument is what the report exists to expose. Never pass a
+    credential positionally: only ``key=value`` text is redacted.
+    """
+    name = getattr(fn, "__name__", str(fn))
+    params = [repr(a) for a in args] + [f"{k}={v!r}" for k, v in kwargs.items()]
+    query = f"{name}({', '.join(params)})"
+    try:
+        result = fn(*args, **kwargs)
+    except Exception as exc:
+        record(service, query, f"error: {type(exc).__name__}: {exc}")
+        raise
+    record(service, query, "answered", _render(result))
+    return result
+
+
+def errored(service: str) -> bool:
+    """Whether any query to *service* in this run failed to get an answer.
+
+    What turns a service's missing data into exit 2 (re-run when it answers)
+    rather than 3 (investigate): several lookups return an empty result on a
+    network failure, so their own status cannot tell the two apart.
+    """
+    with _LOCK:
+        return any(
+            r.service == service and r.outcome.startswith(("error", "network"))
+            for r in _RECORDS
+        )

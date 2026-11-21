@@ -192,7 +192,15 @@ shown otherwise (3);
 no track verifying, with the cause an offset search found (3);
 a track still failing after recovery (3);
 a subchannel Q stream too damaged to supply pre\-gaps, ISRCs and the MCN (3);
-MusicBrainz unreachable (2).
+MusicBrainz, CDDB, Discogs, AcoustID or the Cover Art Archive contributing
+nothing: unreachable (2), or answering "nothing found" (3), which is treated as
+a fault in the query until shown otherwise.
+.B rip
+also refuses to start (status 1) unless
+.B DISCOGS_TOKEN
+and
+.B ACOUSTID_API_KEY
+are set; both are free, and without them the archive cannot be complete.
 .PP
 .BI "cdda2img rip " "[options]"
 .TP

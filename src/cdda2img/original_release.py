@@ -26,6 +26,7 @@ import re
 import unicodedata
 from typing import TYPE_CHECKING
 
+from cdda2img import query_log
 from cdda2img.rbi_format import RBIDisc
 
 if TYPE_CHECKING:
@@ -256,7 +257,12 @@ def _fetch_release_group(rg_id: str):  # type: ignore[no-untyped-def]
 
     _setup_useragent()
     try:
-        result = musicbrainzngs.get_release_group_by_id(rg_id, includes=["releases"])
+        result = query_log.call(
+            "MusicBrainz",
+            musicbrainzngs.get_release_group_by_id,
+            rg_id,
+            includes=["releases"],
+        )
     except (musicbrainzngs.ResponseError, musicbrainzngs.NetworkError) as exc:
         log.debug("MB release-group lookup %s failed: %s", rg_id, exc)
         return None

@@ -15,6 +15,7 @@ import logging
 import os
 from pathlib import Path
 
+from cdda2img import query_log
 from cdda2img.lookup_result import DiscMeta
 from cdda2img.net import NETWORK_TIMEOUT
 from cdda2img.validators import validate_isrc
@@ -117,7 +118,9 @@ def _browse_releases_for_recording(
     total = 0
     for _page in range(_MAX_RELEASE_PAGES):
         try:
-            result = musicbrainzngs.browse_releases(
+            result = query_log.call(
+                "MusicBrainz",
+                musicbrainzngs.browse_releases,
                 recording=recording_id,
                 includes=["release-groups", "media"],
                 limit=_BROWSE_PAGE_SIZE,
@@ -162,7 +165,9 @@ def _chain_to_mb(top: list, *, verbose: bool = False) -> list[DiscMeta]:
 
     for _score, recording_id, fallback_title, fallback_artist in top:
         try:
-            mb_result = musicbrainzngs.get_recording_by_id(
+            mb_result = query_log.call(
+                "MusicBrainz",
+                musicbrainzngs.get_recording_by_id,
                 recording_id,
                 # Recording-level fields only. "releases"/"media" used to ride
                 # along here; they were moved to _browse_releases_for_recording
@@ -270,6 +275,22 @@ def _chain_to_mb(top: list, *, verbose: bool = False) -> list[DiscMeta]:
     return results
 
 
+def _acoustid_query(wav_path: Path) -> str:
+    """What the failure report records as the AcoustID query.
+
+    ``acoustid.match`` fingerprints the file and sends the fingerprint with its
+    duration; neither is returned to us, and the fingerprint is a perceptual hash
+    nobody can check by eye. So the record names the audio that was fingerprinted
+    (the track's WAV and its length), which is what a wrong query would get wrong.
+    """
+    try:
+        seconds = (wav_path.stat().st_size - 44) / (44100 * 4)
+        length = f", duration={seconds:.1f}s"
+    except OSError:
+        length = ""
+    return f"match({wav_path.name}{length}, meta=recordings)"
+
+
 def fingerprint_and_lookup(wav_path: Path, *, verbose: bool = False) -> list[DiscMeta]:
     """Fingerprint *wav_path* via Chromaprint, query AcoustID, then chain to MusicBrainz.
 
@@ -293,11 +314,18 @@ def fingerprint_and_lookup(wav_path: Path, *, verbose: bool = False) -> list[Dis
             acoustid.match(api_key, str(wav_path), timeout=NETWORK_TIMEOUT)
         )
     except Exception as exc:
+        query_log.record("AcoustID", _acoustid_query(wav_path), f"error: {exc}")
         log.debug("AcoustID fingerprint failed for %s: %s", wav_path, exc)
         if verbose:
             print(f"  Fingerprint error: {exc}")
         return []
 
+    query_log.record(
+        "AcoustID",
+        _acoustid_query(wav_path),
+        f"{len(raw_matches)} candidate(s)" if raw_matches else "no match",
+        "\n".join(repr(m) for m in raw_matches),
+    )
     if verbose:
         if not raw_matches:
             print("  AcoustID returned no candidates.")

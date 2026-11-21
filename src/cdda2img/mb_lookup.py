@@ -33,6 +33,7 @@ from typing import NamedTuple
 
 import musicbrainzngs  # type: ignore[import-untyped]
 
+from cdda2img import query_log
 from cdda2img.lookup_result import (
     DiscMeta,
     TrackMeta,
@@ -470,7 +471,9 @@ def lookup_disc_id(disc: RBIDisc) -> list[DiscMeta]:
     _setup_useragent()
     log.debug("MusicBrainz disc ID lookup: %s", disc_id_str)
     try:
-        result = musicbrainzngs.get_releases_by_discid(
+        result = query_log.call(
+            "MusicBrainz",
+            musicbrainzngs.get_releases_by_discid,
             disc_id_str,
             # NB: do NOT add "discids" here. It is a valid include on the
             # /release endpoint, but the /discid endpoint rejects it with HTTP
@@ -533,7 +536,9 @@ def _fetch_release_raw(release_id: str) -> dict | None:
     _setup_useragent()
     log.debug("MusicBrainz release lookup: %s", release_id)
     try:
-        result = musicbrainzngs.get_release_by_id(
+        result = query_log.call(
+            "MusicBrainz",
+            musicbrainzngs.get_release_by_id,
             release_id,
             includes=["artists", "recordings", "release-groups", "labels", "isrcs"],
         )
@@ -577,7 +582,12 @@ def discogs_link_and_barcode(release_id: str) -> tuple[int | None, str | None]:
     _setup_useragent()
     log.debug("MusicBrainz url-rels lookup: %s", release_id)
     try:
-        result = musicbrainzngs.get_release_by_id(release_id, includes=["url-rels"])
+        result = query_log.call(
+            "MusicBrainz",
+            musicbrainzngs.get_release_by_id,
+            release_id,
+            includes=["url-rels"],
+        )
     except (musicbrainzngs.ResponseError, musicbrainzngs.NetworkError) as exc:
         log.debug("MusicBrainz url-rels lookup for %s failed: %s", release_id, exc)
         return None, None
@@ -624,7 +634,9 @@ def search_releases(query: str, limit: int = 25) -> list[DiscMeta]:
     _setup_useragent()
     log.debug("MusicBrainz text search: %r", query)
     try:
-        result = musicbrainzngs.search_releases(query, limit=limit)
+        result = query_log.call(
+            "MusicBrainz", musicbrainzngs.search_releases, query, limit=limit
+        )
     except (musicbrainzngs.ResponseError, musicbrainzngs.NetworkError) as exc:
         log.debug("MusicBrainz text search failed: %s", exc)
         return []
@@ -636,7 +648,9 @@ def search_releases_by_barcode(barcode: str, limit: int = 25) -> list[DiscMeta]:
     _setup_useragent()
     log.debug("MusicBrainz barcode search: %r", barcode)
     try:
-        result = musicbrainzngs.search_releases(barcode=barcode, limit=limit)
+        result = query_log.call(
+            "MusicBrainz", musicbrainzngs.search_releases, barcode=barcode, limit=limit
+        )
     except (musicbrainzngs.ResponseError, musicbrainzngs.NetworkError) as exc:
         log.debug("MusicBrainz barcode search failed: %s", exc)
         return []
@@ -798,7 +812,9 @@ def lookup_release_group(rg_id: str) -> list[DiscMeta]:
     _setup_useragent()
     log.debug("MusicBrainz release group lookup: %s", rg_id)
     try:
-        result = musicbrainzngs.get_release_group_by_id(
+        result = query_log.call(
+            "MusicBrainz",
+            musicbrainzngs.get_release_group_by_id,
             rg_id,
             includes=["releases", "artists"],
         )
@@ -842,7 +858,9 @@ def _browse_releases_for_recording(recording_id: str) -> list[dict]:
     total = 0
     for _page in range(_ISRC_MAX_RELEASE_PAGES):
         try:
-            result = musicbrainzngs.browse_releases(
+            result = query_log.call(
+                "MusicBrainz",
+                musicbrainzngs.browse_releases,
                 recording=recording_id,
                 includes=["release-groups"],
                 limit=_ISRC_BROWSE_PAGE_SIZE,
@@ -918,7 +936,9 @@ def lookup_isrc(isrc: str) -> list[DiscMeta]:
     _setup_useragent()
     log.debug("MusicBrainz ISRC lookup: %s", isrc)
     try:
-        result = musicbrainzngs.get_recordings_by_isrc(
+        result = query_log.call(
+            "MusicBrainz",
+            musicbrainzngs.get_recordings_by_isrc,
             isrc,
             includes=["artists", "releases"],
         )
@@ -1492,7 +1512,12 @@ def fetch_annotation(release_id: str) -> str | None:
         return None
     _setup_useragent()
     try:
-        result = musicbrainzngs.get_release_by_id(release_id, includes=["annotation"])
+        result = query_log.call(
+            "MusicBrainz",
+            musicbrainzngs.get_release_by_id,
+            release_id,
+            includes=["annotation"],
+        )
     except Exception as exc:
         log.debug("MB annotation fetch for %s failed: %s", release_id, exc)
         return None

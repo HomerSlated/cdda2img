@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import importlib.metadata
 import importlib.util
+import os
 import shutil
 import subprocess
 import sys
@@ -566,6 +567,27 @@ def _emit(title: str, results: list[Result], out: TextIO, footer: str = "") -> N
         print(f"  -> {footer}", file=out)
 
 
+#: The credentials ``rip`` refuses to start without (kgr, 2026-11-21: Discogs
+#: and AcoustID are mandatory, since without them the archive cannot be
+#: complete). Presence only: a wrong key shows as a failed query in the rip's
+#: failure report. Both are free.
+SERVICE_KEYS = (
+    ("DISCOGS_TOKEN", "Discogs", "free at https://www.discogs.com/settings/developers"),
+    ("ACOUSTID_API_KEY", "AcoustID", "free at https://acoustid.org/new-application"),
+)
+
+
+def _check_service_keys() -> list[Result]:
+    return [
+        Result(env, OK, f"{service} configured", required=True)
+        if os.environ.get(env)
+        else Result(
+            env, MISSING, f"{service} not configured", remedy=where, required=True
+        )
+        for env, service, where in SERVICE_KEYS
+    ]
+
+
 def run_doctor(stream: TextIO | None = None) -> int:
     """Report every dependency and return the exit code.
 
@@ -591,6 +613,7 @@ def run_doctor(stream: TextIO | None = None) -> int:
         ),
         ("Disc engine — AccuDisc", _check_accudisc(), ""),
         ("Package data", _check_package_data(), ""),
+        ("Service credentials (required by rip)", _check_service_keys(), ""),
         ("External tools (optional; each enables one feature)", _check_binaries(), ""),
         ("Native libraries (optional)", _check_native(), ""),
     ]

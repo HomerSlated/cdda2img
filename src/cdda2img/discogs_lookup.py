@@ -13,6 +13,7 @@ import importlib.metadata
 import logging
 import os
 
+from cdda2img import query_log
 from cdda2img.barcode import normalize_barcode
 from cdda2img.lookup_result import DiscMeta, TrackMeta
 from cdda2img.net import NETWORK_TIMEOUT
@@ -97,13 +98,26 @@ def _timeout_fetcher_class():
 
     class _TimeoutUserTokenFetcher(UserTokenRequestsFetcher):
         def fetch(self, client, method, url, data=None, headers=None, json=True):
-            resp = requests.request(
-                method,
-                url,
-                params={"token": self.user_token},
-                data=data,
-                headers=headers,
-                timeout=NETWORK_TIMEOUT,
+            # Recorded for the failure report (kgr, 2026-11-21); the token rides
+            # in params, never in the recorded URL.
+            query = f"{method} {url} (token=<redacted>)"
+            try:
+                resp = requests.request(
+                    method,
+                    url,
+                    params={"token": self.user_token},
+                    data=data,
+                    headers=headers,
+                    timeout=NETWORK_TIMEOUT,
+                )
+            except requests.RequestException as exc:
+                query_log.record("Discogs", query, f"network: {exc}")
+                raise
+            query_log.record(
+                "Discogs",
+                query,
+                f"HTTP {resp.status_code}",
+                resp.content.decode("utf-8", "replace"),
             )
             return resp.content, resp.status_code
 
