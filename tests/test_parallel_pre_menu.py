@@ -37,7 +37,10 @@ def _stub_discogs_barcode_corroborate():
     tests cover CDDB/MB precedence and parallelism, not Discogs, and must stay
     network-free regardless of whether DISCOGS_TOKEN is set in the environment.
     """
-    with patch("cdda2img.cdda2img._discogs_barcode_corroborate", lambda *a, **k: None):
+    with (
+        patch("cdda2img.cdda2img._discogs_barcode_corroborate", lambda *a, **k: None),
+        patch("cdda2img.cdda2img._discogs_release", lambda *a, **k: None),
+    ):
         yield
 
 

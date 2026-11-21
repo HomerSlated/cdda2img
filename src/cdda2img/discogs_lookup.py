@@ -15,6 +15,7 @@ import os
 
 from cdda2img import query_log
 from cdda2img.barcode import normalize_barcode
+from cdda2img.countries import discogs_country_code
 from cdda2img.lookup_result import DiscMeta, TrackMeta
 from cdda2img.net import NETWORK_TIMEOUT
 
@@ -185,7 +186,7 @@ def _parse_result(r) -> DiscMeta:
         barcode=barcode,
         discogs_release_id=int(release_id) if release_id else None,
         release_date=year,
-        country=str(country) if country else None,
+        country=discogs_country_code(country),
         label=str(label) if label else None,
         catalog_number=catalog_number or None,
         primary_type=_discogs_primary_type(data.get("format")),
@@ -272,7 +273,7 @@ def _parse_full_release(r) -> DiscMeta:
         barcode=barcode,
         discogs_release_id=int(data["id"]) if data.get("id") else None,
         release_date=year,
-        country=str(country) if country else None,
+        country=discogs_country_code(country),
         label=str(label) if label else None,
         catalog_number=catalog_number or None,
         source="discogs",

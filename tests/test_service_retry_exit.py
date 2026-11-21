@@ -235,6 +235,7 @@ def test_a_retried_musicbrainz_that_answers_records_ok(retry: bool) -> None:
         ),
         patch("cdda2img.mb_lookup.duration_match_lookup", return_value=None),
         patch("cdda2img.cdda2img._discogs_barcode_corroborate", lambda *a, **k: None),
+        patch("cdda2img.cdda2img._discogs_release", lambda *a, **k: None),
         patch(
             "cdda2img.cdda2img._prepopulate_from_discogs",
             side_effect=lambda d, *a, **k: (d, None, None),

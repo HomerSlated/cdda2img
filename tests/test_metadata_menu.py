@@ -280,7 +280,7 @@ def test_discogs_parse_result_artist_album_split():
     assert meta.artist == "Technotronic"
     assert meta.album == "Pump Up the Jam"
     assert meta.release_date == "1989"
-    assert meta.country == "Belgium"
+    assert meta.country == "BE"  # Discogs names are converted (countries.py)
     assert meta.label == "Epic"
     assert meta.barcode == "5099747023521"
     assert meta.source == "discogs"

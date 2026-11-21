@@ -308,27 +308,51 @@ def test_the_digital_release_is_one_agreed_digital_media_release(
 
 
 def _album(name="Toca (20th Anniversary Edition)"):
-    return SimpleNamespace(album=name)
+    return SimpleNamespace(album=name, barcode=None)
 
 
+@pytest.fixture
+def _discogs_on(monkeypatch):
+    monkeypatch.setattr("cdda2img.discogs_lookup.is_available", lambda: True)
+
+
+@pytest.mark.usefixtures("_discogs_on")
 def test_discogs_is_reached_through_the_musicbrainz_link(monkeypatch) -> None:
     """Toca: the barcode search finds nothing (the Discogs record has no barcode),
-    MusicBrainz links 22970945. Only the ids are taken: Discogs says "UK" where
-    MusicBrainz's XW is the right country for a worldwide digital release."""
+    MusicBrainz links 22970945. Only the id is taken."""
     from cdda2img.lookup_result import DiscMeta
 
-    record = DiscMeta(album="Toca (20th Anniversary Edition)", country="UK")
+    record = DiscMeta(album="Toca (20th Anniversary Edition)", country="GB")
     monkeypatch.setattr("cdda2img.discogs_lookup.fetch_release", lambda _i: record)
-    prov: dict[str, str] = {}
-    meta = app._digital_identity(
-        _album(), prov, app._DigitalRelease(_TOCA, 22970945), None
+    prov: dict[str, str] = {"discogs_barcode_outcome": "no_match"}
+    got = app._discogs_release(_album(), prov, None, linked_id=22970945)
+    assert got == 22970945
+    assert prov["discogs_release"] == "22970945"
+    assert prov["discogs_release_via"] == "mb_link"
+
+
+@pytest.mark.usefixtures("_discogs_on")
+def test_a_pressed_disc_reads_the_link_from_its_disc_id_release(monkeypatch) -> None:
+    from cdda2img import mb_lookup
+    from cdda2img.lookup_result import DiscMeta
+
+    asked: list[str] = []
+
+    def link(rid):
+        asked.append(rid)
+        return 1303585, "0075596077422"
+
+    monkeypatch.setattr(mb_lookup, "discogs_link_and_barcode", link)
+    monkeypatch.setattr(
+        "cdda2img.discogs_lookup.fetch_release",
+        lambda _i: DiscMeta(album="Toca (20th Anniversary Edition)"),
     )
-    assert prov["digital_discogs_release"] == "22970945"
-    assert meta is not None
-    assert (meta.mb_release_id, meta.discogs_release_id) == (_TOCA, 22970945)
-    assert meta.country is None
+    prov = {"discogs_barcode_outcome": "ambiguous_72"}
+    got = app._discogs_release(_album(), prov, None, link_release="e9b905e6")
+    assert (got, asked) == (1303585, ["e9b905e6"])
 
 
+@pytest.mark.usefixtures("_discogs_on")
 def test_a_barcode_hit_is_used_without_following_the_link(monkeypatch) -> None:
     from cdda2img.lookup_result import DiscMeta
 
@@ -337,73 +361,155 @@ def test_a_barcode_hit_is_used_without_following_the_link(monkeypatch) -> None:
 
     monkeypatch.setattr("cdda2img.discogs_lookup.fetch_release", no_fetch)
     prov: dict[str, str] = {}
-    meta = app._digital_identity(
-        _album(), prov, app._DigitalRelease(_TOCA, 1), DiscMeta(discogs_release_id=7)
-    )
-    assert meta is not None
-    assert meta.discogs_release_id == 7
-    assert prov["digital_discogs_release"] == "7"
+    from cdda2img.rbi_format import RBIDisc
+
+    disc = RBIDisc(album="Toca", artist="Fragma", barcode="5037300003931")
+    got = app._discogs_release(disc, prov, DiscMeta(discogs_release_id=7), linked_id=1)
+    assert got == 7
+    assert prov["discogs_release_via"] == "barcode"
+    assert prov["discogs_release_barcode"] == "5037300003931"
 
 
+@pytest.mark.usefixtures("_discogs_on")
 @pytest.mark.parametrize(
     ("linked", "record", "expect"),
     [
-        (None, None, "no_link"),
+        (None, None, "ambiguous_121+no_link"),
         (22970945, None, "unfetched:22970945"),
         (22970945, "Ibiza Anthems", "album_mismatch:22970945"),
     ],
 )
-def test_no_discogs_release_is_no_identity(monkeypatch, linked, record, expect) -> None:
+def test_no_single_discogs_release(monkeypatch, linked, record, expect) -> None:
+    """121 releases share ABBA Gold's barcode: that is an answer, not THE release."""
     from cdda2img.lookup_result import DiscMeta
 
     answer = DiscMeta(album=record) if record else None
     monkeypatch.setattr("cdda2img.discogs_lookup.fetch_release", lambda _i: answer)
-    prov: dict[str, str] = {}
-    meta = app._digital_identity(
-        _album(), prov, app._DigitalRelease(_TOCA, linked), None
-    )
-    assert meta is None
-    assert prov["digital_discogs_release"] == expect
+    prov = {"discogs_barcode_outcome": "ambiguous_121"}
+    assert app._discogs_release(_album(), prov, None, linked_id=linked) is None
+    assert prov["discogs_release"] == expect
 
 
-def test_the_gate_passes_with_both_records() -> None:
-    app._require_digital_identity({
-        "digital_release": _TOCA,
-        "digital_discogs_release": "22970945",
-    })
+def test_no_link_is_followed_from_a_fallback_on_a_pressed_disc(monkeypatch) -> None:
+    """C2: a fallback's release is not proven to be this pressing, so its link
+    is not either. Only the disc-ID release (or the digital release) is passed."""
+    seen: dict[str, object] = {}
+
+    def resolve(_disc, _prov, _hit, *, link_release=None, linked_id=None):
+        seen.update(link_release=link_release, linked_id=linked_id)
+
+    from cdda2img.rbi_format import RBIDisc
+
+    disc = RBIDisc(album="Toca", artist="Fragma")
+    monkeypatch.setattr(app, "_discogs_release", resolve)
+    app._apply_release_identity(disc, {}, None, None, None)
+    assert seen == {"link_release": None, "linked_id": None}
+    app._apply_release_identity(disc, {}, None, None, "disc-id-release")
+    assert seen == {"link_release": "disc-id-release", "linked_id": None}
+    app._apply_release_identity(disc, {}, app._DigitalRelease(_TOCA, 5), None, "x")
+    assert seen == {"link_release": None, "linked_id": 5}
+
+
+def test_the_digital_gate_passes_with_its_release() -> None:
+    app._require_digital_identity({"digital_release": _TOCA})
 
 
 @pytest.mark.parametrize(
-    ("prov", "code"),
+    ("release", "code"),
     [
-        ({}, ra.EXIT_INVESTIGATE),
-        ({"digital_release": f"not_digital:{_TOCA}"}, ra.EXIT_INVESTIGATE),
-        (
-            {"digital_release": _TOCA, "digital_discogs_release": "no_link"},
-            ra.EXIT_INVESTIGATE,
-        ),
-        (
-            {"digital_release": f"down:{_TOCA}", "digital_discogs_release": "1"},
-            ra.EXIT_RETRY_LATER,
-        ),
-        (
-            {"digital_release": _TOCA, "digital_discogs_release": "unfetched:1"},
-            ra.EXIT_RETRY_LATER,
-        ),
-        # one outage beside a real miss is still a miss
-        (
-            {"digital_release": "none", "digital_discogs_release": "unfetched:1"},
-            ra.EXIT_INVESTIGATE,
-        ),
+        (None, ra.EXIT_INVESTIGATE),
+        (f"not_digital:{_TOCA}", ra.EXIT_INVESTIGATE),
+        (f"conflict:{_TOCA}|{_OTHER}", ra.EXIT_INVESTIGATE),
+        ("none", ra.EXIT_INVESTIGATE),
+        (f"down:{_TOCA}", ra.EXIT_RETRY_LATER),
     ],
 )
-def test_the_gate_aborts_without_either_record(prov, code) -> None:
-    from cdda2img import query_log
-
-    query_log.start()
+def test_the_digital_gate_aborts_without_its_release(release, code) -> None:
+    prov = {"digital_release": release} if release else {}
     with pytest.raises(ra.RipAborted) as exc:
         app._require_digital_identity(prov)
     assert _v(exc).code == code
+
+
+# ---- the Discogs release follows the pressing the menu settled on ----------------
+
+
+def _menu_disc(mbid, discogs, barcode="0731451700729"):
+    return SimpleNamespace(
+        album="Gold: Greatest Hits",
+        mb_release_id=mbid,
+        discogs_release_id=discogs,
+        barcode=barcode,
+    )
+
+
+def _links(monkeypatch, answer):
+    from cdda2img import mb_lookup
+
+    monkeypatch.setattr(mb_lookup, "discogs_link_and_barcode", lambda _r: answer)
+
+
+def test_an_unchanged_pressing_keeps_its_discogs_release(monkeypatch) -> None:
+    _links(monkeypatch, None)  # would raise on unpacking if asked
+    disc = _menu_disc("09cc", 338764)
+    prov = {"discogs_release": "338764", "discogs_release_via": "mb_link"}
+    app._discogs_after_menu(disc, prov, "09cc")
+    assert disc.discogs_release_id == 338764
+
+
+@pytest.mark.usefixtures("_discogs_on")
+def test_a_new_pressing_follows_its_own_link(monkeypatch) -> None:
+    from cdda2img.lookup_result import DiscMeta
+
+    _links(monkeypatch, (999, "0731451700729"))
+    monkeypatch.setattr(
+        "cdda2img.discogs_lookup.fetch_release",
+        lambda _i: DiscMeta(album="Gold: Greatest Hits"),
+    )
+    disc = _menu_disc("159d", 338764)
+    prov = {"discogs_release": "338764", "discogs_release_via": "mb_link"}
+    app._discogs_after_menu(disc, prov, "09cc")
+    assert disc.discogs_release_id == 999
+    assert prov["discogs_release"] == "999"
+    assert prov["discogs_release_via"] == "mb_link_after_menu"
+
+
+@pytest.mark.usefixtures("_discogs_on")
+@pytest.mark.parametrize(
+    ("chosen_barcode", "kept"),
+    [("0731451700729", True), ("0731453308329", False)],
+)
+def test_a_barcode_release_stands_only_for_the_same_barcode(
+    monkeypatch, chosen_barcode, kept
+) -> None:
+    _links(monkeypatch, (None, chosen_barcode))
+    disc = _menu_disc("159d", 7)
+    prov = {
+        "discogs_release": "7",
+        "discogs_release_via": "barcode",
+        "discogs_release_barcode": "0731451700729",
+        "discogs_barcode_outcome": "matched",
+    }
+    app._discogs_after_menu(disc, prov, "09cc")
+    assert (disc.discogs_release_id == 7) is kept
+    if not kept:
+        with pytest.raises(ra.RipAborted):
+            app._require_discogs_release(prov, archival=True)
+
+
+def test_a_discogs_release_set_in_the_menu_is_the_users(monkeypatch) -> None:
+    _links(monkeypatch, None)
+    disc = _menu_disc("159d", 42)
+    prov = {"discogs_release": "338764", "discogs_release_via": "mb_link"}
+    app._discogs_after_menu(disc, prov, "09cc")
+    assert disc.discogs_release_id == 42
+    assert prov["discogs_release_via"] == "menu"
+
+
+def test_the_post_menu_gate_is_rip_only() -> None:
+    app._require_discogs_release({}, archival=False)
+    with pytest.raises(ra.RipAborted):
+        app._require_discogs_release({}, archival=True)
 
 
 def test_the_gate_runs_only_for_digital_media(monkeypatch, tmp_path) -> None:
@@ -524,3 +630,16 @@ def test_rate_limited_or_server_error_is_not_an_answer(outcome, errored) -> None
     query_log.start()
     query_log.record("Discogs", "q", outcome)
     assert query_log.errored("Discogs") is errored
+
+
+def test_the_discogs_release_is_settled_after_the_menu_and_before_writing() -> None:
+    src = inspect.getsource(app._finalize_import)
+    order = [
+        "run_metadata_menu(",
+        "_discogs_after_menu(",
+        "_require_discogs_release(",
+        "build_container(",
+    ]
+    at = [src.find(s) for s in order]
+    assert -1 not in at, dict(zip(order, at, strict=True))
+    assert at == sorted(at)

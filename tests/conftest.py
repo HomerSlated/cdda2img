@@ -38,3 +38,12 @@ def _isolate_xdg_dirs():
                 os.environ.pop("XDG_CONFIG_HOME", None)
             else:
                 os.environ["XDG_CONFIG_HOME"] = old_config
+
+
+@pytest.fixture(autouse=True)
+def _no_discogs_link_lookups(monkeypatch):
+    """The release ladder's ``discogs_link`` rung asks MusicBrainz about each
+    still-tied candidate. Tests stay off the network: no candidate has a link
+    unless a test says otherwise (by passing ``has_discogs_link`` itself or
+    patching ``mb_lookup._has_discogs_link`` again)."""
+    monkeypatch.setattr("cdda2img.mb_lookup._has_discogs_link", lambda _rid: False)

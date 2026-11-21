@@ -211,6 +211,7 @@ _ANSWERED = {
     "lookup_status_mb": "OK",
     "lookup_status_cddb": "OK",
     "lookup_status_discogs": "OK",
+    "discogs_release": "1303585",
     "lookup_status_acoustid": "OK",
 }
 
@@ -501,3 +502,40 @@ def test_the_second_look_follows_the_fallbacks() -> None:
     assert src.index("_discogs_after_fallback(") < src.index(
         "_collect_metadata_proposals("
     )
+
+
+@pytest.mark.parametrize(
+    ("value", "code"),
+    [
+        # Discogs answered, richly, and could not be narrowed to one release:
+        # not the data an archive needs (kgr, 2026-11-21). ABBA Gold: 121.
+        ("ambiguous_121+no_link", ra.EXIT_INVESTIGATE),
+        ("album_mismatch:7", ra.EXIT_INVESTIGATE),
+        ("disabled", ra.EXIT_INVESTIGATE),
+        (None, ra.EXIT_INVESTIGATE),
+    ],
+)
+def test_a_rip_needs_one_discogs_release_after_the_menu(value, code) -> None:
+    query_log.start()
+    prov = {**_ANSWERED}
+    if value is None:
+        del prov["discogs_release"]
+    else:
+        prov["discogs_release"] = value
+    app._require_service_answers(prov, archival=True)  # before the menu: answered
+    with pytest.raises(ra.RipAborted) as exc:
+        app._require_discogs_release(prov, archival=True)
+    assert _v(exc).code == code
+
+
+def test_one_discogs_release_passes_after_the_menu() -> None:
+    app._require_discogs_release(dict(_ANSWERED), archival=True)
+
+
+def test_an_unfetched_discogs_release_is_retry_later() -> None:
+    query_log.start()
+    query_log.record("Discogs", "GET https://api.discogs.com/releases/7", "HTTP 429")
+    prov = {**_ANSWERED, "discogs_release": "unfetched:7"}
+    with pytest.raises(ra.RipAborted) as exc:
+        app._require_discogs_release(prov, archival=True)
+    assert _v(exc).code == ra.EXIT_RETRY_LATER

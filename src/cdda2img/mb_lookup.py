@@ -28,6 +28,7 @@ import math
 import re
 import threading
 from collections import Counter
+from collections.abc import Callable
 from dataclasses import replace
 from typing import NamedTuple
 
@@ -380,14 +381,17 @@ def _parse_release(
             # R13: structure-check each ISRC at MB ingress; malformed entries
             # are dropped (with a WARNING log) rather than propagated through
             # the rest of the pipeline.
-            isrc = validate_isrc(isrc_list[0]) if isrc_list else None
+            isrcs = tuple(
+                v for v in (validate_isrc(i) for i in isrc_list) if v is not None
+            )
             tracks.append(
                 TrackMeta(
                     number=_parse_track_number(track),
                     title=track.get("title") or recording.get("title"),
                     performer=artist or None,
-                    isrc=isrc,
+                    isrc=isrcs[0] if isrcs else None,
                     duration_ms=int(length) if length else None,
+                    isrcs=isrcs,
                 )
             )
 
@@ -646,6 +650,12 @@ def release_identity(release_id: str) -> ReleaseIdentity:
             discogs_id = int(m.group(1))
             break
     return ReleaseIdentity(formats, discogs_id)
+
+
+def _has_discogs_link(release_id: str) -> bool:
+    """Whether MusicBrainz links *release_id* to a Discogs release (the ladder's
+    ``discogs_link`` rung). A failed lookup counts as no link."""
+    return discogs_link_and_barcode(release_id)[0] is not None
 
 
 def _mb_lucene_escape(value: str) -> str:
@@ -1234,10 +1244,20 @@ def _score_candidate_by_isrcs(meta: DiscMeta, disc: RBIDisc) -> int:
     disc_isrcs = {t.track_number: t.isrc for t in disc.tracks if t.isrc}
     if not disc_isrcs:
         return 0
-    meta_isrcs = {
-        t.number: t.isrc for t in meta.tracks if t.number is not None and t.isrc
-    }
-    return sum(1 for tn, isrc in disc_isrcs.items() if meta_isrcs.get(tn) == isrc)
+    meta_isrcs = _meta_isrc_sets(meta)
+    return sum(1 for tn, isrc in disc_isrcs.items() if isrc in meta_isrcs.get(tn, ()))
+
+
+def _meta_isrc_sets(meta: DiscMeta) -> dict[int, frozenset[str]]:
+    """Per track number, every ISRC *meta* holds for that track's recording."""
+    out: dict[int, frozenset[str]] = {}
+    for t in meta.tracks:
+        if t.number is None:
+            continue
+        codes = frozenset(c for c in (*t.isrcs, t.isrc) if c)
+        if codes:
+            out[t.number] = codes
+    return out
 
 
 # R4: minimum ISRC-bearing tracks required before the zero-match tally
@@ -1408,20 +1428,22 @@ def _is_consistent(meta: DiscMeta, disc: RBIDisc) -> bool:
     §1a). A cross-namespace MCN/barcode comparison must therefore never veto a
     candidate; the per-track ISRC veto is exact and same-namespace, so it stays.
 
-      * per-track ISRC — matched by track number; both non-blank and unequal ⇒
-        inconsistent (exact: ISRC is a fixed 12-char ISO-3901 code).
+      * per-track ISRC — matched by track number; inconsistent when the disc's
+        ISRC is none of the ISRCs MusicBrainz holds for that track's recording
+        (exact: ISRC is a fixed 12-char ISO-3901 code). Every one of them, not
+        just the first: a recording is often registered more than once, and a
+        disc carrying the second (ABBA *Gold* burned from our own RBI) is not a
+        different record.
 
     Blank on either side is no evidence, never a contradiction. A candidate with
     no overlapping non-blank ISRC passes vacuously (consistent until proven wrong).
     """
     disc_isrcs = {t.track_number: t.isrc for t in disc.tracks if t.isrc}
     if disc_isrcs:
-        meta_isrcs = {
-            t.number: t.isrc for t in meta.tracks if t.number is not None and t.isrc
-        }
+        meta_isrcs = _meta_isrc_sets(meta)
         for tn, isrc in disc_isrcs.items():
-            other = meta_isrcs.get(tn)
-            if other is not None and other != isrc:
+            codes = meta_isrcs.get(tn)
+            if codes and isrc not in codes:
                 return False
     return True
 
@@ -1626,10 +1648,32 @@ class ReleaseSelection(NamedTuple):
     menu_candidates: tuple[DiscMeta, ...]
 
 
+def _tied_after(keys: list[tuple], winning_key: tuple, names: tuple[str, ...]) -> str:
+    """``"<rung>:<n>"``: the last rung that narrowed the candidates still tied with
+    the winner, and how many the terminal rung had to arbitrate (N4)."""
+    survivors = list(range(len(keys)))
+    narrowed: str | None = None
+    for i, name in enumerate(names[:-1]):
+        still = [j for j in survivors if keys[j][i] == winning_key[i]]
+        if len(still) < len(survivors):
+            narrowed = name
+        survivors = still
+    return f"{narrowed or 'none'}:{len(survivors)}"
+
+
+def _still_tied(keys: list[tuple], depth: int) -> list[int]:
+    """Indices tied for first on the first *depth* key elements, when more than
+    one is (the candidates a later rung must still separate); else ``[]``."""
+    top = min(k[:depth] for k in keys)
+    tied = [i for i, k in enumerate(keys) if k[:depth] == top]
+    return tied if len(tied) > 1 else []
+
+
 def _select_release_lexicographic(
     candidates: list[DiscMeta],
     disc: RBIDisc,
     preferred_country: list[str],
+    has_discogs_link: Callable[[str], bool] | None = None,
 ) -> ReleaseSelection:
     """Pick one pressing from several album-consistent candidates by a pure
     lexicographic key chain (trust_model_design.md §10.3). *via* names the first
@@ -1638,7 +1682,20 @@ def _select_release_lexicographic(
       (0) ``barcode_plurality`` — the most common normalised barcode wins
       (1) ``preferred_country`` — user config ranking (priority, NOT a filter)
       (2) ``date``              — earliest ``release_date``
-      (3) ``mbid``              — terminal, deterministic tiebreak
+      (3) ``discogs_link``      — a release MusicBrainz links to Discogs first
+      (4) ``mbid``              — terminal, deterministic tiebreak
+
+    ``discogs_link`` (kgr, 2026-11-21: "We need to be picking metadata that is
+    consistent enough that it survives a round trip"): pressings left tied by
+    every rung above cannot be told apart by anything about the disc, and the
+    ``mbid`` sort then picks by the accident of an identifier. ABBA *Gold*:
+    09cc6e86 and 159d12a8 share disc ID, barcode, country and date; ``mbid``
+    chose 09cc6e86, which has no Discogs release, so a rip of it could not be
+    archived, while 159d12a8 (Discogs 2758131) is the one a rip chose before.
+    Preferring the linked one picks the pressing an archive can be completed
+    from. *has_discogs_link* (a network lookup) is asked only about the
+    candidates still tied when this rung is reached; ``None`` leaves the rung
+    inert.
 
     No candidate is discarded; the top of the ranking is pinned. *candidates*
     must already be the album-consistent set (the plurality release-group), so
@@ -1665,16 +1722,21 @@ def _select_release_lexicographic(
 
     pref = [code.upper() for code in preferred_country]
 
-    def _key(c: DiscMeta) -> tuple[int, int, str, str]:
+    def _key(c: DiscMeta, k_link: int = 0) -> tuple[int, int, str, int, str]:
         nb = _norm(c.barcode)
         k_plur = -(counts[nb] if nb else 0)  # more common -> smaller -> first
         country = (c.country or "").upper()
         k_country = pref.index(country) if country in pref else len(pref)
         k_date = c.release_date or "9999"  # missing date sorts last
         k_mbid = c.mb_release_id or "~"  # '~' (0x7e) sorts after digits/letters
-        return (k_plur, k_country, k_date, k_mbid)
+        return (k_plur, k_country, k_date, k_link, k_mbid)
 
     keys = [_key(c) for c in candidates]
+    if has_discogs_link is not None:
+        for i in _still_tied(keys, 3):
+            rid = candidates[i].mb_release_id
+            linked = bool(rid) and has_discogs_link(rid)  # type: ignore[arg-type]
+            keys[i] = _key(candidates[i], 0 if linked else 1)
     winning_key = min(keys)
     winner = candidates[keys.index(winning_key)]
 
@@ -1688,12 +1750,17 @@ def _select_release_lexicographic(
     # read `preferred_country`, naming a rung that eliminated but did not select.
     # It is kept because containers and `match_distance` already read it;
     # `tied_after` below is the honest account.
-    via_names = ("barcode_plurality", "preferred_country", "date", "mbid")
-    via = via_names[-1]
-    for i, name in enumerate(via_names):
-        if len({k[i] for k in keys}) > 1:
-            via = name
-            break
+    via_names = (
+        "barcode_plurality",
+        "preferred_country",
+        "date",
+        "discogs_link",
+        "mbid",
+    )
+    via = next(
+        (name for i, name in enumerate(via_names) if len({k[i] for k in keys}) > 1),
+        via_names[-1],
+    )
 
     # N4: how many candidates the terminal `mbid` sort actually had to arbitrate
     # between — those tied with the winner on every key ABOVE it — and the last
@@ -1712,14 +1779,7 @@ def _select_release_lexicographic(
     # did not perform, reporting `date:5` where the ladder's real last
     # discriminator was `preferred_country`. (That whole-set test is exactly how
     # *via* is defined, one block up, and exactly why it misleads.)
-    survivors = list(range(len(keys)))
-    narrowed: str | None = None
-    for i, name in enumerate(via_names[:-1]):
-        still = [j for j in survivors if keys[j][i] == winning_key[i]]
-        if len(still) < len(survivors):
-            narrowed = name
-        survivors = still
-    tied_after = f"{narrowed or 'none'}:{len(survivors)}"
+    tied_after = _tied_after(keys, winning_key, via_names)
 
     # N5: the set a human should be offered — tied with the winner on the last
     # EVIDENCE rung only. Preference rungs are excluded by design; see the
@@ -1790,7 +1850,9 @@ def _prepop_multimatch(
     )
     if rg is not None:
         rg_subset = [m for m in matches if m.mb_release_group_id == rg]
-        sel = _select_release_lexicographic(rg_subset, disc, preferred_country)
+        sel = _select_release_lexicographic(
+            rg_subset, disc, preferred_country, has_discogs_link=_has_discogs_link
+        )
         winner = sel.winner
         if winner is not None:
             # The full ladder runs on BOTH paths and pins a provisional winner —

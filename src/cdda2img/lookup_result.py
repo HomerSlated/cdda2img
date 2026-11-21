@@ -16,6 +16,11 @@ class TrackMeta:
     performer: str | None = None
     isrc: str | None = None
     duration_ms: int | None = None  # from MB, for track length verification
+    # Every valid ISRC MusicBrainz holds for the recording; ``isrc`` is the one
+    # written. A recording is often registered more than once (ABBA's "Dancing
+    # Queen": five), so a disc ISRC agrees when it is ANY of them. Comparing
+    # against ``isrc`` alone rejected a burned copy of our own archive.
+    isrcs: tuple[str, ...] = ()
 
 
 @dataclass
