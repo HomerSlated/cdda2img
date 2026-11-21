@@ -17,8 +17,7 @@ sub          = true
 c2           = true
 
 granularity  = "sector"
-ladder       = "single"
-speed        = "max"
+ladder       = "full"
 passes       = 8
 run_up       = 32
 variation    = "none"

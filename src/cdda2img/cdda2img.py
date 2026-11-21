@@ -458,6 +458,13 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Skip the interactive metadata menu; accept the best-guess result automatically (default: from config, false)",
     )
+    r_cmd.add_argument(
+        "--recovery-speed",
+        type=int,
+        default=None,
+        metavar="X",
+        help="The one speed the recovery chain's fixed-speed stages (track-constant, span-fixed) read at, snapped to the nearest speed the drive admits on the disc; every other stage changes speed on each read (default: from config, 32)",
+    )
     media = r_cmd.add_mutually_exclusive_group()
     media.add_argument(
         "--cdr",
@@ -4411,7 +4418,7 @@ def _recover_failed_tracks(
     cached *responses*, and splicing the first match into the RAW *pcm_file*.
 
     **The order is decided where the ladder is bound, never here**:
-    :func:`~cdda2img.recovery_profile.rungs_for` returns a profile's ladder fastest
+    :func:`~cdda2img.recovery_profile.bind_ladder` returns the admitted ladder fastest
     first (kgr, 2026-10-22: slow reads were not necessarily more successful, so start
     fast), and ``--ad-ladder`` arrives as written. Until 2026-10-22 this loop reversed
     the list, a leftover from the ascending ``probe_speed_ladder`` it was written
@@ -4913,11 +4920,13 @@ class _StrategyRun:
 
         kgr, 2026-11-21: a fixed speed repeats a speed that may itself be the cause
         of the failure, so every strategy's reads step through the ladder, one rung
-        per read. ``span-fixed`` is the exception he kept: it reads at the one
-        ``recovery_speed``, which is what makes it a fixed-span control. The plan
+        per read. A profile with ``ladder = "single"`` holds the one
+        ``recovery_speed`` instead: shipped, ``span-fixed``, the exception he kept,
+        which is what makes it a fixed-span control. Decided from the field, never
+        the name. The plan
         in ``strategy_reads`` chooses the sectors; this chooses the speed.
         """
-        if self.kind == "span-fixed" and self.fixed_speed is not None:
+        if self.profile.ladder == "single" and self.fixed_speed is not None:
             return self.fixed_speed
         return self.ladder[i % len(self.ladder)]
 
@@ -5138,7 +5147,9 @@ def _run_chain_stage(
 
     profile = load_profile(stage)
     n_tracks = len(ctx.track_lsns)
-    if stage == "span-flagged":
+    # Dispatch on the profile's FIELDS, never its name: a user profile may shadow a
+    # shipped one, or be new, and PROV must describe what ran.
+    if profile.granularity == "span":
         reason = _span_rung_decline(ctx.disc_damage, ctx.responses, 1)
         if reason is not None or ctx.disc_damage is None:
             return {}, {"span_declined": reason or "no_damage_map"}
@@ -5156,7 +5167,7 @@ def _run_chain_stage(
             ctx.disc_damage,
             ctx.ui,
         )
-    if stage in ("track-ladder", "track-constant"):
+    if profile.granularity == "track":
         return _recover_failed_tracks(
             ctx.device,
             results,
@@ -5165,15 +5176,19 @@ def _run_chain_stage(
             ctx.pcm_file,
             ctx.responses,
             n_tracks,
-            ctx.ladder if stage == "track-ladder" else [ctx.fixed_speed],
+            ctx.ladder if profile.ladder == "full" else [ctx.fixed_speed],
             profile.passes,
             ctx.read_offset,
             ctx.ui,
             ctx.disc_damage,
             ctx.cohort,
         )
+    kind = strategy_kind(profile)
+    if kind is None:  # unreachable for a validated profile; refuse, never guess
+        msg = f"profile {stage!r} describes no recovery shape the chain can run"
+        raise ValueError(msg)
     return _recover_by_strategy(
-        strategy_kind(profile) or stage,
+        kind,
         profile,
         device=ctx.device,
         failed_tracks=results,
@@ -5236,7 +5251,11 @@ def _chain_one_track(
 
 
 def _recovery_chain(
-    ctx: _ChainContext, failed_tracks: list, recovery_speed: int, ceiling_s: int
+    ctx: _ChainContext,
+    failed_tracks: list,
+    recovery_speed: int,
+    ceiling_s: int,
+    only: str | None = None,
 ) -> tuple[dict[int, str], dict[str, str]]:
     """The automatic recovery chain (kgr, 2026-11-21): every shipped profile, in
     an order chosen from each track's damage, until every track verifies.
@@ -5246,6 +5265,10 @@ def _recovery_chain(
     until one matches AccurateRip. Then one ``whole-disc`` stage for every track
     still failing. Every stage gates its own writes on AccurateRip, so a stage
     that misses leaves the track's audio exactly as it found it.
+
+    *only* (``--profile`` or config ``default_profile``) restricts the chain to
+    that one stage, for diagnosis and bench work (kgr, 2026-11-21): every track
+    gets that stage alone, and ``whole-disc`` runs only when it is the one named.
 
     *ceiling_s* > 0 bounds the whole chain in wall time; when it stops the chain,
     ``recovery_ceiling_hit`` says so, so the abort can tell "raise the ceiling"
@@ -5268,11 +5291,14 @@ def _recovery_chain(
         flagged = _flagged_in_track(ctx, result.track)
         cls = _damage_class(flagged)
         prov[f"recovery_damage_track_{result.track}"] = f"{flagged}:{cls}"
+        order = _CHAIN_ORDER[cls] if only is None else (only,)
+        if only == "whole-disc":
+            order = ()
         chains[result.track] = _chain_one_track(
-            result, _CHAIN_ORDER[cls], ctx, expired, prov, outcomes
+            result, order, ctx, expired, prov, outcomes
         )
     remaining = [r for r in failed_tracks if r.track not in outcomes]
-    if remaining and not expired():
+    if remaining and not expired() and only in (None, "whole-disc"):
         got, stage_prov = _run_chain_stage("whole-disc", remaining, ctx)
         prov.update(_stage_keys(stage_prov, "whole-disc"))
         for r in remaining:
@@ -5443,6 +5469,7 @@ def rip_image(  # noqa: C901
     strategy: ResolvedStrategy | None = None,
     network_preflight: str | None = None,
     media_override: str | None = None,
+    recovery_speed: int | None = None,
 ) -> Path | None:
     """Rip *device* into an RBI container, or write nothing at all.
 
@@ -5875,8 +5902,8 @@ def rip_image(  # noqa: C901
             # the profile owns the sweep count.
             #
             # The gate is `strategy is not None`, NOT `strategy.profile is not
-            # None`. The narrower test was a perfectly good check for "can I call
-            # rungs_for" and quite the wrong one for "should recovery run": the
+            # None`. The narrower test was a perfectly good check for "can I bind a
+            # profile's ladder" and quite the wrong one for "should recovery run": the
             # ad-flags rung carries no profile by construction, so any --ad-* flag
             # silently turned recovery off — including --ad-ladder, whose entire
             # purpose is to supply the ladder that was being discarded. bind_ladder
@@ -5899,11 +5926,11 @@ def rip_image(  # noqa: C901
             )
             # kgr, 2026-11-21: with no profile named, every recovery profile is used,
             # in an order chosen from each track's damage, until every track
-            # verifies (_recovery_chain). A named profile (or --ad-* flags) runs
-            # that profile alone, as before.
+            # verifies (_recovery_chain). A named profile restricts the chain to
+            # that one stage. Only --ad-* flags (no profile) take the old path.
             if (
                 bound is not None
-                and bound.source == "builtin"
+                and bound.profile is not None
                 and recovery_ladder
                 and failed_tracks
             ):
@@ -5916,7 +5943,7 @@ def rip_image(  # noqa: C901
                         responses=ar_responses,
                         ladder=recovery_ladder,
                         fixed_speed=_snap_to_ladder(
-                            cfg.recovery_speed, recovery_ladder
+                            recovery_speed or cfg.recovery_speed, recovery_ladder
                         ),
                         read_offset=read_offset,
                         disc_damage=disc_damage,
@@ -5924,8 +5951,9 @@ def rip_image(  # noqa: C901
                         cohort=ar_cohort or None,
                     ),
                     failed_tracks,
-                    cfg.recovery_speed,
+                    recovery_speed or cfg.recovery_speed,
                     cfg.recovery_ceiling_s,
+                    only=None if bound.source == "builtin" else bound.profile.name,
                 )
                 recovery_outcomes.update(chain_outcomes)
                 ladder_prov.update(chain_prov)
@@ -6528,6 +6556,7 @@ def _dispatch(args: argparse.Namespace) -> int:
             strategy=strategy,
             network_preflight=preflight,
             media_override=args.media_override,
+            recovery_speed=args.recovery_speed,
         )
     elif args.cmd == "import":
         if args.info:

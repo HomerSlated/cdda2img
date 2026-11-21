@@ -360,40 +360,28 @@ def test_an_unknown_ad_flag_is_refused() -> None:
         R.resolve_recovery(ad_flags={"turbo": 1})
 
 
-# ---- ladder policy resolution -----------------------------------------------
+# ---- ladder binding (2026-11-21: the chain decides each read's speed) ----------
 
 
-@pytest.mark.parametrize(
-    ("name", "expected"),
-    [
-        ("track-ladder", [32, 24, 8, 4]),  # full: every admitted rung
-        ("max-variation", [32, 24, 8, 4]),  # variation=full needs rungs to draw from
-        ("track-constant", [32]),  # single + max
-        ("whole-disc", [32]),
-    ],
-)
-def test_ladder_policy_against_the_admitted_rungs(
-    name: str, expected: list[int]
+def test_every_profile_binds_the_whole_admitted_ladder_fastest_first(
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    assert R.rungs_for(R.load_profile(name), [32, 24, 8, 4]) == expected
+    """The recovery chain steps a `ladder = "full"` stage through these rungs and
+    snaps a `"single"` one's `recovery_speed` to one of them, so every profile
+    needs all of them (kgr, 2026-11-21). Fastest first is the 2026-10-22 ruling."""
+    monkeypatch.setattr(
+        "cdda2img.drive_speed.admitted_ladder", lambda _d: [8, 40, 4, 24, 32]
+    )
+    for name in ("track-ladder", "track-constant", "span-fixed", "whole-disc"):
+        bound = R.bind_ladder(R.resolve_recovery(profile_name=name), "/dev/sr0")
+        assert list(bound.ladder) == [40, 32, 24, 8, 4], name
 
 
-@pytest.mark.parametrize(
-    ("speed", "expected"), [("max", 32), ("min", 4), ("mid", 24), (0.25, 8), (1.0, 32)]
-)
-def test_a_single_rung_selector_picks_the_nearest_admitted_rung(
-    speed: object, expected: int
-) -> None:
-    """The selector is relative to what the drive admitted, not to a nominal table —
-    "mid" on a governed disc means the middle of what is actually available."""
-    profile = R.Profile(name="p", ladder="single", speed=speed)  # type: ignore[arg-type]
-    assert R.rungs_for(profile, [32, 24, 8, 4]) == [expected]
-
-
-def test_binding_against_an_empty_admitted_list_yields_no_rungs() -> None:
-    """admitted_ladder guarantees this cannot happen in practice; rungs_for still
-    must not raise if it ever does."""
-    assert R.rungs_for(R.load_profile("track-ladder"), []) == []
+def test_a_profile_has_no_speed_field_any_more() -> None:
+    """Replaced by config/CLI `recovery_speed` (kgr, 2026-11-21): a profile saying
+    `speed = "min"` would be ignored by the chain, so it is refused, not read."""
+    errors = validate({"name": "p", "speed": "max"}, PROFILE_SCHEMA)
+    assert [e.where for e in errors] == ["speed"]
 
 
 # ---- §9.7 profile creation guards -------------------------------------------

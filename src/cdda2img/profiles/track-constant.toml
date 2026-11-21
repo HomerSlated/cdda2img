@@ -12,7 +12,6 @@ c2           = true
 
 granularity  = "track"
 ladder       = "single"
-speed        = "max"
 passes       = 3
 variation    = "none"
 

@@ -25,9 +25,10 @@ no honest way to name it.
 2026-08-09). Every other `--ad-*` flag describes *recovery* — how to re-read a sector
 that failed — which is exactly what a profile describes, so the two genuinely compete
 and one of them has to win outright. `--ad-speed` sets the rate of the **initial
-pass**, which no profile has ever had an opinion about: `Profile.speed` is a selector
-over the drive's admitted ladder, consumed only by `rungs_for` under
-`ladder="single"`, and it never reaches the whole-disc read. So there is nothing for
+pass**, which no profile has ever had an opinion about: a profile's speed policy
+(`ladder`, since 2026-11-21 "step through the admitted ladder" or "hold
+`recovery_speed`") governs only recovery re-reads, and never reaches the whole-disc
+read. So there is nothing for
 `--ad-speed` to conflict with, and making it exclusive had a perverse effect —
 `cdda2img rip --ad-speed 8` silently disabled AccurateRip recovery, because rung 1
 returns no profile and the ladder is derived from one. It is carried on
@@ -78,7 +79,6 @@ class Profile:
     c2: bool = True
     granularity: str = "track"
     ladder: str = "full"
-    speed: str | float = "max"
     passes: int = 3
     run_up: int = 0
     span: int = 0
@@ -309,36 +309,6 @@ def _read_speed_from(value: object) -> int | None:
 # --------------------------------------------------------------------------
 
 
-def rungs_for(profile: Profile, admitted: list[int]) -> list[int]:
-    """Resolve the profile's ladder policy against the drive's admitted rungs.
-
-    ``full`` takes the whole admitted list fastest->slowest; ``single`` picks the
-    admitted rung nearest the selector. ``variation="full"`` also needs the whole
-    list, because the sweep chooses a rung per attempt at random.
-
-    **The order returned is the order walked**: both re-read rungs take the list as
-    given, so this is the one place the order is decided. Fastest first is kgr's
-    ruling (2026-10-22): slow reads were not necessarily more successful, so start
-    fast.
-    """
-    if not admitted:
-        return []
-    if profile.ladder == "full" or profile.variation == "full":
-        return sorted(admitted, reverse=True)
-
-    top = max(admitted)
-    speed = profile.speed
-    if speed == "max":
-        target = float(top)
-    elif speed == "min":
-        target = float(min(admitted))
-    elif speed == "mid":
-        target = (top + min(admitted)) / 2
-    else:
-        target = float(speed) * top
-    return [min(admitted, key=lambda r: (abs(r - target), -r))]
-
-
 def parse_ad_ladder(spec: object) -> list[int]:
     """``--ad-ladder "32,16,8"`` -> ``[32, 16, 8]``, in the order given.
 
@@ -404,8 +374,13 @@ def bind_ladder(strategy: ResolvedStrategy, device: str) -> ResolvedStrategy:
         log.info("recovery: --ad-ladder %s -> rungs %s (not filtered)", explicit, rungs)
         return strategy.with_ladder(rungs)
 
+    # The whole admitted ladder, fastest first, whatever the profile: since
+    # 2026-11-21 the recovery chain decides each read's speed (a `ladder = "full"`
+    # stage steps through these rungs; a `"single"` one holds `recovery_speed`,
+    # snapped to one of them). Fastest first is kgr's ruling (2026-10-22): slow
+    # reads were not necessarily more successful, so start fast.
     admitted = drive_speed.admitted_ladder(device)
-    rungs = rungs_for(strategy.profile, admitted)
+    rungs = sorted(admitted, reverse=True)
     log.info(
         "recovery: profile %s (%s), drive admitted %s -> rungs %s",
         strategy.profile.name,

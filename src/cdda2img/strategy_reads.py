@@ -27,7 +27,7 @@ from dataclasses import dataclass
 from typing import Any
 
 #: The bench's arms, in its reporting order. ``track-constant`` and
-#: ``track-ladder`` are the speed ladder in the rip path (``rungs_for`` decides
+#: ``track-ladder`` are the speed ladder in the rip path (the profile's ``ladder`` decides
 #: single or full); the other five are what :func:`strategy_kind` can return.
 STRATEGIES = [
     "sector-hammer",
@@ -125,7 +125,7 @@ def strategy_kind(profile: Any) -> str | None:
     """The bench strategy a profile's fields describe, or ``None`` for the ladder.
 
     ``None`` for ``granularity = "track"`` (the speed ladder: ``track-ladder`` or
-    ``track-constant``, as ``rungs_for`` binds it) and ``"span"`` (the flagged-span
+    ``track-constant``, by its ``ladder`` field) and ``"span"`` (the flagged-span
     rung). Validation (``validation.PROFILE_SCHEMA``) refuses the field
     combinations this cannot place, so every valid profile maps to exactly one
     answer.

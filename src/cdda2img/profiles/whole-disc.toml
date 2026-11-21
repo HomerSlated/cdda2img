@@ -22,8 +22,7 @@ sub          = true
 c2           = true
 
 granularity  = "whole-disc"
-ladder       = "single"
-speed        = "max"
+ladder       = "full"
 passes       = 8
 variation    = "none"
 

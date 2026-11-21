@@ -236,8 +236,70 @@ def test_a_declined_span_stage_is_a_recorded_miss(monkeypatch) -> None:
 # ---- wiring --------------------------------------------------------------------------
 
 
-def test_the_chain_runs_only_when_no_profile_was_named() -> None:
+def test_every_profile_runs_through_the_chain() -> None:
+    """No profile named: every stage. A named profile: that stage alone. Only the
+    --ad-* escape hatch (no profile) takes the old single-ladder path."""
     src = inspect.getsource(app.rip_image)
-    branch = src[src.index('and bound.source == "builtin"') - 200 :]
-    assert "_recovery_chain(" in branch[:2000]
-    assert src.index('bound.source == "builtin"') < src.index("_recovery_chain(")
+    cond = src[
+        src.rindex("if (", 0, src.index("_recovery_chain(")) : src.index(
+            "_recovery_chain("
+        )
+    ]
+    assert "bound.profile is not None" in cond
+    assert 'bound.source == "builtin"' not in cond
+    branch = src[src.index("and bound.profile is not None") - 200 :]
+    assert "_recovery_chain(" in branch[:2500]
+    assert 'only=None if bound.source == "builtin" else bound.profile.name' in branch
+
+
+def test_a_named_profile_restricts_the_chain_to_its_stage(monkeypatch) -> None:
+    calls = _fake_stages(monkeypatch, {})
+    app._recovery_chain(
+        _ctx(disc_damage=_lane({150})),
+        [SimpleNamespace(track=2)],
+        32,
+        0,
+        only="max-variation",
+    )
+    assert [c[0] for c in calls] == ["max-variation"]
+
+
+def test_naming_whole_disc_runs_only_the_shared_stage(monkeypatch) -> None:
+    calls = _fake_stages(monkeypatch, {})
+    tracks = [SimpleNamespace(track=1), SimpleNamespace(track=2)]
+    app._recovery_chain(_ctx(), tracks, 32, 0, only="whole-disc")
+    assert calls == [("whole-disc", (1, 2))]
+
+
+def test_stage_dispatch_follows_the_fields_not_the_name(monkeypatch, tmp_path) -> None:
+    """A user profile that shadows a shipped name runs what its fields say."""
+    from cdda2img import recovery_profile as R
+
+    (tmp_path / "track-ladder.toml").write_text(
+        'name = "track-ladder"\ngranularity = "sector"\nladder = "full"\n'
+    )
+    monkeypatch.setattr(R, "user_profiles_dir", lambda: tmp_path)
+    seen: list[str] = []
+
+    def strategy(kind, *_a, **_k):
+        seen.append(kind)
+        return {}, {}
+
+    def ladder(*_a, **_k):
+        seen.append("ladder")
+        return {}, {}
+
+    monkeypatch.setattr(app, "_recover_by_strategy", strategy)
+    monkeypatch.setattr(app, "_recover_failed_tracks", ladder)
+    app._run_chain_stage("track-ladder", [SimpleNamespace(track=2)], _ctx())
+    assert seen == ["sector-hammer"]
+
+
+def test_recovery_speed_is_a_cli_option_over_the_config(monkeypatch) -> None:
+    monkeypatch.setattr("sys.argv", ["cdda2img", "rip", "--recovery-speed", "24"])
+    assert app.parse_args().recovery_speed == 24
+    monkeypatch.setattr("sys.argv", ["cdda2img", "rip"])
+    assert app.parse_args().recovery_speed is None  # the config's value applies
+    src = inspect.getsource(app.rip_image)
+    # Both uses: the snapped fixed speed, and the requested speed PROV records.
+    assert src.count("recovery_speed or cfg.recovery_speed") == 2

@@ -127,38 +127,43 @@ bounds the whole chain in time (0, the default, lets it run to exhaustion).
 A track that never matches keeps its original audio \(em an unverified splice is
 never written.
 .PP
-With
-.BR "\-\-profile span\-flagged" ,
-an extra rung runs before the speed ladder: only the sectors the first pass flagged
-are re\-read, in padded spans, and a track is written only when the assembled
-result matches AccurateRip.
-Tracks it does not recover still go to the speed ladder.
-.B NOTE:
-this profile is experimental and has never been run on real hardware; it is
-validated only by offline tests, and it is never selected by default.
-.PP
-The profiles
-.BR max\-variation ,
-.BR whole\-disc ,
-.BR sector\-hammer ,
+.BI \-\-profile " NAME"
+restricts the chain to that one profile, for diagnosis or comparison: every
+failed track gets that profile alone, and a track it does not recover aborts
+the rip.
+.B span\-flagged
+re\-reads only the sectors the first pass flagged, in padded spans;
+.B max\-variation
+re\-reads around a random flagged sector with a random run\-up and tail;
+.B sector\-hammer ,
 .B sector\-runup
 and
 .B span\-fixed
-replace the speed ladder with the read plan of the recovery bench strategy they
-are named after.
-.B max\-variation
-re\-reads around a random flagged sector with a random run\-up, tail and ladder
-speed each time;
+re\-read a flagged sector alone, after a short run\-up, or at the end of a long
+fixed span;
+.B track\-ladder
+and
+.B track\-constant
+re\-read the whole track;
 .B whole\-disc
-re\-reads the whole disc at one speed and tests every failed track against it;
-the other three re\-read a flagged sector alone, after a fixed run\-up, or at the
-end of a fixed span.
-Each read asks the drive to bypass its cache, each read is recorded in the
-container's provenance, and a track is written only when it matches AccurateRip.
-A track the strategy does not recover keeps its original audio and is not handed
-to the speed ladder.
+re\-reads the whole disc and tests every failed track against it.
+A profile's
+.B ladder
+field is its speed policy:
+.B full
+reads each attempt at the next speed the drive admits,
+.B single
+holds
+.B \-\-recovery\-speed
+(shipped:
+.BR track\-constant " and " span\-fixed ).
+Each read asks the drive to bypass its cache (the whole\-disc read excepted),
+each read is recorded in the container's provenance, and a track is written
+only when it matches AccurateRip.
 .B NOTE:
-all five are experimental: the strategies were measured on a drive, but their
+every profile but
+.BR track\-ladder " and " track\-constant
+is experimental: the strategies were measured on a drive, but their
 implementation in
 .B rip
 has so far been validated only by offline tests.
@@ -268,6 +273,14 @@ Overrides the
 .B duplicate_catalogue_entry
 configuration key for this run.
 Default: from config, ask (prompt if TTY, skip otherwise).
+.TP
+.BI \-\-recovery\-speed " X"
+The one speed, in X, that the recovery chain's fixed\-speed profiles read at,
+snapped to the nearest speed the drive admits on the disc.
+Every other profile changes speed on each read.
+Default: the configuration's
+.BR recovery_speed ,
+32.
 .TP
 .B \-\-cdr
 The disc is a recordable copy of a pressed CD, or its type could not be

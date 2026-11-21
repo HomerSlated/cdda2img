@@ -22,7 +22,6 @@ c2           = true
 
 granularity  = "sector"
 ladder       = "single"
-speed        = "max"
 passes       = 8
 span         = 512
 variation    = "none"

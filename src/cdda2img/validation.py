@@ -195,8 +195,8 @@ def apply_defaults(data: Mapping[str, Any], schema: Schema) -> dict[str, Any]:
     """Return *data* with every absent non-required key filled from its default.
 
     Sanity rules read a complete picture, so they run against this rather than the
-    raw file — otherwise ``ladder="single"`` in a profile that omits ``speed``
-    would be judged against a missing key instead of the default.
+    raw file — otherwise a rule reading a key the profile omits would be judged
+    against a missing key instead of the default.
     """
     out = dict(data)
     for key, spec in schema.fields.items():
@@ -265,20 +265,6 @@ def _is_profile_name(s: str) -> bool:
     return bool(s) and set(s) <= _NAME_OK
 
 
-_SPEED_WORDS = frozenset({"max", "mid", "min"})
-
-
-def _speed_ok(value: object) -> bool:
-    """``max``/``mid``/``min``, or a fraction of maximum in [0.0, 1.0]."""
-    if isinstance(value, str):
-        return value in _SPEED_WORDS
-    if isinstance(value, bool):
-        return False
-    if isinstance(value, (int, float)):
-        return 0.0 <= float(value) <= 1.0
-    return False
-
-
 #: Granularities at which a sector-shaped field (span, run_up) means something.
 #: A span is a run of sectors, so it is sector-shaped; a track or the whole disc
 #: is not.
@@ -309,7 +295,6 @@ PROFILE_SCHEMA = Schema(
             enum=frozenset({"sector", "span", "track", "whole-disc"}),
         ),
         "ladder": FieldSpec((str,), default="full", enum=frozenset({"full", "single"})),
-        "speed": FieldSpec((str, float), default="max"),
         "passes": FieldSpec((int,), default=3),
         "run_up": FieldSpec((int,), default=0),
         "span": FieldSpec((int,), default=0),
@@ -336,11 +321,6 @@ PROFILE_SCHEMA = Schema(
         SanityRule("budget_s", "must be greater than 0", lambda d: d["budget_s"] > 0),
         SanityRule("run_up", "must not be negative", lambda d: d["run_up"] >= 0),
         SanityRule("span", "must not be negative", lambda d: d["span"] >= 0),
-        SanityRule(
-            "speed",
-            'must be "max", "mid", "min", or a fraction of maximum in [0.0, 1.0]',
-            lambda d: _speed_ok(d["speed"]),
-        ),
         # Coherence. A speed-varying sweep needs rungs to vary over, and a
         # sector-shaped field is meaningless at track or whole-disc granularity —
         # silently ignoring either would make the profile lie about what it does.
@@ -395,16 +375,15 @@ PROFILE_SCHEMA = Schema(
                 or d["granularity"] not in {"sector", "whole-disc"}
             ),
         ),
+        # `ladder` is the one speed policy since 2026-11-21: "full" reads each
+        # attempt at the next admitted rung, "single" holds config/CLI
+        # `recovery_speed`. max-variation steps the speed (kgr) and randomises the
+        # rest, so it cannot hold one.
         SanityRule(
             "ladder",
-            'a fixed-speed strategy (granularity="sector" without '
-            'variation="full", or "whole-disc") reads at one speed and needs '
-            'ladder="single"',
-            lambda d: (
-                d["ladder"] == "single"
-                or d["granularity"] not in {"sector", "whole-disc"}
-                or d["variation"] == "full"
-            ),
+            'variation="full" (max-variation) steps through the ladder and needs '
+            'ladder="full"',
+            lambda d: d["variation"] != "full" or d["ladder"] == "full",
         ),
         SanityRule(
             "verify_passes",
@@ -476,11 +455,6 @@ PROFILE_SCHEMA = Schema(
             "overlap_sectors",
             "must be between 0 and 8 (the engine clamps above 8)",
             lambda d: 0 <= d["overlap_sectors"] <= 8,
-        ),
-        SanityRule(
-            "ladder",
-            'ladder="single" requires a speed selector',
-            lambda d: d["ladder"] != "single" or d.get("speed") is not None,
         ),
     ),
 )

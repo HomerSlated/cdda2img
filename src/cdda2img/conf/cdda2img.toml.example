@@ -123,13 +123,12 @@
 # this) is distinguishable from a disc the chain could not recover. Default: 0
 # recovery_ceiling_s = 0
 
-# Recovery profile used when neither --profile nor any --ad-* flag is given. A
-# profile is a complete recovery specification, named after the strategy the bench
-# measured. `cdda2img rip --list-profiles` shows what is installed; the shipped set
-# is track-ladder, track-constant, max-variation, whole-disc, and the experimental
-# sector-runup / sector-hammer / span-fixed. Unset falls through to the built-in
-# "track-ladder" -- 19/20 across 8 bench targets, and the only arm that managed 3/3
-# at the hardest one. Default: unset
+# Restrict the recovery chain to one profile when neither --profile nor any --ad-*
+# flag is given. Unset (the default) runs the full automatic chain: every shipped
+# profile, in an order chosen from each failing track's damage, until every track
+# verifies. Setting it is for diagnosis or comparison, not for better recovery:
+# a track the one profile cannot recover aborts the rip. `cdda2img rip
+# --list-profiles` shows what is installed. Default: unset
 # default_profile = "track-ladder"
 
 # C2-erasure-assisted CTDB recovery. The drive's C2 error pointers can be fed to the

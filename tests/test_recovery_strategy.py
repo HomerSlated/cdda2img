@@ -178,8 +178,10 @@ def test_the_kind_comes_from_fields_not_the_file_name() -> None:
             {"granularity": "sector", "ladder": "full", "variation": "speed"},
             "variation",
         ),
-        ({"granularity": "sector", "ladder": "full"}, "ladder"),
-        ({"granularity": "whole-disc", "ladder": "full"}, "ladder"),
+        (
+            {"granularity": "sector", "ladder": "single", "variation": "full"},
+            "ladder",
+        ),
         (
             {"granularity": "sector", "ladder": "single", "verify_passes": 2},
             "verify_passes",
@@ -481,6 +483,13 @@ def test_the_runner_steps_and_span_fixed_holds(monkeypatch, tmp_path) -> None:
             _profile(granularity="sector", span=64, passes=3),
             24,
             [24, 24, 24],
+        ),
+        # Decided by the field, not the name: any single-ladder shape holds.
+        (
+            "sector-runup",
+            _profile(granularity="sector", run_up=16, passes=2),
+            8,
+            [8, 8],
         ),
     ):
         reads.calls.clear()

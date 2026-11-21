@@ -129,7 +129,7 @@ def test_recovery_stops_at_first_match_fastest_first(
 def test_the_bound_ladder_is_walked_in_the_order_bound(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """The shipped default from the profile on: what ``rungs_for`` binds is what
+    """The shipped default from the binding on: what ``bind_ladder`` binds is what
     each pass walks, so PROV ``recovery_ladder`` names the order of the attempts.
 
     Until 2026-10-22 the loop reversed the list. The test above fed it an
@@ -137,10 +137,13 @@ def test_the_bound_ladder_is_walked_in_the_order_bound(
     passed while every real rip walked slowest-first. This one starts where
     production starts.
     """
-    from cdda2img.recovery_profile import load_profile, rungs_for
+    from cdda2img.recovery_profile import bind_ladder, load_profile, resolve_recovery
 
+    monkeypatch.setattr(
+        "cdda2img.drive_speed.admitted_ladder", lambda _d: [8, 40, 4, 24, 32]
+    )
     profile = load_profile("track-ladder")
-    rungs = rungs_for(profile, [8, 40, 4, 24, 32])  # admitted, in no order
+    rungs = list(bind_ladder(resolve_recovery(), "/dev/sr0").ladder)
     assert rungs == [40, 32, 24, 8, 4]
     state = _patch(monkeypatch, match_speed=None)
 

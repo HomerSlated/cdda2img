@@ -149,20 +149,6 @@ def test_an_illegal_profile_name_is_rejected_never_mangled(name: str) -> None:
     assert _where(validate({"name": name}, PROFILE_SCHEMA)) == ["name"]
 
 
-@pytest.mark.parametrize("speed", ["max", "mid", "min", 0.0, 1.0, 0.5])
-def test_every_documented_speed_selector_is_accepted(speed: object) -> None:
-    assert (
-        validate({"name": "p", "ladder": "single", "speed": speed}, PROFILE_SCHEMA)
-        == []
-    )
-
-
-@pytest.mark.parametrize("speed", ["fastest", 1.5, -0.1])
-def test_an_out_of_range_or_unknown_speed_is_rejected(speed: object) -> None:
-    errors = validate({"name": "p", "speed": speed}, PROFILE_SCHEMA)
-    assert _where(errors) == ["speed"]
-
-
 def test_speed_variation_requires_a_ladder_to_vary_over() -> None:
     errors = validate(
         {"name": "p", "variation": "speed", "ladder": "single"}, PROFILE_SCHEMA
