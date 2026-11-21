@@ -872,8 +872,10 @@ class _FakeDiscDevice:
         chunks: tuple[Any, ...] = (),
         cdtext: bytes | None = b"CDTEXT",
         stats: _FakeStats | None = None,
+        pregap: int = 0,
     ) -> None:
         self._leadout = leadout
+        self._pregap = pregap
         self._chunks = chunks
         self._cdtext = cdtext
         self._stats = stats or _FakeStats()
@@ -897,7 +899,12 @@ class _FakeDiscDevice:
 
     def read_toc(self):
         self.calls.append("toc")
-        return SimpleNamespace(leadout_lba=self._leadout)
+        # AccuDisc's Toc shape: audio tracks carry `pregap` (track 1's program-
+        # area pre-gap, src/toc/toc.c since 2026-07-23).
+        return SimpleNamespace(
+            leadout_lba=self._leadout,
+            audio_tracks=(SimpleNamespace(pregap=self._pregap),),
+        )
 
     def read(self, lba: int, count: int, *, status_map: bool = False, **kwargs: Any):
         self.calls.append("read")
@@ -3136,3 +3143,28 @@ def test_read_span_windows_asks_for_the_cache_defeat_and_reports_it(
     assert device.read_kwargs["cache_defeat"] is True
     assert got.cache_defeat == "done"
     assert got.pieces == [_sector(5)]
+
+
+# ---- track 1's pre-gap comes from AccuDisc (kgr, 2026-11-21) ------------------
+
+
+@pytest.mark.parametrize("pregap", [0, 33])
+def test_the_disc_read_returns_accudiscs_first_track_pregap(
+    tmp_path: Path, pregap: int
+) -> None:
+    """Taken from the TOC the read already does on the same handle: 33 is ABBA
+    *Gold*'s INDEX 01, 0 an ordinary disc."""
+    device = _FakeDiscDevice(chunks=(_FakeReadChunk(1),), pregap=pregap)
+    got = ar._read_disc_binding(
+        _disc_binding(device),
+        "/dev/sr0",
+        tmp_path / "a.pcm",
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    assert got == pregap
+    assert device.calls.count("toc") == 1  # no extra command for it

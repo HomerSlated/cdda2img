@@ -147,6 +147,9 @@ def main() -> int:
             fulltoc.read_bytes(),
             sub.read_bytes(),
             cdtext.read_bytes() if cdtext.exists() else None,
+            # No AccuDisc Toc here (a saved dump, or the CLI capture): track 1's
+            # pre-gap comes from the full TOC itself, the same rule AccuDisc uses.
+            track1_pregap=None,
         )
         if info.prov:
             print(f"subq provenance: {info.prov}")

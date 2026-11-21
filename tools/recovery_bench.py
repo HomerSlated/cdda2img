@@ -1071,7 +1071,8 @@ def geometry_from_fulltoc(
     from cdda2img.subq_toc import build_rip_info
 
     try:
-        info = build_rip_info(fulltoc_raw, b"")
+        # Only the boundaries are used here, which track 1's pre-gap does not move.
+        info = build_rip_info(fulltoc_raw, b"", track1_pregap=None)
     except ValueError:
         return None
     cddb_id = int(compute_cddb_disc_id(info.track_lsns, info.disc_last_lsn), 16)

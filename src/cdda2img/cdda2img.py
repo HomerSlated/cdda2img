@@ -3271,7 +3271,7 @@ def _rip_disc_stage(
             )
 
     try:
-        read_disc_c2(
+        track1_pregap = read_disc_c2(
             device,
             pcm_file,
             c2_file if want_c2 else None,
@@ -3300,6 +3300,7 @@ def _rip_disc_stage(
             fulltoc_file.read_bytes(),
             sub_file.read_bytes(),
             cdtext_file.read_bytes() if cdtext_file.exists() else None,
+            track1_pregap=track1_pregap,
         )
     except (ValueError, OSError) as exc:
         # subq_toc already degrades to TOC-only geometry when the Q stream cannot be

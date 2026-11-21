@@ -1360,12 +1360,11 @@ def _read_disc_binding(
     read_speed: int | None,
     progress_cb: Callable[[int, int], None] | None,
     map_cb: Callable[[ReadLanes], None] | None = None,
-) -> bool:
+) -> int:
     """:func:`read_disc_c2` over the binding: one ``Device``, one spin-up.
 
-    Returns ``True`` — a truthy success sentinel, not information. ``_try_binding``
-    signals "declined, fall back" with ``None``, so a function whose natural
-    return is also ``None`` cannot be distinguished from one that never ran.
+    Returns the first audio track's ``Track.pregap`` from the TOC this read
+    already takes on the same handle (:func:`_first_audio_pregap`).
 
     The call order — full TOC, then CD-Text, then the audio pass — is the CLI's
     and is deliberate rather than incidental. Both lead-in reads happen while the
@@ -1446,7 +1445,23 @@ def _read_disc_binding(
                 **extra,
             )
     _log_read_caveats(result.stats, "read", module)
-    return True
+    return _first_audio_pregap(toc)
+
+
+def _first_audio_pregap(toc: Any) -> int:
+    """AccuDisc's ``Track.pregap`` for the disc's first audio track.
+
+    Their rule (``src/toc/toc.c``, since ``ecca97f``, 2026-07-23): the lowest
+    track of session 1 whose INDEX 01 sits at LBA > 0 carries that LBA as a
+    program-area pre-gap, which the ``[0, lead-out)`` read has captured. It is
+    the same quantity ``subq_toc.build_rip_info`` used to derive from the raw full
+    TOC itself; since 2026-11-21 (kgr) the rip takes theirs, and
+    ``build_rip_info`` checks it against the full TOC rather than computing it.
+    Zero on an ordinary disc. A disc whose session 1 starts with a data track is
+    refused downstream (mixed mode), so the first *audio* track is the one asked.
+    """
+    audio = toc.audio_tracks
+    return int(audio[0].pregap) if audio else 0
 
 
 def read_disc_c2(
@@ -1459,8 +1474,12 @@ def read_disc_c2(
     read_speed: int | None = None,
     progress_cb: Callable[[int, int], None] | None = None,
     map_cb: Callable[[ReadLanes], None] | None = None,
-) -> None:
+) -> int:
     """Full-disc raw audio (s16le, no byte-swap) + C2 bitmap via ``accudisc read``.
+
+    Returns AccuDisc's ``Track.pregap`` for the first audio track (the track-1
+    program-area pre-gap, 0 on an ordinary disc; :func:`_first_audio_pregap`),
+    taken from the TOC the read already does, so it costs no command.
 
     Every output is opt-in — ``accudisc read`` reads the disc and writes only the
     streams asked for. *output_pcm* / *output_c2* write the audio and C2 bitmap;
@@ -1488,7 +1507,7 @@ def read_disc_c2(
     is not a failure, and since the library returns no verdict for it,
     :func:`_log_read_caveats` rebuilds one from ``ReadStats``."""
     module = _binding("disc read")
-    _call(
+    return _call(
         module,
         "disc read",
         lambda: _read_disc_binding(

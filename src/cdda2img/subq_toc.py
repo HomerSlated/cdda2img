@@ -60,8 +60,16 @@ def build_rip_info(
     fulltoc_raw: bytes,
     sub_data: bytes,
     cdtext_raw: bytes | None = None,
+    *,
+    track1_pregap: int | None,
 ) -> RipInfo:
     """Build a :class:`RipInfo` from single-pass captures.
+
+    *track1_pregap* is AccuDisc's ``Track.pregap`` for the first audio track,
+    which the rip gets from its own disc read (``accudisc_reader.read_disc_c2``).
+    It is required, so every caller says where track 1's pre-gap comes from:
+    ``None`` is for offline callers holding only a saved full TOC, since AccuDisc
+    computes it only from a live drive (:func:`_track1_pregap`).
 
     The returned RipInfo carries read-stage provenance keys in ``prov``
     (``toc_source``, Q-frame stats, per-track ISRC vote counts). Raises
@@ -132,7 +140,9 @@ def build_rip_info(
             # *Gold*: start=33). A normal disc has INDEX 01 at LBA 0 (``start`` == 0),
             # so this is a no-op there; the standard 150-frame lead-in pre-gap lies
             # before LBA 0 and is genuinely not in the PCM, so it stays unrepresented.
-            pregap = start
+            # Since 2026-11-21 the value is AccuDisc's (kgr), checked against
+            # ``start`` rather than computed from it.
+            pregap = _track1_pregap(number, start, track1_pregap)
         control = layout.control.get(number) if layout is not None else None
         audio_start = start
         indices = (
@@ -173,6 +183,32 @@ def build_rip_info(
         disc_last_lsn=leadout - 1,
         prov=prov,
     )
+
+
+def _track1_pregap(track: int, start: int, accudisc_pregap: int | None) -> int:
+    """Track 1's program-area pre-gap: AccuDisc's ``Track.pregap``, checked.
+
+    The rule is the same on both sides: the first track's INDEX 01 LBA in the full
+    TOC (AccuDisc ``src/toc/toc.c``, since 2026-07-23; this module until
+    2026-11-21). The rip now takes AccuDisc's value (kgr, 2026-11-21) and this
+    checks it against the full TOC it was read beside. A disagreement means two
+    decodes of one lead-in contradict each other, which would move every track
+    and the disc ID, so it raises rather than picking one; ``_rip_disc_stage``
+    turns that into a failed rip.
+
+    ``None`` (no AccuDisc TOC: an offline caller with a saved full TOC) falls
+    back to the full TOC's own value, which is the same number by the shared rule.
+    """
+    if accudisc_pregap is None:
+        return start
+    if accudisc_pregap != start:
+        msg = (
+            f"track {track}: AccuDisc reports a {accudisc_pregap}-frame pre-gap but "
+            f"the full TOC puts INDEX 01 at LBA {start}; the two decodes of one "
+            "lead-in disagree, so the disc's geometry cannot be trusted"
+        )
+        raise ValueError(msg)
+    return accudisc_pregap
 
 
 def _derive_layout(

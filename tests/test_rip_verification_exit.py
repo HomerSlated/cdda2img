@@ -104,7 +104,7 @@ def test_the_q_count_subq_toc_writes_is_the_one_failed_checks_reads() -> None:
     from cdda2img.subq_toc import build_rip_info
     from tests.test_subq_toc import _TOC
 
-    info = build_rip_info(_TOC, b"\x00" * (CD_SUBCODE_SIZE * 4))
+    info = build_rip_info(_TOC, b"\x00" * (CD_SUBCODE_SIZE * 4), track1_pregap=None)
     assert info.prov is not None
     failed = app._failed_checks(dict(info.prov))
     assert any("subchannel Q" in reason for reason in failed)
