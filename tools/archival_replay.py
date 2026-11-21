@@ -106,8 +106,14 @@ def replay(rbi: Path, *, digital_media: bool, scratch: Path) -> int:
                     "discogs_barcode",
                     "acoustid",
                     "duration_match",
+                    "digital_",
                 )):
                     print(f"   {k} = {prov[k]}")
+            # What the archive would carry, not just what PROV says was asked: a
+            # gate that passed while both release ids were missing is how the
+            # --digital-media identity gap went unseen (2026-11-21).
+            print(f"   disc.mb_release_id = {disc.mb_release_id}")
+            print(f"   disc.discogs_release_id = {disc.discogs_release_id}")
             try:
                 app._archival_gates(
                     disc, pcm, prov, None, archival=True, digital_media=digital_media

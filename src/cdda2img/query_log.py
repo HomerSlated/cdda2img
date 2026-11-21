@@ -128,7 +128,15 @@ def errored(service: str) -> bool:
     network failure, so their own status cannot tell the two apart.
     """
     with _LOCK:
-        return any(
-            r.service == service and r.outcome.startswith(("error", "network"))
-            for r in _RECORDS
-        )
+        return any(r.service == service and _unanswered(r.outcome) for r in _RECORDS)
+
+
+#: An HTTP status that means "not now", not "nothing found": rate limited, or a
+#: server error. Measured 2026-11-21: Discogs answers a burst of lookups with
+#: ``429 You are making requests too quickly``, and its client then returns an
+#: empty result, which read as a genuine miss (exit 3) instead of exit 2.
+_NOT_NOW = re.compile(r"HTTP (429|5\d\d)\b")
+
+
+def _unanswered(outcome: str) -> bool:
+    return outcome.startswith(("error", "network")) or bool(_NOT_NOW.match(outcome))

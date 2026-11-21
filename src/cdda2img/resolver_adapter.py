@@ -131,6 +131,9 @@ _REPRODUCE_META_TRUST: dict[Source, Trust] = {
     # overwrite. Within one apply only baseline vs this meta compete, so the exact
     # level below OBJECTIVE does not affect the result.
     Source.MENU: Trust.DISC_ID,
+    # --digital-media's release identity (proposes mb_release_id alone): the
+    # digital counterpart of a disc-ID match, so it takes the same level.
+    Source.DIGITAL_RELEASE: Trust.DISC_ID,
 }
 
 # B-6 (2026-06-23) — the single intentional ranking change of the whole B4 arc, and

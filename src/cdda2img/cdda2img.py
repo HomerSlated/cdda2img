@@ -2203,6 +2203,7 @@ def _collect_metadata_proposals(
     discogs_hit: DiscMeta | None,
     stage7_meta: DiscMeta | None,
     cddb_meta: DiscMeta | None,
+    digital_identity: DiscMeta | None = None,
 ) -> list[FieldProposal]:
     """Collect every metadata source's proposals in the live ``_run_metadata_lookups``
     call order (B-3 part 2 / trust_model_design §11.4): baseline -> MB -> §10
@@ -2245,6 +2246,19 @@ def _collect_metadata_proposals(
         props += meta_to_proposals(stage7_meta, Source.DURATION)
     if cddb_meta is not None:
         props += meta_to_proposals(cddb_meta, Source.CDDB)
+    if digital_identity is not None:
+        from cdda2img.lookup_result import DiscMeta
+
+        # --digital-media only: the release id the tally and duration match agreed
+        # on (format checked), and the Discogs release MusicBrainz links it to.
+        props += meta_to_proposals(
+            DiscMeta(mb_release_id=digital_identity.mb_release_id),
+            Source.DIGITAL_RELEASE,
+        )
+        props += meta_to_proposals(
+            DiscMeta(discogs_release_id=digital_identity.discogs_release_id),
+            Source.DISCOGS,
+        )
     return props
 
 
@@ -2523,6 +2537,11 @@ def _run_metadata_lookups(
             stage7_meta = strip_pressing_mbid(dm)
             disc = _merge_into_disc(stage7_meta, disc)
 
+    # --digital-media: the data that belongs to a digital release is its own
+    # MusicBrainz release and its Discogs record (kgr, 2026-11-21: "fetch the data
+    # corresponding to the media type"); the archival gate aborts without them.
+    digital = _identify_digital_release(provenance, mb_result, enabled=digital_media)
+
     # Discogs again, when its first look had no barcode and a MusicBrainz
     # fallback has since identified the release (found 2026-11-21 by replaying
     # real discs: ABBA *Gold* through the duration match, Toca under
@@ -2534,10 +2553,10 @@ def _run_metadata_lookups(
         provenance,
         chosen_barcode,
         discogs_hit,
-        identified_release=(
-            provenance.get("duration_match_release")
-            or (mb_result.meta.mb_release_id if mb_result.meta else None)
-        ),
+        identified_release=_identified_release(digital, provenance, mb_result),
+    )
+    disc, digital_identity = _apply_digital_identity(
+        disc, provenance, digital, discogs_hit
     )
 
     # CDDB applied DEAD LAST — zero-trust gap-filler, now the absolute lowest
@@ -2573,6 +2592,7 @@ def _run_metadata_lookups(
             discogs_hit,
             stage7_meta,
             cddb_meta,
+            digital_identity,
         )
         resolution = resolve(proposals)
         # sanitize_base: drop invalid on-disc ISRCs uniformly (committed-disc
@@ -3863,6 +3883,175 @@ def _require_service_answers(
     )
 
 
+class _DigitalRelease(NamedTuple):
+    release_id: str
+    linked_discogs_id: int | None  # MusicBrainz's Discogs link, None without one
+
+
+def _identified_release(
+    digital: _DigitalRelease | None,
+    provenance: dict[str, str],
+    mb_result: MBPrepopResult,
+) -> str | None:
+    """The release a MusicBrainz fallback identified, for Discogs' second look."""
+    if digital is not None:
+        return digital.release_id
+    return provenance.get("duration_match_release") or (
+        mb_result.meta.mb_release_id if mb_result.meta else None
+    )
+
+
+def _apply_digital_identity(
+    disc: RBIDisc,
+    provenance: dict[str, str],
+    digital: _DigitalRelease | None,
+    discogs_hit: DiscMeta | None,
+) -> tuple[RBIDisc, DiscMeta | None]:
+    """Merge the digital release's ids into the legacy fold (the resolver gets the
+    same meta as ``digital_identity``). A no-op for a pressed disc."""
+    if digital is None:
+        return disc, None
+    identity = _digital_identity(disc, provenance, digital, discogs_hit)
+    if identity is None:
+        return disc, None
+    from cdda2img.mb_lookup import _merge_into_disc
+
+    return _merge_into_disc(identity, disc), identity
+
+
+def _identify_digital_release(
+    provenance: dict[str, str], mb_result: MBPrepopResult, *, enabled: bool = True
+) -> _DigitalRelease | None:
+    """``--digital-media``: the digital-only release this disc was made from.
+
+    Two MusicBrainz paths can name it, the ISRC tally (``tally_release_id``) and
+    the duration match (``duration_match_release``); where both ran they must
+    agree. MusicBrainz must then call every medium of it ``Digital Media``: the
+    disc is a copy of a download, so a CD release of the same album is the wrong
+    record. Writes PROV ``digital_release`` (the MBID, or why there is none:
+    ``none``, ``conflict:<a>|<b>``, ``not_digital:<id>``, ``down:<id>``) and
+    ``digital_release_format``. A Digital Media release is its own pressing, so
+    its id is kept, where a fallback's id on a pressed disc is stripped (C2; see
+    ``field_resolver.Source.DIGITAL_RELEASE``).
+    """
+    if not enabled:
+        return None
+    from cdda2img.mb_lookup import MBLookupError, release_identity
+
+    votes = {
+        v
+        for v in (mb_result.tally_release_id, provenance.get("duration_match_release"))
+        if v and v != "?"
+    }
+    if not votes:
+        provenance["digital_release"] = "none"
+        return None
+    if len(votes) > 1:
+        provenance["digital_release"] = "conflict:" + "|".join(sorted(votes))
+        return None
+    (release_id,) = votes
+    try:
+        identity = release_identity(release_id)
+    except MBLookupError as exc:
+        provenance["digital_release"] = f"down:{release_id}"
+        provenance["digital_release_error"] = exc.reason
+        return None
+    provenance["digital_release_format"] = (
+        "+".join(f or "?" for f in identity.formats) or "?"
+    )
+    if not identity.formats or any(f != "Digital Media" for f in identity.formats):
+        provenance["digital_release"] = f"not_digital:{release_id}"
+        return None
+    provenance["digital_release"] = release_id
+    return _DigitalRelease(release_id, identity.discogs_release_id)
+
+
+def _digital_identity(
+    disc: RBIDisc,
+    provenance: dict[str, str],
+    digital: _DigitalRelease,
+    discogs_hit: DiscMeta | None,
+) -> DiscMeta | None:
+    """The identified digital release's MBID and its Discogs release, as one meta.
+
+    A Discogs record reached by barcode (``discogs_hit``) is used as it is; else
+    MusicBrainz's link is followed, because a digital release often carries no
+    barcode on Discogs for a search to find (Toca (20th Anniversary Edition):
+    Discogs 22970945, barcode search empty, linked from 6bc751d2). The linked
+    record must name the same album. Writes PROV ``digital_discogs_release`` (the
+    id, or ``no_link``, ``unfetched:<id>``, ``album_mismatch:<id>``). Only the id
+    is taken from the linked record, never its catalogue fields: Discogs writes
+    country as a name ("UK"), and MusicBrainz's ``XW`` is the right one here.
+    Returns ``None`` when there is no Discogs release; the gate then aborts.
+    """
+    from cdda2img.lookup_result import DiscMeta
+
+    if discogs_hit is not None and discogs_hit.discogs_release_id:
+        provenance["digital_discogs_release"] = str(discogs_hit.discogs_release_id)
+        return DiscMeta(
+            mb_release_id=digital.release_id,
+            discogs_release_id=discogs_hit.discogs_release_id,
+        )
+    linked = digital.linked_discogs_id
+    if linked is None:
+        provenance["digital_discogs_release"] = "no_link"
+        return None
+    from cdda2img import discogs_lookup
+
+    record = discogs_lookup.fetch_release(linked)
+    if record is None:
+        provenance["digital_discogs_release"] = f"unfetched:{linked}"
+        return None
+    if not _albums_match(disc.album, record.album):
+        provenance["digital_discogs_release"] = f"album_mismatch:{linked}"
+        return None
+    provenance["digital_discogs_release"] = str(linked)
+    return DiscMeta(mb_release_id=digital.release_id, discogs_release_id=linked)
+
+
+_MBID_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
+
+
+def _require_digital_identity(provenance: dict[str, str]) -> None:
+    """``--digital-media``: abort unless the digital release was identified on
+    MusicBrainz and found on Discogs (kgr, 2026-11-21: "If the data corresponding
+    to the media type is not available, then abort").
+
+    The disc-ID databases (AccurateRip, CDDB, CTDB, the MusicBrainz disc ID) are
+    the wrong lookups for a digital release and are not asked, so they cannot
+    abort it; these two records are what it has instead. Exit 2 when each gap is
+    a service that did not answer, else 3.
+    """
+    from cdda2img import query_log
+
+    release = provenance.get("digital_release", "never identified")
+    discogs = provenance.get("digital_discogs_release", "not looked up")
+    gaps: list[tuple[str, str]] = []
+    if not _MBID_RE.fullmatch(release):
+        gaps.append(("MusicBrainz", f"identified no Digital Media release ({release})"))
+    if not discogs.isdigit():
+        gaps.append(("Discogs", f"has no release for it ({discogs})"))
+    if not gaps:
+        return
+    transient = all(
+        why.startswith((
+            "identified no Digital Media release (down:",
+            "has no release for it (unfetched:",
+        ))
+        or query_log.errored(service)
+        for service, why in gaps
+    )
+    raise RipAborted(
+        EXIT_RETRY_LATER if transient else EXIT_INVESTIGATE,
+        "the digital release this disc was made from could not be identified",
+        [
+            f"{service} {why}; its queries and answers are in the report."
+            for service, why in gaps
+        ],
+        provenance,
+    )
+
+
 def _archival_gates(
     disc: RBIDisc,
     pcm_file: Path,
@@ -3876,6 +4065,7 @@ def _archival_gates(
     ``--digital-media`` every track fingerprints to the identified release."""
     _require_service_answers(provenance, archival=archival, digital_media=digital_media)
     if archival and digital_media:
+        _require_digital_identity(provenance)
         _require_acoustid_identity(disc, pcm_file, provenance, ui)
 
 

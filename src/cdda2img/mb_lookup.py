@@ -607,6 +607,47 @@ def discogs_link_and_barcode(release_id: str) -> tuple[int | None, str | None]:
     return discogs_id, mb_barcode
 
 
+class ReleaseIdentity(NamedTuple):
+    """What MusicBrainz says a release IS: its media formats and Discogs link."""
+
+    formats: tuple[str, ...]  # one per medium, "" where MB records none
+    discogs_release_id: int | None
+
+
+def release_identity(release_id: str) -> ReleaseIdentity:
+    """One ``inc=media+url-rels`` fetch: the release's medium formats and its
+    Discogs *release* link (a master/artist/label URL is skipped).
+
+    For ``--digital-media``, where the identified release must be a digital one
+    and its Discogs record is reached through MusicBrainz's link (a digital
+    release often has no barcode for Discogs to be searched by: measured on Toca
+    (20th Anniversary Edition), Discogs 22970945 has none). Raises
+    :class:`MBLookupError` when MusicBrainz gives no usable answer, so the caller
+    can tell an outage from a release that is not digital.
+    """
+    _setup_useragent()
+    try:
+        result = query_log.call(
+            "MusicBrainz",
+            musicbrainzngs.get_release_by_id,
+            release_id,
+            includes=["media", "url-rels"],
+        )
+    except (musicbrainzngs.ResponseError, musicbrainzngs.NetworkError) as exc:
+        raise MBLookupError(_mb_error_reason(exc), exc) from exc
+    release = result.get("release") or {}
+    formats = tuple((m.get("format") or "") for m in release.get("medium-list") or [])
+    discogs_id: int | None = None
+    for rel in release.get("url-relation-list") or []:
+        if (rel.get("type") or "").lower() != "discogs":
+            continue
+        m = _DISCOGS_RELEASE_RE.search(rel.get("target") or "")
+        if m:
+            discogs_id = int(m.group(1))
+            break
+    return ReleaseIdentity(formats, discogs_id)
+
+
 def _mb_lucene_escape(value: str) -> str:
     """Escape backslash and double-quote for use inside a Lucene quoted string."""
     return value.replace("\\", "\\\\").replace('"', '\\"')
@@ -1206,6 +1247,12 @@ _R4_MIN_ISRC_BEARING_TRACKS = 3
 
 
 def _resolve_via_isrc_tally(disc: RBIDisc) -> DiscMeta | None:
+    """R4, with the winner's pressing id stripped (C2). See :func:`_isrc_tally_winner`."""
+    winner = _isrc_tally_winner(disc)
+    return strip_pressing_mbid(winner) if winner is not None else None
+
+
+def _isrc_tally_winner(disc: RBIDisc) -> DiscMeta | None:
     """R4: zero-disc-ID-match fallback via per-track ISRC release tally.
 
     Fires only when ``lookup_disc_id`` returned no matches *and* the disc
@@ -1254,9 +1301,10 @@ def _resolve_via_isrc_tally(disc: RBIDisc) -> DiscMeta | None:
         return None
     # F-002 / C2: the tally key (and thus candidate.mb_release_id) is a
     # *recording*'s release, reached via ISRC — not a disc-ID-verified release
-    # for THIS disc. Route through the C2 chokepoint so it is never written as
-    # authoritative release provenance; the release-group id is kept.
-    return strip_pressing_mbid(candidates[top_rid])
+    # for THIS disc. Returned UNSTRIPPED: every merge path goes through
+    # _resolve_via_isrc_tally's C2 chokepoint, and only the --digital-media
+    # identity (tally_release_id) reads the release id itself.
+    return candidates[top_rid]
 
 
 def _disambiguate_by_isrcs(matches: list[DiscMeta], disc: RBIDisc) -> DiscMeta | None:
@@ -1465,6 +1513,10 @@ class MBPrepopResult(NamedTuple):
     # ``lookup_status_mb=down`` + ``lookup_error_mb``, and tells the stage-7 gate
     # not to query a service that just failed.
     lookup_error: str | None = None
+    # --digital-media: the release the R4 ISRC tally converged on, before the C2
+    # strip. Never merged as pressing provenance; it is one of the two votes
+    # ``cdda2img._identify_digital_release`` checks (with the duration match).
+    tally_release_id: str | None = None
 
 
 def _prepop_zero_match(
@@ -1475,7 +1527,8 @@ def _prepop_zero_match(
     The tally winner's ISRC half agrees with the disc by construction, but a
     contradicting on-disc MCN must still reject it (advisor #1).
     """
-    winner = _resolve_via_isrc_tally(disc)
+    tallied = _isrc_tally_winner(disc)
+    winner = strip_pressing_mbid(tallied) if tallied is not None else None
     if winner is not None and _is_consistent(winner, disc):
         updated = _merge_into_disc(winner, disc)
         if verbose:
@@ -1492,6 +1545,7 @@ def _prepop_zero_match(
             mb_candidate_album=winner.album,
             mb_candidate_artist=winner.artist,
             meta=winner,
+            tally_release_id=tallied.mb_release_id if tallied else None,
         )
     return MBPrepopResult(disc, hints, 0, isrc_disambiguated=False)
 

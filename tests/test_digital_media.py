@@ -256,3 +256,271 @@ def test_the_consensus_avoids_the_captures_own_speed(monkeypatch, tmp_path) -> N
     monkeypatch.setattr("cdda2img.drive_speed.admitted_ladder", lambda _d: [40, 32, 24])
     app._digital_media_consensus("/dev/sr0", first, bytes(4), None, capture_speed=32)
     assert calls == [40]
+
+
+# ---- the digital release's own records (kgr, 2026-11-21) ----------------------------
+# "We need to fetch the data corresponding to the media type. If the data
+# corresponding to the media type is not available, then abort." For a digital
+# release that is its MusicBrainz release (format Digital Media) and its Discogs
+# record; the disc-ID databases are the wrong lookups and are not asked.
+
+_TOCA = "6bc751d2-79ca-4c93-9ea5-f1456a252897"
+_OTHER = "9f8006ea-d0a0-4222-86a6-38572b93b037"
+
+
+def _mb(tally=None):
+    return SimpleNamespace(tally_release_id=tally)
+
+
+def _identity(monkeypatch, formats=("Digital Media",), discogs=22970945, error=None):
+    from cdda2img import mb_lookup
+
+    def fetch(_rid):
+        if error is not None:
+            raise mb_lookup.MBLookupError(error, "x")
+        return mb_lookup.ReleaseIdentity(tuple(formats), discogs)
+
+    monkeypatch.setattr(mb_lookup, "release_identity", fetch)
+
+
+@pytest.mark.parametrize(
+    ("tally", "duration", "kwargs", "expect"),
+    [
+        (_TOCA, None, {}, _TOCA),
+        (None, _TOCA, {}, _TOCA),
+        (_TOCA, _TOCA, {}, _TOCA),
+        (None, None, {}, "none"),
+        (_TOCA, _OTHER, {}, f"conflict:{_TOCA}|{_OTHER}"),
+        (_TOCA, None, {"formats": ("CD",)}, f"not_digital:{_TOCA}"),
+        (_TOCA, None, {"formats": ("Digital Media", "CD")}, f"not_digital:{_TOCA}"),
+        (_TOCA, None, {"formats": ()}, f"not_digital:{_TOCA}"),
+        (_TOCA, None, {"error": "503"}, f"down:{_TOCA}"),
+    ],
+)
+def test_the_digital_release_is_one_agreed_digital_media_release(
+    monkeypatch, tally, duration, kwargs, expect
+) -> None:
+    _identity(monkeypatch, **kwargs)
+    prov = {"duration_match_release": duration} if duration else {}
+    got = app._identify_digital_release(prov, _mb(tally))
+    assert prov["digital_release"] == expect
+    assert (got.release_id if got else None) == (expect if expect == _TOCA else None)
+
+
+def _album(name="Toca (20th Anniversary Edition)"):
+    return SimpleNamespace(album=name)
+
+
+def test_discogs_is_reached_through_the_musicbrainz_link(monkeypatch) -> None:
+    """Toca: the barcode search finds nothing (the Discogs record has no barcode),
+    MusicBrainz links 22970945. Only the ids are taken: Discogs says "UK" where
+    MusicBrainz's XW is the right country for a worldwide digital release."""
+    from cdda2img.lookup_result import DiscMeta
+
+    record = DiscMeta(album="Toca (20th Anniversary Edition)", country="UK")
+    monkeypatch.setattr("cdda2img.discogs_lookup.fetch_release", lambda _i: record)
+    prov: dict[str, str] = {}
+    meta = app._digital_identity(
+        _album(), prov, app._DigitalRelease(_TOCA, 22970945), None
+    )
+    assert prov["digital_discogs_release"] == "22970945"
+    assert meta is not None
+    assert (meta.mb_release_id, meta.discogs_release_id) == (_TOCA, 22970945)
+    assert meta.country is None
+
+
+def test_a_barcode_hit_is_used_without_following_the_link(monkeypatch) -> None:
+    from cdda2img.lookup_result import DiscMeta
+
+    def no_fetch(_i):
+        pytest.fail("the link must not be followed")
+
+    monkeypatch.setattr("cdda2img.discogs_lookup.fetch_release", no_fetch)
+    prov: dict[str, str] = {}
+    meta = app._digital_identity(
+        _album(), prov, app._DigitalRelease(_TOCA, 1), DiscMeta(discogs_release_id=7)
+    )
+    assert meta is not None
+    assert meta.discogs_release_id == 7
+    assert prov["digital_discogs_release"] == "7"
+
+
+@pytest.mark.parametrize(
+    ("linked", "record", "expect"),
+    [
+        (None, None, "no_link"),
+        (22970945, None, "unfetched:22970945"),
+        (22970945, "Ibiza Anthems", "album_mismatch:22970945"),
+    ],
+)
+def test_no_discogs_release_is_no_identity(monkeypatch, linked, record, expect) -> None:
+    from cdda2img.lookup_result import DiscMeta
+
+    answer = DiscMeta(album=record) if record else None
+    monkeypatch.setattr("cdda2img.discogs_lookup.fetch_release", lambda _i: answer)
+    prov: dict[str, str] = {}
+    meta = app._digital_identity(
+        _album(), prov, app._DigitalRelease(_TOCA, linked), None
+    )
+    assert meta is None
+    assert prov["digital_discogs_release"] == expect
+
+
+def test_the_gate_passes_with_both_records() -> None:
+    app._require_digital_identity({
+        "digital_release": _TOCA,
+        "digital_discogs_release": "22970945",
+    })
+
+
+@pytest.mark.parametrize(
+    ("prov", "code"),
+    [
+        ({}, ra.EXIT_INVESTIGATE),
+        ({"digital_release": f"not_digital:{_TOCA}"}, ra.EXIT_INVESTIGATE),
+        (
+            {"digital_release": _TOCA, "digital_discogs_release": "no_link"},
+            ra.EXIT_INVESTIGATE,
+        ),
+        (
+            {"digital_release": f"down:{_TOCA}", "digital_discogs_release": "1"},
+            ra.EXIT_RETRY_LATER,
+        ),
+        (
+            {"digital_release": _TOCA, "digital_discogs_release": "unfetched:1"},
+            ra.EXIT_RETRY_LATER,
+        ),
+        # one outage beside a real miss is still a miss
+        (
+            {"digital_release": "none", "digital_discogs_release": "unfetched:1"},
+            ra.EXIT_INVESTIGATE,
+        ),
+    ],
+)
+def test_the_gate_aborts_without_either_record(prov, code) -> None:
+    from cdda2img import query_log
+
+    query_log.start()
+    with pytest.raises(ra.RipAborted) as exc:
+        app._require_digital_identity(prov)
+    assert _v(exc).code == code
+
+
+def test_the_gate_runs_only_for_digital_media(monkeypatch, tmp_path) -> None:
+    """A pressed disc is not asked for a digital release (the negative control)."""
+    calls: list[str] = []
+    monkeypatch.setattr(app, "_require_service_answers", lambda *_a, **_k: None)
+    monkeypatch.setattr(
+        app, "_require_digital_identity", lambda _p: calls.append("identity")
+    )
+    monkeypatch.setattr(
+        app, "_require_acoustid_identity", lambda *_a: calls.append("acoustid")
+    )
+    from cdda2img.rbi_format import RBIDisc
+
+    disc = RBIDisc(album="", artist="")
+    app._archival_gates(disc, tmp_path, {}, None, archival=True, digital_media=False)
+    assert calls == []
+    app._archival_gates(disc, tmp_path, {}, None, archival=True, digital_media=True)
+    assert calls == ["identity", "acoustid"]
+
+
+def test_the_resolver_keeps_the_digital_release_id() -> None:
+    """The release id reaches the committed disc through its own source; the same
+    id from a recording-level source is still refused (C2, the control)."""
+    from cdda2img.field_resolver import Field, FieldProposal, Source, Trust
+    from cdda2img.lookup_result import DiscMeta
+    from cdda2img.rbi_format import RBIDisc
+
+    base = RBIDisc(album="Toca", artist="Fragma")
+    props = app._collect_metadata_proposals(
+        base,
+        None,
+        None,
+        None,
+        None,
+        None,
+        DiscMeta(mb_release_id=_TOCA, discogs_release_id=22970945),
+    )
+    got = {(p.field, p.value) for p in props}
+    assert (Field.MB_RELEASE_ID, _TOCA) in got
+    assert (Field.DISCOGS_RELEASE_ID, 22970945) in got
+    with pytest.raises(ValueError, match="C2"):
+        FieldProposal(Field.MB_RELEASE_ID, _TOCA, Trust.DURATION, Source.DURATION)
+
+
+def test_the_tally_still_strips_for_the_merge_but_reports_its_release(
+    monkeypatch,
+) -> None:
+    """Pressed discs keep C2: the merged meta carries no pressing id. Only the
+    separate ``tally_release_id`` names it, for the digital identity."""
+    from cdda2img import mb_lookup
+    from cdda2img.lookup_result import DiscMeta
+    from cdda2img.rbi_format import RBIDisc
+
+    winner = DiscMeta(album="Toca", mb_release_id=_TOCA, mb_release_group_id="rg")
+    monkeypatch.setattr(mb_lookup, "_isrc_tally_winner", lambda _d: winner)
+    monkeypatch.setattr(mb_lookup, "_is_consistent", lambda *_a: True)
+    r = mb_lookup.prepopulate_without_disc_id(
+        RBIDisc(album="", artist=""), verbose=False
+    )
+    assert r.meta is not None
+    assert r.meta.mb_release_id is None
+    assert r.meta.mb_release_group_id == "rg"
+    assert r.disc.mb_release_id is None
+    assert r.tally_release_id == _TOCA
+
+
+def test_release_identity_reads_formats_and_the_discogs_link(monkeypatch) -> None:
+    from cdda2img import mb_lookup
+
+    release = {
+        "medium-list": [{"format": "Digital Media"}],
+        "url-relation-list": [
+            {"type": "free streaming", "target": "https://open.spotify.com/a"},
+            {"type": "discogs", "target": "https://www.discogs.com/master/9"},
+            {"type": "discogs", "target": "https://www.discogs.com/release/22970945"},
+        ],
+    }
+    monkeypatch.setattr(mb_lookup, "_setup_useragent", lambda: None)
+    monkeypatch.setattr(
+        mb_lookup.musicbrainzngs,
+        "get_release_by_id",
+        lambda *_a, **_k: {"release": release},
+    )
+    got = mb_lookup.release_identity(_TOCA)
+    assert got == mb_lookup.ReleaseIdentity(("Digital Media",), 22970945)
+
+
+def test_release_identity_raises_on_an_outage(monkeypatch) -> None:
+    from cdda2img import mb_lookup
+
+    def down(*_a, **_k):
+        raise mb_lookup.musicbrainzngs.NetworkError("down")
+
+    monkeypatch.setattr(mb_lookup, "_setup_useragent", lambda: None)
+    monkeypatch.setattr(mb_lookup.musicbrainzngs, "get_release_by_id", down)
+    with pytest.raises(mb_lookup.MBLookupError):
+        mb_lookup.release_identity(_TOCA)
+
+
+@pytest.mark.parametrize(
+    ("outcome", "errored"),
+    [
+        ("HTTP 429", True),
+        ("HTTP 503", True),
+        ("network: refused", True),
+        ("error: boom", True),
+        ("HTTP 404", False),  # a genuine "not found"
+        ("HTTP 200", False),
+        ("200", False),
+    ],
+)
+def test_rate_limited_or_server_error_is_not_an_answer(outcome, errored) -> None:
+    """Measured 2026-11-21: Discogs answered a burst with 429 and its client returned
+    [], which the archival gate took for a real miss (exit 3, not 2)."""
+    from cdda2img import query_log
+
+    query_log.start()
+    query_log.record("Discogs", "q", outcome)
+    assert query_log.errored("Discogs") is errored

@@ -462,7 +462,7 @@ def test_prepopulate_records_the_error_and_skips_the_isrc_fallback():
             "cdda2img.mb_lookup.lookup_disc_id",
             side_effect=MBLookupError("503", "busy"),
         ),
-        patch("cdda2img.mb_lookup._resolve_via_isrc_tally") as tally,
+        patch("cdda2img.mb_lookup._isrc_tally_winner") as tally,
     ):
         result = prepopulate_from_mb(disc, verbose=False)
     assert result.lookup_error == "503"
@@ -475,7 +475,7 @@ def test_prepopulate_a_genuine_miss_still_tries_the_isrc_fallback():
     disc = _make_disc(tracks=[(1, 0, 18000)])
     with (
         patch("cdda2img.mb_lookup.lookup_disc_id", return_value=[]),
-        patch("cdda2img.mb_lookup._resolve_via_isrc_tally", return_value=None) as tally,
+        patch("cdda2img.mb_lookup._isrc_tally_winner", return_value=None) as tally,
     ):
         result = prepopulate_from_mb(disc, verbose=False)
     assert result.lookup_error is None
@@ -1719,7 +1719,7 @@ def test_prepopulate_r4_tally_winner_kept_despite_mcn_divergence():
     )
     with (
         patch("cdda2img.mb_lookup.lookup_disc_id", return_value=[]),
-        patch("cdda2img.mb_lookup._resolve_via_isrc_tally", return_value=winner),
+        patch("cdda2img.mb_lookup._isrc_tally_winner", return_value=winner),
     ):
         r = prepopulate_from_mb(disc, verbose=False)
     assert r.disc.release_date == "2015"  # winner kept; ISRC agrees, MCN ignored

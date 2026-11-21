@@ -78,6 +78,13 @@ class Source(Enum):
     MENU = "menu"  # B-5: user-selected result in the interactive menu. NOT
     # recording-level: the user explicitly endorsed this release, so its
     # mb_release_id is authoritative (user-confirmed) and is kept, not C2-stripped.
+    DIGITAL_RELEASE = "digital_release"  # --digital-media (kgr, 2026-11-21): the
+    # digital-only release the ISRC tally and the duration match agreed on, its
+    # format confirmed Digital Media by MusicBrainz, every track then fingerprinted
+    # to it. NOT recording-level: C2 exists to keep a fallback from naming one
+    # pressing of a physical disc among several it cannot tell apart, and a digital
+    # release has no pressings and can never have a disc ID, so without this
+    # source its release id could never be recorded at all.
 
 
 # Sources that identify a *recording*, not a disc-ID-verified pressing. They must
