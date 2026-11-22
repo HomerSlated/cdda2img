@@ -253,7 +253,14 @@ def test_all_shipped_profiles_ship() -> None:
     }
 
 
-@pytest.mark.parametrize("name", sorted(R.list_profiles()))
+# From the shipped directory, never list_profiles(): parametrize runs at
+# collection, before any fixture isolates XDG_CONFIG_HOME, so list_profiles()
+# picked up the machine's own user profiles (kgr's *-x20 copies, 2026-11-22) and
+# then failed to load them under the isolated run.
+_SHIPPED = sorted(p.stem for p in R.shipped_profiles_dir().glob("*.toml"))
+
+
+@pytest.mark.parametrize("name", _SHIPPED)
 def test_every_shipped_profile_validates(name: str) -> None:
     """A shipped profile that fails its own schema would break every rip using it,
     and `setup` writes user profiles through the same validator."""
@@ -434,3 +441,31 @@ def test_setup_writes_a_profile_that_loads_back(
     assert loaded.name == "my-profile"
     assert loaded.ladder == "single"  # inherited from track-constant
     assert loaded.experimental is False  # a derived profile is not a bench control
+
+
+def test_the_profile_listing_keeps_its_columns_for_a_long_user_name() -> None:
+    """`rip --list-profiles` sized its name column at 16, so a user profile such as
+    `track-constant-x20` (18) pushed its own row out of line (kgr, 2026-11-22)."""
+    from pathlib import Path
+
+    from cdda2img.cdda2img import _profile_listing
+
+    long_name = "track-constant-x20"
+    rows = [
+        (n, R.load_profile(n), Path(f"/p/{n}.toml"))
+        for n in ("track-ladder", "whole-disc")
+    ]
+    rows.append((long_name, R.load_profile("track-constant"), Path("/u/x.toml")))
+    lines = _profile_listing(rows)
+    heads, paths = lines[0::2], lines[1::2]
+
+    def gran_col(line: str, name: str) -> int:
+        rest = line[len(name) :]
+        return len(name) + len(rest) - len(rest.lstrip())
+
+    assert len({h.index("ladder=") for h in heads}) == 1
+    grans = {gran_col(h, n) for h, (n, _p, _x) in zip(heads, rows, strict=True)}
+    assert len(grans) == 1  # granularity column
+    assert {len(p) - len(p.lstrip()) for p in paths} == grans  # path under it
+    assert all(line == line.rstrip() for line in lines)
+    assert "(experimental)" in heads[1] and "(experimental)" not in heads[0]

@@ -6963,6 +6963,27 @@ def _report_unanswered(unanswered: list[str]) -> int:
     return EXIT_RETRY_LATER
 
 
+def _profile_listing(rows: list[tuple[str, Profile, Path]]) -> list[str]:
+    """``rip --list-profiles``: two lines per profile, the columns sized to the
+    longest entry so a user profile's longer name (``track-constant-x20``) keeps
+    them aligned. The path goes on the second line, under the granularity."""
+    if not rows:
+        return []
+    name_w = max(len(name) for name, _p, _path in rows)
+    gran_w = max(len(p.granularity) for _n, p, _path in rows)
+    ladder_w = max(len(p.ladder) for _n, p, _path in rows)
+    lines = []
+    for name, prof, path in rows:
+        mark = "  (experimental)" if prof.experimental else ""
+        head = (
+            f"{name:<{name_w}}  {prof.granularity:<{gran_w}}  "
+            f"ladder={prof.ladder:<{ladder_w}}{mark}"
+        )
+        lines.append(head.rstrip())
+        lines.append(f"{'':<{name_w}}  {path}")
+    return lines
+
+
 def _dispatch(args: argparse.Namespace) -> int:
     """Run the subcommand; return the exit code (``rip_abort``: 0, or 2 when
     ``import`` wrote a container without a required service's answer). A rip that
@@ -7006,13 +7027,12 @@ def _dispatch(args: argparse.Namespace) -> int:
         )
 
         if getattr(args, "list_profiles", False):
-            for pname, path in sorted(list_profiles().items()):
-                prof = load_profile(pname)
-                mark = " (experimental)" if prof.experimental else ""
-                print(
-                    f"{pname:16s} {prof.granularity:10s} ladder={prof.ladder:6s}{mark}"
-                )
-                print(f"{'':16s} {path}")
+            rows = [
+                (name, load_profile(name), path)
+                for name, path in sorted(list_profiles().items())
+            ]
+            for line in _profile_listing(rows):
+                print(line)
             return 0
 
         cfg = load_config()
