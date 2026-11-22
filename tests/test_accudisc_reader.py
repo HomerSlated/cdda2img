@@ -1639,6 +1639,9 @@ class _FakeLadderDevice:
         self.kwargs = kwargs
         return self._rungs
 
+    def read_toc(self) -> SimpleNamespace:
+        return SimpleNamespace(leadout_lba=211185)
+
 
 def test_speed_ladder_binding_returns_the_same_triple() -> None:
     """The transport swap must be invisible to drive_speed.admitted_ladder.
@@ -1661,17 +1664,18 @@ def test_speed_ladder_binding_returns_the_same_triple() -> None:
     ]
 
 
-def test_speed_ladder_binding_asks_for_three_points_and_no_span() -> None:
-    """points=3 is what makes verdicts possible at all; the span is AccuDisc's.
-
-    Our plan had recorded the CLI's span as leadout/4 + leadout/2 — the NON-sweep
-    span. At points=3 the CLI opens out to the whole disc, because three bands of
-    the middle half sample much the same neighbourhood. Passing no span gets
-    their computation rather than our copy of it.
+def test_speed_ladder_binding_asks_for_three_points_over_the_planned_audio() -> None:
+    """points=3 is what makes verdicts possible at all, and its three bands span
+    the whole audio. Until 2026-11-22 the span was left to the library, whose
+    default is [0, the disc's LAST lead-out): on an Enhanced CD the slow rungs'
+    outer windows then lie between the sessions (AccuDisc 2026-11-22a: the 4x
+    window at 202377 on Under My Skin, whose audio ends at 195656).
     """
     dev = _FakeLadderDevice(())
-    ar._speed_ladder_binding(_binding_with(dev), "/dev/sr0")  # type: ignore[arg-type]
-    assert dev.kwargs == {"points": 3}
+    module = _binding_with(dev)  # type: ignore[arg-type]
+    module.plan = _plan(lba=0, count=195656)
+    ar._speed_ladder_binding(module, "/dev/sr0")
+    assert dev.kwargs == {"points": 3, "lba": 0, "count": 195656}
 
 
 class _FailingLadderDevice(_FakeLadderDevice):

@@ -712,7 +712,9 @@ def _speed_ladder_binding(module: Any, device: str) -> list[SpeedRow]:
     ``points=3`` does any rung get a verdict other than UNKNOWN**; a ladder
     derived from point samples is a confident wrong answer.
 
-    The span is left to the library on purpose. Our migration plan had recorded
+    The span is the planned audio extent (:func:`_audio_extent`) since 2026-11-22.
+    It was left to the library before, for the reason below, which still holds
+    for a single-session disc, where the two are the same. Our migration plan had recorded
     the CLI's span as ``lba = leadout/4, count clamped to leadout/2`` — true of
     the *non-sweep* probe, and wrong here: at ``points=3`` the CLI opens out to
     the whole disc, because three bands of the middle half are three samples of
@@ -727,7 +729,13 @@ def _speed_ladder_binding(module: Any, device: str) -> list[SpeedRow]:
     that only the CLI carries.
     """
     with module.Device(device) as dev:
-        rungs = dev.probe_speed_ladder(points=3)
+        # The span is the planned audio, not the library's default [0, lead-out):
+        # on an Enhanced CD the slow rungs' outer windows lie past session 1's
+        # end (Under My Skin: the 4x window at 202377, session 1 ending at
+        # 195656), where every read fails after the drive's retries. AccuDisc's
+        # advice, 2026-11-22a.
+        count = _audio_extent(module, dev.read_toc())
+        rungs = dev.probe_speed_ladder(points=3, lba=0, count=count)
     return [
         SpeedRow(r.requested_x, r.reported_x, r.measured_x, _verdict_class(r.verdict))
         for r in rungs
