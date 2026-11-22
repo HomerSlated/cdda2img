@@ -11,9 +11,10 @@ import sys
 import textwrap
 import threading
 from collections.abc import Callable, Iterator
+from concurrent.futures import Future
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import TYPE_CHECKING, NamedTuple, NoReturn
+from typing import TYPE_CHECKING, Any, NamedTuple, NoReturn, TypeVar
 
 if TYPE_CHECKING:
     import random
@@ -2377,8 +2378,6 @@ def _run_metadata_lookups(
     ``resolution`` (the full :class:`~cdda2img.field_resolver.Resolution`, whose
     ``contenders`` diagnoses any mismatch), ``proposals``, ``baseline``.
     """
-    from concurrent.futures import ThreadPoolExecutor
-
     from cdda2img.cddb import query_cddb
 
     # B-3 part 2: snapshot the pre-merge baseline BEFORE any lookup runs. This is
@@ -2395,21 +2394,23 @@ def _run_metadata_lookups(
     # last (lowest precedence). A flaky/slow gnudb must never gate the rip.
     cddb_matches: list[DiscMeta] = []
     if do_cddb:
-        with ThreadPoolExecutor(max_workers=2) as ex:
-            cddb_future = ex.submit(
-                query_cddb, cddb_track_lsns, cddb_disc_last_lsn, cddb_server
-            )
-            mb_future = ex.submit(
-                prepopulate_from_mb,
-                disc,
-                verbose=mb_verbose,
-                preferred_country=preferred_country,
-            )
-            try:
-                cddb_matches = cddb_future.result()
-            except Exception as exc:
-                log.warning("CDDB query failed; continuing without it: %s", exc)
-            mb_result = mb_future.result()
+        # Daemon threads, not a ThreadPoolExecutor: leaving an executor's block,
+        # and interpreter exit, both join its workers, so a Ctrl-C during a
+        # stalled MusicBrainz request (up to ~5 min of retries) waited for it.
+        cddb_future = _in_daemon_thread(
+            query_cddb, cddb_track_lsns, cddb_disc_last_lsn, cddb_server
+        )
+        mb_future = _in_daemon_thread(
+            prepopulate_from_mb,
+            disc,
+            verbose=mb_verbose,
+            preferred_country=preferred_country,
+        )
+        try:
+            cddb_matches = cddb_future.result()
+        except Exception as exc:
+            log.warning("CDDB query failed; continuing without it: %s", exc)
+        mb_result = mb_future.result()
     else:
         mb_result = _mb_prepop_alone(
             disc, mb_verbose, preferred_country, digital_media=digital_media
@@ -7212,6 +7213,74 @@ def _run_startup_checks(args: argparse.Namespace) -> None:
                 print("  Run `cdda2img setup --validate-catalogue` to repair it.")
 
 
+_R = TypeVar("_R")
+
+
+def _in_daemon_thread(fn: Callable[..., _R], *args: Any, **kwargs: Any) -> Future[_R]:
+    """Run *fn* on a daemon thread; its result or exception arrives on the Future.
+
+    Not a ``ThreadPoolExecutor``: its workers are joined when its block is left
+    and again at interpreter exit, so a Ctrl-C had to wait for a stalled lookup.
+    A daemon thread is abandoned at exit instead, and ``Future.result()`` is an
+    interruptible wait.
+    """
+    future: Future[_R] = Future()
+
+    def run() -> None:
+        if not future.set_running_or_notify_cancel():
+            return
+        try:
+            future.set_result(fn(*args, **kwargs))
+        except BaseException as exc:  # handed to the caller, never swallowed
+            future.set_exception(exc)
+
+    threading.Thread(target=run, daemon=True, name=getattr(fn, "__name__", "")).start()
+    return future
+
+
+def _install_interrupt_watcher() -> None:
+    """Let Ctrl-C reach an AccuDisc read in flight (kgr, 2026-11-22).
+
+    Python acts on SIGINT only in the main thread between bytecodes, and during a
+    read the main thread is inside libaccudisc. ``signal.set_wakeup_fd`` is
+    written by CPython's C-level handler at once, whatever the main thread is
+    doing, so a thread blocked on the pipe wakes and sets every live read's
+    AccuDisc ``Cancel`` flag (``accudisc_reader.cancel_reads``). The usual
+    ``KeyboardInterrupt`` still follows in the main thread, so the rip's
+    ``finally`` blocks restore the drive and remove the scratch as before.
+
+    The second of the entry-point-only global mutations beside the log handler
+    and the socket timeout: it owns the process's one wakeup fd. Only bytes for
+    SIGINT act; ``menu_state``'s SIGWINCH handler writes here too.
+    """
+    import os
+    import signal
+
+    read_fd, write_fd = os.pipe()
+    os.set_blocking(write_fd, False)
+    try:
+        signal.set_wakeup_fd(write_fd, warn_on_full_buffer=False)
+    except ValueError:  # not the main thread (an embedding caller)
+        os.close(read_fd)
+        os.close(write_fd)
+        return
+
+    def watch() -> None:
+        from cdda2img.accudisc_reader import cancel_reads
+
+        while True:
+            try:
+                data = os.read(read_fd, 64)
+            except OSError:
+                return
+            if not data:
+                return
+            if signal.SIGINT in data:
+                cancel_reads()
+
+    threading.Thread(target=watch, daemon=True, name="interrupt-watcher").start()
+
+
 def _install_log_handler(*, verbose: bool) -> None:
     """Route every log record through one handler, at the CLI entry point (N8).
 
@@ -7300,6 +7369,7 @@ def main() -> None:
 
     args = parse_args()
     _install_log_handler(verbose=args.verbose)
+    _install_interrupt_watcher()
     # The other entry-point-only global mutation: bound every urllib socket, the
     # only lever musicbrainzngs offers. requests-based lookups (AcoustID, Discogs)
     # ignore this default and pass their own timeout — see net.py for why one line

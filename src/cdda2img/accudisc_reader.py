@@ -52,13 +52,14 @@ import functools
 import inspect
 import logging
 import sys
+import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, NamedTuple, TypeVar
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Sequence
+    from collections.abc import Callable, Iterator, Sequence
 
 _T = TypeVar("_T")
 
@@ -277,6 +278,64 @@ def _call(module: Any, what: str, fn: Callable[[], _T]) -> _T:
     except module.AccuDiscError as exc:
         msg = f"accudisc {what} failed: {exc}"
         raise RuntimeError(msg) from exc
+
+
+# ---- Ctrl-C reaching a read in flight (kgr, 2026-11-22) -------------------------
+#
+# Python raises KeyboardInterrupt only in the main thread, between bytecodes, and
+# during Device.read the main thread is inside libaccudisc. Today a read therefore
+# stops at the next chunk boundary, when the engine calls our sink and the pending
+# interrupt is raised there. On damaged sectors one chunk can take minutes of
+# retries. AccuDisc's Cancel flag is the only thing the engine can see without
+# calling back into Python, so every read carries one, and cancel_reads() sets
+# them all from the interrupt watcher thread (cdda2img._install_interrupt_watcher),
+# which runs while the main thread is blocked. Until the engine polls the flag
+# between retries as well as between chunks (asked of AccuDisc 2026-11-22), the
+# flag acts at the same boundary the sink does.
+
+_LIVE_LOCK = threading.Lock()
+_LIVE_CANCELS: set[Any] = set()
+
+
+def cancel_reads() -> None:
+    """Cancel every read in flight. Safe from any thread; never from a signal
+    handler (it takes a lock). Called by the interrupt watcher on SIGINT.
+
+    Only reads in flight: nothing is remembered for later reads. Between reads
+    the main thread runs Python, where the ordinary KeyboardInterrupt already
+    arrives, and a sticky flag would cancel the reads after a Ctrl-C that a
+    prompt took as "back" (metadata menu, ``setup``'s disc prompts)."""
+    with _LIVE_LOCK:
+        for token in _LIVE_CANCELS:
+            token.cancel()
+
+
+@contextlib.contextmanager
+def _cancellable(module: Any) -> Iterator[dict[str, Any]]:
+    """``{"cancel": token}`` for one ``Device.read``, registered while it runs.
+
+    A read the flag stopped surfaces as ``KeyboardInterrupt``, never as the
+    ``RuntimeError`` a device failure becomes: the recovery loops catch
+    ``RuntimeError`` per attempt and would go on to the next one. A binding
+    without ``Cancel`` gets no keyword, and the read stops at a chunk boundary
+    as before.
+    """
+    cancel_cls = getattr(module, "Cancel", None)
+    if cancel_cls is None:
+        yield {}
+        return
+    token = cancel_cls()
+    with _LIVE_LOCK:
+        _LIVE_CANCELS.add(token)
+    try:
+        yield {"cancel": token}
+    except getattr(module, "Cancelled", _NeverRaised) as exc:
+        if token.cancelled:
+            raise KeyboardInterrupt from exc
+        raise
+    finally:
+        with _LIVE_LOCK:
+            _LIVE_CANCELS.discard(token)
 
 
 class BurnRefused(RuntimeError):
@@ -1557,17 +1616,19 @@ def _read_disc_binding(
                 extra["status_map"] = status
             if subq is not None:
                 extra["subq_map"] = subq
-            result = dev.read(
-                0,
-                count,
-                sink=split,
-                copy=False,
-                c2=module.C2.PTRS,
-                sub=module.Sub.RAW if want_sub else module.Sub.NONE,
-                speed_x=read_speed or 0,
-                **extra,
-                **_readable_kw(module, readable),
-            )
+            with _cancellable(module) as cancel:
+                result = dev.read(
+                    0,
+                    count,
+                    sink=split,
+                    copy=False,
+                    c2=module.C2.PTRS,
+                    sub=module.Sub.RAW if want_sub else module.Sub.NONE,
+                    speed_x=read_speed or 0,
+                    **extra,
+                    **_readable_kw(module, readable),
+                    **cancel,
+                )
     _log_read_caveats(result.stats, "read", module)
     return _first_audio_pregap(toc)
 
@@ -1888,7 +1949,7 @@ def _read_windows_binding(
     extra: dict[str, Any] = {}
     if cache_defeat and _has_feature(module, _FEATURE_CACHE_DEFEAT):
         extra["cache_defeat"] = True
-    with module.Device(device) as dev:
+    with module.Device(device) as dev, _cancellable(module) as cancel:
         # copy=False is safe: `collect` consumes the view synchronously into
         # `buf` and never retains it past the call.
         result = dev.read(
@@ -1899,6 +1960,7 @@ def _read_windows_binding(
             speed_x=read_speed or 0,
             **extra,
             **_readable_kw(module, readable),
+            **cancel,
         )
     defeat = "off"
     if extra:
@@ -2036,7 +2098,7 @@ def _defeated_read(
     extra: dict[str, Any] = {}
     if cache_defeat and _has_feature(module, _FEATURE_CACHE_DEFEAT):
         extra["cache_defeat"] = True
-    with module.Device(device) as dev:
+    with module.Device(device) as dev, _cancellable(module) as cancel:
         result = dev.read(
             start_lba,
             count,
@@ -2045,6 +2107,7 @@ def _defeated_read(
             speed_x=read_speed or 0,
             **read_kw,
             **extra,
+            **cancel,
         )
     defeat = "off"
     if extra:
@@ -2527,22 +2590,24 @@ def _read_span_detail_binding(
         subq = bytearray(count)
         # copy=False is safe: `collect` consumes the view synchronously and
         # never retains it past the call.
-        result = dev.read(
-            start_lba,
-            count,
-            sink=collect,
-            copy=False,
-            c2=module.C2.PTRS,
-            sub=module.Sub.RAW,
-            speed_x=read_speed or 0,
-            verify_passes=verify_passes,
-            overlap_sectors=overlap_sectors,
-            c2_retries=c2_retries,
-            speed_ladder=speed_ladder,
-            status_map=status,
-            subq_map=subq,
-            **_readable_kw(module, readable),
-        )
+        with _cancellable(module) as cancel:
+            result = dev.read(
+                start_lba,
+                count,
+                sink=collect,
+                copy=False,
+                c2=module.C2.PTRS,
+                sub=module.Sub.RAW,
+                speed_x=read_speed or 0,
+                verify_passes=verify_passes,
+                overlap_sectors=overlap_sectors,
+                c2_retries=c2_retries,
+                speed_ladder=speed_ladder,
+                status_map=status,
+                subq_map=subq,
+                **_readable_kw(module, readable),
+                **cancel,
+            )
 
     if pos != count:
         how = "short" if pos < count else "over-long"

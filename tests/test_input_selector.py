@@ -271,3 +271,23 @@ def test_select_batches_custom_capacity(monkeypatch: pytest.MonkeyPatch) -> None
     # capacity=40: 20+20=40 fits, 3rd overflows → 2 discs
     result = select_batches(files, "aatc", capacity_minutes=40)
     assert len(result) == 2
+
+
+def test_a_cp_sat_solve_leaves_ctrl_c_with_python() -> None:
+    """CP-SAT's default catch_sigint_signal reset SIGINT to SIG_DFL at the OS
+    level, so after a `best` batch every Ctrl-C killed the process with no
+    clean-up (found 2026-11-22 when a SIGINT test after this file killed pytest).
+    Read from the kernel: signal.getsignal() kept reporting Python's handler."""
+    import signal
+    from pathlib import Path
+
+    def sigint_caught() -> bool:
+        for line in Path("/proc/self/status").read_text().splitlines():
+            if line.startswith("SigCgt"):
+                return bool(int(line.split()[1], 16) & (1 << (signal.SIGINT - 1)))
+        pytest.skip("no /proc/self/status")
+        return False
+
+    assert sigint_caught()  # control: Python's handler is installed to begin with
+    batch_best(_paths(4), [41.0, 41.0, 39.0, 39.0])
+    assert sigint_caught(), "the solve left SIGINT at the OS default"

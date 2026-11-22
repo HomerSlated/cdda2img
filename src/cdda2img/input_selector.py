@@ -98,6 +98,12 @@ def batch_best(
 
     solver = cp_model.CpSolver()
     solver.parameters.max_time_in_seconds = 30.0
+    # CP-SAT's default installs its own C-level SIGINT handler and leaves SIGINT
+    # at SIG_DFL afterwards, behind Python's back (signal.getsignal still names
+    # Python's handler): every later Ctrl-C killed the process outright, with no
+    # clean-up. Measured 2026-11-22 from /proc/self/status SigCgt. A 30 s solve
+    # needs no handler of its own; Ctrl-C reaches Python as usual.
+    solver.parameters.catch_sigint_signal = False
     status = solver.Solve(model)
 
     if status not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
