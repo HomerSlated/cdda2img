@@ -128,3 +128,52 @@ def test_a_stalled_lookup_does_not_hold_the_exit() -> None:
     assert worker.daemon
     release.set()
     future.result(2)
+
+
+class _FakeProbeDevice:
+    """A handle with AccuDisc 0.52.0's set_cancel; its probe raises CANCELLED
+    when the handle flag is set mid-probe, as the engine does between rungs."""
+
+    def __init__(self, cancel_mid_probe: bool) -> None:
+        self.installed: list[Any] = []
+        self._cancel_mid_probe = cancel_mid_probe
+
+    def set_cancel(self, token: Any) -> None:
+        self.installed.append(token)
+
+    def probe(self) -> str:
+        token = self.installed[-1]
+        if self._cancel_mid_probe:
+            ar.cancel_reads()  # the watcher thread, on Ctrl-C
+        if token is not None and token.cancelled:
+            raise _FakeCancelled
+        return "rungs"
+
+
+def _handle_module() -> SimpleNamespace:
+    module = _module()
+    module.features = frozenset({"handle_cancel"})
+    return module
+
+
+def test_the_speed_probe_is_cancelled_through_the_handle_flag() -> None:
+    """probe_speed_ladder takes no per-call flag; only the handle flag reaches it."""
+    dev = _FakeProbeDevice(cancel_mid_probe=True)
+    with pytest.raises(KeyboardInterrupt), ar._handle_cancel(_handle_module(), dev):
+        dev.probe()
+    assert dev.installed[-1] is None  # removed again: the library never clears it
+
+
+def test_the_handle_flag_is_installed_and_removed_on_a_clean_probe() -> None:
+    dev = _FakeProbeDevice(cancel_mid_probe=False)
+    with ar._handle_cancel(_handle_module(), dev):
+        assert dev.probe() == "rungs"
+    assert len(dev.installed) == 2
+    assert dev.installed[0] is not None and dev.installed[1] is None
+
+
+def test_no_handle_flag_on_an_engine_before_0_52() -> None:
+    dev = _FakeProbeDevice(cancel_mid_probe=False)
+    with ar._handle_cancel(_module(), dev):  # no "handle_cancel" feature
+        pass
+    assert dev.installed == []

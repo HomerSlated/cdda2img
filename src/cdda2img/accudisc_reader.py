@@ -311,6 +311,47 @@ def cancel_reads() -> None:
 
 
 @contextlib.contextmanager
+def _registered_cancel(module: Any) -> Iterator[Any]:
+    """A fresh AccuDisc ``Cancel`` token, registered for :func:`cancel_reads`
+    while the block runs; ``None`` on a binding without ``Cancel``. A call our
+    flag stopped surfaces as ``KeyboardInterrupt``."""
+    cancel_cls = getattr(module, "Cancel", None)
+    if cancel_cls is None:
+        yield None
+        return
+    token = cancel_cls()
+    with _LIVE_LOCK:
+        _LIVE_CANCELS.add(token)
+    try:
+        yield token
+    except getattr(module, "Cancelled", _NeverRaised) as exc:
+        if token.cancelled:
+            raise KeyboardInterrupt from exc
+        raise
+    finally:
+        with _LIVE_LOCK:
+            _LIVE_CANCELS.discard(token)
+
+
+@contextlib.contextmanager
+def _handle_cancel(module: Any, dev: Any) -> Iterator[None]:
+    """Install a registered ``Cancel`` on the whole handle (AccuDisc 0.52.0,
+    ``Device.set_cancel``, feature ``"handle_cancel"``), for the calls that take
+    no per-call flag: ``probe_speed_ladder`` polls it between rungs, bands and
+    READ CDs. The library never clears it, so it is a fresh token per block and
+    is removed again on the way out. Nothing on an engine without it."""
+    if not _has_feature(module, "handle_cancel"):
+        yield
+        return
+    with _registered_cancel(module) as token:
+        dev.set_cancel(token)
+        try:
+            yield
+        finally:
+            dev.set_cancel(None)
+
+
+@contextlib.contextmanager
 def _cancellable(module: Any) -> Iterator[dict[str, Any]]:
     """``{"cancel": token}`` for one ``Device.read``, registered while it runs.
 
@@ -320,22 +361,8 @@ def _cancellable(module: Any) -> Iterator[dict[str, Any]]:
     without ``Cancel`` gets no keyword, and the read stops at a chunk boundary
     as before.
     """
-    cancel_cls = getattr(module, "Cancel", None)
-    if cancel_cls is None:
-        yield {}
-        return
-    token = cancel_cls()
-    with _LIVE_LOCK:
-        _LIVE_CANCELS.add(token)
-    try:
-        yield {"cancel": token}
-    except getattr(module, "Cancelled", _NeverRaised) as exc:
-        if token.cancelled:
-            raise KeyboardInterrupt from exc
-        raise
-    finally:
-        with _LIVE_LOCK:
-            _LIVE_CANCELS.discard(token)
+    with _registered_cancel(module) as token:
+        yield {} if token is None else {"cancel": token}
 
 
 class BurnRefused(RuntimeError):
@@ -856,7 +883,8 @@ def _speed_ladder_binding(module: Any, device: str) -> list[SpeedRow]:
         # 195656), where every read fails after the drive's retries. AccuDisc's
         # advice, 2026-11-22a.
         count = _audio_extent(module, dev.read_toc_src()[0])
-        rungs = dev.probe_speed_ladder(points=3, lba=0, count=count)
+        with _handle_cancel(module, dev):
+            rungs = dev.probe_speed_ladder(points=3, lba=0, count=count)
     return [
         SpeedRow(r.requested_x, r.reported_x, r.measured_x, _verdict_class(r.verdict))
         for r in rungs
