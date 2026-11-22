@@ -479,6 +479,11 @@ def parse_args() -> argparse.Namespace:
         metavar="X",
         help="The one speed the recovery chain's fixed-speed stages (track-constant, span-fixed) read at, snapped to the nearest speed the drive admits on the disc; 'auto' holds, per track, the speed whose earlier re-read flagged the fewest C2 errors. Every other stage changes speed on each read (default: from config, 32)",
     )
+    r_cmd.add_argument(
+        "--profile-only",
+        action="store_true",
+        help="Testing (temporary, 2026-11-22): skip the two zero-read repairs, CTDB parity repair and the displacement check, so every track that fails AccurateRip goes to the recovery profile (use with --profile). Recorded in PROV as zero_read_repairs=skipped",
+    )
     media = r_cmd.add_mutually_exclusive_group()
     media.add_argument(
         "--cdr",
@@ -5933,8 +5938,14 @@ def rip_image(  # noqa: C901
     network_preflight: str | None = None,
     media_override: str | None = None,
     recovery_speed: int | str | None = None,
+    profile_only: bool = False,
 ) -> Path | None:
     """Rip *device* into an RBI container, or write nothing at all.
+
+    *profile_only* (``--profile-only``, a temporary test switch, kgr 2026-11-22)
+    skips CTDB parity repair and the displacement check, so a failed track reaches
+    the recovery profile itself. Nothing else changes: AccurateRip still has to
+    verify every track or nothing is written. PROV ``zero_read_repairs=skipped``.
 
     Returns the container's path: ``None`` only when ``--extract --no-keep-rbi``
     removed it after extraction. A rip that cannot build a complete, fully
@@ -6225,7 +6236,11 @@ def rip_image(  # noqa: C901
         # raw domain for ctanalyse's offset detection). On success the PCM is repaired in
         # place and the ladder is skipped; on failure we fall through, still raw — the
         # c2read ladder works in the raw domain too.
-        if raw_domain and _ar_has_partial_mismatch(ar_verify.tracks):
+        if (
+            raw_domain
+            and not profile_only
+            and _ar_has_partial_mismatch(ar_verify.tracks)
+        ):
             from cdda2img.ctdb_repair import repair_whole_disc
 
             _ui_status(ui, "Trying CTDB parity repair…")
@@ -6285,7 +6300,11 @@ def rip_image(  # noqa: C901
         # samples mid-stream leaves every later track intact and out of place, which
         # AccurateRip reports as a mismatch and CTDB as damage beyond its capacity.
         # Tracks it can place are re-sliced from the capture; the rest fall through.
-        if raw_domain and _ar_has_partial_mismatch(ar_verify.tracks):
+        if (
+            raw_domain
+            and not profile_only
+            and _ar_has_partial_mismatch(ar_verify.tracks)
+        ):
             from cdda2img.accuraterip import fetch_ar_responses
 
             ar_responses, _ar_transport, _ar_b3 = fetch_ar_responses(
@@ -6597,6 +6616,8 @@ def rip_image(  # noqa: C901
         provenance.update(span_prov)
         if displacement_check is not None:
             provenance["displacement_check"] = displacement_check
+        if profile_only:
+            provenance["zero_read_repairs"] = "skipped"
         # CTDB provenance. The declined case matters most: without it a failed parity
         # repair is invisible in the container and has to be reverse-engineered from
         # the finished RBI (which is exactly what happened on 2026-07-25).
@@ -7029,6 +7050,7 @@ def _dispatch(args: argparse.Namespace) -> int:
             network_preflight=preflight,
             media_override=args.media_override,
             recovery_speed=args.recovery_speed,
+            profile_only=args.profile_only,
         )
     elif args.cmd == "import":
         if args.info:

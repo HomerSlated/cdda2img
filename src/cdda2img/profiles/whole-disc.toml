@@ -1,4 +1,7 @@
-# whole-disc — re-read the entire disc at one speed and re-gate.
+# whole-disc — re-read the whole audio session ([0, its lead-out); never an
+# Enhanced CD's data session) once per pass, and test every failed track
+# against that one read. `ladder = "full"`: each pass reads at the next rung the
+# drive admits, fastest first, cycling (kgr, 2026-11-21).
 #
 # Bench: 11/20 (0.55). Expensive per attempt, but it carries the most positional
 # variation of any single-speed arm — a fresh whole-disc pass came back clean ~27%
@@ -6,11 +9,14 @@
 # original evidence that variation, not targeting, drives recovery.
 #
 # In the rip since 2026-11-21 (cdda2img.strategy_reads, the bench's own read plan,
-# picked from these fields rather than this file's name): it stands alone, so a
-# track it does not recover is not handed to the speed ladder; every read asks
-# AccuDisc for a cache defeat, which the bench did not; and `passes` is reads per
-# track (the bench's --max-attempts, 8), bounded by budget_s. Here one whole-disc
-# read serves every failed track, so passes and budget_s cover them all together.
+# picked from these fields rather than this file's name). Named with --profile it
+# runs alone; in the automatic chain it is the last stage, shared by every track
+# still failing. It asks for NO cache defeat (AccuDisc 2026-11-21j, kgr): its
+# read covers the whole session, so there is nowhere outside it for a far read
+# to go, and the disc's start cannot be cached after a pass that ended at the
+# lead-out. `passes` is passes over the disc (the bench's --max-attempts, 8),
+# bounded by budget_s; one pass serves every failed track, so both cover them
+# all together.
 #
 # EXPERIMENTAL until a hardware run of this code reproduces the bench (kgr,
 # 2026-11-21): the read plan was scored on a drive, this implementation has not

@@ -1,5 +1,9 @@
-# track-constant — re-read the whole failed track, always at the drive's top
-# admitted speed.
+# track-constant — re-read the whole failed track, every attempt at the one
+# fixed speed `recovery_speed` (`ladder = "single"`): config/CLI, default 32x,
+# snapped to the nearest rung the drive admits (ties to the slower). With
+# `recovery_speed = "auto"` it holds the rung whose ladder re-reads flagged the
+# fewest C2 sectors for this track, or the slowest rung before there is any.
+# Every attempt asks AccuDisc for a cache defeat.
 #
 # Bench: 14/19 (0.74). Beats track-ladder on time when the first attempt succeeds
 # (18 s vs 20 s on Tracy t8) and loses badly when it does not — 1/3 against the
