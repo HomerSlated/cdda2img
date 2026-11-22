@@ -627,6 +627,7 @@ class _FakeCacheDefeat(enum.IntEnum):
     OFF = 0
     DONE = 1
     FAILED = 2
+    NEAR = 3
 
 
 class _PreCacheDefeatDevice(_FakeDevice):
@@ -3441,3 +3442,185 @@ def test_the_real_planner_refuses_the_session_less_view(real_engine) -> None:
     )
     with pytest.raises(RuntimeError, match="no audio range to read"):
         ar._audio_extent(real_engine, flat)
+
+
+# ---- readable= (AccuDisc 0.51.0): far reads stay inside the read's session ------
+# Every re-read passes the session the audio was read from, so no far read, the
+# cache defeat's or the engine's own before a retry or verify pass, lands between
+# an Enhanced CD's sessions. Omitted, never passed as None, on an older engine.
+
+_SESSION_ONE = (0, 195656)
+
+
+def _binding_with_readable(device: Any, *extra: str) -> _FakeBinding:
+    module = _binding_with_cache_defeat(device)
+    module.features = frozenset(  # type: ignore[attr-defined]
+        {"cache_defeat", "readable_range", *extra}
+    )
+    return module
+
+
+def test_a_span_re_read_passes_the_session_as_readable() -> None:
+    device = _FakeDevice(
+        chunks=[_FakeChunk(1, b"\x00" * 2352)],
+        result=_cache_defeat_result(_FakeCacheDefeat.DONE),
+    )
+    ar._read_span_binding(
+        _binding_with_readable(device),
+        "/dev/sr0",
+        0,
+        1,
+        None,
+        None,
+        cache_defeat=True,
+        readable=_SESSION_ONE,
+    )
+    assert device.read_kwargs["readable"] == _SESSION_ONE
+
+
+def test_readable_is_omitted_on_an_engine_without_it() -> None:
+    """Negative control: an older binding raises TypeError on the keyword, which
+    nothing translates, so passing it would end the rip."""
+    device = _FakeDevice(
+        chunks=[_FakeChunk(1, b"\x00" * 2352)],
+        result=_cache_defeat_result(_FakeCacheDefeat.DONE),
+    )
+    ar._read_span_binding(
+        _binding_with_cache_defeat(device),
+        "/dev/sr0",
+        0,
+        1,
+        None,
+        None,
+        cache_defeat=True,
+        readable=_SESSION_ONE,
+    )
+    assert "readable" not in device.read_kwargs
+
+
+def test_no_extent_means_no_readable_keyword() -> None:
+    device = _FakeDevice(chunks=[_FakeChunk(1, b"\x00" * 2352)])
+    ar._read_span_binding(_binding_with_readable(device), "/dev/sr0", 0, 1, None, None)
+    assert "readable" not in device.read_kwargs
+
+
+def test_a_c2_re_read_passes_the_session_as_readable() -> None:
+    rec = 2352 + 294
+    device = _FakeDevice(chunks=[_FakeChunk(1, _sector(10) + bytes(294), rec)])
+    module = _binding_with_readable(device)
+    module.C2 = SimpleNamespace(PTRS="ptrs")  # type: ignore[attr-defined]
+    ar._read_windows_with_c2(
+        module, "/dev/sr0", 10, 1, [(10, 11)], None, None, readable=_SESSION_ONE
+    )
+    assert device.read_kwargs["readable"] == _SESSION_ONE
+
+
+def test_the_public_span_reads_carry_readable_to_the_drive(monkeypatch) -> None:
+    device = _FakeDevice(
+        chunks=[_FakeChunk(1, b"\x00" * 2352)],
+        result=_cache_defeat_result(_FakeCacheDefeat.DONE),
+    )
+    _install(monkeypatch, _binding_with_readable(device))
+    ar.read_span_attempt("/dev/sr0", 0, 1, cache_defeat=True, readable=_SESSION_ONE)
+    assert device.read_kwargs["readable"] == _SESSION_ONE
+    device.read_kwargs = {}
+    ar.read_span_windows(
+        "/dev/sr0", 0, 1, [(0, 1)], cache_defeat=True, readable=_SESSION_ONE
+    )
+    assert device.read_kwargs["readable"] == _SESSION_ONE
+
+
+def test_a_span_detail_read_passes_readable(monkeypatch) -> None:
+    """The span rung's verify passes and C2 retries are where the engine makes
+    its own far reads, so this read needs the bound most."""
+    device = _DetailDevice([_DetailChunk(1, _detail_sector(0xAA, 0x00))], [0x10])
+    module = _detail_binding(
+        device,
+        features=frozenset({
+            "caller_map_buffers",
+            "speed_honoured",
+            "subq_map",
+            "readable_range",
+        }),
+    )
+    _install(monkeypatch, module)
+    ar.read_span_detail("/dev/sr0", 100, 1, readable=_SESSION_ONE)
+    assert device.read_kwargs["readable"] == _SESSION_ONE
+
+
+def test_a_span_detail_read_omits_readable_without_the_feature(monkeypatch) -> None:
+    device = _DetailDevice([_DetailChunk(1, _detail_sector(0xAA, 0x00))], [0x10])
+    _install(monkeypatch, _detail_binding(device))
+    ar.read_span_detail("/dev/sr0", 100, 1, readable=_SESSION_ONE)
+    assert "readable" not in device.read_kwargs
+
+
+def test_a_near_cache_defeat_is_a_defeat(caplog: pytest.LogCaptureFixture) -> None:
+    """NEAR (0.51.0): the far read ran closer than 5000 sectors. Any read that
+    reaches the disc empties the cache (AccuDisc 2026-11-22f), so it is recorded
+    as `near` and logged at DEBUG, never as a defeat that did not run."""
+    device = _FakeDevice(
+        chunks=[_FakeChunk(1, b"\x00" * 2352)],
+        result=_cache_defeat_result(_FakeCacheDefeat.NEAR),
+    )
+    with caplog.at_level(logging.DEBUG, logger=ar.log.name):
+        got = ar._read_span_binding(
+            _binding_with_readable(device),
+            "/dev/sr0",
+            0,
+            1,
+            None,
+            None,
+            cache_defeat=True,
+            readable=_SESSION_ONE,
+        )
+    assert got.cache_defeat == "near"
+    assert [r.levelno for r in caplog.records] == [logging.DEBUG]
+
+
+def _extent_binding(answer, sessions) -> tuple[_FakeBinding, _FakeToc]:
+    toc = _FakeToc([_FakeTrack(1, 0)], sessions, 1000)
+    module = _FakeBinding()
+    module.features = frozenset({"readable_range"})  # type: ignore[attr-defined]
+    module.toc_from_full_toc = lambda _raw: (toc, None)  # type: ignore[attr-defined]
+    module.session_extent_at = lambda _toc, _lba: answer  # type: ignore[attr-defined]
+    return module, toc
+
+
+def test_readable_extent_is_the_session_of_the_audio(monkeypatch) -> None:
+    module, _toc = _extent_binding((0, 1000), [_FakeSession(1)])
+    _install(monkeypatch, module)
+    assert ar.readable_extent(b"raw") == (0, 1000)
+
+
+def test_a_mapped_toc_with_no_session_for_the_audio_is_refused(monkeypatch) -> None:
+    """AccuDisc 2026-11-22i: None from a TOC that maps sessions is the trap of
+    planning from a session-less view. Substituting the disc's lead-out would span
+    the gap between sessions, so it raises."""
+    module, _toc = _extent_binding(None, [_FakeSession(1)])
+    _install(monkeypatch, module)
+    with pytest.raises(RuntimeError, match="maps sessions"):
+        ar.readable_extent(b"raw")
+
+
+def test_a_toc_without_sessions_keeps_the_unbounded_rule(monkeypatch) -> None:
+    """Control for the test above: the format-0 degrade maps no sessions, and
+    there AccuDisc's own answer is the unbounded rule."""
+    module, _toc = _extent_binding(None, [])
+    _install(monkeypatch, module)
+    assert ar.readable_extent(b"raw") is None
+
+
+def test_readable_extent_is_none_on_an_engine_before_0_51(monkeypatch) -> None:
+    module, _toc = _extent_binding((0, 1000), [_FakeSession(1)])
+    module.features = frozenset()  # type: ignore[attr-defined]
+    _install(monkeypatch, module)
+    assert ar.readable_extent(b"raw") is None
+
+
+def test_the_real_engine_bounds_an_enhanced_cd_to_session_one(real_engine) -> None:
+    """Under My Skin's shape: the re-reads' far reads stay in [0, 195656), not up
+    to the disc's last lead-out (211185), which spans the inter-session gap."""
+    if "readable_range" not in real_engine.features:
+        pytest.skip("AccuDisc before 0.51.0")
+    assert ar.readable_extent(_enhanced_cd_fulltoc()) == _SESSION_ONE

@@ -200,7 +200,7 @@ def test_each_stage_reaches_the_code_that_runs_its_profile(monkeypatch) -> None:
         seen["strategy"] = (kind, kw["fixed_speed"], kw["ladder"])
         return {}, {}
 
-    def spans(*a):
+    def spans(*a, **k):
         seen["spans"] = True
         return {}, {}
 

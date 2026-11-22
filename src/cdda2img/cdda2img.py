@@ -3299,8 +3299,15 @@ def _rip_disc_stage(
     cfg: Config,
     ui: TerminalUI | None = None,
     read_speed: int | None = None,
-) -> tuple[RipInfo, str, Path | None, bytes | None]:
-    """Read the disc, returning (info, rip_type, c2_path, disc_damage).
+) -> tuple[RipInfo, str, Path | None, bytes | None, tuple[int, int] | None]:
+    """Read the disc, returning (info, rip_type, c2_path, disc_damage, readable).
+
+    *readable* is the session the audio was read from, ``(lo, hi)``, from the
+    full TOC the capture saved (``accudisc_reader.readable_extent``). Every
+    recovery re-read passes it to AccuDisc, so no far read, the cache defeat's or
+    the engine's own before a retry or verify pass, lands between an Enhanced
+    CD's sessions (2026-11-22, AccuDisc 0.51.0). ``None`` on an engine before
+    0.51.0 or a TOC without sessions, where the engine's unbounded rule stands.
 
     *disc_damage* is the read's per-sector C2 damage map, one byte per sector,
     retained past the read so a later stage can draw against it (the CTDB repair
@@ -3328,7 +3335,7 @@ def _rip_disc_stage(
     The PCM returned is RAW — the drive offset is not applied here. The caller works raw
     through AR + ctanalyse and calls apply_offset exactly once, at storage.
     """
-    from cdda2img.accudisc_reader import read_disc_c2
+    from cdda2img.accudisc_reader import read_disc_c2, readable_extent
 
     want_c2 = cfg.c2_recovery != "off"
     sub_file = pcm_file.with_suffix(".sub")
@@ -3418,7 +3425,8 @@ def _rip_disc_stage(
         # nothing left to build a disc from, and no second engine to ask.
         msg = f"disc metadata assembly failed: {exc}"
         raise RuntimeError(msg) from exc
-    return info, "accudisc", (c2_file if want_c2 else None), disc_damage
+    readable = readable_extent(fulltoc_file.read_bytes())
+    return info, "accudisc", (c2_file if want_c2 else None), disc_damage, readable
 
 
 # The PROV status keys of the services an IMPORTED container's provenance depends
@@ -4604,6 +4612,7 @@ def _ladder_attempt(
     responses: list,
     cohort: list | None,
     c2: bool = False,
+    readable: tuple[int, int] | None = None,
 ) -> tuple[tuple[bytes, str] | None, str, int | None]:
     """One targeted re-read of track ``idx`` (0-based) at *speed*.
 
@@ -4659,6 +4668,7 @@ def _ladder_attempt(
         progress_cb=prog_cb,
         cache_defeat=True,
         c2=c2,
+        readable=readable,
     )
     attempt = _attempt_record(speed, read.speed_honoured_x, read.cache_defeat)
     window = read.pcm
@@ -4790,8 +4800,12 @@ def _recover_failed_tracks(
     disc_damage: bytes | None = None,
     cohort: list | None = None,
     c2: bool = False,
+    readable: tuple[int, int] | None = None,
 ) -> tuple[dict[int, str], dict[str, str]]:
     """Re-read each AR-failed track across the drive's speed ladder until it matches.
+
+    *readable* bounds every far read of every attempt to the session being read
+    (:func:`_rip_disc_stage`).
 
     *c2* asks every re-read for C2 pointers and records how many sectors each
     flagged as ``recovery_c2_track_<n>`` (``40X:12,32X:3``), which is what
@@ -4894,6 +4908,7 @@ def _recover_failed_tracks(
                         responses,
                         cohort,
                         c2,
+                        readable=readable,
                     )
                 except (RuntimeError, OSError) as exc:
                     log.warning("track %d re-read at %dX failed: %s", t, speed, exc)
@@ -4953,6 +4968,7 @@ def _span_pass(
     prog_cb: Callable[[int, int], None] | None,
     best: dict[int, bytes],
     track: int,
+    readable: tuple[int, int] | None = None,
 ) -> None:
     """Re-read every span once and record each accepted copy in *best*, replacing
     the previous one. A failed span read is logged and skipped, not fatal."""
@@ -4969,6 +4985,7 @@ def _span_pass(
                 overlap_sectors=profile.overlap_sectors,
                 c2_retries=profile.c2_retries,
                 progress_cb=prog_cb,
+                readable=readable,
             )
         except (RuntimeError, OSError) as exc:
             log.warning("track %d span re-read failed: %s", track, exc)
@@ -5019,8 +5036,11 @@ def _recover_flagged_spans(
     read_offset: int,
     disc_damage: bytes,
     ui: TerminalUI | None,
+    readable: tuple[int, int] | None = None,
 ) -> tuple[dict[int, str], dict[str, str]]:
     """Re-read only the flagged sectors of each AR-failed track; commit on AR pass.
+
+    *readable* bounds the engine's far reads to the session (:func:`_rip_disc_stage`).
 
     ``docs/reference/span-recovery-plan.md`` §4. Per track: take the capture
     pass's damage lane inside the track's raw window as targets (the disc's final
@@ -5095,7 +5115,9 @@ def _recover_flagged_spans(
                 status_line[0] = f"Span re-read track {t} ({k}/{profile.passes})"
                 if ui is not None:
                     ui.set_status(status_line[0], 0.0)
-                _span_pass(device, spans, profile, speed, prog_cb, best, t)
+                _span_pass(
+                    device, spans, profile, speed, prog_cb, best, t, readable=readable
+                )
                 corrected = _span_gate(
                     base, best, w, read_offset, t, n_tracks, responses
                 )
@@ -5122,6 +5144,7 @@ def _strategy_attempt(
     prog_cb: Callable[[int, int], None] | None,
     *,
     cache_defeat: bool = True,
+    readable: tuple[int, int] | None = None,
 ) -> tuple[list[bytes] | None, str]:
     """One strategy read, keeping *windows*. Returns ``(pieces, record)``.
 
@@ -5148,6 +5171,7 @@ def _strategy_attempt(
             read_speed=req.speed,
             progress_cb=prog_cb,
             cache_defeat=cache_defeat,
+            readable=readable,
         )
     except (RuntimeError, OSError) as exc:
         log.warning("strategy read %s%dX failed: %s", where, req.speed, exc)
@@ -5210,6 +5234,7 @@ def _recover_by_strategy(
     ui: TerminalUI | None,
     seed: int,
     fixed_speed: int | None = None,
+    readable: tuple[int, int] | None = None,
 ) -> tuple[dict[int, str], dict[str, str]]:
     """Run one of the bench's recovery strategies **instead of** the speed ladder.
 
@@ -5272,6 +5297,7 @@ def _recover_by_strategy(
             pcm_fh=pcm_fh,
             outcomes=outcomes,
             fixed_speed=fixed_speed,
+            readable=readable,
         )
         if kind == "whole-disc":
             run.whole_disc(tracks)
@@ -5305,6 +5331,8 @@ class _StrategyRun:
     pcm_fh: BinaryIO
     outcomes: dict[int, str]
     fixed_speed: int | None = None
+    #: The session the audio was read from (:func:`_rip_disc_stage`).
+    readable: tuple[int, int] | None = None
 
     def speed_for(self, i: int) -> int:
         """The speed of read *i*: the next rung of the admitted ladder, cycling.
@@ -5397,7 +5425,7 @@ class _StrategyRun:
             req = replace(planned, speed=self.speed_for(k - 1))
             self._status(f"Recover track {st.track} ({k}/{self.profile.passes})")
             pieces, record = _strategy_attempt(
-                self.device, req, [(w.lo, w.hi)], self.prog_cb
+                self.device, req, [(w.lo, w.hi)], self.prog_cb, readable=self.readable
             )
             st.reads.append(record)
             if pieces is None:
@@ -5435,7 +5463,12 @@ class _StrategyRun:
             self._status(f"Whole-disc re-read ({k}/{self.profile.passes})")
             windows = [(st.window.lo, st.window.hi) for st in remaining]
             pieces, record = _strategy_attempt(
-                self.device, req, windows, self.prog_cb, cache_defeat=False
+                self.device,
+                req,
+                windows,
+                self.prog_cb,
+                cache_defeat=False,
+                readable=self.readable,
             )
             for st in remaining:
                 st.reads.append(record)
@@ -5522,6 +5555,8 @@ class _ChainContext(NamedTuple):
     #: recovery_speed = "auto": the ladder captures C2, and a track's fixed-speed
     #: stages hold the rung whose re-read flagged fewest (_fewest_c2).
     auto_speed: bool = False
+    #: The session the audio was read from; bounds every far read (_rip_disc_stage).
+    readable: tuple[int, int] | None = None
 
 
 def _initial_fixed_speed(speed: int | str, ladder: list[int]) -> int:
@@ -5579,6 +5614,7 @@ def _run_chain_stage(
             ctx.read_offset,
             ctx.disc_damage,
             ctx.ui,
+            readable=ctx.readable,
         )
     if profile.granularity == "track":
         return _recover_failed_tracks(
@@ -5596,6 +5632,7 @@ def _run_chain_stage(
             ctx.disc_damage,
             ctx.cohort,
             c2=ctx.auto_speed and profile.ladder == "full",
+            readable=ctx.readable,
         )
     kind = strategy_kind(profile)
     if kind is None:  # unreachable for a validated profile; refuse, never guess
@@ -5616,6 +5653,7 @@ def _run_chain_stage(
         ui=ctx.ui,
         seed=secrets.randbits(32),
         fixed_speed=ctx.fixed_speed,
+        readable=ctx.readable,
     )
 
 
@@ -5845,6 +5883,7 @@ def _run_span_rung(
     read_offset: int,
     disc_damage: bytes | None,
     ui: TerminalUI | None,
+    readable: tuple[int, int] | None = None,
 ) -> tuple[dict[int, str], dict[str, str], list]:
     """Dispatch the span rung ahead of the speed ladder, when the profile asks.
 
@@ -5873,6 +5912,7 @@ def _run_span_rung(
         read_offset,
         disc_damage,
         ui,
+        readable=readable,
     )
     remaining = [r for r in failed_tracks if r.track not in outcomes]
     return outcomes, prov, remaining
@@ -6087,7 +6127,7 @@ def rip_image(  # noqa: C901
         track_preview = _start_track_preview(device, temp.base, ui, enabled=preview)
 
         c2_file = temp.pcm_file.with_suffix(".c2")
-        info, rip_type, c2_path, disc_damage = _rip_disc_stage(
+        info, rip_type, c2_path, disc_damage, readable = _rip_disc_stage(
             device,
             temp.pcm_file,
             c2_file,
@@ -6377,6 +6417,7 @@ def rip_image(  # noqa: C901
                         disc_damage=disc_damage,
                         ui=ui,
                         cohort=ar_cohort or None,
+                        readable=readable,
                     ),
                     failed_tracks,
                     recovery_speed or cfg.recovery_speed,
@@ -6399,6 +6440,7 @@ def rip_image(  # noqa: C901
                     read_offset=read_offset,
                     disc_damage=disc_damage,
                     ui=ui,
+                    readable=readable,
                 )
                 recovery_outcomes.update(span_outcomes)
                 span_prov.update(span_keys)
@@ -6435,6 +6477,7 @@ def rip_image(  # noqa: C901
                         disc_damage=disc_damage,
                         ui=ui,
                         seed=secrets.randbits(32),
+                        readable=readable,
                     )
                     recovery_outcomes.update(outcomes)
                     ladder_prov.update(strategy_keys)
@@ -6453,6 +6496,7 @@ def rip_image(  # noqa: C901
                         ui,
                         disc_damage,
                         ar_cohort or None,
+                        readable=readable,
                     )
                     recovery_outcomes.update(outcomes)
                     ladder_prov.update(attempts_prov)

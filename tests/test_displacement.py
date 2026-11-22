@@ -289,6 +289,7 @@ def _drive(monkeypatch: pytest.MonkeyPatch, what_it_returns: np.ndarray) -> list
         progress_cb=None,
         cache_defeat=False,
         c2=False,
+        readable=None,
     ):
         reads.append((start, count))
         return adr.SpanRead(

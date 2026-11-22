@@ -70,10 +70,12 @@ def _patch(
         progress_cb=None,
         cache_defeat=False,
         c2=False,
+        readable=None,
     ):
         state["speeds"].append(read_speed)
         state.setdefault("c2", []).append(c2)
         state["defeat"].append(cache_defeat)
+        state.setdefault("readable", []).append(readable)
         state["windows"].append((start, count))
         state["cur"] = read_speed
         return adr.SpanRead(
@@ -270,6 +272,7 @@ def test_recovery_read_failure_consumes_attempt(
         progress_cb=None,
         cache_defeat=False,
         c2=False,
+        readable=None,
     ):
         state["calls"] += 1
         if state["calls"] == 1:
@@ -388,6 +391,7 @@ def test_recovery_tui_status_is_per_attempt(
         progress_cb=None,
         cache_defeat=False,
         c2=False,
+        readable=None,
     ):
         if progress_cb is not None:  # emit one mid-window progress event
             progress_cb(5, 10)
@@ -659,3 +663,104 @@ def test_the_ladder_records_c2_per_rung_only_when_asked(
         None,
     )
     assert "recovery_c2_track_2" not in prov
+
+
+def test_every_ladder_attempt_is_bounded_to_the_session(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """AccuDisc 0.51.0: the session the audio was read from reaches every re-read,
+    so no far read before an attempt or its retries lands between sessions."""
+    state = _patch(monkeypatch, match_speed=None)
+    _recover_failed_tracks(
+        "/dev/sr0",
+        _failed(2),
+        _LSNS,
+        _LAST_LSN,
+        _disc_pcm(tmp_path),
+        ["resp"],
+        _N_TRACKS,
+        [32, 8],
+        2,
+        _OFFSET,
+        None,
+        readable=(0, _LAST_LSN + 1),
+    )
+    assert state["readable"] == [(0, _LAST_LSN + 1)] * 4
+
+
+def test_every_recovery_path_in_the_rip_carries_the_session() -> None:
+    """Structural: each recovery entry point rip_image calls is handed the
+    extent _rip_disc_stage returned. A path that forgets it reads unbounded,
+    and no fake drive would notice."""
+    import ast
+    import inspect
+    import textwrap
+
+    from cdda2img import cdda2img as app
+
+    tree = ast.parse(textwrap.dedent(inspect.getsource(app.rip_image)))
+    wanted = {
+        "_ChainContext",
+        "_run_span_rung",
+        "_recover_by_strategy",
+        "_recover_failed_tracks",
+    }
+    seen: dict[str, list[bool]] = {}
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id in wanted
+        ):
+            seen.setdefault(node.func.id, []).append(
+                any(k.arg == "readable" for k in node.keywords)
+            )
+    assert set(seen) == wanted
+    assert all(all(v) for v in seen.values()), seen
+
+
+@pytest.mark.parametrize(
+    ("caller", "callees"),
+    [
+        (
+            "_run_chain_stage",
+            {
+                "_recover_flagged_spans",
+                "_recover_failed_tracks",
+                "_recover_by_strategy",
+            },
+        ),
+        ("_recover_failed_tracks", {"_ladder_attempt"}),
+        ("_ladder_attempt", {"read_span_attempt"}),
+        ("_recover_flagged_spans", {"_span_pass"}),
+        ("_span_pass", {"read_span_detail"}),
+        ("_run_span_rung", {"_recover_flagged_spans"}),
+        ("_strategy_attempt", {"read_span_windows"}),
+        ("_StrategyRun", {"_strategy_attempt"}),
+        ("_recover_by_strategy", {"_StrategyRun"}),
+    ],
+)
+def test_the_session_is_handed_down_every_recovery_call(caller, callees) -> None:
+    """Each link from rip_image to the seam passes `readable` by keyword, so a
+    link that drops it fails here instead of reading unbounded on a real disc."""
+    import ast
+    import inspect
+    import textwrap
+
+    from cdda2img import cdda2img as app
+
+    tree = ast.parse(textwrap.dedent(inspect.getsource(getattr(app, caller))))
+
+    def name(func: ast.expr) -> str | None:
+        if isinstance(func, ast.Name):
+            return func.id
+        if isinstance(func, ast.Attribute):
+            return func.attr
+        return None
+
+    calls = [
+        n for n in ast.walk(tree) if isinstance(n, ast.Call) and name(n.func) in callees
+    ]
+    assert calls, f"{caller} calls none of {callees}"
+    for call in calls:
+        assert any(k.arg == "readable" for k in call.keywords), ast.unparse(call)[:80]

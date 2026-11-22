@@ -524,6 +524,61 @@ def _audio_extent(module: Any, toc: Any) -> int:
     return int(plan.count)
 
 
+def readable_extent(fulltoc_raw: bytes) -> tuple[int, int] | None:
+    """The sectors a far read may target on this disc, from its **saved** full TOC.
+
+    ``(lo, hi)``: the session the audio is read from, from its first track's
+    pregap to its own lead-out (AccuDisc's ``session_extent_at``, keyed by the
+    plan's LBA, which :func:`_audio_extent` holds at 0). Pass it to every re-read
+    as ``readable=``, so no far read, the cache defeat's or the engine's own
+    before a retry or verify pass, lands between an Enhanced CD's sessions or past
+    a short session's lead-out. Pure: no device is opened.
+
+    ``None`` when the engine predates 0.51.0 (the re-reads then keep the old
+    unbounded rule), and when the TOC maps no sessions (the format-0 degrade),
+    where AccuDisc's own answer is the unbounded rule. Raises ``RuntimeError``
+    when the TOC maps sessions and none holds the audio: that is the trap of
+    planning from a session-less view (AccuDisc 2026-11-22i), and substituting
+    the disc's lead-out would span the gap between sessions.
+    """
+    module = _binding("session extent")
+    if not _has_feature(module, _FEATURE_READABLE_RANGE):
+        return None
+
+    def _run() -> tuple[int, int] | None:
+        toc, _info = module.toc_from_full_toc(fulltoc_raw)
+        return _session_extent(module, toc)
+
+    return _call(module, "session extent", _run)
+
+
+def _session_extent(module: Any, toc: Any) -> tuple[int, int] | None:
+    """:func:`readable_extent` for a TOC already folded."""
+    _audio_extent(module, toc)  # the plan the capture read; its LBA is 0
+    extent = module.session_extent_at(toc, 0)
+    if extent is not None:
+        return (int(extent[0]), int(extent[1]))
+    if toc.sessions:
+        msg = (
+            "accudisc: the TOC maps sessions but none holds the audio at LBA 0;"
+            " refusing to bound re-reads by the disc's lead-out"
+        )
+        raise RuntimeError(msg)
+    log.info("no session map in the TOC; re-reads keep AccuDisc's unbounded far reads")
+    return None
+
+
+def _readable_kw(module: Any, readable: tuple[int, int] | None) -> dict[str, Any]:
+    """``{"readable": (lo, hi)}`` for ``Device.read``, or nothing.
+
+    Nothing when no extent was given or the engine has no such keyword; passing
+    it to an older binding would raise ``TypeError`` and end the rip.
+    """
+    if readable is None or not _has_feature(module, _FEATURE_READABLE_RANGE):
+        return {}
+    return {"readable": readable}
+
+
 def _warn_about_geometry(geom: TocGeometry) -> None:
     """Surface an untrusted or degraded TOC."""
     if not geom.toc_trusted:
@@ -1176,6 +1231,13 @@ _FEATURE_CACHE_DEFEAT = "cache_defeat"
 #: ``read_toc_src`` runs live, so a dump and a live read cannot disagree.
 _FEATURE_TOC_FROM_FULL_TOC = "toc_from_full_toc"
 
+#: ``Device.read(readable=(lo, hi))`` and ``session_extent_at`` (0.51.0, AccuDisc
+#: ``3357cf2``, 2026-11-22): every far read the engine makes, the cache defeat's
+#: and its own before each retry, rescue and verify pass, stays inside ``[lo,
+#: hi)``. Omitted, never passed as ``None``, on an engine without it: an older
+#: binding raises ``TypeError`` on the keyword, as for ``cache_defeat``.
+_FEATURE_READABLE_RANGE = "readable_range"
+
 
 def _has_feature(module: Any, name: str) -> bool:
     """Whether the binding publishes capability *name* in ``accudisc.features``.
@@ -1704,6 +1766,7 @@ def _read_span_binding(
     *,
     cache_defeat: bool = False,
     c2: bool = False,
+    readable: tuple[int, int] | None = None,
 ) -> SpanRead:
     """Span read straight into memory — no temp file, no filesystem round-trip.
 
@@ -1741,6 +1804,7 @@ def _read_span_binding(
         read_speed,
         progress_cb,
         cache_defeat=cache_defeat,
+        readable=readable,
     )
     return SpanRead(
         pcm=got.pieces[0],
@@ -1760,6 +1824,7 @@ def _read_windows_binding(
     progress_cb: Callable[[int, int], None] | None,
     *,
     cache_defeat: bool = False,
+    readable: tuple[int, int] | None = None,
 ) -> WindowsRead:
     """One read of ``[start_lba, start_lba + count)`` keeping only *windows*.
 
@@ -1821,6 +1886,7 @@ def _read_windows_binding(
             copy=False,
             speed_x=read_speed or 0,
             **extra,
+            **_readable_kw(module, readable),
         )
     defeat = "off"
     if extra:
@@ -1866,6 +1932,7 @@ def _read_windows_with_c2(
     progress_cb: Callable[[int, int], None] | None,
     *,
     cache_defeat: bool = False,
+    readable: tuple[int, int] | None = None,
 ) -> WindowsRead:
     """:func:`_read_windows_binding` with C2 pointers (2026-11-21).
 
@@ -1906,6 +1973,7 @@ def _read_windows_with_c2(
         read_speed,
         cache_defeat,
         c2=module.C2.PTRS,
+        **_readable_kw(module, readable),
     )
     if done != count:
         msg = (
@@ -1976,16 +2044,23 @@ def _defeated_read(
 def _log_cache_defeat(stats: Any, start_lba: int, module: Any) -> None:
     """Say whether a requested cache defeat ran, from the engine's own answer.
 
-    Anything but ``DONE`` is logged at **INFO**, as a quantized speed is: it is
-    not a fault. ``FAILED`` means the drive refused the far read, or there was
-    no address 5000 sectors away, and the read went ahead exactly as it would
-    have without the option. So this read may have been answered from the
+    ``DONE`` and ``NEAR`` are defeats (``NEAR``, 0.51.0: the far read ran closer
+    than 5000 sectors because ``readable`` left no room; any read that reaches the
+    disc empties the cache on both drives measured, AccuDisc 2026-11-22f). Anything
+    else is logged at **INFO**, as a quantized speed is: it is not a fault.
+    ``FAILED`` means the drive refused the far read, or the readable range held no
+    sector outside the span, and the read went ahead exactly as it would have
+    without the option. So this read may have been answered from the
     drive's cache. On the recovery ladder that can only repeat a miss, never
     splice wrong audio, because AccurateRip gates every splice.
     """
     outcome = module.CacheDefeat(stats.cache_defeat)
-    if outcome == module.CacheDefeat.DONE:
-        log.debug("accudisc span read at lba %d: cache defeated", start_lba)
+    if outcome.name in ("DONE", "NEAR"):
+        log.debug(
+            "accudisc span read at lba %d: cache defeated (%s)",
+            start_lba,
+            outcome.name.lower(),
+        )
         return
     log.info(
         "accudisc span read at lba %d: the cache defeat did not run (%s); "
@@ -2004,8 +2079,9 @@ class SpanRead:
     A span read sets one speed and AccuDisc runs no ladder of its own inside it, so
     one value describes the whole read.
 
-    *cache_defeat* is ``"done"`` or ``"failed"`` from the engine's own
-    ``ReadStats.cache_defeat`` when one was asked for, and ``"off"`` when none was:
+    *cache_defeat* is ``"done"``, ``"near"`` (0.51.0) or ``"failed"`` from the
+    engine's own ``ReadStats.cache_defeat`` when one was asked for, and ``"off"``
+    when none was:
     either the caller did not ask or the engine has no such option. ``"off"`` is
     decided here, never read from the stats, because on an engine before 0.49.0
     the field does not exist.
@@ -2027,6 +2103,7 @@ def read_span_attempt(
     *,
     cache_defeat: bool = False,
     c2: bool = False,
+    readable: tuple[int, int] | None = None,
 ) -> SpanRead:
     """:func:`read_span_bytes` plus the speed the drive ran at and the cache defeat.
 
@@ -2041,6 +2118,9 @@ def read_span_attempt(
     (:data:`_FEATURE_CACHE_DEFEAT`). The recovery ladder sets it on every attempt
     (kgr, 2026-10-22). On an engine without the capability the keyword is omitted,
     the read goes ahead as before and the result says ``"off"``.
+
+    *readable* is :func:`readable_extent`: where any far read may go. ``None``
+    keeps AccuDisc's unbounded rule (the bench tools, an engine before 0.51.0).
     """
     module = _binding("span read")
     return _call(
@@ -2055,6 +2135,7 @@ def read_span_attempt(
             progress_cb,
             cache_defeat=cache_defeat,
             c2=c2,
+            readable=readable,
         ),
     )
 
@@ -2080,6 +2161,7 @@ def read_span_windows(
     progress_cb: Callable[[int, int], None] | None = None,
     *,
     cache_defeat: bool = False,
+    readable: tuple[int, int] | None = None,
 ) -> WindowsRead:
     """Read ``[start_lba, start_lba + count)`` once and keep only *windows*.
 
@@ -2087,7 +2169,7 @@ def read_span_windows(
     streams the whole range, which is what the strategy specifies (a run-up, or
     the whole disc), and memory holds only the ``[lo, hi)`` LBA ranges asked for,
     each clipped to the read. Otherwise as :func:`read_span_attempt`, including the
-    cache defeat and the speed the drive reported.
+    cache defeat, *readable* and the speed the drive reported.
     """
     module = _binding("span read")
     return _call(
@@ -2102,6 +2184,7 @@ def read_span_windows(
             read_speed,
             progress_cb,
             cache_defeat=cache_defeat,
+            readable=readable,
         ),
     )
 
@@ -2273,6 +2356,7 @@ def read_span_detail(
     c2_retries: int = 0,
     speed_ladder: Sequence[int] | None = None,
     progress_cb: Callable[[int, int], None] | None = None,
+    readable: tuple[int, int] | None = None,
 ) -> SpanDetail:
     """Re-read ``[start_lba, start_lba + count)`` keeping C2 and the status map.
 
@@ -2305,6 +2389,9 @@ def read_span_detail(
 
     Speed is set per invocation and **not** restored, matching
     :func:`read_span`; the caller restores once after its sweep.
+
+    *readable* (:func:`readable_extent`) bounds the engine's own far reads, the
+    ones before each verify pass and C2 retry, to the session being read.
 
     **Two properties this depends on, read out of AccuDisc's source rather than
     assumed** (2026-09-18; both are request shapes nothing else in this tree
@@ -2353,6 +2440,7 @@ def read_span_detail(
             c2_retries,
             speed_ladder,
             progress_cb,
+            readable,
         ),
     )
 
@@ -2368,6 +2456,7 @@ def _read_span_detail_binding(
     c2_retries: int,
     speed_ladder: Sequence[int] | None,
     progress_cb: Callable[[int, int], None] | None,
+    readable: tuple[int, int] | None = None,
 ) -> SpanDetail:
     """:func:`read_span_detail` over the binding — one ``Device``, three lanes.
 
@@ -2440,6 +2529,7 @@ def _read_span_detail_binding(
             speed_ladder=speed_ladder,
             status_map=status,
             subq_map=subq,
+            **_readable_kw(module, readable),
         )
 
     if pos != count:
