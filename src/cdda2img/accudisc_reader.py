@@ -547,14 +547,18 @@ def readable_extent(fulltoc_raw: bytes) -> tuple[int, int] | None:
 
     def _run() -> tuple[int, int] | None:
         toc, _info = module.toc_from_full_toc(fulltoc_raw)
+        _audio_extent(module, toc)  # the plan the capture read; its LBA is 0
         return _session_extent(module, toc)
 
     return _call(module, "session extent", _run)
 
 
 def _session_extent(module: Any, toc: Any) -> tuple[int, int] | None:
-    """:func:`readable_extent` for a TOC already folded."""
-    _audio_extent(module, toc)  # the plan the capture read; its LBA is 0
+    """:func:`readable_extent` for a TOC already folded and planned from LBA 0
+    (:func:`_audio_extent` must have accepted it). ``None`` on an engine before
+    0.51.0, as for the whole-TOC form."""
+    if not _has_feature(module, _FEATURE_READABLE_RANGE):
+        return None
     extent = module.session_extent_at(toc, 0)
     if extent is not None:
         return (int(extent[0]), int(extent[1]))
@@ -1519,6 +1523,9 @@ def _read_disc_binding(
         # (AccuDisc 2026-11-22b, measured). It is the TOC `accudisc read` plans from.
         toc, _info = dev.read_toc_src()
         count = _audio_extent(module, toc)
+        # The same session bound the re-reads get (kgr, 2026-11-22): the engine's
+        # own far reads before a retry or verify chunk stay in the audio session.
+        readable = _session_extent(module, toc)
 
         with contextlib.ExitStack() as stack:
             files: dict[str, Any] = {
@@ -1559,6 +1566,7 @@ def _read_disc_binding(
                 sub=module.Sub.RAW if want_sub else module.Sub.NONE,
                 speed_x=read_speed or 0,
                 **extra,
+                **_readable_kw(module, readable),
             )
     _log_read_caveats(result.stats, "read", module)
     return _first_audio_pregap(toc)
@@ -1698,6 +1706,10 @@ def read_disc_c2(
     unconditionally — so the map is available even with ``c2_recovery = "off"``,
     which suppresses only the bitmap *file*. The Q lane additionally needs the
     raw subchannel, so it is present only when *output_sub* was asked for.
+
+    Every far read the engine makes during the capture, before a retry or a
+    verify chunk, is bounded to the audio session (``readable=``, AccuDisc 0.51.0;
+    kgr, 2026-11-22), as the recovery re-reads are.
 
     Raises RuntimeError only on a genuine read failure; "completed with caveats"
     is not a failure, and since the library returns no verdict for it,

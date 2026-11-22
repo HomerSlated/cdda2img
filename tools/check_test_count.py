@@ -30,7 +30,7 @@ import sys
 import pytest
 
 #: Minimum tests the suite must collect. 1733 collected on 2026-08-29.
-FLOOR = 2299
+FLOOR = 2301
 
 
 class _Counter:

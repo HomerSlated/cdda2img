@@ -3624,3 +3624,30 @@ def test_the_real_engine_bounds_an_enhanced_cd_to_session_one(real_engine) -> No
     if "readable_range" not in real_engine.features:
         pytest.skip("AccuDisc before 0.51.0")
     assert ar.readable_extent(_enhanced_cd_fulltoc()) == _SESSION_ONE
+
+
+def test_the_capture_bounds_its_far_reads_to_the_audio_session(tmp_path) -> None:
+    """kgr, 2026-11-22: the capture passes the same session bound the re-reads
+    do, from the TOC it already holds, keyed at the plan's LBA 0."""
+    device = _FakeDiscDevice(leadout=195656, chunks=(_FakeReadChunk(1),))
+    module = _disc_binding(device)
+    asked: list[int] = []
+
+    def extent(_toc, lba):
+        asked.append(lba)
+        return _SESSION_ONE
+
+    module.features = frozenset({"readable_range"})  # type: ignore[attr-defined]
+    module.session_extent_at = extent  # type: ignore[attr-defined]
+    _run_disc(device, tmp_path, module=module, output_pcm=tmp_path / "a.pcm")
+
+    assert device.read_kwargs["readable"] == _SESSION_ONE
+    assert asked == [0]
+    assert len(module.planned) == 1  # planned once, not again for the extent
+
+
+def test_the_capture_omits_readable_on_an_engine_without_it(tmp_path) -> None:
+    """Negative control: before 0.51.0 the keyword would raise TypeError."""
+    device = _FakeDiscDevice(leadout=195656, chunks=(_FakeReadChunk(1),))
+    _run_disc(device, tmp_path, output_pcm=tmp_path / "a.pcm")
+    assert "readable" not in device.read_kwargs
