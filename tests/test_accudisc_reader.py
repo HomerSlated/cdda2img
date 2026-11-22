@@ -30,7 +30,7 @@ import subprocess
 import sys
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, NoReturn
 
 import pytest
 
@@ -1652,8 +1652,9 @@ class _FakeLadderDevice:
     def read_toc_src(self) -> tuple[SimpleNamespace, SimpleNamespace]:
         return SimpleNamespace(leadout_lba=211185), SimpleNamespace()
 
-    def read_toc(self) -> SimpleNamespace:
-        pytest.fail("planned from Device.read_toc(), the session-less format 0")
+    def read_toc(self) -> NoReturn:
+        msg = "planned from Device.read_toc(), the session-less format 0"
+        raise AssertionError(msg)
 
 
 def test_speed_ladder_binding_returns_the_same_triple() -> None:
