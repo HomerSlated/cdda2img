@@ -464,7 +464,7 @@ def _toc_geometry_from_binding(module: Any, device: str) -> TocGeometry:
     numbers = [s.number for s in toc.sessions]
     return TocGeometry(
         track_lsns=[t.lba for t in audio],
-        disc_last_lsn=toc.leadout_lba - 1,
+        disc_last_lsn=_audio_extent(module, toc) - 1,
         source=info.source.token,
         degrade=info.degrade.token,
         sessions=f"{min(numbers)}..{max(numbers)}" if numbers else None,
@@ -483,6 +483,42 @@ def _toc_geometry_from_binding(module: Any, device: str) -> TocGeometry:
         ),
         toc_trusted=toc.trusted,
     )
+
+
+def _audio_extent(module: Any, toc: Any) -> int:
+    """Sectors of audio to read, from LBA 0: AccuDisc's own read plan.
+
+    ``toc.leadout_lba`` is the disc's LAST lead-out. On an Enhanced CD that is
+    the data session's, and between it and the audio sit session 1's lead-out,
+    session 2's lead-in and a pregap, about 11,400 sectors no drive can read as
+    CD-DA. Reading ``[0, toc.leadout_lba)`` there ground through the gap one
+    failed read every ~20 s (*Under My Skin*, 2026-11-22: stuck at 202377 of
+    211185; session 1 ends at 195656). ``plan_read_range`` with every argument
+    at its default is AccuDisc's whole-disc policy (the one audio session, or a
+    stated refusal), the same default its CLI applies; it was skipped when the
+    read moved to the binding.
+
+    Raises ``RuntimeError`` when the plan is refused (several audio sessions, no
+    audio, a session split by data, an untrusted map: AccuDisc's reason token is
+    in the message), and when the audio does not start at LBA 0. Every consumer
+    of the capture indexes it from LBA 0, and the TOC assembly already refuses
+    the one shape that starts later (Mixed Mode, data first).
+    """
+    plan = module.plan_read_range(toc)
+    if not plan.ok:
+        msg = (
+            "accudisc: no audio range to read on this disc"
+            f" ({plan.reason.token()}; disc lead-out {toc.leadout_lba})"
+        )
+        raise RuntimeError(msg)
+    if plan.lba != 0 or not plan.count:
+        msg = (
+            f"accudisc: the audio starts at LBA {plan.lba}, not 0"
+            f" (session {plan.session}, {plan.count} sectors); a disc whose audio"
+            " does not start the program area is outside the CD-DA archival model"
+        )
+        raise RuntimeError(msg)
+    return int(plan.count)
 
 
 def _warn_about_geometry(geom: TocGeometry) -> None:
@@ -1405,10 +1441,7 @@ def _read_disc_binding(
                 output_cdtext.write_bytes(packs)
 
         toc = dev.read_toc()
-        count = toc.leadout_lba
-        if count <= 0:
-            msg = f"accudisc read: lead-out reported at LBA {count} — nothing to read"
-            raise RuntimeError(msg)
+        count = _audio_extent(module, toc)
 
         with contextlib.ExitStack() as stack:
             files: dict[str, Any] = {

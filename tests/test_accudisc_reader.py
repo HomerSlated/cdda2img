@@ -220,6 +220,19 @@ class _FakeBinding:
 
     def __init__(self) -> None:
         self.opened: list[str] = []
+        # What plan_read_range answers. None = the whole TOC, from LBA 0, which is
+        # what AccuDisc's planner returns for a single-session audio disc.
+        self.plan: object | None = None
+        self.planned: list[object] = []
+
+    def plan_read_range(self, toc: Any) -> object:
+        self.planned.append(toc)
+        if self.plan is not None:
+            return self.plan
+        n = toc.leadout_lba
+        if n <= 0:
+            return _plan(ok=False, why="empty_range")
+        return _plan(lba=0, count=n)
 
     @staticmethod
     def anomaly_token(bit: object) -> str:
@@ -231,6 +244,21 @@ class _FakeBinding:
 
     def Device(self, path: str) -> object:
         raise NotImplementedError
+
+
+class _FakePlanReason:
+    def __init__(self, token: str) -> None:
+        self._token = token
+
+    def token(self) -> str:
+        return self._token
+
+
+def _plan(*, ok=True, why="ok", lba=None, count=None, session=1) -> SimpleNamespace:
+    """The shape of AccuDisc's RangePlan: a refusal is a result, with None extents."""
+    return SimpleNamespace(
+        ok=ok, reason=_FakePlanReason(why), lba=lba, count=count, session=session
+    )
 
 
 def _install(
@@ -1093,13 +1121,68 @@ def test_disc_binding_reads_with_no_outputs_at_all(tmp_path: Path) -> None:
 
 
 def test_disc_binding_refuses_a_nonsense_leadout(tmp_path: Path) -> None:
-    """count <= 0 reaches Device.read as ValueError('count must be > 0').
+    """count <= 0 would reach Device.read as ValueError('count must be > 0').
 
-    Caught here so the message names the disc geometry rather than the argument.
+    Refused before the read, with AccuDisc's reason and the lead-out named.
     """
     device = _FakeDiscDevice(leadout=0)
-    with pytest.raises(RuntimeError, match="lead-out reported at LBA 0"):
+    with pytest.raises(RuntimeError, match=r"empty_range; disc lead-out 0"):
         _run_disc(device, tmp_path)
+    assert "read" not in device.calls
+
+
+# ---- the read stops at the audio, not the disc's last lead-out (2026-11-22) ------
+# *Under My Skin* (Enhanced CD): session 1 audio ends at 195656, the data session
+# at 211185. Reading to `toc.leadout_lba` ground through the 11,400-sector gap
+# between them, one failed read every ~20 s. AccuDisc's planner, checked offline
+# on that disc's saved full TOC, answers lba=0 count=195656 session=1.
+
+
+def test_the_read_covers_the_planned_audio_not_the_last_lead_out(tmp_path) -> None:
+    device = _FakeDiscDevice(leadout=211185, chunks=(_FakeReadChunk(1),))
+    module = _disc_binding(device)
+    module.plan = _plan(lba=0, count=195656)
+    _run_disc(device, tmp_path, module=module)
+    assert device.read_kwargs["lba"] == 0
+    assert device.read_kwargs["count"] == 195656
+    assert len(module.planned) == 1
+
+
+@pytest.mark.parametrize("why", ["multiple_audio_sessions", "no_audio_session"])
+def test_a_refused_plan_reads_nothing_and_says_why(tmp_path, why) -> None:
+    device = _FakeDiscDevice(leadout=211185)
+    module = _disc_binding(device)
+    module.plan = _plan(ok=False, why=why)
+    with pytest.raises(RuntimeError, match=why):
+        _run_disc(device, tmp_path, module=module)
+    assert "read" not in device.calls
+
+
+def test_audio_that_does_not_start_the_program_area_is_refused(tmp_path) -> None:
+    """Mixed Mode (data track first): every consumer indexes the capture from 0."""
+    device = _FakeDiscDevice(leadout=200000)
+    module = _disc_binding(device)
+    module.plan = _plan(lba=11250, count=188750)
+    with pytest.raises(RuntimeError, match="starts at LBA 11250"):
+        _run_disc(device, tmp_path, module=module)
+    assert "read" not in device.calls
+
+
+def test_the_geometry_ends_at_the_planned_audio_too() -> None:
+    device = _FakeDevice(
+        toc_src=(
+            _FakeToc(
+                tracks=[_FakeTrack(1, 0), _FakeTrack(14, 207056, audio=False)],
+                sessions=[_FakeSession(1), _FakeSession(2)],
+                leadout=211185,
+            ),
+            _FakeInfo("fulltoc", "none", 2),
+        )
+    )
+    module = _binding_with(device)
+    module.plan = _plan(lba=0, count=195656)
+    geom = ar._toc_geometry_from_binding(module, "/dev/sr0")
+    assert geom.disc_last_lsn == 195655
 
 
 def test_disc_binding_passes_the_requested_speed(tmp_path: Path) -> None:
