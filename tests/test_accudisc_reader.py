@@ -250,7 +250,11 @@ class _FakePlanReason:
     def __init__(self, token: str) -> None:
         self._token = token
 
+    @property
     def token(self) -> str:
+        # A property, as on the real PlanReason: a method here let
+        # `reason.token()` pass the tests and raise TypeError on the engine
+        # (AccuDisc 2026-11-22b).
         return self._token
 
 
@@ -925,14 +929,20 @@ class _FakeDiscDevice:
         self.calls.append("cdtext")
         return self._cdtext
 
-    def read_toc(self):
+    def read_toc_src(self):
         self.calls.append("toc")
         # AccuDisc's Toc shape: audio tracks carry `pregap` (track 1's program-
         # area pre-gap, src/toc/toc.c since 2026-07-23).
-        return SimpleNamespace(
+        toc = SimpleNamespace(
             leadout_lba=self._leadout,
             audio_tracks=(SimpleNamespace(pregap=self._pregap),),
         )
+        return toc, SimpleNamespace(source=_FakeToken("fulltoc"))
+
+    def read_toc(self):
+        # READ TOC format 0: no sessions, so the planner refuses every Enhanced
+        # CD from it. The read must plan from read_toc_src (AccuDisc 2026-11-22b).
+        pytest.fail("planned from Device.read_toc(), the session-less format 0")
 
     def read(self, lba: int, count: int, *, status_map: bool = False, **kwargs: Any):
         self.calls.append("read")
@@ -1639,8 +1649,11 @@ class _FakeLadderDevice:
         self.kwargs = kwargs
         return self._rungs
 
+    def read_toc_src(self) -> tuple[SimpleNamespace, SimpleNamespace]:
+        return SimpleNamespace(leadout_lba=211185), SimpleNamespace()
+
     def read_toc(self) -> SimpleNamespace:
-        return SimpleNamespace(leadout_lba=211185)
+        pytest.fail("planned from Device.read_toc(), the session-less format 0")
 
 
 def test_speed_ladder_binding_returns_the_same_triple() -> None:
@@ -3362,3 +3375,68 @@ def test_a_c2_span_read_refuses_records_of_the_wrong_width() -> None:
     module.C2 = SimpleNamespace(PTRS="ptrs")  # type: ignore[attr-defined]
     with pytest.raises(RuntimeError, match="refusing to reassemble"):
         ar._read_windows_with_c2(module, "/dev/sr0", 0, 1, [(0, 1)], None, None)
+
+
+# ---- against the REAL engine, when it is importable (skips in CI) -----------------
+# Both 2026-11-22 defects passed the fakes above and failed on the engine
+# (AccuDisc 2026-11-22b). These use AccuDisc's pure functions, no device.
+
+
+def _msf(lba: int) -> bytes:
+    f = lba + 150
+    return bytes((f // 4500, f // 75 % 60, f % 75))
+
+
+def _enhanced_cd_fulltoc() -> bytes:
+    """A raw READ TOC format-2 response shaped like Under My Skin: 13 audio
+    tracks in session 1 (lead-out 195656), data track 14 in session 2 at 207056
+    (lead-out 211185). Built from numbers, not from the disc's own dump."""
+    starts = [0, 13320, 27917, 43068, 56551, 73421, 91602, 107533, 122337,
+              138060, 153711, 168208, 184300]  # fmt: skip
+
+    def desc(session: int, ctrl: int, point: int, p: bytes) -> bytes:
+        return bytes((session, 0x10 | ctrl, 0, point, 0, 0, 0, 0)) + p
+
+    body = b"".join([
+        desc(1, 0, 0xA0, bytes((1, 0, 0))),
+        desc(1, 0, 0xA1, bytes((13, 0, 0))),
+        desc(1, 0, 0xA2, _msf(195656)),
+        *(desc(1, 0, n, _msf(lba)) for n, lba in enumerate(starts, 1)),
+        desc(2, 4, 0xA0, bytes((14, 0x20, 0))),
+        desc(2, 4, 0xA1, bytes((14, 0, 0))),
+        desc(2, 4, 0xA2, _msf(211185)),
+        desc(2, 4, 14, _msf(207056)),
+    ])
+    return (len(body) + 2).to_bytes(2, "big") + bytes((1, 2)) + body
+
+
+@pytest.fixture
+def real_engine():
+    ar._import_binding.cache_clear()
+    module, why = ar._import_binding()
+    if module is None or not hasattr(module, "plan_read_range"):
+        pytest.skip(f"AccuDisc binding not importable here ({why or 'old engine'})")
+    return module
+
+
+def test_the_real_planner_reads_session_one_of_an_enhanced_cd(real_engine) -> None:
+    toc, _info = real_engine.toc_from_full_toc(_enhanced_cd_fulltoc())
+    assert toc.leadout_lba == 211185  # the disc's LAST lead-out
+    assert ar._audio_extent(real_engine, toc) == 195656
+
+
+def test_the_real_planner_refuses_the_session_less_view(real_engine) -> None:
+    """What Device.read_toc() returns (format 0): no sessions, so a disc with a
+    data track cannot be planned. And the refusal must reach us as our
+    RuntimeError naming the reason, which needs `token` read as a property."""
+    import dataclasses
+
+    toc, _info = real_engine.toc_from_full_toc(_enhanced_cd_fulltoc())
+    flat = dataclasses.replace(
+        toc,
+        sessions=(),
+        sessions_total=0,
+        tracks=tuple(dataclasses.replace(t, session=0) for t in toc.tracks),
+    )
+    with pytest.raises(RuntimeError, match="no audio range to read"):
+        ar._audio_extent(real_engine, flat)

@@ -498,6 +498,9 @@ def _audio_extent(module: Any, toc: Any) -> int:
     stated refusal), the same default its CLI applies; it was skipped when the
     read moved to the binding.
 
+    *toc* must come from ``Device.read_toc_src()`` (the full TOC, with sessions):
+    from ``read_toc()`` (format 0, no sessions) every Enhanced CD is refused.
+
     Raises ``RuntimeError`` when the plan is refused (several audio sessions, no
     audio, a session split by data, an untrusted map: AccuDisc's reason token is
     in the message), and when the audio does not start at LBA 0. Every consumer
@@ -508,7 +511,7 @@ def _audio_extent(module: Any, toc: Any) -> int:
     if not plan.ok:
         msg = (
             "accudisc: no audio range to read on this disc"
-            f" ({plan.reason.token()}; disc lead-out {toc.leadout_lba})"
+            f" ({plan.reason.token}; disc lead-out {toc.leadout_lba})"
         )
         raise RuntimeError(msg)
     if plan.lba != 0 or not plan.count:
@@ -734,7 +737,7 @@ def _speed_ladder_binding(module: Any, device: str) -> list[SpeedRow]:
         # end (Under My Skin: the 4x window at 202377, session 1 ending at
         # 195656), where every read fails after the drive's retries. AccuDisc's
         # advice, 2026-11-22a.
-        count = _audio_extent(module, dev.read_toc())
+        count = _audio_extent(module, dev.read_toc_src()[0])
         rungs = dev.probe_speed_ladder(points=3, lba=0, count=count)
     return [
         SpeedRow(r.requested_x, r.reported_x, r.measured_x, _verdict_class(r.verdict))
@@ -1448,7 +1451,11 @@ def _read_disc_binding(
             if packs:
                 output_cdtext.write_bytes(packs)
 
-        toc = dev.read_toc()
+        # read_toc_src: the full TOC (format 2), with sessions; format 0 only when
+        # the lead-in is unreadable. Device.read_toc() is format 0 alone, which
+        # carries no sessions, so the planner refuses every Enhanced CD from it
+        # (AccuDisc 2026-11-22b, measured). It is the TOC `accudisc read` plans from.
+        toc, _info = dev.read_toc_src()
         count = _audio_extent(module, toc)
 
         with contextlib.ExitStack() as stack:
