@@ -35,21 +35,6 @@ from cdda2img.mb_lookup import (
 )
 from cdda2img.rbi_format import RBIDisc, RBITocEntry
 
-
-@pytest.fixture(autouse=True)
-def _clear_mb_caches():
-    """Reset the process-lifetime disc-ID cache between tests (OPT-1).
-
-    The cache is meant to persist for a process; in a test session it would
-    otherwise leak a cached result into later tests that reuse the same disc-ID.
-    """
-    from cdda2img import mb_lookup
-
-    mb_lookup._DISC_ID_CACHE.clear()
-    yield
-    mb_lookup._DISC_ID_CACHE.clear()
-
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -411,8 +396,9 @@ def test_lookup_disc_id_network_error_raises_and_is_not_cached():
     assert mock_mb.call_count == 2  # the failure was not cached
 
 
-def test_lookup_disc_id_404_is_a_cached_empty_answer():
-    """Control: a 404 is MusicBrainz's genuine "not known", and stays []."""
+def test_lookup_disc_id_404_is_an_empty_answer_asked_each_time():
+    """Control: a 404 is MusicBrainz's genuine "not known", and stays []. With no
+    cache (kgr, 2026-11-22) each call asks again."""
     import musicbrainzngs
 
     disc = _make_disc(tracks=[(1, 0, 18000)])
@@ -420,7 +406,7 @@ def test_lookup_disc_id_404_is_a_cached_empty_answer():
     with patch("musicbrainzngs.get_releases_by_discid", side_effect=err) as mock_mb:
         assert lookup_disc_id(disc) == []
         assert lookup_disc_id(disc) == []
-    assert mock_mb.call_count == 1
+    assert mock_mb.call_count == 2
 
 
 @pytest.mark.parametrize(
@@ -2000,16 +1986,15 @@ def test_duration_match_lookup_rejects_when_no_candidate_in_tolerance():
 
 
 # ---------------------------------------------------------------------------
-# OPT-1 — in-process disc-ID lookup cache
+# No disc-ID lookup cache (kgr, 2026-11-22; OPT-1 removed): every call asks
 # ---------------------------------------------------------------------------
 
 
-def test_lookup_disc_id_caches_success(monkeypatch: pytest.MonkeyPatch) -> None:
-    # A successful disc-ID lookup is cached process-wide; the second call (banner
-    # then finalize) is served without a network round-trip.
+def test_lookup_disc_id_asks_every_time(monkeypatch: pytest.MonkeyPatch) -> None:
+    # No cache: the banner's lookup and finalisation's each reach MusicBrainz. A
+    # cached answer once outlived the code that produced it (kgr, 2026-11-22).
     from cdda2img import mb_lookup
 
-    mb_lookup._DISC_ID_CACHE.clear()
     calls = {"n": 0}
 
     def _fake(*_a, **_k):
@@ -2026,17 +2011,16 @@ def test_lookup_disc_id_caches_success(monkeypatch: pytest.MonkeyPatch) -> None:
     disc = RBIDisc(album="x", artist="y")
     r1 = mb_lookup.lookup_disc_id(disc)
     r2 = mb_lookup.lookup_disc_id(disc)
-    assert calls["n"] == 1  # second call served from cache
+    assert calls["n"] == 2  # asked twice, never served from memory
     assert r1 == r2 == [DiscMeta(album="A")]
 
 
-def test_lookup_disc_id_caches_404_negative(monkeypatch: pytest.MonkeyPatch) -> None:
-    # A 404 ("not in MB") is a definitive answer — the empty list is cached.
+def test_a_404_is_asked_again_too(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A 404 ("not in MB") is still [], and the next call asks again.
     import musicbrainzngs
 
     from cdda2img import mb_lookup
 
-    mb_lookup._DISC_ID_CACHE.clear()
     calls = {"n": 0}
 
     def _raise_404(*_a, **_k):
@@ -2050,7 +2034,7 @@ def test_lookup_disc_id_caches_404_negative(monkeypatch: pytest.MonkeyPatch) -> 
     disc = RBIDisc(album="x", artist="y")
     assert mb_lookup.lookup_disc_id(disc) == []
     assert mb_lookup.lookup_disc_id(disc) == []
-    assert calls["n"] == 1  # 404 cached, not re-queried
+    assert calls["n"] == 2  # asked again
 
 
 def test_lookup_disc_id_does_not_cache_network_error(
@@ -2061,7 +2045,6 @@ def test_lookup_disc_id_does_not_cache_network_error(
 
     from cdda2img import mb_lookup
 
-    mb_lookup._DISC_ID_CACHE.clear()
     calls = {"n": 0}
 
     def _raise_net(*_a, **_k):
@@ -2432,9 +2415,8 @@ def test_disc_id_includes_exclude_annotation():
     """
     from unittest.mock import patch
 
-    from cdda2img.mb_lookup import _DISC_ID_CACHE, lookup_disc_id
+    from cdda2img.mb_lookup import lookup_disc_id
 
-    _DISC_ID_CACHE.clear()
     disc = RBIDisc(
         album="A",
         artist="B",
@@ -2452,7 +2434,6 @@ def test_disc_id_includes_exclude_annotation():
         "musicbrainzngs.get_releases_by_discid", return_value={"disc": {}}
     ) as gd:
         lookup_disc_id(disc)
-    _DISC_ID_CACHE.clear()
 
     includes = set(gd.call_args.kwargs["includes"])
     assert "annotation" not in includes

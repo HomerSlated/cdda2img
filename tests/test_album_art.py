@@ -190,16 +190,14 @@ class TestArtBlockRoundtrip:
 
 
 # ---------------------------------------------------------------------------
-# OPT-2 — in-process cover fetch cache
+# No cover cache (kgr, 2026-11-22; OPT-2 removed): every call fetches
 # ---------------------------------------------------------------------------
 
 
-def test_fetch_cover_caches_success(monkeypatch) -> None:
-    # A successful fetch is memoised per source; the second fetch_cover with the
-    # same IDs is served from cache (no re-download).
+def test_fetch_cover_fetches_every_time(monkeypatch) -> None:
+    # No cache: the banner's fetch and finalisation's each download.
     from cdda2img import album_art
 
-    album_art._COVER_CACHE.clear()
     calls = {"n": 0}
     art = CoverArt(
         data=b"x", fmt="jpeg", width=1, height=1, source="caa:release-group:rg-x"
@@ -213,14 +211,13 @@ def test_fetch_cover_caches_success(monkeypatch) -> None:
     disc = RBIDisc(album="a", artist="b", mb_release_group_id="rg-x")
     assert album_art.fetch_cover(disc) is art
     assert album_art.fetch_cover(disc) is art
-    assert calls["n"] == 1  # second call served from cache
+    assert calls["n"] == 2  # fetched twice, never served from memory
 
 
 def test_fetch_cover_does_not_cache_miss(monkeypatch) -> None:
     # A miss (None) is a cheap 404 and is NOT cached — the next call retries.
     from cdda2img import album_art
 
-    album_art._COVER_CACHE.clear()
     calls = {"n": 0}
 
     def _fake_try(_entity, _mbid):
@@ -251,7 +248,6 @@ def _record_caa_calls(monkeypatch, answers: dict[str, CoverArt | None]) -> list[
     """Patch _try_caa to answer per entity and record the order of consultation."""
     from cdda2img import album_art
 
-    album_art._COVER_CACHE.clear()
     seen: list[str] = []
 
     def _fake_try(entity, _mbid):
@@ -337,7 +333,6 @@ def _patch_http(monkeypatch, outcomes: list[object]) -> dict[str, int]:
     """Serve `outcomes` in order from _http_get; raise the ones that are errors."""
     from cdda2img import album_art
 
-    album_art._COVER_CACHE.clear()
     monkeypatch.setattr(album_art.time, "sleep", lambda _s: None)
     state = {"n": 0}
 

@@ -445,15 +445,6 @@ def _parse_release(
 # ---------------------------------------------------------------------------
 
 
-# OPT-1: process-lifetime cache for MB disc-ID lookups. The pre-rip banner
-# (_preview_worker) and finalization (prepopulate_from_mb) query the *same* disc-ID
-# seconds apart; this dedups that round-trip. Only **definitive** answers are cached
-# — a successful response, including a legitimate empty list / 404 "not in MB".
-# Transient network/HTTP errors are never cached, so a blip can't poison the second
-# call. No TTL; discarded on process exit. Clearable via _DISC_ID_CACHE.clear().
-_DISC_ID_CACHE: dict[str, list[DiscMeta]] = {}
-
-
 def lookup_disc_id(disc: RBIDisc) -> list[DiscMeta]:
     """Look up releases on MusicBrainz by Disc ID computed from the disc TOC.
 
@@ -463,15 +454,16 @@ def lookup_disc_id(disc: RBIDisc) -> list[DiscMeta]:
     Raises :class:`MBLookupError` when MusicBrainz gave no usable answer, so "not in
     MusicBrainz" and "MusicBrainz could not be asked" stay distinguishable. Until
     2026-09-13 both returned ``[]``, the pipeline could not tell them apart, and
-    ``lookup_status_mb`` was never ``down``. Errors are not cached.
+    ``lookup_status_mb`` was never ``down``.
+
+    **Every call asks MusicBrainz** (kgr, 2026-11-22: no lookup caches). The
+    process-lifetime ``_DISC_ID_CACHE`` (OPT-1) is gone: the banner and the
+    finalisation each ask for themselves, at the cost of one request, because a
+    cached answer outlived the code that produced it before.
     """
     disc_id_str = disc_id_from_rbi(disc)
     if not disc_id_str:
         return []
-    cached = _DISC_ID_CACHE.get(disc_id_str)
-    if cached is not None:
-        log.debug("MusicBrainz disc ID lookup: %s (cached)", disc_id_str)
-        return cached
     _setup_useragent()
     log.debug("MusicBrainz disc ID lookup: %s", disc_id_str)
     try:
@@ -514,15 +506,12 @@ def lookup_disc_id(disc: RBIDisc) -> list[DiscMeta]:
         code = getattr(getattr(exc, "cause", None), "code", None)
         if code == 404:
             log.debug("MusicBrainz disc ID %s not found (404)", disc_id_str)
-            _DISC_ID_CACHE[disc_id_str] = []  # legitimate negative — cache it
             return []
-        raise MBLookupError(_mb_error_reason(exc), exc) from exc  # not cached
+        raise MBLookupError(_mb_error_reason(exc), exc) from exc
     except musicbrainzngs.NetworkError as exc:
-        raise MBLookupError(_mb_error_reason(exc), exc) from exc  # not cached
+        raise MBLookupError(_mb_error_reason(exc), exc) from exc
     releases = (result.get("disc") or {}).get("release-list") or []
-    parsed = [_parse_release(r, _disc_id=disc_id_str) for r in releases]
-    _DISC_ID_CACHE[disc_id_str] = parsed
-    return parsed
+    return [_parse_release(r, _disc_id=disc_id_str) for r in releases]
 
 
 def _fetch_release_raw(release_id: str) -> dict | None:
