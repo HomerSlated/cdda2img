@@ -1,12 +1,19 @@
-# sector-hammer — re-read the single flagged sector, same speed, over and over.
+# sector-hammer — re-read each flagged sector on its own, one sector per read.
 #
-# EXPERIMENTAL, and the measured floor: minimum variation of every arm. 2/20 (0.10),
-# 0/25 on the disc that motivated the whole bench, while plain whole-disc passes on
-# the same disc came back clean ~27% of the time.
+# EXPERIMENTAL, and the measured floor: on the bench (one speed, 32x) the minimum
+# variation of every arm. 2/20 (0.10), 0/25 on the disc that motivated the whole
+# bench, while plain whole-disc passes on the same disc came back clean ~27% of
+# the time.
 #
-# This is the shape the pre-bench `_recover_rung` used. It is kept as the control
-# that anchors the low end of the variation axis — deleting it would leave the
-# ranking with no zero point.
+# This is the shape the pre-bench `_recover_rung` used, kept as the control that
+# anchored the low end of the variation axis. In the rip it no longer holds one
+# speed: `ladder = "full"` steps to the next admitted rung on every read (kgr,
+# 2026-11-21), so it is not the bench's zero point; `ladder = "single"` holds
+# `recovery_speed` and restores it. It reads only the flagged sectors themselves:
+# damage in a sector the capture did not flag is out of its reach. With several
+# flagged sectors the reads take them in turn while the speed steps, and the newest
+# read of each sector replaces the last, so with two targets on a five-rung ladder
+# only ten of the twenty-five speed pairings ever stand together.
 #
 # In the rip since 2026-11-21 (cdda2img.strategy_reads, the bench's own read plan,
 # picked from these fields rather than this file's name): it stands alone, so a
