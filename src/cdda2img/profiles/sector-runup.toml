@@ -5,6 +5,13 @@
 # drive a streaming approach to the defect, and because a negative result is only
 # useful if the arm that produced it stays runnable.
 #
+# Each read covers the `run_up` (32) sectors before a flagged sector and the 2 after
+# it, so it also repairs unflagged damage that close (sector-hammer cannot). It
+# takes several targets in turn while `ladder = "full"` steps the speed, both by one
+# per read, so like sector-hammer each target is read at only L/gcd(n, L) of the L
+# rungs, unless it also falls inside another target's read (up to 32 sectors before
+# or 2 after another target).
+#
 # In the rip since 2026-11-21 (cdda2img.strategy_reads, the bench's own read plan,
 # picked from these fields rather than this file's name): it stands alone, so a
 # track it does not recover is not handed to the speed ladder; every read asks

@@ -11,9 +11,12 @@
 # 2026-11-21), so it is not the bench's zero point; `ladder = "single"` holds
 # `recovery_speed` and restores it. It reads only the flagged sectors themselves:
 # damage in a sector the capture did not flag is out of its reach. With several
-# flagged sectors the reads take them in turn while the speed steps, and the newest
-# read of each sector replaces the last, so with two targets on a five-rung ladder
-# only ten of the twenty-five speed pairings ever stand together.
+# flagged sectors the reads take them in turn while the speed steps, both by one
+# per read, so with n targets on an L-rung ladder each target is only ever read at
+# L/gcd(n, L) of the rungs, however many passes: five targets on a five-rung
+# ladder get one speed each, two on a four-rung ladder two speeds each. The newest
+# read of each sector replaces the last, so only lcm(n, L) of the L^n speed
+# combinations ever stand together (two targets, five rungs: 10 of 25).
 #
 # In the rip since 2026-11-21 (cdda2img.strategy_reads, the bench's own read plan,
 # picked from these fields rather than this file's name): it stands alone, so a
