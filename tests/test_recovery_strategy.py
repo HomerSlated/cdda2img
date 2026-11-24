@@ -109,6 +109,8 @@ def _run(
     damage: set[int] | None = None,
     reads: _Reads | None = None,
     seed: int = 7,
+    ladder: list[int] | None = None,
+    read_offset: int = 0,
 ):
     reads = reads or _Reads()
     monkeypatch.setattr(ar, "read_span_windows", reads)
@@ -126,8 +128,8 @@ def _run(
         disc_last_lsn=_LEADOUT - 1,
         pcm_file=pcm,
         responses=[["block"]],
-        ladder=_LADDER if profile.variation == "full" else [_LADDER[0]],
-        read_offset=0,
+        ladder=ladder or (_LADDER if profile.variation == "full" else [_LADDER[0]]),
+        read_offset=read_offset,
         disc_damage=lane if damage is not None else None,
         ui=None,
         seed=seed,
@@ -511,3 +513,171 @@ def test_the_runner_steps_and_span_fixed_holds(monkeypatch, tmp_path) -> None:
             fixed_speed=fixed,
         )
         assert [c["speed"] for c in reads.calls] == expected, kind
+
+
+# ---- speed rounds: one rung per round of targets (kgr, 2026-11-24) -------------
+
+
+def _speeds_by_target(reads: _Reads) -> dict[int, list[int]]:
+    out: dict[int, list[int]] = {}
+    for c in reads.calls:
+        out.setdefault(c["start"], []).append(c["speed"])
+    return out
+
+
+@pytest.mark.parametrize("n", [2, 5])
+def test_each_flagged_sector_is_read_at_every_rung(monkeypatch, tmp_path, n) -> None:
+    """The speed steps once per ROUND of targets. Stepping it on every read while
+    the targets also advanced read target j only at rungs j, j + n, ...: two
+    targets on five rungs never shared a speed, and five met ONE speed each."""
+    flagged = {110 + 10 * j for j in range(n)}
+    _o, _p, _pcm, reads = _run(
+        monkeypatch,
+        tmp_path,
+        _profile(granularity="sector", ladder="full", passes=n * len(_LADDER)),
+        bad=flagged,
+        failed=[2],
+        damage=flagged,
+        reads=_Reads(stale=True),
+        ladder=_LADDER,
+    )
+    by_target = _speeds_by_target(reads)
+    assert sorted(by_target) == sorted(flagged)
+    for lba, speeds in by_target.items():
+        assert speeds == _LADDER, lba  # every rung, fastest first
+    # The targets of one round share its speed.
+    assert [c["speed"] for c in reads.calls] == [s for s in _LADDER for _ in range(n)]
+
+
+def test_two_targets_each_readable_at_one_rung_only_are_recovered(
+    monkeypatch, tmp_path
+) -> None:
+    """The failure the old stepping could not reach: both sectors read correctly
+    only at 8X. Per read, the two were never read at 8X in the same pass of the
+    ladder (each met 8X with the other at a neighbouring rung), so the track
+    never verified; per round, the 8X round repairs both."""
+
+    class _Only8(_Reads):
+        def __call__(self, device, start, count, windows, read_speed=None, **kw):
+            got = super().__call__(device, start, count, windows, read_speed, **kw)
+            if read_speed == 8:
+                return got
+            pieces = [
+                b"".join(
+                    _bad(lba) for lba in range(max(lo, start), min(hi, start + count))
+                )
+                for lo, hi in windows
+            ]
+            return ar.WindowsRead(
+                pieces=pieces, speed_honoured_x=read_speed, cache_defeat="done"
+            )
+
+    outcomes, prov, pcm, _reads = _run(
+        monkeypatch,
+        tmp_path,
+        _profile(granularity="sector", ladder="full", passes=10),
+        bad={120, 180},
+        failed=[2],
+        damage={120, 180},
+        reads=_Only8(),
+        ladder=_LADDER,
+    )
+    assert outcomes == {2: "strategy_matched@a8"}  # round 4 = 8X, its second read
+    assert pcm == b"".join(_good(lba) for lba in range(_LEADOUT))
+    assert prov["strategy_reads_track_2"].split(",")[6:8] == [
+        "120+1@8>8:done",
+        "180+1@8>8:done",
+    ]
+
+
+def test_sector_runup_steps_once_per_round_too(monkeypatch, tmp_path) -> None:
+    """Same round-robin plan, same rule (decided by the plan, not the name)."""
+    _o, _p, _pcm, reads = _run(
+        monkeypatch,
+        tmp_path,
+        _profile(granularity="sector", ladder="full", run_up=8, passes=4),
+        bad={150, 190},
+        failed=[2],
+        damage={150, 190},
+        reads=_Reads(stale=True),
+        ladder=_LADDER,
+    )
+    assert [c["speed"] for c in reads.calls] == [40, 40, 32, 32]
+
+
+def test_nothing_flagged_makes_a_round_of_one(monkeypatch, tmp_path) -> None:
+    """Every read aims at the track's first sector, so each read is a round."""
+    _o, _p, _pcm, reads = _run(
+        monkeypatch,
+        tmp_path,
+        _profile(granularity="sector", ladder="full", passes=3),
+        bad={150},
+        failed=[2],
+        damage=None,
+        reads=_Reads(stale=True),
+        ladder=_LADDER,
+    )
+    assert [(c["start"], c["speed"]) for c in reads.calls] == [
+        (100, 40),
+        (100, 32),
+        (100, 24),
+    ]
+
+
+def test_a_round_counts_only_the_targets_the_plan_aims_at(
+    monkeypatch, tmp_path
+) -> None:
+    """At a positive read offset the track's window holds the next track's first
+    sector, so the damage lane can flag a sector the plan never aims at. The round
+    is the plan's own target list (strategy_reads.targets_in_track), not the
+    flags: counting 200 here would hold each rung for two reads of sector 150."""
+    _o, _p, _pcm, reads = _run(
+        monkeypatch,
+        tmp_path,
+        _profile(granularity="sector", ladder="full", passes=3),
+        bad={150},
+        failed=[2],
+        damage={150, 200},
+        reads=_Reads(stale=True),
+        ladder=_LADDER,
+        read_offset=30,
+    )
+    assert [(c["start"], c["speed"]) for c in reads.calls] == [
+        (150, 40),
+        (150, 32),
+        (150, 24),
+    ]
+
+
+def test_round_robin_names_exactly_the_plans_that_take_targets_in_turn() -> None:
+    """The plans whose i-th read aims at target i mod n, read off strategy_reads
+    itself: a plan added later must be placed in or out of ROUND_ROBIN."""
+    flagged = [110, 120, 130]
+    turn = []
+    for name in S.STRATEGIES:
+        if name in ("track-constant", "track-ladder"):
+            continue  # the speed ladder, not a strategy the runner steps
+        reqs = list(
+            S.strategy_reads(
+                name,
+                2,
+                flagged,
+                _LSNS,
+                _LEADOUT,
+                _LADDER,
+                40,
+                8,
+                16,
+                random.Random(3),  # noqa: S311
+                6,
+            )
+        )
+        # A read's target is the last flagged sector it covers: a run-up or span
+        # read may also cover the targets before it, never the ones after.
+        aimed = [
+            max((f for f in flagged if r.start <= f < r.start + r.count), default=None)
+            for r in reqs
+        ]
+        if aimed == [flagged[i % 3] for i in range(6)]:
+            turn.append(name)
+    assert set(turn) == S.ROUND_ROBIN

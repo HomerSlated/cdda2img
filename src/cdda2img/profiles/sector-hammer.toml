@@ -7,16 +7,19 @@
 #
 # This is the shape the pre-bench `_recover_rung` used, kept as the control that
 # anchored the low end of the variation axis. In the rip it no longer holds one
-# speed: `ladder = "full"` steps to the next admitted rung on every read (kgr,
-# 2026-11-21), so it is not the bench's zero point; `ladder = "single"` holds
-# `recovery_speed` and restores it. It reads only the flagged sectors themselves:
-# damage in a sector the capture did not flag is out of its reach. With several
-# flagged sectors the reads take them in turn while the speed steps, both by one
-# per read, so with n targets on an L-rung ladder each target is only ever read at
-# L/gcd(n, L) of the rungs, however many passes: five targets on a five-rung
-# ladder get one speed each, two on a four-rung ladder two speeds each. The newest
-# read of each sector replaces the last, so only lcm(n, L) of the L^n speed
-# combinations ever stand together (two targets, five rungs: 10 of 25).
+# speed: `ladder = "full"` steps through the admitted ladder (kgr, 2026-11-21), so
+# it is not the bench's zero point; `ladder = "single"` holds `recovery_speed` and
+# restores it. It reads only the flagged sectors themselves: damage in a sector
+# the capture did not flag is out of its reach.
+#
+# With several flagged sectors the reads take them in turn, and since 2026-11-24
+# (kgr) the speed steps once per ROUND of them: every target is read at every
+# rung, and the targets of a round share one speed, so a round at a speed that
+# reads them all correctly repairs the track. Reaching every rung for n targets
+# on an L-rung ladder takes n x L reads (two targets on five rungs: `passes` 10).
+# Before then the speed stepped on every read while the target advanced too, so
+# target j only met rungs j, j + n, ...: five targets on five rungs were each read
+# at one speed, and two targets never shared a speed.
 #
 # In the rip since 2026-11-21 (cdda2img.strategy_reads, the bench's own read plan,
 # picked from these fields rather than this file's name): it stands alone, so a

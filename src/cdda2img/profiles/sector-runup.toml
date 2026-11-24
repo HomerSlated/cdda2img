@@ -7,10 +7,10 @@
 #
 # Each read covers the `run_up` (32) sectors before a flagged sector and the 2 after
 # it, so it also repairs unflagged damage that close (sector-hammer cannot). It
-# takes several targets in turn while `ladder = "full"` steps the speed, both by one
-# per read, so like sector-hammer each target is read at only L/gcd(n, L) of the L
-# rungs, unless it also falls inside another target's read (up to 32 sectors before
-# or 2 after another target).
+# takes several targets in turn, and like sector-hammer, since 2026-11-24 (kgr) its
+# speed steps once per round of them, so every target is read at every rung; until
+# then it stepped on every read, and each of n targets met only L/gcd(n, L) of the
+# L rungs.
 #
 # In the rip since 2026-11-21 (cdda2img.strategy_reads, the bench's own read plan,
 # picked from these fields rather than this file's name): it stands alone, so a

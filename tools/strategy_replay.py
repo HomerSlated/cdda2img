@@ -18,9 +18,13 @@ replaced, by a drive whose behaviour each scenario sets:
 4. unflagged neighbour: the sector BEFORE the flagged one is corrupt. Run with
    both sector-hammer and sector-runup to show what each read covers.
 5. two flagged sectors, each read correctly only at 8x: sector-hammer stepping the
-   ladder per read (``ladder = "full"``) against the same profile held at 8x
-   (``ladder = "single"``). Shows which speed combinations the working copy ever
-   holds at once.
+   ladder once per round of targets (``ladder = "full"``, since 2026-11-24) must
+   recover in the 8x round; the same profile held at 8x (``ladder = "single"``)
+   recovers on read 2. Before the per-round fix, stepping per read never read both
+   at 8x together and never recovered.
+   5c: five flagged sectors, each read correctly only at 24x, 25 reads allowed. Per
+   round, the 24x round repairs all five (read 15); per read, sector j was only
+   ever read at rung j, so four of them never met 24x.
 
 The rebuilt capture is a SPARSE file of the disc's full size under /var/tmp holding
 only the track's window, deleted on exit (scratch scope rule).
@@ -279,10 +283,10 @@ def main() -> int:
         return s if speed == 8 or lba not in (x, y) else corrupt(s)
 
     check(
-        f"5a two flagged ({x}, {y}), each good only at 8x: hammer stepping per read",
+        f"5a two flagged ({x}, {y}), each good only at 8x: hammer stepping per round",
         run(disc, responses, t, hammer, {x, y}, {x, y}, only_8x),
-        False,
-        False,
+        True,
+        True,
     )
     single = dataclasses.replace(hammer, ladder="single")
     check(
@@ -291,6 +295,26 @@ def main() -> int:
         True,
         True,
     )
+    lo, hi = (
+        disc.track_lsns[t - 1],
+        disc.track_lsns[t] if t < len(disc.track_lsns) else disc.disc_last_lsn + 1,
+    )
+    five = {x + 150 * j for j in range(5)}
+    if not all(lo <= s < hi for s in five):
+        print(f"SKIP  5c: {sorted(five)} not all inside track {t} [{lo}, {hi})")
+    else:
+
+        def only_24x(lba: int, speed: int) -> bytes:
+            s = disc.raw(lba, lba + 1)
+            return s if speed == 24 or lba not in five else corrupt(s)
+
+        many = dataclasses.replace(hammer, passes=25)
+        check(
+            "5c five flagged, each good only at 24x, 25 reads: the 24x round repairs all",
+            run(disc, responses, t, many, five, five, only_24x),
+            True,
+            True,
+        )
     print(f"\n{fails} unexpected result(s)")
     return 1 if fails else 0
 

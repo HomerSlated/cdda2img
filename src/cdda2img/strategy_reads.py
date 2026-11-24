@@ -53,11 +53,32 @@ class ReadReq:
     speed: int
 
 
+#: The plans that take a track's targets in turn, one per read
+#: (``targets_in_track(...)[i % n]``). The rip steps their speed once per ROUND of
+#: targets, not once per read (``cdda2img._StrategyRun.speed_for``, kgr
+#: 2026-11-24): with both advancing one per read, each of n targets met only
+#: L/gcd(n, L) of the L rungs, so five flagged sectors on a five-rung ladder were
+#: each read at one speed forever. ``max-variation`` draws its target at random,
+#: and ``whole-disc`` has one read per pass, so both step per read.
+ROUND_ROBIN = frozenset({"sector-hammer", "sector-runup", "span-fixed"})
+
+
 def track_bounds(track: int, track_lsns: list[int], leadout: int) -> tuple[int, int]:
     """``[start, end)`` sectors of 1-based *track*; the last runs to the lead-out."""
     start = track_lsns[track - 1]
     end = track_lsns[track] if track < len(track_lsns) else leadout
     return start, end
+
+
+def targets_in_track(
+    track: int, flagged: list[int], track_lsns: list[int], leadout: int
+) -> list[int]:
+    """The sectors a plan aims at in *track*: its flagged LBAs, or its first sector
+    when none is flagged (the bench's rule). One definition, shared by
+    :func:`strategy_reads` and the rip's speed rounds, so the two cannot count a
+    round differently."""
+    start, end = track_bounds(track, track_lsns, leadout)
+    return [s for s in flagged if start <= s < end] or [start]
 
 
 def strategy_reads(
@@ -81,7 +102,7 @@ def strategy_reads(
     bench and the rip mean by each name, so it needs the bench's evidence first.
     """
     start, end = track_bounds(track, track_lsns, leadout)
-    in_track = [s for s in flagged if start <= s < end] or [start]
+    in_track = targets_in_track(track, flagged, track_lsns, leadout)
 
     for i in range(max_attempts):
         if name == "sector-hammer":

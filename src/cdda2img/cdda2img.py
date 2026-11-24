@@ -5340,20 +5340,27 @@ class _StrategyRun:
     #: The session the audio was read from (:func:`_rip_disc_stage`).
     readable: tuple[int, int] | None = None
 
-    def speed_for(self, i: int) -> int:
-        """The speed of read *i*: the next rung of the admitted ladder, cycling.
+    def speed_for(self, i: int, per: int = 1) -> int:
+        """The speed of read *i*: the next rung of the admitted ladder every *per*
+        reads, cycling.
 
         kgr, 2026-11-21: a fixed speed repeats a speed that may itself be the cause
-        of the failure, so every strategy's reads step through the ladder, one rung
-        per read. A profile with ``ladder = "single"`` holds the one
-        ``recovery_speed`` instead: shipped, ``span-fixed``, the exception he kept,
-        which is what makes it a fixed-span control. Decided from the field, never
-        the name. The plan
-        in ``strategy_reads`` chooses the sectors; this chooses the speed.
+        of the failure, so every strategy's reads step through the ladder. A
+        profile with ``ladder = "single"`` holds the one ``recovery_speed``
+        instead: shipped, ``span-fixed``, the exception he kept, which is what
+        makes it a fixed-span control. Decided from the field, never the name.
+        The plan in ``strategy_reads`` chooses the sectors; this chooses the speed.
+
+        *per* is the length of a round: a plan that takes n targets in turn
+        (:data:`~cdda2img.strategy_reads.ROUND_ROBIN`) passes n, so the speed
+        steps once per round and every target is read at every rung, and the
+        targets of a round share one speed. Until 2026-11-24 the speed stepped on
+        every read, and with the targets advancing too, target j only ever met
+        rungs j, j + n, ...: L/gcd(n, L) of them (kgr asked for the fix that day).
         """
         if self.profile.ladder == "single" and self.fixed_speed is not None:
             return self.fixed_speed
-        return self.ladder[i % len(self.ladder)]
+        return self.ladder[(i // max(1, per)) % len(self.ladder)]
 
     @property
     def leadout(self) -> int:
@@ -5405,7 +5412,7 @@ class _StrategyRun:
         import time
 
         from cdda2img.span_planner import locate_targets
-        from cdda2img.strategy_reads import track_bounds
+        from cdda2img.strategy_reads import ROUND_ROBIN, targets_in_track, track_bounds
 
         w = st.window
         flagged = (
@@ -5422,13 +5429,19 @@ class _StrategyRun:
         )
         lo, hi = track_bounds(st.track, self.track_lsns, self.leadout)
         n_targets = sum(1 for lba in flagged if lo <= lba < hi)
+        # One speed per round of targets for a plan that takes them in turn.
+        per = (
+            len(targets_in_track(st.track, flagged, self.track_lsns, self.leadout))
+            if self.kind in ROUND_ROBIN
+            else 1
+        )
         if self.ui is None:
             print(f"  Recovering track {st.track} ({self.kind})…")
         deadline = time.monotonic() + self.profile.budget_s
         for k, planned in enumerate(self._reads(st.track, flagged), 1):
             if time.monotonic() > deadline:
                 break
-            req = replace(planned, speed=self.speed_for(k - 1))
+            req = replace(planned, speed=self.speed_for(k - 1, per))
             self._status(f"Recover track {st.track} ({k}/{self.profile.passes})")
             pieces, record = _strategy_attempt(
                 self.device, req, [(w.lo, w.hi)], self.prog_cb, readable=self.readable
