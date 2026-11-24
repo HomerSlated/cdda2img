@@ -151,7 +151,8 @@ A profile's
 .B ladder
 field is its speed policy:
 .B full
-reads each attempt at the next speed the drive admits,
+steps to the next speed the drive admits on each read (on each round of flagged
+sectors for the profiles that take them in turn),
 .B single
 holds
 .B \-\-recovery\-speed
@@ -160,13 +161,19 @@ holds
 Each read asks the drive to bypass its cache (the whole\-disc read excepted),
 each read is recorded in the container's provenance, and a track is written
 only when it matches AccurateRip.
+Each profile runs one sweep per attempt: every flagged sector (or the track, or
+the disc) at every speed the profile reads at, the least that tries them all;
+.B \-\-recovery\-attempts
+repeats the sweep, and the first AccurateRip match ends a track's re\-reads.
 .B NOTE:
 every profile but
 .BR track\-ladder " and " track\-constant
-is experimental: the strategies were measured on a drive, but their
+is marked experimental: the strategies were measured on a drive, and their
 implementation in
 .B rip
-has so far been validated only by offline tests.
+has run on one only since November 2026, too briefly to rank them.
+The mark is a label only: it changes nothing at run time, and the automatic
+chain uses every profile.
 .PP
 If no track verifies at all, neither exit runs: re\-reading cannot fix a disc
 that is wrong everywhere (a wrong drive offset, a pressing AccurateRip does not
@@ -284,6 +291,16 @@ Every other profile changes speed on each read.
 Default: the configuration's
 .BR recovery_speed ,
 32.
+.TP
+.BI \-\-recovery\-attempts " N"
+How many times each recovery profile runs its sweep: every flagged sector (or
+the whole track, or the whole disc) re\-read at every speed the profile reads
+at.
+The first AccurateRip match ends a track's re\-reads, however many attempts
+remain.
+Default: the configuration's
+.BR recovery_attempts ,
+1.
 .TP
 .B \-\-cdr
 The disc is a recordable copy of a pressed CD, or its type could not be

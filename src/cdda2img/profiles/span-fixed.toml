@@ -12,8 +12,13 @@
 # In the rip since 2026-11-21 (cdda2img.strategy_reads, the bench's own read plan,
 # picked from these fields rather than this file's name): it stands alone, so a
 # track it does not recover is not handed to the speed ladder; every read asks
-# AccuDisc for a cache defeat, which the bench did not; and `passes` is reads per
-# track (the bench's --max-attempts, 8), bounded by budget_s per track.
+# AccuDisc for a cache defeat, which the bench did not.
+#
+# `passes = 1`: one sweep per attempt, one read per flagged sector, all at
+# `recovery_speed` (kgr, 2026-11-24; it was 8 reads). Config or CLI
+# `recovery_attempts` repeats the sweep; the first AccurateRip match ends the reads.
+# `budget_s` is seconds per read: a track may take budget_s x its planned reads, a
+# guard against a stalled drive that should never bind.
 name         = "span-fixed"
 experimental = true
 
@@ -22,10 +27,10 @@ c2           = true
 
 granularity  = "sector"
 ladder       = "single"
-passes       = 8
+passes       = 1
 span         = 512
 variation    = "none"
 
 ctdb         = "auto"
 verify       = false
-budget_s     = 180
+budget_s     = 15

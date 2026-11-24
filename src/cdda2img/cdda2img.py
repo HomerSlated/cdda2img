@@ -82,6 +82,18 @@ _MIN_AR_CONFIDENCE = (
 SILENCE_PAD_DUR = "2"  # seconds of post-track silence (Red Book inter-track gap)
 
 
+def _recovery_attempts_arg(value: str) -> int:
+    """``--recovery-attempts``: a whole number 1..100 (config's range)."""
+    try:
+        n = int(value)
+    except ValueError:
+        n = 0
+    if not 1 <= n <= 100:
+        msg = f"expected a whole number from 1 to 100, got {value!r}"
+        raise argparse.ArgumentTypeError(msg)
+    return n
+
+
 def _recovery_speed_arg(value: str) -> int | str:
     """``--recovery-speed``: an X rate 1..72, or ``auto``."""
     if value == "auto":
@@ -479,6 +491,13 @@ def parse_args() -> argparse.Namespace:
         default=None,
         metavar="X",
         help="The one speed the recovery chain's fixed-speed stages (track-constant, span-fixed) read at, snapped to the nearest speed the drive admits on the disc; 'auto' holds, per track, the speed whose earlier re-read flagged the fewest C2 errors. Every other stage changes speed on each read (default: from config, 32)",
+    )
+    r_cmd.add_argument(
+        "--recovery-attempts",
+        type=_recovery_attempts_arg,
+        default=None,
+        metavar="N",
+        help="How many times each recovery profile runs its full sweep: every flagged sector (or the track, or the disc) at every speed the profile reads at. The first AccurateRip match ends a track's re-reads early (default: from config, 1)",
     )
     r_cmd.add_argument(
         "--profile-only",
@@ -5043,6 +5062,7 @@ def _recover_flagged_spans(
     disc_damage: bytes,
     ui: TerminalUI | None,
     readable: tuple[int, int] | None = None,
+    sweeps: int | None = None,
 ) -> tuple[dict[int, str], dict[str, str]]:
     """Re-read only the flagged sectors of each AR-failed track; commit on AR pass.
 
@@ -5051,9 +5071,12 @@ def _recover_flagged_spans(
     ``docs/reference/span-recovery-plan.md`` §4. Per track: take the capture
     pass's damage lane inside the track's raw window as targets (the disc's final
     sector excluded, a lead-out artefact), cluster and pad them into spans
-    (``span_gap``/``span_pad``), then run up to ``profile.passes`` passes, each
-    re-reading every span once at the next speed of the ladder, in the order it was
-    bound (fastest first, cycling). Accepted copies (:func:`_span_copy_accepted`) are
+    (``span_gap``/``span_pad``), then run passes, each re-reading every span once
+    at the next speed of the ladder, in the order it was bound (fastest first,
+    cycling). *sweeps* (default ``profile.passes``; the chain passes
+    ``passes x recovery_attempts``) counts sweeps of the ladder, one pass per
+    rung each (kgr, 2026-11-24: a sweep is the least that tries every speed), so
+    the passes run are ``sweeps x len(ladder)``. Accepted copies (:func:`_span_copy_accepted`) are
     overlaid onto the track's current raw audio **in memory**; after each pass the
     assembled track goes to ``match_track_pcm``, and only a match is written. A
     track that never matches keeps its audio byte-identical, the same invariant
@@ -5065,7 +5088,9 @@ def _recover_flagged_spans(
     agreement between reads was worth nothing (seven cache-defeated reads, majority
     correct for 0/49), so "being wrong early" has to stay survivable.
 
-    ``profile.budget_s`` bounds each track's passes in wall time.
+    ``profile.budget_s`` is seconds per span read: each track may take
+    ``budget_s x spans x passes`` in wall time, so the bound grows with the work
+    planned and is a guard against a stalled drive, not a cap on the plan.
 
     **Not yet run on hardware.** The H1/H2 bench runs in the plan were cancelled
     on 2026-09-24 under the replacement drive's minimal-testing terms; that ruling
@@ -5088,6 +5113,7 @@ def _recover_flagged_spans(
     prov: dict[str, str] = {}
     # The ladder as bound, never reordered here (see _recover_failed_tracks).
     speeds: list[int | None] = [*ladder] or [None]
+    n_sweeps = profile.passes if sweeps is None else sweeps
     file_size = (disc_last_lsn + 1) * _R6_BYTES_PER_FRAME
     status_line = [""]
     prog_cb = _recovery_status_cb(ui, status_line)
@@ -5112,13 +5138,14 @@ def _recover_flagged_spans(
             pcm_fh.seek(w.lo * _R6_BYTES_PER_FRAME)
             base = pcm_fh.read((w.hi - w.lo) * _R6_BYTES_PER_FRAME)
             best: dict[int, bytes] = {}
-            deadline = time.monotonic() + profile.budget_s
+            n_passes = n_sweeps * len(speeds)
+            deadline = time.monotonic() + profile.budget_s * len(spans) * n_passes
 
-            for k in range(1, profile.passes + 1):
+            for k in range(1, n_passes + 1):
                 if time.monotonic() > deadline:
                     break
                 speed = speeds[(k - 1) % len(speeds)]
-                status_line[0] = f"Span re-read track {t} ({k}/{profile.passes})"
+                status_line[0] = f"Span re-read track {t} ({k}/{n_passes})"
                 if ui is not None:
                     ui.set_status(status_line[0], 0.0)
                 _span_pass(
@@ -5241,6 +5268,7 @@ def _recover_by_strategy(
     seed: int,
     fixed_speed: int | None = None,
     readable: tuple[int, int] | None = None,
+    sweeps: int | None = None,
 ) -> tuple[dict[int, str], dict[str, str]]:
     """Run one of the bench's recovery strategies **instead of** the speed ladder.
 
@@ -5255,11 +5283,19 @@ def _recover_by_strategy(
     (kgr, 2026-11-21), and the record of every read in PROV.
 
     **It stands alone** (kgr, 2026-11-21): a track it does not recover is
-    ``unrecovered``, not handed to the ladder. ``profile.passes`` is reads per
-    track (the bench's ``--max-attempts``) and ``profile.budget_s`` bounds each
-    track's reads in wall time. ``whole-disc`` reads the disc once per pass and
-    tests every remaining track against that read, so there the two bound all
-    the tracks together.
+    ``unrecovered``, not handed to the ladder.
+
+    **Reads are planned in sweeps** (kgr, 2026-11-24): a sweep is the least that
+    tries every target at every speed the profile reads at, ``targets x rungs``
+    reads (:meth:`_StrategyRun.sweep_reads`; one rung when the profile holds
+    ``recovery_speed``). *sweeps* (default ``profile.passes``; the chain passes
+    ``passes x recovery_attempts``) is how many run, so the reads per track are
+    ``sweeps x targets x rungs``, and the first AccurateRip match ends them.
+    ``profile.budget_s`` is seconds per read: a track may take ``budget_s`` x
+    its planned reads, a guard against a stalled drive rather than a cap on the
+    plan. ``whole-disc`` reads the disc once per rung of a sweep and tests every
+    remaining track against that read, so there the plan and the time bound
+    serve all the tracks together.
 
     *seed* drives ``max-variation``'s random choices and is recorded
     (``recovery_seed``) so its reads can be regenerated. Returns
@@ -5304,6 +5340,7 @@ def _recover_by_strategy(
             outcomes=outcomes,
             fixed_speed=fixed_speed,
             readable=readable,
+            sweeps=profile.passes if sweeps is None else sweeps,
         )
         if kind == "whole-disc":
             run.whole_disc(tracks)
@@ -5339,6 +5376,8 @@ class _StrategyRun:
     fixed_speed: int | None = None
     #: The session the audio was read from (:func:`_rip_disc_stage`).
     readable: tuple[int, int] | None = None
+    #: Sweeps to run per track (``passes x recovery_attempts`` in the chain).
+    sweeps: int = 1
 
     def speed_for(self, i: int, per: int = 1) -> int:
         """The speed of read *i*: the next rung of the admitted ladder every *per*
@@ -5358,9 +5397,23 @@ class _StrategyRun:
         every read, and with the targets advancing too, target j only ever met
         rungs j, j + n, ...: L/gcd(n, L) of them (kgr asked for the fix that day).
         """
-        if self.profile.ladder == "single" and self.fixed_speed is not None:
+        if self.holds_speed() and self.fixed_speed is not None:
             return self.fixed_speed
         return self.ladder[(i // max(1, per)) % len(self.ladder)]
+
+    def holds_speed(self) -> bool:
+        """True when every read is at the one ``recovery_speed`` (``ladder =
+        "single"`` with a speed to hold); the one rule both :meth:`speed_for` and
+        :meth:`sweep_reads` read, so a sweep is always as long as the speeds it
+        has to cover."""
+        return self.profile.ladder == "single" and self.fixed_speed is not None
+
+    def sweep_reads(self, targets: int) -> int:
+        """Reads in one sweep: every one of *targets* at every rung read at
+        (the whole ladder, or the one held speed). ``max-variation`` draws its
+        targets at random, so its sweep has as many reads but no promise that
+        every pairing occurs."""
+        return max(1, targets) * (1 if self.holds_speed() else len(self.ladder))
 
     @property
     def leadout(self) -> int:
@@ -5374,7 +5427,7 @@ class _StrategyRun:
     def n_tracks(self) -> int:
         return len(self.track_lsns)
 
-    def _reads(self, track: int, flagged: list[int]) -> Iterator[ReadReq]:
+    def _reads(self, track: int, flagged: list[int], total: int) -> Iterator[ReadReq]:
         from cdda2img.strategy_reads import strategy_reads
 
         return strategy_reads(
@@ -5388,7 +5441,7 @@ class _StrategyRun:
             self.profile.run_up,
             self.profile.span,
             self.rng,
-            self.profile.passes,
+            total,
         )
 
     def _status(self, text: str) -> None:
@@ -5429,20 +5482,18 @@ class _StrategyRun:
         )
         lo, hi = track_bounds(st.track, self.track_lsns, self.leadout)
         n_targets = sum(1 for lba in flagged if lo <= lba < hi)
+        targets = targets_in_track(st.track, flagged, self.track_lsns, self.leadout)
         # One speed per round of targets for a plan that takes them in turn.
-        per = (
-            len(targets_in_track(st.track, flagged, self.track_lsns, self.leadout))
-            if self.kind in ROUND_ROBIN
-            else 1
-        )
+        per = len(targets) if self.kind in ROUND_ROBIN else 1
+        total = self.sweeps * self.sweep_reads(len(targets))
         if self.ui is None:
             print(f"  Recovering track {st.track} ({self.kind})…")
-        deadline = time.monotonic() + self.profile.budget_s
-        for k, planned in enumerate(self._reads(st.track, flagged), 1):
+        deadline = time.monotonic() + self.profile.budget_s * total
+        for k, planned in enumerate(self._reads(st.track, flagged, total), 1):
             if time.monotonic() > deadline:
                 break
             req = replace(planned, speed=self.speed_for(k - 1, per))
-            self._status(f"Recover track {st.track} ({k}/{self.profile.passes})")
+            self._status(f"Recover track {st.track} ({k}/{total})")
             pieces, record = _strategy_attempt(
                 self.device, req, [(w.lo, w.hi)], self.prog_cb, readable=self.readable
             )
@@ -5465,21 +5516,23 @@ class _StrategyRun:
         return n_targets
 
     def whole_disc(self, tracks: list[_StrategyTrack]) -> None:
-        """Read the whole disc once per pass; test every remaining track against
-        that one read. A match is written; the rest wait for the next pass."""
+        """Read the whole disc once per rung of each sweep; test every remaining
+        track against that one read. A match is written; the rest wait for the
+        next read, and the reads stop once none is left."""
         import time
 
         if not tracks:
             return
         if self.ui is None:
             print(f"  Re-reading the whole disc for {len(tracks)} track(s)…")
-        deadline = time.monotonic() + self.profile.budget_s
+        total = self.sweeps * self.sweep_reads(1)
+        deadline = time.monotonic() + self.profile.budget_s * total
         remaining = list(tracks)
-        for k, planned in enumerate(self._reads(remaining[0].track, []), 1):
+        for k, planned in enumerate(self._reads(remaining[0].track, [], total), 1):
             if not remaining or time.monotonic() > deadline:
                 break
             req = replace(planned, speed=self.speed_for(k - 1))
-            self._status(f"Whole-disc re-read ({k}/{self.profile.passes})")
+            self._status(f"Whole-disc re-read ({k}/{total})")
             windows = [(st.window.lo, st.window.hi) for st in remaining]
             pieces, record = _strategy_attempt(
                 self.device,
@@ -5576,6 +5629,10 @@ class _ChainContext(NamedTuple):
     auto_speed: bool = False
     #: The session the audio was read from; bounds every far read (_rip_disc_stage).
     readable: tuple[int, int] | None = None
+    #: recovery_attempts (kgr, 2026-11-24): each stage runs its profile's
+    #: ``passes`` sweeps this many times over, in ONE call, so a strategy's
+    #: working copy carries every read and the first match still ends it.
+    attempts: int = 1
 
 
 def _initial_fixed_speed(speed: int | str, ladder: list[int]) -> int:
@@ -5614,6 +5671,10 @@ def _run_chain_stage(
 
     profile = load_profile(stage)
     n_tracks = len(ctx.track_lsns)
+    # A pass is one sweep: every target at every speed the profile reads at (the
+    # ladder's one sweep per pass, the span rung's one pass per rung, a strategy's
+    # targets x rungs reads). recovery_attempts repeats the profile's passes.
+    sweeps = profile.passes * ctx.attempts
     # Dispatch on the profile's FIELDS, never its name: a user profile may shadow a
     # shipped one, or be new, and PROV must describe what ran.
     if profile.granularity == "span":
@@ -5634,6 +5695,7 @@ def _run_chain_stage(
             ctx.disc_damage,
             ctx.ui,
             readable=ctx.readable,
+            sweeps=sweeps,
         )
     if profile.granularity == "track":
         return _recover_failed_tracks(
@@ -5645,7 +5707,7 @@ def _run_chain_stage(
             ctx.responses,
             n_tracks,
             ctx.ladder if profile.ladder == "full" else [ctx.fixed_speed],
-            profile.passes,
+            sweeps,
             ctx.read_offset,
             ctx.ui,
             ctx.disc_damage,
@@ -5673,6 +5735,7 @@ def _run_chain_stage(
         seed=secrets.randbits(32),
         fixed_speed=ctx.fixed_speed,
         readable=ctx.readable,
+        sweeps=sweeps,
     )
 
 
@@ -5953,8 +6016,14 @@ def rip_image(  # noqa: C901
     media_override: str | None = None,
     recovery_speed: int | str | None = None,
     profile_only: bool = False,
+    recovery_attempts: int | None = None,
 ) -> Path | None:
     """Rip *device* into an RBI container, or write nothing at all.
+
+    *recovery_attempts* (``--recovery-attempts``, else config
+    ``recovery_attempts``, default 1; kgr 2026-11-24) is how many times each
+    recovery stage runs its profile's ``passes`` sweeps, every target at every
+    speed per sweep. The first AccurateRip match ends a track's reads early.
 
     *profile_only* (``--profile-only``, a temporary test switch, kgr 2026-11-22)
     skips CTDB parity repair and the displacement check, so a failed track reaches
@@ -6424,6 +6493,7 @@ def rip_image(  # noqa: C901
                 if bound is not None and bound.profile is not None
                 else cfg.recovery_passes
             )
+            attempts = recovery_attempts or cfg.recovery_attempts
             # kgr, 2026-11-21: with no profile named, every recovery profile is used,
             # in an order chosen from each track's damage, until every track
             # verifies (_recovery_chain). A named profile restricts the chain to
@@ -6451,6 +6521,7 @@ def rip_image(  # noqa: C901
                         ui=ui,
                         cohort=ar_cohort or None,
                         readable=readable,
+                        attempts=attempts,
                     ),
                     failed_tracks,
                     recovery_speed or cfg.recovery_speed,
@@ -6459,6 +6530,7 @@ def rip_image(  # noqa: C901
                 )
                 recovery_outcomes.update(chain_outcomes)
                 ladder_prov.update(chain_prov)
+                ladder_prov["recovery_attempts"] = str(attempts)
             else:
                 span_outcomes, span_keys, failed_tracks = _run_span_rung(
                     bound.profile if bound is not None else None,
@@ -7085,6 +7157,7 @@ def _dispatch(args: argparse.Namespace) -> int:
             media_override=args.media_override,
             recovery_speed=args.recovery_speed,
             profile_only=args.profile_only,
+            recovery_attempts=args.recovery_attempts,
         )
     elif args.cmd == "import":
         if args.info:

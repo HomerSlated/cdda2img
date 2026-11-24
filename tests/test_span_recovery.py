@@ -162,7 +162,8 @@ def test_a_candidate_that_fails_accuraterip_leaves_the_file_byte_identical(
     seen = _true_ar(monkeypatch)
     wrong = bytes(b ^ 0x55 for b in KEY)
     _reads(monkeypatch, lambda _p: wrong)
-    outcomes, prov = _run(pcm)
+    # One sweep (span-flagged's passes = 1) is one pass per rung: three here.
+    outcomes, prov = _run(pcm, ladder=[16, 8, 4])
     assert outcomes == {}
     assert len(seen) == 3  # the gate ran on every pass...
     assert pcm.read_bytes() == before  # ...and nothing reached the file

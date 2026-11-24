@@ -1,13 +1,18 @@
-# track-constant — re-read the whole failed track, every attempt at the one
+# track-constant — re-read the whole failed track, every read at the one
 # fixed speed `recovery_speed` (`ladder = "single"`): config/CLI, default 32x,
 # snapped to the nearest rung the drive admits (ties to the slower). With
 # `recovery_speed = "auto"` it holds the rung whose ladder re-reads flagged the
 # fewest C2 sectors for this track, or the slowest rung before there is any.
-# Every attempt asks AccuDisc for a cache defeat.
+# Every read asks AccuDisc for a cache defeat.
 #
 # Bench: 14/19 (0.74). Beats track-ladder on time when the first attempt succeeds
 # (18 s vs 20 s on Tracy t8) and loses badly when it does not — 1/3 against the
 # ladder's 3/3 at ABBA t19. Choose it when you already know the damage is light.
+#
+# `passes = 1`: one sweep per attempt, which at one speed is a single read of the
+# track (kgr, 2026-11-24; it was 3). Config or CLI `recovery_attempts` repeats it;
+# the first AccurateRip match ends the reads. `budget_s` is not read at
+# granularity = "track".
 name         = "track-constant"
 experimental = false
 
@@ -16,7 +21,7 @@ c2           = true
 
 granularity  = "track"
 ladder       = "single"
-passes       = 3
+passes       = 1
 variation    = "none"
 
 ctdb         = "auto"

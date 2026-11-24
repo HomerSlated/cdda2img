@@ -1,5 +1,5 @@
 # track-ladder — the default. Re-read the whole failed track, sweeping the drive's
-# admitted speed ladder, one rung per attempt.
+# admitted speed ladder, one rung per read.
 #
 # Bench: 19/20 across 8 targets (0.95), the most reliable arm measured, and the sole
 # 3/3 at the hardest target (ABBA t19, n=47) where track-constant managed 1/3. That
@@ -8,6 +8,12 @@
 #
 # This is also what `_recover_failed_tracks` already does, so it is the shipped
 # behaviour named rather than a change of behaviour.
+#
+# `passes = 1`: one sweep per attempt, the track read once at every admitted rung,
+# the least that tries every speed (kgr, 2026-11-24; it was 3 sweeps). Config or
+# CLI `recovery_attempts` repeats the sweep; the first AccurateRip match ends the
+# reads. `budget_s` is not read at granularity = "track": the ladder always
+# finishes its sweeps.
 name         = "track-ladder"
 experimental = false
 
@@ -16,7 +22,7 @@ c2           = true
 
 granularity  = "track"
 ladder       = "full"
-passes       = 3
+passes       = 1
 variation    = "none"
 
 ctdb         = "auto"

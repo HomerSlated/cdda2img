@@ -343,7 +343,8 @@ def test_max_variation_records_a_seed_that_regenerates_its_reads(
     monkeypatch, tmp_path
 ) -> None:
     """The seed is the record: the same seed must give the same reads."""
-    profile = _profile(granularity="sector", ladder="full", variation="full", passes=6)
+    # One sweep: 2 targets x 5 rungs = 10 reads (kgr, 2026-11-24).
+    profile = _profile(granularity="sector", ladder="full", variation="full", passes=1)
     _o, prov, _pcm, reads = _run(
         monkeypatch,
         tmp_path,
@@ -368,7 +369,7 @@ def test_max_variation_records_a_seed_that_regenerates_its_reads(
             0,
             0,
             random.Random(12345),  # noqa: S311 - a seed is the point
-            6,
+            10,
         )
     )
     # The seed regenerates the sectors; the speed steps through the ladder, one
@@ -474,11 +475,11 @@ def test_the_runner_steps_and_span_fixed_holds(monkeypatch, tmp_path) -> None:
     monkeypatch.setattr("cdda2img.accuraterip.match_track_pcm", _match)
     lane = bytes(1 if lba == 150 else 0 for lba in range(_LEADOUT))
     for kind, prof, fixed, expected in (
-        (
+        (  # one sweep of one target: every rung once
             "sector-hammer",
-            _profile(granularity="sector", passes=6),
+            _profile(granularity="sector", passes=1),
             None,
-            _LADDER + _LADDER[:1],
+            _LADDER,
         ),
         (
             "span-fixed",
@@ -534,7 +535,7 @@ def test_each_flagged_sector_is_read_at_every_rung(monkeypatch, tmp_path, n) -> 
     _o, _p, _pcm, reads = _run(
         monkeypatch,
         tmp_path,
-        _profile(granularity="sector", ladder="full", passes=n * len(_LADDER)),
+        _profile(granularity="sector", ladder="full", passes=1),  # one sweep
         bad=flagged,
         failed=[2],
         damage=flagged,
@@ -575,7 +576,7 @@ def test_two_targets_each_readable_at_one_rung_only_are_recovered(
     outcomes, prov, pcm, _reads = _run(
         monkeypatch,
         tmp_path,
-        _profile(granularity="sector", ladder="full", passes=10),
+        _profile(granularity="sector", ladder="full", passes=1),  # 2 x 5 reads
         bad={120, 180},
         failed=[2],
         damage={120, 180},
@@ -595,14 +596,14 @@ def test_sector_runup_steps_once_per_round_too(monkeypatch, tmp_path) -> None:
     _o, _p, _pcm, reads = _run(
         monkeypatch,
         tmp_path,
-        _profile(granularity="sector", ladder="full", run_up=8, passes=4),
+        _profile(granularity="sector", ladder="full", run_up=8, passes=1),
         bad={150, 190},
         failed=[2],
         damage={150, 190},
         reads=_Reads(stale=True),
         ladder=_LADDER,
     )
-    assert [c["speed"] for c in reads.calls] == [40, 40, 32, 32]
+    assert [c["speed"] for c in reads.calls] == [s for s in _LADDER for _ in (1, 2)]
 
 
 def test_nothing_flagged_makes_a_round_of_one(monkeypatch, tmp_path) -> None:
@@ -610,7 +611,7 @@ def test_nothing_flagged_makes_a_round_of_one(monkeypatch, tmp_path) -> None:
     _o, _p, _pcm, reads = _run(
         monkeypatch,
         tmp_path,
-        _profile(granularity="sector", ladder="full", passes=3),
+        _profile(granularity="sector", ladder="full", passes=1),
         bad={150},
         failed=[2],
         damage=None,
@@ -618,9 +619,7 @@ def test_nothing_flagged_makes_a_round_of_one(monkeypatch, tmp_path) -> None:
         ladder=_LADDER,
     )
     assert [(c["start"], c["speed"]) for c in reads.calls] == [
-        (100, 40),
-        (100, 32),
-        (100, 24),
+        (100, s) for s in _LADDER
     ]
 
 
@@ -634,7 +633,7 @@ def test_a_round_counts_only_the_targets_the_plan_aims_at(
     _o, _p, _pcm, reads = _run(
         monkeypatch,
         tmp_path,
-        _profile(granularity="sector", ladder="full", passes=3),
+        _profile(granularity="sector", ladder="full", passes=1),
         bad={150},
         failed=[2],
         damage={150, 200},
@@ -642,10 +641,10 @@ def test_a_round_counts_only_the_targets_the_plan_aims_at(
         ladder=_LADDER,
         read_offset=30,
     )
+    # One target, so one sweep is 5 reads, a rung each; counting 200 would make
+    # it 10 reads, each rung held for two.
     assert [(c["start"], c["speed"]) for c in reads.calls] == [
-        (150, 40),
-        (150, 32),
-        (150, 24),
+        (150, s) for s in _LADDER
     ]
 
 

@@ -22,9 +22,10 @@ replaced, by a drive whose behaviour each scenario sets:
    recover in the 8x round; the same profile held at 8x (``ladder = "single"``)
    recovers on read 2. Before the per-round fix, stepping per read never read both
    at 8x together and never recovered.
-   5c: five flagged sectors, each read correctly only at 24x, 25 reads allowed. Per
-   round, the 24x round repairs all five (read 15); per read, sector j was only
-   ever read at rung j, so four of them never met 24x.
+   5c: five flagged sectors, each read correctly only at 24x, in one sweep (5 x 5
+   reads since passes became sweeps, 2026-11-24). Per round, the 24x round repairs
+   all five (read 15); per read, sector j was only ever read at rung j, so four of
+   them never met 24x.
 
 The rebuilt capture is a SPARSE file of the disc's full size under /var/tmp holding
 only the track's window, deleted on exit (scratch scope rule).
@@ -308,10 +309,9 @@ def main() -> int:
             s = disc.raw(lba, lba + 1)
             return s if speed == 24 or lba not in five else corrupt(s)
 
-        many = dataclasses.replace(hammer, passes=25)
         check(
-            "5c five flagged, each good only at 24x, 25 reads: the 24x round repairs all",
-            run(disc, responses, t, many, five, five, only_24x),
+            "5c five flagged, each good only at 24x, one sweep (25 reads): the 24x round repairs all",
+            run(disc, responses, t, hammer, five, five, only_24x),
             True,
             True,
         )

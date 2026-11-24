@@ -229,6 +229,8 @@ class Config:
     recovery_passes: int = 3
     recovery_speed: int | str = 32
     recovery_ceiling_s: int = 0
+    # Times each recovery stage runs its profile's passes (sweeps), kgr 2026-11-24.
+    recovery_attempts: int = 1
     # C2-erasure-assisted CTDB recovery gate (item 8). "off" (default) rips via cdrdao
     # read-cd as usual — CTDB error-only ctanalyse still repairs above cd-paranoia. "auto"
     # uses the drive's C2 error pointers as RS erasures when the drive advertises +
@@ -377,6 +379,7 @@ def _build(d: dict) -> Config:
         recovery_passes=d["recovery_passes"],
         recovery_speed=d["recovery_speed"],
         recovery_ceiling_s=d["recovery_ceiling_s"],
+        recovery_attempts=d["recovery_attempts"],
         c2_recovery=d["c2_recovery"],
         preferred_country=_parse_preferred_country(d["preferred_country"]),
         default_profile=d["default_profile"],

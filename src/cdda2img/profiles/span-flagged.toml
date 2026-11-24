@@ -15,6 +15,12 @@
 # it scored 44/44 on that single observation. gap = 8 = 2 × pad, so two flagged
 # sites whose padding would touch are merged into one read.
 #
+# `passes = 1`: one sweep per attempt, one pass per admitted rung, each re-reading
+# every span (kgr, 2026-11-24; it was 3 passes, fewer than the rungs). Config or
+# CLI `recovery_attempts` repeats the sweep; the first AccurateRip match ends the
+# passes. `budget_s` is seconds per span read: a track may take budget_s x spans x
+# passes, a guard against a stalled drive that should never bind.
+#
 # verify_passes = 2 is required (the schema refuses less for granularity = "span"):
 # the acceptance rule needs a position witness. c2_retries stays 0 until a
 # measurement shows it helps under verification (plan §4.3).
@@ -26,7 +32,7 @@ c2              = true
 
 granularity     = "span"
 ladder          = "full"
-passes          = 3
+passes          = 1
 span_gap        = 8
 span_pad        = 4
 variation       = "none"
@@ -35,4 +41,4 @@ ctdb            = "auto"
 verify_passes   = 2
 overlap_sectors = 4
 c2_retries      = 0
-budget_s        = 300
+budget_s        = 30

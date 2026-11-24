@@ -104,10 +104,18 @@
 
 # AccurateRip recovery effort for a rip. When a track fails AccurateRip it is
 # re-read across the drive's own admitted speed ladder (fastest to slowest),
-# AR-verifying each attempt and stopping at the first match. recovery_passes is how
-# many full sweeps of the ladder to try per failed track before giving up (total
-# attempts = passes x ladder steps). 0 disables the laddered recovery. Default: 3
+# AR-verifying each re-read and stopping at the first match. recovery_passes is how
+# many full sweeps of the ladder the --ad-* flags' recovery tries per failed track
+# (total re-reads = passes x ladder steps); recovery profiles carry their own
+# passes. 0 disables recovery altogether. Default: 3
 # recovery_passes = 3
+
+# How many times each recovery profile runs its sweep: every flagged sector (or
+# the whole track, or the whole disc) re-read at every speed the profile reads at,
+# the least that tries them all. The first AccurateRip match ends a track's
+# re-reads, however many attempts remain. Overridden per run by
+# --recovery-attempts. Default: 1
+# recovery_attempts = 1
 
 # The automatic recovery chain. When no --profile is given, each track that fails
 # AccurateRip after CTDB and the displacement check is tried with every recovery
