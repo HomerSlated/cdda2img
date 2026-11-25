@@ -868,6 +868,18 @@ What it changes in this plan, pending AccuDisc's own audit (§268.5) and Keith's
   > ladder. Done the same day: the five `--ad-*` flags deleted, the capture's counters in PROV
   > (`capture_*`), `recovery_attempts` merged into `recovery_passes`. Not yet put to him:
   > AccuDisc's G.3 (order the rescue by rung, not by sector).
+  >
+  > **UPDATE 2026-11-25 (afternoon).** Keith approved G.3 and the shift test. They landed as
+  > opt-in engine features: 0.54.0 `rescue_by_rung`, 0.55.0 `accudisc_shift_test()` (our
+  > acceptance: 0 disagreements in 47,504 cases, outbound §276) and 0.56.0 `shift_search`
+  > (`1d5b458`; our damaged-x run, §277: 0 false positives with both copies damaged). Our
+  > suite is green on 0.56.0. **`shift_search` is not free, so it joins the post-series A/B
+  > rather than being assumed** (AccuDisc 2026-11-25t). Where single re-reads happen to land
+  > true on a late *and* damaged seam pair, the flag turns a right answer reached by agreement
+  > into an honest SUSPECT (`test_seam_widens_on_damaged_evidence`); that is the 0.41 rule,
+  > under which agreement is not evidence once a slip is seen. Only our AccurateRip gate can
+  > tell which arm delivered the right bytes, so `span-flagged` is scored by it with the flag
+  > off and on.
 - **The `--ad-*` passthrough does less than §9.4 and the tests above assume.** `--ad-retries`,
   `--ad-c2-retries`, `--ad-verify`, `--ad-overlap` and `--ad-recovery` are accepted, take
   rung 1 (so the chain gives way to the plain ladder) and are recorded in PROV
