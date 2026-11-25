@@ -610,8 +610,9 @@ explanations fit that, and no run has separated them:
    byte-exact 0.20 of the time, against 0.60 with a 16-64 sector run-up.
 
 The arithmetic narrows approach. As a settling penalty it predicts a low success rate, not
-zero: at the bench's 0.20, 700 reads would be expected to give on the order of a hundred
-hits, and they gave none. What fits 0/700 is a SYSTEMATIC cause: reach, the long seek the
+zero: at the bench's 0.20 (measured at 114436@40x, so applying it to the other sectors is
+an extrapolation), 700 reads would be expected to give on the order of a hundred hits, and
+they gave none. What fits 0/700 is a SYSTEMATIC cause: reach, the long seek the
 cache defeat imposes (below), or approach as mispositioning (hypothesis 4), which delivers
 the same wrong sector the same way every time.
 
@@ -628,7 +629,12 @@ way it has never recovered a sector that another profile could not.
 scratch; this needs an option to retain it, not yet built), diff each failing track against
 a verified rip of the same disc (Tracy has several), and count the sectors that differ and
 how many of them the capture flagged. Unflagged differing sectors near the targets confirm
-reach; none confirms approach (or the cache defeat).
+reach; none confirms approach (or the cache defeat). To tell mispositioning (4) from settling
+(1), look for each hammer read's 588 stereo samples **at any sample offset** near the target
+in the verified rip, not only at whole-sector offsets: this drive's shifts come in samples
+(12 on 2026-10-10), and a sub-sector shift matches no neighbouring sector. The window must be
+wider than the engine's own shift test, which covers only about ±290 stereo samples
+(AccuDisc 2026-11-25ah/ai).
 
 **Hypotheses for approach, not measured.** Why the approach would matter is a cause, and the
 bench's rule is to rank strategies, not causes. Recorded so they can be tested:
@@ -2497,4 +2503,4 @@ That set lets a future reader distinguish "we never checked" from "we checked
 thoroughly and this disc cannot be verified" — which is the only useful thing
 left to say about it.
 
-Blake3 52748d730e254fa93f674addcc3235cc97fdaf7ce18ad9ad4a41839031a1e8f4
+Blake3 c7b7cdc9091935830fd13cc347ca3cfc17be3999e58b8608798bca0db90eafc2

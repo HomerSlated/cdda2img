@@ -8,15 +8,19 @@ kgr: *"Add the sector-hammer experiment to the TODO, as you noted this is a syst
 that should be addressed. If it can be transformed into a useful profile then we should make
 the attempt."* Background and evidence: `RECOVERY.md` §2.5d. In short: **0 of 700 reads on six
 sectors**, five of which another profile recovered from captures that flagged them. At the
-bench's single-sector rate (0.20) that is about a hundred expected hits, so the cause is
-systematic, not chance. The profile is disabled (`experimental = true`) until this is done.
+bench's single-sector rate (0.20, measured at 114436@40x, so an extrapolation to the others)
+that is about a hundred expected hits, so the cause is systematic, not chance. The profile is disabled (`experimental = true`) until this is done.
 
 **Step 1: decide between the explanations.** Each predicts something different in one diff.
 - *Reach*: the capture left wrong sectors it did not flag, and hammer never writes them.
   Predicts unflagged differing sectors near the targets.
-- *Approach as mispositioning* (AccuDisc's H4): the drive lands on the wrong sector after the
-  5000-sector cache-defeat seek through damaged Q. Predicts a hammer read that is a clean copy
-  of a NEIGHBOURING sector.
+- *Approach as mispositioning* (AccuDisc's H4): the drive lands in the wrong place after the
+  5000-sector cache-defeat seek through damaged Q. Predicts a hammer read that is clean audio
+  from the wrong place: its 588 stereo samples found **at some sample offset** near the target
+  in the verified rip. Shifts on this drive come in samples, not sectors (12 samples on
+  2026-10-10, 8,852 in the slip that motivated AccuDisc's detector), so a sub-sector shift
+  straddles two reference sectors and matches no neighbouring sector; a whole-sector test
+  would wrongly clear H4 (AccuDisc 2026-11-25ah).
 - *Approach as settling* (H1): predicts a hammer read that is damaged in place, not shifted.
 
 The experiment:
@@ -27,8 +31,11 @@ The experiment:
 3. Diff the capture's failing track, and each hammer read, against a verified Tracy RBI.
 4. Count:
    - the differing sectors, and how many the capture flagged;
-   - for each hammer read, whether it equals the reference sector, a reference sector at
-     another LBA (a misposition), or neither (damaged in place).
+   - for each hammer read, whether it equals the reference sector, appears at another SAMPLE
+     offset in the reference (a misposition; a whole-sector match is just an offset that is a
+     multiple of 588), or neither (damaged in place). The search needs its own window, wider
+     than the engine's: AccuDisc's in-engine shift test (`adsc_shift_find`) covers only about
+     ±290 stereo samples (2026-11-25ai), so a sector-crossing slip is invisible to it.
 
 No new damage data is needed: Tracy fails track 8 on many captures.
 
