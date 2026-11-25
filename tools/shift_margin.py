@@ -91,9 +91,22 @@ def main() -> int:
         "accudisc.shift_test() (0.55.0), count per-case disagreements, and print "
         "the table from the C answers",
     )
+    ap.add_argument(
+        "--damage-x",
+        type=int,
+        default=0,
+        metavar="N",
+        help="with --predicate: damage x (the copy in place) by N bytes as well",
+    )
     args = ap.parse_args()
     if args.predicate:
-        predicate(args.rbi, args.sectors, args.seed, compare_c=args.compare_c)
+        predicate(
+            args.rbi,
+            args.sectors,
+            args.seed,
+            compare_c=args.compare_c,
+            damage_x=args.damage_x,
+        )
         return 0
     rng = random.Random(args.seed)  # noqa: S311 - a reproducible sample, not a secret
     bands = (
@@ -198,21 +211,37 @@ def _c_shift_test():
     return lambda x, y: module.shift_test(bytes(x), bytes(y))
 
 
-def _sample_container(path: Path, sectors: int, rng: random.Random, test) -> dict:
+def _self_rates(x: np.ndarray) -> np.ndarray:
+    self_r = _rates(x, x)
+    self_r[MAX_K] = np.inf
+    return self_r
+
+
+def _sample_container(
+    path: Path, sectors: int, rng: random.Random, test, damage_x: int = 0
+) -> dict:
     """Per band: for each sampled sector with signal, (false-positive flags per
-    damage level, true-detection flags per shift)."""
+    damage level, true-detection flags per shift).
+
+    ``damage_x`` > 0 also damages x (the copy already in place) by that many bytes,
+    independently of y, and the test sees x's self-difference as measured on the
+    damaged copy, as the engine would: a re-read or first transfer that is itself
+    damaged (AccuDisc 0.56.0 makes the new re-read x in consensus)."""
     pcm = _pcm(path)
     n_sec = len(pcm) // SECTOR
     rows: dict[str, list] = {"quiet": [], "middle": [], "loud": []}
     for i in rng.sample(range(4, n_sec - 4), sectors):
         x = np.asarray(pcm[i * SECTOR : (i + 1) * SECTOR])
-        self_r = _rates(x, x)
-        self_r[MAX_K] = np.inf
+        self_r = _self_rates(x)
         if not x.any() or (self_r == 0).any():
             continue  # no alignment signal: the engine declines these already
         lvl = _level_dbfs(x)
+        clean = x
+        if damage_x:
+            x = _damage(clean, damage_x, rng)
+            self_r = _self_rates(x)
         band = "quiet" if lvl < -40 else "middle" if lvl < -20 else "loud"
-        fp = [test(self_r, x, _damage(x, d, rng)) is not None for d in DAMAGE]
+        fp = [test(self_r, x, _damage(clean, d, rng)) is not None for d in DAMAGE]
         tp = []
         for k in TRUE_K:
             lo = i * SECTOR - SAMPLE * k
@@ -236,14 +265,16 @@ def _print_rows(name: str, rows: dict) -> None:
         print(f"{name[:26]:26} {band:8} {m:4}  {fps}  {tps}")
 
 
-def predicate(paths: list[Path], sectors: int, seed: int, *, compare_c: bool) -> None:
+def predicate(
+    paths: list[Path], sectors: int, seed: int, *, compare_c: bool, damage_x: int = 0
+) -> None:
     rng = random.Random(seed)  # noqa: S311 - a reproducible sample, not a secret
     c_test = _c_shift_test() if compare_c else None
     tally = {"cases": 0, "mismatches": 0}
 
     def test(self_r: np.ndarray, x: np.ndarray, y: np.ndarray) -> int | None:
         """Python's answer, or C's when comparing; every case checked both ways."""
-        py = _shifted(self_r, x, y)
+        py = None if (self_r == 0).any() else _shifted(self_r, x, y)
         if c_test is None:
             return py
         c = c_test(x, y)
@@ -262,7 +293,7 @@ def predicate(paths: list[Path], sectors: int, seed: int, *, compare_c: bool) ->
         + "   (TP at 624 B damage)"
     )
     for path in paths:
-        _print_rows(path.name, _sample_container(path, sectors, rng, test))
+        _print_rows(path.name, _sample_container(path, sectors, rng, test, damage_x))
     if c_test is not None:
         print(
             f"C vs Python: {tally['mismatches']} disagreements"
