@@ -1,6 +1,17 @@
 # max-variation — random rung x random run-up x random order, around the flagged
 # sectors.
 #
+# WHAT DAMAGE IT IS FOR (kgr, 2026-11-25: "why does this profile exist")
+#   Best for:  a HANDFUL of flagged sectors (light, localised damage). The
+#              fastest profile there on the bench, 5x quicker than track-ladder
+#              on Tracy.
+#   Poor for:  broad damage: 0/9 at high flagged counts. The automatic chain
+#              does not run it above 5 flagged sectors.
+#   Exists because the bench found that VARIATION (speed, run-up length and read
+#   order, all at once) is what recovers sectors, not the size of the read; the
+#   span-fixed control separated the two. It varies everything around each
+#   flagged sector.
+#
 # Bench: 13/20 (0.65) overall, but that average hides the shape: fastest arm at low
 # n (5x quicker than track-ladder on Tracy) and 0/9 at high n. Use it when the
 # damage is a handful of sectors; it collapses when the defect is broad.

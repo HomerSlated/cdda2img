@@ -5,6 +5,17 @@
 # fewest C2 sectors for this track, or the slowest rung before there is any.
 # Every read asks AccuDisc for a cache defeat.
 #
+# WHAT DAMAGE IT IS FOR (kgr, 2026-11-25: "why does this profile exist")
+#   Best for:  LIGHT damage that one clean re-read at a good speed fixes. The
+#              fastest whole-track profile when its first read succeeds (18 s vs
+#              20 s for track-ladder on Tracy t8).
+#   Poor for:  heavy damage: 1/3 at ABBA t19, where track-ladder got 3/3. It
+#              never changes speed, and an error that is stable at that speed
+#              stays.
+#   Exists as the cheap option when you already know a speed that reads this
+#   disc well (`recovery_speed`, or "auto" to hold the rung whose re-reads
+#   flagged the fewest C2 errors).
+#
 # Bench: 14/19 (0.74). Beats track-ladder on time when the first attempt succeeds
 # (18 s vs 20 s on Tracy t8) and loses badly when it does not — 1/3 against the
 # ladder's 3/3 at ABBA t19. Choose it when you already know the damage is light.

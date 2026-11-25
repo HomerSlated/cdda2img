@@ -1,5 +1,14 @@
 # span-fixed — re-read a large FIXED span ending at the flagged sector, at one speed.
 #
+# WHAT DAMAGE IT IS FOR (kgr, 2026-11-25: "why does this profile exist")
+#   Best for:  not a candidate: a CONTROL. In principle, damage wider than the
+#              flagged sectors, read in one long streaming pass at a speed known
+#              to be good.
+#   Poor for:  measured 1/16, against max-variation's 2/3 on the same target.
+#   Exists to separate two explanations of max-variation's wins: a big read, or
+#   variation. This holds the read big and the variation at zero, and showed that
+#   size alone is not it.
+#
 # EXPERIMENTAL, and a control rather than a candidate. It exists to separate two
 # confounded explanations of max-variation's wins: it reads 145-664 sectors AND it
 # randomises speed and run-up, while sector-runup reads 35 and randomises nothing.

@@ -1,5 +1,19 @@
 # sector-runup — re-read each flagged sector with a fixed run-up ahead of it.
 #
+# WHAT DAMAGE IT IS FOR (kgr, 2026-11-25: "why does this profile exist")
+#   Best for:  a FEW flagged sectors, especially where single-sector re-reads keep
+#              failing. Measured 2026-11-25, Tracy track 8 (capture at 4x, the
+#              same two flagged sectors 112502 and 113058): it matched AccurateRip
+#              after 8 reads, where sector-hammer had failed 30. Each read streams
+#              the 32 sectors before a flagged sector and the 2 after, so it also
+#              reaches unflagged damage that close.
+#   Poor for:  broad damage (it reads only around flagged sectors). Bench: 2/20,
+#              both on one easy target, 0/3 on every hard one.
+#   Exists as the cheapest way to give the drive a running start at the defect.
+#   On the bench a bare single-sector read was byte-exact 0.20 of the time at
+#   114436@40x, against 0.60 with a 16-64 sector run-up. Why the run-up helps is
+#   not measured, only that it does.
+#
 # EXPERIMENTAL. Bench: 2/20 (0.10), and both wins were on one degenerate n=1 target.
 # 0/3 on every hard target. Kept because it is the cheapest arm that still gives the
 # drive a streaming approach to the defect, and because a negative result is only

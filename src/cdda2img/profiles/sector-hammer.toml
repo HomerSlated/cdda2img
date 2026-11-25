@@ -1,5 +1,17 @@
 # sector-hammer — re-read each flagged sector on its own, one sector per read.
 #
+# WHAT DAMAGE IT IS FOR (kgr, 2026-11-25: "why does this profile exist")
+#   Best for:  in principle, a flagged sector whose error is transient and reads
+#              right when simply asked again, with nothing wrong around it.
+#              MEASURED, nothing yet: 2/20 on the bench, 0/25 on the disc that
+#              motivated it, 0/520 on Tracy tracks 8-9 (Nov 2026), and on 2026-11-25
+#              30 failed reads of the two flagged sectors (112502, 113058) that
+#              sector-runup then fixed in 8.
+#   Poor for:  damage outside the flagged sectors themselves, which it cannot
+#              reach, and (as measured) most real damage.
+#   Exists as a CONTROL: the least-variation re-read there is, anchoring the low
+#   end so that the other profiles' gains mean something.
+#
 # EXPERIMENTAL, and the measured floor: on the bench (one speed, 32x) the minimum
 # variation of every arm. 2/20 (0.10), 0/25 on the disc that motivated the whole
 # bench, while plain whole-disc passes on the same disc came back clean ~27% of

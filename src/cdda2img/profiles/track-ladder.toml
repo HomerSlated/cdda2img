@@ -1,6 +1,17 @@
 # track-ladder — the default. Re-read the whole failed track, sweeping the drive's
 # admitted speed ladder, one rung per read.
 #
+# WHAT DAMAGE IT IS FOR (kgr, 2026-11-25: "why does this profile exist")
+#   Best for:  damage of any size, and the only profile proven on HEAVY damage:
+#              3/3 at ABBA t19 (47 flagged sectors), 19/20 over the whole bench.
+#              Choose it when you do not know what you face. The automatic chain
+#              tries it first when a track has more than 5 flagged sectors.
+#   Poor for:  speed on light damage. It re-reads the whole track at every rung,
+#              so the targeted profiles usually finish sooner when they work.
+#   Exists because read errors on a damaged disc are stable per SPEED (measured:
+#   a majority vote across speeds rebuilt the reference disc 7/7), so changing
+#   the speed is what turns an unreadable track into a readable one.
+#
 # Bench: 19/20 across 8 targets (0.95), the most reliable arm measured, and the sole
 # 3/3 at the hardest target (ABBA t19, n=47) where track-constant managed 1/3. That
 # gap is what makes the ladder non-optional: at high n the speed diversity IS the

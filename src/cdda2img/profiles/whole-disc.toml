@@ -3,6 +3,18 @@
 # against that one read. `ladder = "full"`: each pass reads at the next rung the
 # drive admits, fastest first, cycling (kgr, 2026-11-21).
 #
+# WHAT DAMAGE IT IS FOR (kgr, 2026-11-25: "why does this profile exist")
+#   Best for:  what the targeted profiles cannot reach: several failing tracks at
+#              once, damage the capture did not flag, and errors that depend on
+#              how the drive arrives at the area. A fresh full pass came back
+#              clean ~27% of the time on the disc where sector-hammer scored 0/25.
+#   Poor for:  cost. Every read is the whole audio session (about 20 minutes a
+#              sweep on Tracy); bench 11/20.
+#   Exists because it carries the most positional variation of any profile, and
+#   it is the original evidence that variation, not targeting, drives recovery.
+#   In the automatic chain it runs last, once, shared by every track still
+#   failing.
+#
 # Bench: 11/20 (0.55). Expensive per attempt, but it carries the most positional
 # variation of any single-speed arm — a fresh whole-disc pass came back clean ~27%
 # of the time on the disc where sector-hammer scored 0/25. That contrast is the
