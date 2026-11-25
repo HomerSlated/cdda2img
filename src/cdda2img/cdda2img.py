@@ -5055,9 +5055,13 @@ def _span_pass(
     best: dict[int, bytes],
     track: int,
     readable: tuple[int, int] | None = None,
+    records: list[str] | None = None,
 ) -> None:
     """Re-read every span once and record each accepted copy in *best*, replacing
-    the previous one. A failed span read is logged and skipped, not fatal."""
+    the previous one. A failed span read is logged and skipped, not fatal.
+
+    Each read is appended to *records* as its ``span_reads_track_<n>`` entry
+    (:func:`_span_read_record`)."""
     from cdda2img.accudisc_reader import read_span_detail
 
     for span in spans:
@@ -5079,11 +5083,40 @@ def _span_pass(
             )
         except (RuntimeError, OSError) as exc:
             log.warning("track %d span re-read failed: %s", track, exc)
+            if records is not None:
+                records.append(f"{span.start}+{span.count}@{speed or 0}X:error")
             continue
+        if records is not None:
+            records.append(_span_read_record(detail, speed))
         for i in range(detail.count):
             if _span_copy_accepted(detail, i):
                 off = i * _R6_BYTES_PER_FRAME
                 best[detail.start_lba + i] = detail.pcm[off : off + _R6_BYTES_PER_FRAME]
+
+
+def _span_read_record(detail: SpanDetail, speed: int | None) -> str:
+    """One span read as PROV ``span_reads_track_<n>`` writes it (rbi_spec):
+    ``<start>+<count>@<speed>X:<stage>=<n>/...:slips=<s>[/<off>]``."""
+    if detail.stage_cmds is None:
+        stages = "?"
+    else:
+        stages = "/".join(f"{k}={v}" for k, v in detail.stage_cmds.items() if v)
+        stages = stages or "none"
+    slips = f"slips={detail.slips}"
+    if detail.slips_off_frame is not None:
+        slips += f"/{detail.slips_off_frame}"
+    return f"{detail.start_lba}+{detail.count}@{speed or 0}X:{stages}:{slips}"
+
+
+def _lba_ranges(lbas: list[int]) -> str:
+    """Ascending LBAs as ``a,b-c,...`` (PROV ``span_target_lbas_track_<n>``)."""
+    runs: list[list[int]] = []
+    for lba in sorted(set(lbas)):
+        if runs and lba == runs[-1][1] + 1:
+            runs[-1][1] = lba
+        else:
+            runs.append([lba, lba])
+    return ",".join(str(a) if a == b else f"{a}-{b}" for a, b in runs)
 
 
 def _span_gate(
@@ -5197,6 +5230,8 @@ def _recover_flagged_spans(
             prov[f"span_targets_track_{t}"] = f"{len(targets)}/{len(spans)}"
             if not spans:
                 continue  # nothing flagged: the ladder is the only remedy left
+            prov[f"span_target_lbas_track_{t}"] = _lba_ranges(list(targets))
+            records: list[str] = []
 
             if ui is None:
                 print(f"  Re-reading {len(targets)} flagged sector(s) of track {t}…")
@@ -5214,8 +5249,17 @@ def _recover_flagged_spans(
                 if ui is not None:
                     ui.set_status(status_line[0], 0.0)
                 _span_pass(
-                    device, spans, profile, speed, prog_cb, best, t, readable=readable
+                    device,
+                    spans,
+                    profile,
+                    speed,
+                    prog_cb,
+                    best,
+                    t,
+                    readable=readable,
+                    records=records,
                 )
+                prov[f"span_reads_track_{t}"] = ",".join(records)
                 corrected = _span_gate(
                     base, best, w, read_offset, t, n_tracks, responses
                 )

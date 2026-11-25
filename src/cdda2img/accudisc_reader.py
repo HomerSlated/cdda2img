@@ -1912,21 +1912,23 @@ def _capture_counters(stats: Any, module: Any = None) -> CaptureCounters:
     if module is None or not _has_feature(module, _FEATURE_EFFORT_STATS):
         return counters
 
-    def table(values: Any, enum: Any) -> dict[str, int]:
-        return {
-            m.name.lower(): int(values[int(m)])
-            for m in enum
-            if int(m) < len(values) and values[int(m)]
-        }
-
     return dataclasses.replace(
         counters,
-        cmds=table(stats.cmds, module.Stage),
-        cmds_failed=table(stats.cmds_failed, module.Stage),
-        us=table(stats.us, module.Stage),
-        won_by=table(stats.won_by, module.Origin),
+        cmds=_effort_table(stats.cmds, module.Stage),
+        cmds_failed=_effort_table(stats.cmds_failed, module.Stage),
+        us=_effort_table(stats.us, module.Stage),
+        won_by=_effort_table(stats.won_by, module.Origin),
         speed_changes=int(stats.speed_changes),
     )
+
+
+def _effort_table(values: Any, enum: Any) -> dict[str, int]:
+    """One 0.53 effort array as ``{member name, lower case: count}``, zeros dropped."""
+    return {
+        m.name.lower(): int(values[int(m)])
+        for m in enum
+        if int(m) < len(values) and values[int(m)]
+    }
 
 
 def _read_disc_binding(
@@ -2834,6 +2836,13 @@ class SpanDetail:
     sectors_flagged: int
     sectors_recovered: int
     speed_honoured_x: int | None
+    #: The engine's own operations in this read, per stage (AccuDisc 0.53.0
+    #: ``ReadStats.cmds``, zeros dropped), ``None`` on an older engine. A
+    #: ``consensus`` count marks a read where the slip test, and so
+    #: ``shift_search``, had a pair to judge (AccuDisc 2026-11-25ae).
+    stage_cmds: dict[str, int] | None = None
+    #: Slips that were not a whole CIRC frame (0.56.0), ``None`` before it.
+    slips_off_frame: int | None = None
 
     @property
     def count(self) -> int:
@@ -3087,6 +3096,14 @@ def _read_span_detail_binding(
         sectors_flagged=stats.sectors_flagged,
         sectors_recovered=stats.sectors_recovered,
         speed_honoured_x=_speed_x_or_none(module, stats),
+        stage_cmds=(
+            _effort_table(stats.cmds, module.Stage)
+            if _has_feature(module, _FEATURE_EFFORT_STATS)
+            else None
+        ),
+        slips_off_frame=(
+            int(stats.slips_off_frame) if hasattr(stats, "slips_off_frame") else None
+        ),
     )
 
 

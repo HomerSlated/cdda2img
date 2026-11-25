@@ -138,7 +138,12 @@ def test_a_clean_re_read_of_the_flagged_spans_recovers_the_track(
     outcomes, prov = _run(pcm)
     assert outcomes == {2: "span_matched@p1"}
     assert pcm.read_bytes() == KEY  # every damaged sector repaired, nothing else moved
-    assert prov == {"span_targets_track_2": "3/2"}
+    assert prov["span_targets_track_2"] == "3/2"
+    # kgr 2026-11-25: which sectors were targeted, and what each read did.
+    assert prov["span_target_lbas_track_2"] == "60-61,75"
+    reads = prov["span_reads_track_2"].split(",")
+    assert len(reads) == 2  # one read per span, pass 1
+    assert all(r.endswith("@0X:?:slips=0") for r in reads)  # no ladder, old engine
 
 
 def test_only_the_padded_clusters_are_re_read(
@@ -344,3 +349,29 @@ def test_rip_image_runs_the_span_rung_before_the_ladder() -> None:
     ladder = src.index("_recover_failed_tracks(")
     assert span < ladder
     assert "if recovery_ladder and failed_tracks:" in src
+
+
+def test_a_span_read_record_names_its_stages_and_slips() -> None:
+    """AccuDisc 2026-11-25ae: consensus > 0 marks a read where shift_search had a
+    pair to judge; far + witness alone means it had nothing to compare."""
+    quiet = _detail(113054, 9, bytes(9 * _SECTOR), stage_cmds={"far": 1, "witness": 1})
+    assert C._span_read_record(quiet, 40) == "113054+9@40X:far=1/witness=1:slips=0"
+    busy = _detail(
+        113054,
+        9,
+        bytes(9 * _SECTOR),
+        stage_cmds={"far": 2, "witness": 1, "consensus": 3},
+        slips=2,
+        slips_off_frame=1,
+    )
+    assert C._span_read_record(busy, 32) == (
+        "113054+9@32X:far=2/witness=1/consensus=3:slips=2/1"
+    )
+    assert C._span_read_record(_detail(1, 1, bytes(_SECTOR), stage_cmds={}), 8) == (
+        "1+1@8X:none:slips=0"
+    )
+
+
+def test_target_lbas_are_written_as_ranges() -> None:
+    assert C._lba_ranges([113058, 112502]) == "112502,113058"
+    assert C._lba_ranges([5, 1, 2, 3, 7, 8, 10, 3]) == "1-3,5,7-8,10"
