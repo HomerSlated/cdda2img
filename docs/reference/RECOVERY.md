@@ -531,14 +531,23 @@ read-engine side; "caller" means cdda2img (or any application driving AccuDisc).
 - **Role**: gate (relative) — specifically detects positioning/jitter slips, the
   one error class C2 cannot see.
 - **AccuDisc status**: supported (`--overlap K` seam check + slip classification),
-  plus the **Accurate Stream probe** (`features --stream`) that tells you whether
-  overlap is needed at all.
+  plus the **Accurate Stream probe** (`features --stream`). The probe reports whether a
+  clean span re-read identically from different starts. It does not say whether
+  overlap is needed (see Conflicts).
 - **cdda2img status**: not wired; DB-gap reserve, same bar as 2.6.
 - **Conflicts**: costs throughput — measured ~1.77× slower than a plain read for
-  *zero* recovery benefit on clean discs → must stay opt-in / last-resort. On an
-  Accurate-Stream drive it is near-redundant (its whole purpose is catching slips
-  that Accurate Stream prevents); on a non-Accurate-Stream drive it is the only
-  defence against the C2-invisible class, and there it earns its cost.
+  *zero* recovery benefit on clean discs → must stay opt-in / last-resort.
+  **Measured blind to the slips actually seen** (LITE-ON LH-20A1S, 2026-09-19,
+  AccuDisc TODO.md): a displacement that holds from one point onward shifts both
+  sides of every later seam alike, so the seams agree. There, `--overlap 2` cost
+  2.56× and marked the slip site OK, and AccurateRip scored 0/11. The PX-716A's
+  2026-10-10 loss (12 samples, held to the lead-out) has the same shape. Overlap
+  sees a displacement only where two adjacent transfers differ.
+
+  **Accurate Stream is no guide either way:** both drives measured slipping report
+  `accurate_stream yes`. Corrected 2026-11-25: this entry said overlap was
+  near-redundant on an Accurate-Stream drive and the only defence on one without.
+  Only an absolute gate settles the C2-invisible class.
 - **Combinations**: with 2.6/2.11 as the DB-gap arbiter; C2 flags as a
   slip-vs-decode classifier (a region that changes between passes *without* C2
   flags is slip-shaped).
@@ -583,9 +592,11 @@ read-engine side; "caller" means cdda2img (or any application driving AccuDisc).
 - **Role**: re-acquirer tuning — the only component that changes the *drive's*
   behaviour rather than ours.
 - **Status**: **rejected for adoption** (experiment 2026-07-05,
-  `tools/modepage_experiment.py`); retained as a manual diagnostic
-  (`--recovery ERR,RETR`, saved page restored on every exit path) for genuinely
-  dying media. PX-716A default: error byte 0x00, retries 10.
+  `tools/modepage_experiment.py`, which is in neither repository today).
+  **Not an AccuDisc control** (corrected 2026-11-25). AccuDisc issues MODE SELECT
+  for the write-parameters page (05) only, and has no `--recovery ERR,RETR` flag.
+  This entry used to say the diagnostic was retained. The 2026-07-05 measurement
+  stands. PX-716A default: error byte 0x00, retries 10.
 - **Dependencies**: O_RDWR on the device node (MODE SELECT filtered on read-only
   fds; the `cdrom` group grants rw — still no root); drive must honour the page.
 - **Conflicts**: none found — inert for the miscorrection defect class (§3.6): the
@@ -869,7 +880,7 @@ read it before the flags**: the identical `--verify 2` is a ~20-second repair or
 | **R0 baseline** | whole-disc | `--retries 2` | plain read, error-retry only | free on clean sectors | no recovery |
 | ~~**R1**~~ | ~~whole-disc~~ | ~~`+ --c2-retries 3`~~ | **REFUSED since AccuDisc 0.43.0** (2026-09-16): `--c2-retries` requires `--verify 2`+, so it no longer rides a single whole-disc pass — use it inside R3 on flagged spans | was cheap (cut C2 58→2 on ABBA at +0 s) | a single-pass chunk on a LITE-ON LH-20A1S landed 48–96 bytes late with clean C2, and a rescue anchored to it marked a late sector RECOVERED; only a second transfer can check position |
 | **R2** | **flagged spans** | `+ --verify 2` | read everything ≥2× cache-defeated, resolve by consensus | catches non-deterministic errors the single pass hides; marks irreconcilable as `suspect` | **~5–15× slower** — reads the whole *scope* again; whole-disc = the ~4 h blow-up |
-| **R3** | **flagged spans** | `+ --verify 2 --c2-retries 3 --overlap 4` | full careful recovery: consensus + C2-hunt + seam check | **reached C2 = 0 on every damaged span** in the suite; the recommended repair rung | slowest short of the ladder; `--overlap` for the positioning-slip class only |
+| **R3** | **flagged spans** | `+ --verify 2 --c2-retries 3 --overlap 4` | full careful recovery: consensus + C2-hunt + seam check | **reached C2 = 0 on every damaged span** in the suite; the recommended repair rung | slowest short of the ladder; `--overlap` for the positioning-slip class only, and measured blind to a displacement that holds from one point on (§2.7) |
 | **R4** | **flagged spans** | `+ --ladder 8,4` | escalate residual problem sectors to careful-mode speed | recovers the most (rescues speed-marginal sectors R1–R3 can't) | highest cost; only earns it when R3 leaves residue |
 
 **The scope rule that must not be mis-read:** a rung is whole-disc-safe iff its
@@ -897,7 +908,10 @@ from the `--map-file` → R2–R4 on those spans → splice → re-gate whole-di
   Prefer it over piling on `--verify N` at one speed.
 - **`--overlap` is single-purpose** — the C2-invisible positioning-slip class. It
   costs ~1.77× for zero benefit on discs without slips. Opt-in (R3+), never a
-  default. Run `features --stream` first: `accurate_stream yes` → skip it.
+  default. It is measured blind to a displacement that holds from one point onward
+  (§2.7), so do not count on it for that class. `accurate_stream yes` is no reason
+  to skip it or to rely on it: both drives measured slipping report yes. Corrected
+  2026-11-25: this said "`accurate_stream yes` → skip it".
 - **`--speed` interacts with everything and lies.** The requested Nx is *not* the
   achieved rate (§12.7). Set it, then confirm via wall-time or GET PERFORMANCE.
   Some request values are actively Q-hazardous (§12.7).
@@ -1068,8 +1082,10 @@ outside reference (AccurateRip/CTDB) can.*
 - **Verify passes (`--verify P`).** Read everything P times and compare;
   disagreements re-read until two agree ("recovered") or give up ("suspect").
 - **Overlap checking (`--overlap K`).** Reads each batch slightly past its end and
-  compares the overlap — catches the drive drifting position, which no flag
-  reports. Run `accudisc features --stream` first: `accurate_stream yes` → skip it.
+  compares the overlap — catches the drive drifting position where two neighbouring
+  batches drift differently, which no flag reports. It misses a drift that holds
+  from one point onward, and `accurate_stream yes` does not make it unnecessary
+  (§2.7).
 - **Speed ladder (`--ladder 32,16,8,4`).** Problem sectors retried at different
   speeds — a spot that fails at 32× often reads fine at 8×, and *variety* matters
   more than slowness.
@@ -1080,7 +1096,7 @@ outside reference (AccurateRip/CTDB) can.*
 # Does my drive support C2 error pointers? (exit 0 = yes, usable)
 accudisc --device /dev/sr0 features
 
-# Does my drive have Accurate Stream? (if yes, --overlap is unnecessary)
+# Did a clean span re-read identically from different starts? (yes is NOT "cannot slip"; §2.7)
 accudisc --device /dev/sr0 features --stream
 
 # Show the disc layout / raw full TOC / CD-Text (lead-in only — instant)
@@ -1629,6 +1645,11 @@ verified recoveries from the audio ladder in this run.
    outcomes on a genuinely damaged sector, where the drive's real-time
    retry/correction logic can decide differently per attempt — consistent with the
    intermittent baselines in §12.3.
+
+   **Corrected 2026-11-25.** "Guarantees" is too strong. The same drive later lost
+   12 samples on intact data, in two of four whole-disc passes (2026-10-10, AccuDisc
+   TODO.md). "Correctly dropped `--overlap`" stands on cost alone, because overlap
+   is measured blind to that shape (§2.7).
 
 ### 12.5 Validity assessment
 
@@ -2310,4 +2331,4 @@ That set lets a future reader distinguish "we never checked" from "we checked
 thoroughly and this disc cannot be verified" — which is the only useful thing
 left to say about it.
 
-Blake3 446e1e9fa54d2d16026a743864d24d6fe645d8203363555430a5b5c375adb9f5
+Blake3 cefb596fe8d00cd67386a92e2fa927bd35e27a349850e2025ff0ea12d18380fb
