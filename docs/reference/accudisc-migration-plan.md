@@ -897,6 +897,18 @@ What it changes in this plan, pending AccuDisc's own audit (§268.5) and Keith's
   > `speed_changes`, `max_read_cmds`, `reported_reads`). Engine speed changes will share
   > `recovery_max_speed_changes` (1000) when enforced, not get a limit of their own.
   > Re-derive the 10,000 from recorded rips before adoption.
+  >
+  > **0.58.0, `accudisc_read_policy()` (notice 2026-11-25y, reviewed in outbound §281).**
+  > Revision 1's `SPAN_RESCUE` row is our post-series `span-flagged` recipe: overlap 0,
+  > `cache_defeat` on, verify 2, a rescue ladder below the attempt speed (or the next rung up),
+  > `rescue_by_rung` on, and `shift_search` off pending the A/B. **`GATED_REREAD` asks for
+  > C2 whenever the drive has it.** That changes the AR-gated read itself: 2646-byte records,
+  > and PIO on the LITE-ON for transfers that are not a multiple of 16 bytes. Every bench rate
+  > was measured with C2 off on the re-reads. So it is adopted only as an A/B arm, scored by
+  > AccurateRip, and never by passing `c2_usable = 0`, which would record a false `R_NO_C2`.
+  > `--ad-ladder` rungs go in as `admitted_x`, since the policy refuses a `speed_x` outside it.
+  > We pass 0 for `CAPTURE`'s budgets. A refusal on AccuDisc's side was declined: the rule is
+  > archival policy, and it is ours.
 - **The `--ad-*` passthrough does less than §9.4 and the tests above assume.** `--ad-retries`,
   `--ad-c2-retries`, `--ad-verify`, `--ad-overlap` and `--ad-recovery` are accepted, take
   rung 1 (so the chain gives way to the plain ladder) and are recorded in PROV
