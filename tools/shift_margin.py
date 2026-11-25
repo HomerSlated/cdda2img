@@ -84,9 +84,16 @@ def main() -> int:
         action="store_true",
         help="measure AccuDisc's proposed shift test (corrected form) instead",
     )
+    ap.add_argument(
+        "--compare-c",
+        action="store_true",
+        help="with --predicate: also run every case through AccuDisc's C "
+        "accudisc.shift_test() (0.55.0), count per-case disagreements, and print "
+        "the table from the C answers",
+    )
     args = ap.parse_args()
     if args.predicate:
-        predicate(args.rbi, args.sectors, args.seed)
+        predicate(args.rbi, args.sectors, args.seed, compare_c=args.compare_c)
         return 0
     rng = random.Random(args.seed)  # noqa: S311 - a reproducible sample, not a secret
     bands = (
@@ -180,8 +187,73 @@ def _damage(x: np.ndarray, n: int, rng: random.Random) -> np.ndarray:
     return y
 
 
-def predicate(paths: list[Path], sectors: int, seed: int) -> None:
+def _c_shift_test():
+    """AccuDisc's ``shift_test`` (0.55.0) through the seam's binding lookup."""
+    from cdda2img import accudisc_reader as ar
+
+    module = ar._binding("shift test")
+    if "shift_test" not in module.features:
+        msg = "this AccuDisc has no shift_test (needs 0.55.0)"
+        raise SystemExit(msg)
+    return lambda x, y: module.shift_test(bytes(x), bytes(y))
+
+
+def _sample_container(path: Path, sectors: int, rng: random.Random, test) -> dict:
+    """Per band: for each sampled sector with signal, (false-positive flags per
+    damage level, true-detection flags per shift)."""
+    pcm = _pcm(path)
+    n_sec = len(pcm) // SECTOR
+    rows: dict[str, list] = {"quiet": [], "middle": [], "loud": []}
+    for i in rng.sample(range(4, n_sec - 4), sectors):
+        x = np.asarray(pcm[i * SECTOR : (i + 1) * SECTOR])
+        self_r = _rates(x, x)
+        self_r[MAX_K] = np.inf
+        if not x.any() or (self_r == 0).any():
+            continue  # no alignment signal: the engine declines these already
+        lvl = _level_dbfs(x)
+        band = "quiet" if lvl < -40 else "middle" if lvl < -20 else "loud"
+        fp = [test(self_r, x, _damage(x, d, rng)) is not None for d in DAMAGE]
+        tp = []
+        for k in TRUE_K:
+            lo = i * SECTOR - SAMPLE * k
+            y = _damage(np.asarray(pcm[lo : lo + SECTOR]), DAMAGE[-1], rng)
+            tp.append(test(self_r, x, y) == k)
+        rows[band].append((fp, tp))
+    return rows
+
+
+def _print_rows(name: str, rows: dict) -> None:
+    for band, got in rows.items():
+        if not got:
+            continue
+        m = len(got)
+        fps = "  ".join(
+            f"{sum(g[0][j] for g in got):3}/{m:<3}" for j in range(len(DAMAGE))
+        )
+        tps = "  ".join(
+            f"{sum(g[1][j] for g in got):3}/{m:<3}" for j in range(len(TRUE_K))
+        )
+        print(f"{name[:26]:26} {band:8} {m:4}  {fps}  {tps}")
+
+
+def predicate(paths: list[Path], sectors: int, seed: int, *, compare_c: bool) -> None:
     rng = random.Random(seed)  # noqa: S311 - a reproducible sample, not a secret
+    c_test = _c_shift_test() if compare_c else None
+    tally = {"cases": 0, "mismatches": 0}
+
+    def test(self_r: np.ndarray, x: np.ndarray, y: np.ndarray) -> int | None:
+        """Python's answer, or C's when comparing; every case checked both ways."""
+        py = _shifted(self_r, x, y)
+        if c_test is None:
+            return py
+        c = c_test(x, y)
+        tally["cases"] += 1
+        if c != py:
+            tally["mismatches"] += 1
+            if tally["mismatches"] <= 5:
+                print(f"  MISMATCH: python {py}, C {c}")
+        return c
+
     print(
         f"{'container':26} {'band':8} {'n':>4}  "
         + "  ".join(f"FP@{d:<3}" for d in DAMAGE)
@@ -190,35 +262,12 @@ def predicate(paths: list[Path], sectors: int, seed: int) -> None:
         + "   (TP at 624 B damage)"
     )
     for path in paths:
-        pcm = _pcm(path)
-        n_sec = len(pcm) // SECTOR
-        rows: dict[str, list] = {"quiet": [], "middle": [], "loud": []}
-        for i in rng.sample(range(4, n_sec - 4), sectors):
-            x = np.asarray(pcm[i * SECTOR : (i + 1) * SECTOR])
-            self_r = _rates(x, x)
-            self_r[MAX_K] = np.inf
-            if not x.any() or (self_r == 0).any():
-                continue  # no alignment signal: the engine declines these already
-            lvl = _level_dbfs(x)
-            band = "quiet" if lvl < -40 else "middle" if lvl < -20 else "loud"
-            fp = [_shifted(self_r, x, _damage(x, d, rng)) is not None for d in DAMAGE]
-            tp = []
-            for k in TRUE_K:
-                lo = i * SECTOR - SAMPLE * k
-                y = _damage(np.asarray(pcm[lo : lo + SECTOR]), DAMAGE[-1], rng)
-                tp.append(_shifted(self_r, x, y) == k)
-            rows[band].append((fp, tp))
-        for band, got in rows.items():
-            if not got:
-                continue
-            m = len(got)
-            fps = "  ".join(
-                f"{sum(g[0][j] for g in got):3}/{m:<3}" for j in range(len(DAMAGE))
-            )
-            tps = "  ".join(
-                f"{sum(g[1][j] for g in got):3}/{m:<3}" for j in range(len(TRUE_K))
-            )
-            print(f"{path.name[:26]:26} {band:8} {m:4}  {fps}  {tps}")
+        _print_rows(path.name, _sample_container(path, sectors, rng, test))
+    if c_test is not None:
+        print(
+            f"C vs Python: {tally['mismatches']} disagreements"
+            f" in {tally['cases']} cases"
+        )
 
 
 if __name__ == "__main__":
