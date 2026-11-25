@@ -104,7 +104,7 @@ def test_lenient_mode_drops_the_bad_key_and_keeps_the_rest(_cfg) -> None:
     _cfg('recovery_passes = 500\ndefault_device = "/dev/sr1"\n')
     cfg = C.load_config(strict=False)
     assert cfg.default_device == "/dev/sr1"
-    assert cfg.recovery_passes == 3  # schema default, not the rejected 500
+    assert cfg.recovery_passes == 1  # schema default, not the rejected 500
 
 
 def test_lenient_mode_discards_rather_than_keeps_an_invalid_value(_cfg) -> None:

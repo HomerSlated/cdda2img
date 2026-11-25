@@ -17,7 +17,7 @@
 #
 # `passes = 1`: one sweep per attempt, as many reads as targets x rungs (kgr,
 # 2026-11-24; it was 8 reads), drawn at random, so no pairing is promised. Config or
-# CLI `recovery_attempts` repeats the sweep; the first AccurateRip match ends the
+# CLI `recovery_passes` repeats the sweep; the first AccurateRip match ends the
 # reads. `budget_s` is seconds per read: a track may take budget_s x its planned
 # reads, a guard against a stalled drive that should never bind.
 # The seed of its random choices is in PROV (recovery_seed), so its reads can

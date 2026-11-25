@@ -1,4 +1,5 @@
-"""Sweeps and attempts (kgr, 2026-11-24).
+"""Sweeps and passes (kgr, 2026-11-24; the repeat count merged into
+``recovery_passes`` on 2026-11-25).
 
 "For the standard profiles, set the number of passes to the minimum needed to
 cover all speeds ... Each full round of passes per profile = 1x attempt. Have a
@@ -7,8 +8,12 @@ config option --recovery-attempts set to 1 by default."
 A pass is now one SWEEP: every target at every speed the profile reads at. How
 many reads that is depends on the disc's admitted ladder and the track's flagged
 sectors, so it is computed, not written in the TOML: every shipped profile has
-``passes = 1``. ``recovery_attempts`` repeats the sweeps, inside one call, and
+``passes = 1``. ``recovery_attempts`` repeated the sweeps, inside one call, and
 the first AccurateRip match still ends a track's reads.
+
+2026-11-25, kgr: "merge recovery_attempts into recovery_passes (keep the name as
+recovery_passes)". One setting, ``recovery_passes`` (config, or
+``--recovery-passes``), default 1, 0 = no recovery.
 """
 
 from __future__ import annotations
@@ -131,9 +136,9 @@ _SHIPPED = sorted(p.stem for p in R.shipped_profiles_dir().glob("*.toml"))
 
 
 @pytest.mark.parametrize("name", _SHIPPED)
-def test_every_shipped_profile_runs_one_sweep_per_attempt(name: str) -> None:
+def test_every_shipped_profile_runs_one_sweep_per_pass(name: str) -> None:
     """One sweep already tries every speed, so 1 is the minimum; more effort
-    comes from recovery_attempts, the same for every profile. Loaded from the
+    comes from recovery_passes, the same for every profile. Loaded from the
     shipped file itself, so a user profile of the same name cannot answer."""
     path = R.shipped_profiles_dir() / f"{name}.toml"
     assert R.load_profile(name, profiles={name: path}).passes == 1
@@ -198,10 +203,10 @@ def test_a_whole_disc_sweep_is_one_read_per_rung(monkeypatch, tmp_path) -> None:
     assert all((c["start"], c["count"]) == (0, _LEADOUT) for c in drive.calls)
 
 
-# ---- attempts ------------------------------------------------------------------------
+# ---- passes --------------------------------------------------------------------------
 
 
-def test_attempts_repeat_the_sweep(monkeypatch, tmp_path) -> None:
+def test_passes_repeat_the_sweep(monkeypatch, tmp_path) -> None:
     drive = _Drive()
     _strategy(
         monkeypatch,
@@ -224,7 +229,7 @@ def test_attempts_repeat_the_sweep(monkeypatch, tmp_path) -> None:
         ("span-flagged", "spans"),
     ],
 )
-def test_the_chain_hands_every_stage_passes_times_attempts(
+def test_the_chain_hands_every_stage_profile_passes_times_recovery_passes(
     monkeypatch, stage: str, how: str
 ) -> None:
     seen: dict[str, int] = {}
@@ -257,16 +262,18 @@ def test_the_chain_hands_every_stage_passes_times_attempts(
         disc_damage=bytes(1 if x == 150 else 0 for x in range(_LEADOUT)),
         ui=None,
         cohort=None,
-        attempts=3,
+        recovery_passes=3,
     )
     app._run_chain_stage(stage, [SimpleNamespace(track=2)], ctx)
-    assert seen[how] == 3  # passes 1 x attempts 3
+    # passes 1 x recovery_passes 3: the same 3 sweeps kgr's series ran with
+    # recovery_attempts = 3 before the merge, so the merge changes no stage.
+    assert seen[how] == 3
 
 
 # ---- success = early exit ------------------------------------------------------------
 
 
-def test_a_match_ends_the_reads_however_many_attempts_remain(
+def test_a_match_ends_the_reads_however_many_passes_remain(
     monkeypatch, tmp_path
 ) -> None:
     drive = _Drive(good_from=2)
@@ -279,7 +286,7 @@ def test_a_match_ends_the_reads_however_many_attempts_remain(
         sweeps=3,
     )
     assert outcomes == {2: "strategy_matched@a2"}
-    assert len(drive.calls) == 2  # not the 15 that three attempts allow
+    assert len(drive.calls) == 2  # not the 15 that three passes allow
 
 
 def test_whole_disc_stops_once_every_track_has_matched(monkeypatch, tmp_path) -> None:
@@ -317,7 +324,7 @@ def test_the_speed_ladder_stops_at_its_first_match(monkeypatch, tmp_path) -> Non
         [["block"]],
         3,
         _LADDER,
-        3,  # sweeps: passes 1 x attempts 3
+        3,  # sweeps: passes 1 x recovery_passes 3
         0,
         None,
     )
@@ -418,34 +425,67 @@ def test_a_stalled_drive_still_hits_the_time_bound(monkeypatch, tmp_path) -> Non
 # ---- the option ------------------------------------------------------------------------
 
 
-def test_recovery_attempts_defaults_to_one_and_is_bounded() -> None:
+def test_recovery_passes_defaults_to_one_and_zero_turns_recovery_off() -> None:
     from cdda2img.config import Config
 
-    assert Config().recovery_attempts == 1
-    assert validate({"recovery_attempts": 3}, CONFIG_SCHEMA) == []
-    for bad in (0, 101, "3", True):
-        assert validate({"recovery_attempts": bad}, CONFIG_SCHEMA), bad
+    assert Config().recovery_passes == 1
+    assert validate({"recovery_passes": 3}, CONFIG_SCHEMA) == []
+    assert validate({"recovery_passes": 0}, CONFIG_SCHEMA) == []  # the kill switch
+    for bad in (-1, 101, "3", True):
+        assert validate({"recovery_passes": bad}, CONFIG_SCHEMA), bad
+
+
+def test_recovery_attempts_is_no_longer_a_config_key() -> None:
+    """Merged into recovery_passes (kgr, 2026-11-25). A config still naming it is
+    refused, loudly, rather than read as something it no longer is."""
+    assert validate({"recovery_attempts": 3}, CONFIG_SCHEMA)
 
 
 @pytest.mark.parametrize(
-    ("value", "ok"), [("3", 3), ("1", 1), ("0", None), ("x", None)]
+    ("value", "ok"),
+    [("3", 3), ("1", 1), ("0", 0), ("-1", None), ("101", None), ("x", None)],
 )
 def test_the_cli_option(monkeypatch, value: str, ok: int | None) -> None:
-    monkeypatch.setattr("sys.argv", ["cdda2img", "rip", "--recovery-attempts", value])
+    monkeypatch.setattr("sys.argv", ["cdda2img", "rip", "--recovery-passes", value])
     if ok is None:
         with pytest.raises(SystemExit):
             app.parse_args()
     else:
-        assert app.parse_args().recovery_attempts == ok
+        assert app.parse_args().recovery_passes == ok
 
 
-def test_the_cli_falls_back_to_the_config(monkeypatch) -> None:
+def test_recovery_attempts_is_no_longer_an_option(monkeypatch) -> None:
+    monkeypatch.setattr("sys.argv", ["cdda2img", "rip", "--recovery-attempts", "3"])
+    with pytest.raises(SystemExit) as exc:
+        app.parse_args()
+    assert isinstance(exc.value, SystemExit)
+    assert exc.value.code == 1
+
+
+@pytest.mark.parametrize(
+    ("cli", "configured", "want"),
+    [(None, 3, 3), (0, 3, 0), (2, 0, 2), (None, 0, 0), (5, 1, 5)],
+)
+def test_the_cli_overrides_the_config_and_zero_is_a_value(
+    cli: int | None, configured: int, want: int
+) -> None:
+    """`--recovery-passes 0` over a config of 3 is no recovery, not 3: the CLI is
+    tested against None, never for truth."""
+    assert app._effective_recovery_passes(cli, configured) == want
+
+
+def test_the_rip_uses_the_one_effective_value_everywhere(monkeypatch) -> None:
     monkeypatch.setattr("sys.argv", ["cdda2img", "rip"])
-    assert app.parse_args().recovery_attempts is None
+    assert app.parse_args().recovery_passes is None
     src = inspect.getsource(app.rip_image)
-    assert "attempts = recovery_attempts or cfg.recovery_attempts" in src
-    assert "attempts=attempts" in src  # into the chain's context
-    assert 'ladder_prov["recovery_attempts"] = str(attempts)' in src
-    assert "recovery_attempts=args.recovery_attempts" in inspect.getsource(
-        app._dispatch
-    )
+    assert "_effective_recovery_passes(recovery_passes, cfg.recovery_passes)" in src
+    # Nothing else may read the config value past the CLI override.
+    assert src.count("cfg.recovery_passes") == 1
+    assert "ar_responses and passes > 0" in src  # the kill switch
+    assert src.count("recovery_passes=passes") == 2  # chain context, span rung
+    assert 'provenance["recovery_passes"] = str(passes)' in src
+    # The old setting is gone from the code (comments keep its history).
+    assert "cfg.recovery_attempts" not in src
+    assert '"recovery_attempts"' not in src  # the PROV key
+    assert "attempts=attempts" not in src
+    assert "recovery_passes=args.recovery_passes" in inspect.getsource(app._dispatch)

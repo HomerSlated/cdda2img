@@ -857,6 +857,17 @@ What it changes in this plan, pending AccuDisc's own audit (§268.5) and Keith's
   > verify defeats only its own second transfer, so the rung should pass `cache_defeat`.
   > AccuDisc's answer (policy surface as a pure function, the stats and budget fields, the
   > reference-compare primitive, Posture A) is awaiting Keith's decisions.
+  >
+  > **Keith's decisions, 2026-11-25 10:22 GMT ("Yes to all"):** AccuDisc designs the policy
+  > function, the stats extension (before any engine recovery inside an AR-gated read), a
+  > count budget and the reference-compare primitive, all opt-in. Posture B stays, and
+  > `c2_retries = 0` and `c2_witness` off stand, until a hardware A/B on Tracy after his
+  > series (AccuDisc 2026-11-25b: `c2_retries` repairs a damaged sector when the transfers
+  > are in place and makes it worse when the re-reads share a displacement). After the
+  > series, `span-flagged` drops `overlap_sectors`, asks for `cache_defeat` and gets a rescue
+  > ladder. Done the same day: the five `--ad-*` flags deleted, the capture's counters in PROV
+  > (`capture_*`), `recovery_attempts` merged into `recovery_passes`. Not yet put to him:
+  > AccuDisc's G.3 (order the rescue by rung, not by sector).
 - **The `--ad-*` passthrough does less than §9.4 and the tests above assume.** `--ad-retries`,
   `--ad-c2-retries`, `--ad-verify`, `--ad-overlap` and `--ad-recovery` are accepted, take
   rung 1 (so the chain gives way to the plain ladder) and are recorded in PROV
@@ -864,9 +875,13 @@ What it changes in this plan, pending AccuDisc's own audit (§268.5) and Keith's
   Measured 2026-11-25 by reading every consumer of `ad_flags`. **Deleted the same day**
   (Keith: "Yes to all", 10:22 GMT); rbi_spec's `recovery_ad_flags` row carries the audit note
   for older containers.
-- **`profile.passes` × `recovery_attempts` and `recovery_passes` overlap** (§9.2's note above
-  resolved the first overlap; `recovery_attempts`, added 2026-11-24, made a second). To be
-  settled with Keith.
+- **`profile.passes` × `recovery_attempts` and `recovery_passes` overlapped** (§9.2's note above
+  resolved the first overlap; `recovery_attempts`, added 2026-11-24, made a second). **Settled
+  2026-11-25** (Keith: "merge recovery_attempts into recovery_passes (keep the name as
+  recovery_passes)"): one setting, config `recovery_passes` / `--recovery-passes`, default 1,
+  0 = recovery off, with `recovery_attempts`' meaning. The kept name changed meaning, so an old
+  config setting it now multiplies every stage, and `--ad-ladder`'s default fell from 3 sweeps
+  to 1. rbi_spec's `recovery_passes` row dates each of its three meanings.
 - **Constraints agreed in §268.1:** no default flips in the engine (our checkout tracks
   AccuDisc's HEAD); no change while Keith's per-profile hardware series runs; engine effort
   recorded in PROV apart from ours; per-read budgets re-derived by whichever side owns them.

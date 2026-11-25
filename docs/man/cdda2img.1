@@ -161,9 +161,9 @@ holds
 Each read asks the drive to bypass its cache (the whole\-disc read excepted),
 each read is recorded in the container's provenance, and a track is written
 only when it matches AccurateRip.
-Each profile runs one sweep per attempt: every flagged sector (or the track, or
+Each profile runs one sweep per pass: every flagged sector (or the track, or
 the disc) at every speed the profile reads at, the least that tries them all;
-.B \-\-recovery\-attempts
+.B \-\-recovery\-passes
 repeats the sweep, and the first AccurateRip match ends a track's re\-reads.
 .B NOTE:
 every profile but
@@ -292,14 +292,19 @@ Default: the configuration's
 .BR recovery_speed ,
 32.
 .TP
-.BI \-\-recovery\-attempts " N"
+.BI \-\-recovery\-passes " N"
 How many times each recovery profile runs its sweep: every flagged sector (or
 the whole track, or the whole disc) re\-read at every speed the profile reads
 at.
-The first AccurateRip match ends a track's re\-reads, however many attempts
+With
+.BR \-\-ad\-ladder ,
+how many times that ladder is walked.
+The first AccurateRip match ends a track's re\-reads, however many passes
 remain.
+.B 0
+turns recovery off.
 Default: the configuration's
-.BR recovery_attempts ,
+.BR recovery_passes ,
 1.
 .TP
 .B \-\-cdr

@@ -47,6 +47,14 @@ That sequence *is* the strategy.
 | **Re-acquirers** | speed-ladder sweeps (2.5), flagged-span re-reads (2.5a, opt-in), bench strategies (2.5b, opt-in, in place of 2.5), retry ladder (2.9), mode-page tuning (2.10) | nothing | AccuDisc read engine + driver |
 | **Infrastructure** | offset-domain management (2.13) | known drive offset | shared: AccuDisc supplies the offset, cdda2img owns the domain |
 
+**Re-reads follow the same split** (Keith, 2026-11-25): "Re-reads that only reference
+local resources (e.g. C2 pointers) belong to AccuDisc. Re-reads that reference online
+resources (e.g. AccurateRip) belong to cdda2img." So the engine chooses its own retries,
+rescues, consensus and witness reads, and cdda2img chooses which AccurateRip-gated reads to
+make and when to stop. The consolidation this started (a policy function in AccuDisc, its
+effort recorded in PROV, a per-read budget, the C2-retry and capture-rescue questions) is
+correspondence §268–§270 and AccuDisc 2026-11-25a–c.
+
 **The exit chain on a failed gate** (the load-bearing idea):
 
 > CTDB parity repair (zero extra reads) → displacement re-slice (zero extra
@@ -288,7 +296,8 @@ read-engine side; "caller" means cdda2img (or any application driving AccuDisc).
 - **Dependencies**: a settable read speed (`accudisc_reader.set_speed` → AccuDisc's
   `Device.set_speed`, which prefers SET STREAMING and falls back to
   `CDROM_SELECT_SPEED`); requires an external gate (AR) to know when to stop.
-- **Optional**: `recovery_passes` config (default 3; 0 disables).
+- **Optional**: `recovery_passes` (config, or `--recovery-passes`; default 1 since
+  2026-11-25, when `recovery_attempts` was merged into it; 0 disables).
 - **Auto-detected**: the ladder is probed live by `drive_speed.admitted_ladder` over
   `accudisc_reader.speed_ladder_rows` — timed reads at three radii per rung, judged
   by AccuDisc's own verdict. **Probe it every time; never cache it.** The ladder is a
@@ -338,7 +347,7 @@ read-engine side; "caller" means cdda2img (or any application driving AccuDisc).
 - **Name**: flagged-span rung — `--profile span-flagged` (`granularity = "span"`).
 - **Role**: re-acquirer, cheaper than 2.5. It re-reads only the sectors the capture
   pass flagged, clustered into padded spans (`span_gap`, `span_pad`), one pass
-  per admitted rung for each of `passes` x `recovery_attempts` sweeps (2.5c).
+  per admitted rung for each of `passes` x `recovery_passes` sweeps (2.5c).
 - **AccuDisc status**: supported (`read_span_detail`: per-sector status map, C2,
   and the Q-position lane; needs `caller_map_buffers` and the sub-Q map).
 - **cdda2img status**: included, **opt-in only, and not yet exercised on a drive**
@@ -450,7 +459,8 @@ read-engine side; "caller" means cdda2img (or any application driving AccuDisc).
   recovered, or aborting with an error").
 - **Role**: re-acquirer; the whole of the re-read side. Runs when no profile is
   named. `--profile X` (or `default_profile`) restricts it to stage `X`; only
-  `--ad-*` flags still take the single-ladder path of 2.5.
+  `--ad-ladder` still takes the single-ladder path of 2.5. (The other five recovery
+  `--ad-*` flags, which no read ever received, were deleted on 2026-11-25.)
 - **Order**: per failed track, by `n`, the sectors the capture pass flagged in
   it (the bench found `n`, not radius, decides which strategy wins):
   - **none flagged**: `track-ladder`, `track-constant` (the sector shapes would aim
@@ -473,7 +483,7 @@ read-engine side; "caller" means cdda2img (or any application driving AccuDisc).
   fixed so they stay distinct. `--recovery-speed auto` holds, per track, the
   rung whose speed-ladder re-read flagged the fewest C2 errors (the ladder asks
   for C2 for this), the slowest admitted rung until such a re-read has run.
-- **Effort: sweeps and attempts** (kgr, 2026-11-24: "set the number of passes to
+- **Effort: sweeps and passes** (kgr, 2026-11-24: "set the number of passes to
   the minimum needed to cover all speeds ... Each full round of passes per
   profile = 1x attempt"). A profile's `passes` counts **sweeps**, a sweep being
   the least that tries every target at every speed the profile reads at: one
@@ -482,15 +492,18 @@ read-engine side; "caller" means cdda2img (or any application driving AccuDisc).
   sector strategies (targets x 1 when held), one whole-disc read per rung for
   `whole-disc`. It is computed per disc and track, since the admitted ladder and
   the flagged sectors vary, so every shipped profile has `passes = 1`.
-  `recovery_attempts` (config, or `--recovery-attempts`; default 1) repeats each
-  stage's sweeps inside one call, so a strategy's working copy keeps every read.
+  `recovery_passes` (config, or `--recovery-passes`; default 1, 0 = no recovery)
+  repeats each stage's sweeps inside one call, so a strategy's working copy keeps
+  every read. It was `recovery_attempts` from 2026-11-24 until Keith merged it into
+  `recovery_passes` on 2026-11-25 ("keep the name as recovery_passes"); the kept
+  name changed meaning, having counted only the `--ad-*` path's ladder sweeps.
   `budget_s` is seconds per read: a track may take `budget_s` x its planned
   reads, a guard against a stalled drive that should never bind; the track
   profiles do not read it. Until 2026-11-24 the shipped passes were 3 (track,
   span) and 8 (strategies), and the track profiles' sweeps were 3. PROV
-  `recovery_attempts`.
+  `recovery_passes` (`recovery_attempts` in containers from 2026-11-24 to 2026-11-25).
 - **Stopping**: each stage gates its own writes on AccurateRip, the first match
-  ends a track's reads however many sweeps or attempts remain, and the chain
+  ends a track's reads however many sweeps or passes remain, and the chain
   stops at a track's first match. `recovery_ceiling_s` (default 0, none) bounds
   the whole chain; a rip it stops says so (`recovery_ceiling_hit`), so "raise
   the ceiling" is not mistaken for "the disc cannot be recovered".
@@ -2297,4 +2310,4 @@ That set lets a future reader distinguish "we never checked" from "we checked
 thoroughly and this disc cannot be verified" — which is the only useful thing
 left to say about it.
 
-Blake3 6ed8e578cc9edd69ecd319824ef10ee901c4953e2b8458d4765b594e3b47aa50
+Blake3 446e1e9fa54d2d16026a743864d24d6fe645d8203363555430a5b5c375adb9f5

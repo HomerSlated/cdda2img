@@ -297,7 +297,7 @@ PROFILE_SCHEMA = Schema(
         "ladder": FieldSpec((str,), default="full", enum=frozenset({"full", "single"})),
         # Sweeps per attempt (kgr, 2026-11-24): a sweep is the least that tries
         # every target at every speed the profile reads at, so 1 is the minimum
-        # for every profile; recovery_attempts (config/CLI) repeats them.
+        # for every profile; recovery_passes (config/CLI) repeats them.
         "passes": FieldSpec((int,), default=1),
         "run_up": FieldSpec((int,), default=0),
         "span": FieldSpec((int,), default=0),
@@ -519,16 +519,16 @@ CONFIG_SCHEMA = Schema(
         "low_dr_threshold": FieldSpec((float,), default=5.0),
         "auto": FieldSpec((bool,), default=False),
         "embedart": FieldSpec((bool,), default=False),
-        "recovery_passes": FieldSpec((int,), default=3),
+        # kgr, 2026-11-25 (merged from recovery_attempts, 2026-11-24): how many
+        # times each recovery stage runs its profile's passes, a pass being one
+        # sweep of every target at every speed it reads at. 0 turns recovery off.
+        "recovery_passes": FieldSpec((int,), default=1),
         # The automatic recovery chain (kgr, 2026-11-21): the one speed the two
         # fixed-speed stages (track-constant, span-fixed) read at, snapped to the
         # nearest rung the drive admits on this disc; and a wall-clock ceiling on
         # the whole chain, 0 meaning run every stage to exhaustion.
         "recovery_speed": FieldSpec((int, str), default=32),
         "recovery_ceiling_s": FieldSpec((int,), default=0),
-        # kgr, 2026-11-24: how many times each recovery stage runs its profile's
-        # passes, a pass being one sweep of every target at every speed it reads at.
-        "recovery_attempts": FieldSpec((int,), default=1),
         "c2_recovery": FieldSpec(
             (str,), default="auto", enum=frozenset({"auto", "on", "off"})
         ),
@@ -594,11 +594,6 @@ CONFIG_SCHEMA = Schema(
             "recovery_passes",
             "must be between 0 (disabled) and 100",
             lambda d: 0 <= d["recovery_passes"] <= 100,
-        ),
-        SanityRule(
-            "recovery_attempts",
-            "must be between 1 and 100",
-            lambda d: 1 <= d["recovery_attempts"] <= 100,
         ),
         SanityRule(
             "preferred_country",

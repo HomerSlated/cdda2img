@@ -387,13 +387,15 @@ def test_embedart_defaults_false(
     assert load_config().embedart is False
 
 
-def test_recovery_passes_defaults_to_three(
+def test_recovery_passes_defaults_to_one(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """kgr, 2026-11-25: recovery_attempts merged into recovery_passes, which took
+    its meaning and its default of 1 (it was 3 while it counted ladder sweeps)."""
     cfg = tmp_path / "cfg.toml"
     cfg.write_text("")
     monkeypatch.setattr("cdda2img.config.config_path", lambda: cfg)
-    assert load_config().recovery_passes == 3
+    assert load_config().recovery_passes == 1
 
 
 def test_recovery_passes_read_and_zero_allowed(

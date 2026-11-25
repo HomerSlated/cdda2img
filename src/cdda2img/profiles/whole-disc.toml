@@ -17,7 +17,7 @@
 # lead-out.
 #
 # `passes = 1`: one sweep per attempt, one whole-disc read per admitted rung (kgr,
-# 2026-11-24; it was 8 reads). Config or CLI `recovery_attempts` repeats the sweep;
+# 2026-11-24; it was 8 reads). Config or CLI `recovery_passes` repeats the sweep;
 # each read serves every failed track, and the reads stop once none is left.
 # `budget_s` is seconds per whole-disc read (an 80-minute disc at 4x takes about
 # 1200 s), a guard against a stalled drive that should never bind. On Tracy one

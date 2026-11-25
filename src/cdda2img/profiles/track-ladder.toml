@@ -11,7 +11,7 @@
 #
 # `passes = 1`: one sweep per attempt, the track read once at every admitted rung,
 # the least that tries every speed (kgr, 2026-11-24; it was 3 sweeps). Config or
-# CLI `recovery_attempts` repeats the sweep; the first AccurateRip match ends the
+# CLI `recovery_passes` repeats the sweep; the first AccurateRip match ends the
 # reads. `budget_s` is not read at granularity = "track": the ladder always
 # finishes its sweeps.
 name         = "track-ladder"

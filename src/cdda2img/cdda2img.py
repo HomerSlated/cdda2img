@@ -82,16 +82,26 @@ _MIN_AR_CONFIDENCE = (
 SILENCE_PAD_DUR = "2"  # seconds of post-track silence (Red Book inter-track gap)
 
 
-def _recovery_attempts_arg(value: str) -> int:
-    """``--recovery-attempts``: a whole number 1..100 (config's range)."""
+def _recovery_passes_arg(value: str) -> int:
+    """``--recovery-passes``: a whole number 0..100 (config's range; 0 = no
+    recovery)."""
     try:
         n = int(value)
     except ValueError:
-        n = 0
-    if not 1 <= n <= 100:
-        msg = f"expected a whole number from 1 to 100, got {value!r}"
+        n = -1
+    if not 0 <= n <= 100:
+        msg = f"expected a whole number from 0 to 100, got {value!r}"
         raise argparse.ArgumentTypeError(msg)
     return n
+
+
+def _effective_recovery_passes(cli: int | None, configured: int) -> int:
+    """``--recovery-passes`` when given, else config ``recovery_passes``.
+
+    Tested against ``None``, never for truth: 0 means "no recovery", so
+    ``cli or configured`` would turn ``--recovery-passes 0`` into the config's
+    value (kgr, 2026-11-25: one setting, merged from ``recovery_attempts``)."""
+    return cli if cli is not None else configured
 
 
 def _recovery_speed_arg(value: str) -> int | str:
@@ -470,11 +480,11 @@ def parse_args() -> argparse.Namespace:
         help="The one speed the recovery chain's fixed-speed stages (track-constant, span-fixed) read at, snapped to the nearest speed the drive admits on the disc; 'auto' holds, per track, the speed whose earlier re-read flagged the fewest C2 errors. Every other stage changes speed on each read (default: from config, 32)",
     )
     r_cmd.add_argument(
-        "--recovery-attempts",
-        type=_recovery_attempts_arg,
+        "--recovery-passes",
+        type=_recovery_passes_arg,
         default=None,
         metavar="N",
-        help="How many times each recovery profile runs its full sweep: every flagged sector (or the track, or the disc) at every speed the profile reads at. The first AccurateRip match ends a track's re-reads early (default: from config, 1)",
+        help="How many times each recovery profile runs its full sweep: every flagged sector (or the track, or the disc) at every speed the profile reads at. 0 turns recovery off. The first AccurateRip match ends a track's re-reads early (default: from config, 1)",
     )
     r_cmd.add_argument(
         "--profile-only",
@@ -5071,7 +5081,7 @@ def _recover_flagged_spans(
     (``span_gap``/``span_pad``), then run passes, each re-reading every span once
     at the next speed of the ladder, in the order it was bound (fastest first,
     cycling). *sweeps* (default ``profile.passes``; the chain passes
-    ``passes x recovery_attempts``) counts sweeps of the ladder, one pass per
+    ``passes x recovery_passes``) counts sweeps of the ladder, one pass per
     rung each (kgr, 2026-11-24: a sweep is the least that tries every speed), so
     the passes run are ``sweeps x len(ladder)``. Accepted copies (:func:`_span_copy_accepted`) are
     overlaid onto the track's current raw audio **in memory**; after each pass the
@@ -5286,7 +5296,7 @@ def _recover_by_strategy(
     tries every target at every speed the profile reads at, ``targets x rungs``
     reads (:meth:`_StrategyRun.sweep_reads`; one rung when the profile holds
     ``recovery_speed``). *sweeps* (default ``profile.passes``; the chain passes
-    ``passes x recovery_attempts``) is how many run, so the reads per track are
+    ``passes x recovery_passes``) is how many run, so the reads per track are
     ``sweeps x targets x rungs``, and the first AccurateRip match ends them.
     ``profile.budget_s`` is seconds per read: a track may take ``budget_s`` x
     its planned reads, a guard against a stalled drive rather than a cap on the
@@ -5373,7 +5383,7 @@ class _StrategyRun:
     fixed_speed: int | None = None
     #: The session the audio was read from (:func:`_rip_disc_stage`).
     readable: tuple[int, int] | None = None
-    #: Sweeps to run per track (``passes x recovery_attempts`` in the chain).
+    #: Sweeps to run per track (``passes x recovery_passes`` in the chain).
     sweeps: int = 1
 
     def speed_for(self, i: int, per: int = 1) -> int:
@@ -5626,10 +5636,11 @@ class _ChainContext(NamedTuple):
     auto_speed: bool = False
     #: The session the audio was read from; bounds every far read (_rip_disc_stage).
     readable: tuple[int, int] | None = None
-    #: recovery_attempts (kgr, 2026-11-24): each stage runs its profile's
-    #: ``passes`` sweeps this many times over, in ONE call, so a strategy's
-    #: working copy carries every read and the first match still ends it.
-    attempts: int = 1
+    #: recovery_passes (kgr, 2026-11-24 as recovery_attempts; merged into
+    #: recovery_passes 2026-11-25): each stage runs its profile's ``passes``
+    #: sweeps this many times over, in ONE call, so a strategy's working copy
+    #: carries every read and the first match still ends it.
+    recovery_passes: int = 1
 
 
 def _initial_fixed_speed(speed: int | str, ladder: list[int]) -> int:
@@ -5670,8 +5681,8 @@ def _run_chain_stage(
     n_tracks = len(ctx.track_lsns)
     # A pass is one sweep: every target at every speed the profile reads at (the
     # ladder's one sweep per pass, the span rung's one pass per rung, a strategy's
-    # targets x rungs reads). recovery_attempts repeats the profile's passes.
-    sweeps = profile.passes * ctx.attempts
+    # targets x rungs reads). recovery_passes repeats the profile's passes.
+    sweeps = profile.passes * ctx.recovery_passes
     # Dispatch on the profile's FIELDS, never its name: a user profile may shadow a
     # shipped one, or be new, and PROV must describe what ran.
     if profile.granularity == "span":
@@ -6013,14 +6024,16 @@ def rip_image(  # noqa: C901
     media_override: str | None = None,
     recovery_speed: int | str | None = None,
     profile_only: bool = False,
-    recovery_attempts: int | None = None,
+    recovery_passes: int | None = None,
 ) -> Path | None:
     """Rip *device* into an RBI container, or write nothing at all.
 
-    *recovery_attempts* (``--recovery-attempts``, else config
-    ``recovery_attempts``, default 1; kgr 2026-11-24) is how many times each
-    recovery stage runs its profile's ``passes`` sweeps, every target at every
-    speed per sweep. The first AccurateRip match ends a track's reads early.
+    *recovery_passes* (``--recovery-passes``, else config ``recovery_passes``,
+    default 1; 0 = no recovery) is how many times each recovery stage runs its
+    profile's ``passes`` sweeps, every target at every speed per sweep; on the
+    ``--ad-ladder`` path, how many sweeps of that ladder. The first AccurateRip
+    match ends a track's reads early. (kgr: ``recovery_attempts`` 2026-11-24,
+    merged into ``recovery_passes`` 2026-11-25.)
 
     *profile_only* (``--profile-only``, a temporary test switch, kgr 2026-11-22)
     skips CTDB parity repair and the displacement check, so a failed track reaches
@@ -6260,6 +6273,9 @@ def rip_image(  # noqa: C901
         span_prov: dict[str, str] = {}  # flagged-span rung keys, merged below
         ladder_prov: dict[str, str] = {}  # recovery_attempts_track_<n>, likewise
         recovery_ladder: list[int] = []
+        # The one recovery-effort setting (kgr, 2026-11-25; merged from
+        # recovery_attempts): --recovery-passes, else config. 0 = no recovery.
+        passes = _effective_recovery_passes(recovery_passes, cfg.recovery_passes)
         # CTDB attempt outcome, kept whether it succeeded or declined — a declined
         # repair is the interesting case and used to leave no trace at all.
         ctdb_result: CtdbRepairResult | None = None
@@ -6442,7 +6458,7 @@ def rip_image(  # noqa: C901
             )
 
             # Speed-laddered recovery: re-read each failed track across the drive's own
-            # speed ladder (fastest→slowest, cfg.recovery_passes sweeps), AR-verifying
+            # speed ladder (fastest→slowest, `passes` sweeps), AR-verifying
             # each attempt and splicing the first match; a track that never matches
             # keeps its original audio. The sweep across passes x speeds is the recovery
             # mechanism (validated 6/6 on the damaged reference disc).
@@ -6464,8 +6480,9 @@ def rip_image(  # noqa: C901
             # The ladder comes from the resolved profile bound to THIS drive and
             # THIS disc (§9.3) — a self-throttling governor caps a degraded disc
             # regardless of drive capability, so it must be probed per rip.
-            # `cfg.recovery_passes = 0` remains the global kill switch; otherwise
-            # the profile owns the sweep count.
+            # `recovery_passes = 0` (config or --recovery-passes) remains the global
+            # kill switch; otherwise each stage runs its profile's sweeps that many
+            # times (kgr, 2026-11-25).
             #
             # The gate is `strategy is not None`, NOT `strategy.profile is not
             # None`. The narrower test was a perfectly good check for "can I bind a
@@ -6482,15 +6499,9 @@ def rip_image(  # noqa: C901
             )
             recovery_ladder = (
                 list(bound.ladder)
-                if bound is not None and ar_responses and cfg.recovery_passes > 0
+                if bound is not None and ar_responses and passes > 0
                 else []
             )
-            recovery_passes = (
-                bound.profile.passes
-                if bound is not None and bound.profile is not None
-                else cfg.recovery_passes
-            )
-            attempts = recovery_attempts or cfg.recovery_attempts
             # kgr, 2026-11-21: with no profile named, every recovery profile is used,
             # in an order chosen from each track's damage, until every track
             # verifies (_recovery_chain). A named profile restricts the chain to
@@ -6518,7 +6529,7 @@ def rip_image(  # noqa: C901
                         ui=ui,
                         cohort=ar_cohort or None,
                         readable=readable,
-                        attempts=attempts,
+                        recovery_passes=passes,
                     ),
                     failed_tracks,
                     recovery_speed or cfg.recovery_speed,
@@ -6527,7 +6538,6 @@ def rip_image(  # noqa: C901
                 )
                 recovery_outcomes.update(chain_outcomes)
                 ladder_prov.update(chain_prov)
-                ladder_prov["recovery_attempts"] = str(attempts)
             else:
                 span_outcomes, span_keys, failed_tracks = _run_span_rung(
                     bound.profile if bound is not None else None,
@@ -6538,7 +6548,7 @@ def rip_image(  # noqa: C901
                     pcm_file=temp.pcm_file,
                     responses=ar_responses,
                     ladder=list(bound.ladder) if bound is not None else [],
-                    recovery_passes=cfg.recovery_passes,
+                    recovery_passes=passes,
                     read_offset=read_offset,
                     disc_damage=disc_damage,
                     ui=ui,
@@ -6593,7 +6603,7 @@ def rip_image(  # noqa: C901
                         ar_responses,
                         len(final_track_lsns),
                         recovery_ladder,
-                        recovery_passes,
+                        passes,
                         read_offset,
                         ui,
                         disc_damage,
@@ -6725,7 +6735,7 @@ def rip_image(  # noqa: C901
                 provenance["ctdb_declined"] = ctdb_result.reason
         # Speed-laddered recovery provenance: what was tried and the per-track outcome.
         if recovery_ladder:
-            provenance["recovery_passes"] = str(recovery_passes)
+            provenance["recovery_passes"] = str(passes)
             provenance["recovery_ladder"] = ",".join(f"{x}X" for x in recovery_ladder)
             if strategy is not None:
                 provenance["recovery_source"] = strategy.source
@@ -7154,7 +7164,7 @@ def _dispatch(args: argparse.Namespace) -> int:
             media_override=args.media_override,
             recovery_speed=args.recovery_speed,
             profile_only=args.profile_only,
-            recovery_attempts=args.recovery_attempts,
+            recovery_passes=args.recovery_passes,
         )
     elif args.cmd == "import":
         if args.info:

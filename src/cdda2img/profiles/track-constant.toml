@@ -10,7 +10,7 @@
 # ladder's 3/3 at ABBA t19. Choose it when you already know the damage is light.
 #
 # `passes = 1`: one sweep per attempt, which at one speed is a single read of the
-# track (kgr, 2026-11-24; it was 3). Config or CLI `recovery_attempts` repeats it;
+# track (kgr, 2026-11-24; it was 3). Config or CLI `recovery_passes` repeats it;
 # the first AccurateRip match ends the reads. `budget_s` is not read at
 # granularity = "track".
 name         = "track-constant"

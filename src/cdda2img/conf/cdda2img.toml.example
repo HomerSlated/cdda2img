@@ -102,20 +102,18 @@
 # via 'cdda2img extract --embedart'. Default: false
 # embedart = false
 
-# AccurateRip recovery effort for a rip. When a track fails AccurateRip it is
-# re-read across the drive's own admitted speed ladder (fastest to slowest),
-# AR-verifying each re-read and stopping at the first match. recovery_passes is how
-# many full sweeps of the ladder the --ad-* flags' recovery tries per failed track
-# (total re-reads = passes x ladder steps); recovery profiles carry their own
-# passes. 0 disables recovery altogether. Default: 3
-# recovery_passes = 3
-
-# How many times each recovery profile runs its sweep: every flagged sector (or
-# the whole track, or the whole disc) re-read at every speed the profile reads at,
-# the least that tries them all. The first AccurateRip match ends a track's
-# re-reads, however many attempts remain. Overridden per run by
-# --recovery-attempts. Default: 1
-# recovery_attempts = 1
+# AccurateRip recovery effort for a rip: how many times each recovery profile
+# runs its sweep. A sweep re-reads every flagged sector (or the whole track, or
+# the whole disc) at every speed the profile reads at, the least that tries them
+# all; with --ad-ladder it is one walk of that ladder. The first AccurateRip match
+# ends a track's re-reads, however many passes remain. 0 turns recovery off.
+# Overridden per run by --recovery-passes. Default: 1
+#
+# Changed 2026-11-25: this setting absorbed recovery_attempts (which no longer
+# exists) and took over its meaning. Before then recovery_passes counted ladder
+# sweeps for the --ad-* flags only and did nothing on a normal rip, so an old
+# config that sets it now multiplies every recovery stage's effort.
+# recovery_passes = 1
 
 # The automatic recovery chain. When no --profile is given, each track that fails
 # AccurateRip after CTDB and the displacement check is tried with every recovery
