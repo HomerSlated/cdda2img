@@ -148,6 +148,20 @@ Standalone utility scripts live in `tools/` (tracked, not part of the installed 
   nothing produces). Passes byte-identical; scope is **virtual writer only** — no laser
   timing, no media quality, no real DAO lead-in, and `CAVEATS` is unreachable without a
   CD-Text SIZE_INFO mismatch. A burn on the PX-716A remains the acceptance test.
+- **`tools/policy_smoke.py`** — issues one read of every kind AccuDisc's read policy now
+  drives (a capture, a GATED_REREAD ladder attempt, a whole-disc windowed read, a
+  SPAN_RESCUE span detail read, a REFERENCE_VERIFY compare read) on a device, normally a
+  CDEmu disc (`tools/make_preemph_disc.py`, then `cdemu load 0 …`, `--device /dev/sr1`;
+  `--ladder 48,24`, since CDEmu's speed probe fails and one rung leaves the verify read
+  nowhere to go), and prints the PROV the rip would record. Written 2026-11-25 because the
+  unit tests use fakes that echo the shape the seam expects: its first run found that
+  `read_span_windows` called the audio-only read directly, so under the policy on a C2
+  drive **every strategy and whole-disc read refused itself** and the strategy loop
+  skipped each one as a failed read, while all 2439 tests passed. **Stale-bytecode trap
+  found the same day:** a negative-control edit and its revert written within one second,
+  with equal file sizes, leave a `.pyc` Python accepts as current (it checks whole-second
+  mtime and size only), so the reverted source ran the broken bytecode. Clear
+  `__pycache__` between a control edit and its revert.
 - **`tools/sink_prescreen.py`** — device-free timing of the de-interleave-and-write loop
   against synthetic chunks at the real geometry. Answered "is the Python sink
   *intrinsically* too slow" (no: 654k sectors/s, 0.55 s per disc, 273× headroom at 32×).

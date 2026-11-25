@@ -2593,10 +2593,15 @@ def read_span_windows(
     cache defeat, *readable* and the speed the drive reported.
     """
     module = _binding("span read")
+    # _windowed_read, not _read_windows_binding: inside a rip's recovery the read
+    # policy asks for C2 whenever the drive has it, and the sink must expect it.
+    # Calling the audio-only read directly made every strategy read refuse
+    # itself there (found by tools/policy_smoke.py on CDEmu, 2026-11-25).
+    read = _windowed_read(False)
     return _call(
         module,
         "span read",
-        lambda: _read_windows_binding(
+        lambda: read(
             module,
             device,
             start_lba,

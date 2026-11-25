@@ -320,3 +320,23 @@ def test_the_real_policy_fits_device_read() -> None:
     )
     assert verify.read_kwargs()["speed_x"] == 32
     assert "compare_read" in dir(module.Device)
+
+
+def test_the_strategy_read_follows_the_policys_c2(monkeypatch) -> None:
+    """read_span_windows called the audio-only read directly, so under the policy
+    on a C2 drive every strategy and whole-disc read refused itself and the
+    strategy loop skipped it as a failed read: every strategy silently missed.
+    Found by tools/policy_smoke.py on CDEmu, 2026-11-25."""
+    module, _reads, _p = _module()
+    monkeypatch.setattr(ar, "_binding", lambda _w: module)
+    used: list[str] = []
+    monkeypatch.setattr(
+        ar, "_read_windows_with_c2", lambda *a, **k: used.append("c2") or "c2"
+    )
+    monkeypatch.setattr(
+        ar, "_read_windows_binding", lambda *a, **k: used.append("audio") or "audio"
+    )
+    with ar.recovery_policy((32,), c2_usable=True, readable=None):
+        ar.read_span_windows("/dev/null", 0, 8, [(0, 8)], 32)
+    ar.read_span_windows("/dev/null", 0, 8, [(0, 8)], 32)  # control: no policy
+    assert used == ["c2", "audio"]
