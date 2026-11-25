@@ -357,10 +357,9 @@ def test_auto_holds_the_rung_the_ladder_found_closest(monkeypatch) -> None:
         return {t: "unrecovered"}, {}
 
     monkeypatch.setattr(app, "_run_chain_stage", stage)
-    # Heavy damage: the only order left in which the ladder (the C2 evidence)
-    # runs before track-constant (kgr's 2026-11-25 orders put track-constant
-    # first for light damage and none).
-    ctx = _ctx(fixed_speed=4, auto_speed=True, disc_damage=_lane(set(range(10, 50))))
+    # Nothing flagged: track-constant comes before the ladder in that order, and
+    # auto moves the ladder to the front so the evidence exists (kgr 2026-11-25).
+    ctx = _ctx(fixed_speed=4, auto_speed=True)
     _o, prov = app._recovery_chain(ctx, [SimpleNamespace(track=1)], "auto", 0)
     assert held == [24]
     assert prov["recovery_speed_track_1"] == "24X:c2=2"
@@ -532,3 +531,40 @@ def test_the_sweep_record_is_suffixed_per_stage(monkeypatch) -> None:
     )
     assert prov["recovery_sweeps__span_fixed"] == "3"
     assert prov["recovery_sweeps__whole_disc"] == "3"
+
+
+# ---- auto runs the ladder first (kgr, 2026-11-25) ----------------------------------
+
+
+@pytest.mark.parametrize("cls", ["none", "low", "high"])
+def test_auto_moves_the_ladder_to_the_front_and_keeps_the_rest(cls: str) -> None:
+    order = app._CHAIN_ORDER[cls]
+    got = app._ladder_first(order)
+    assert got[0] == "track-ladder"
+    assert sorted(got) == sorted(order)
+    assert [s for s in got if s != "track-ladder"] == [
+        s for s in order if s != "track-ladder"
+    ]
+
+
+def test_auto_runs_the_ladder_first_on_a_light_track(monkeypatch) -> None:
+    calls = _fake_stages(monkeypatch, {})
+    ctx = _ctx(auto_speed=True, disc_damage=_lane({150}))
+    _o, prov = app._recovery_chain(ctx, [SimpleNamespace(track=2)], "auto", 0)
+    assert [c[0] for c in calls][:2] == ["track-ladder", "span-flagged"]
+    assert prov["recovery_chain_track_2"].startswith("track-ladder:miss,")
+
+
+def test_without_auto_the_light_order_is_untouched(monkeypatch) -> None:
+    """Control for the test above: only auto_speed differs."""
+    calls = _fake_stages(monkeypatch, {})
+    ctx = _ctx(auto_speed=False, disc_damage=_lane({150}))
+    app._recovery_chain(ctx, [SimpleNamespace(track=2)], 32, 0)
+    assert [c[0] for c in calls] == [*app._CHAIN_ORDER["low"], "whole-disc"]
+
+
+def test_auto_leaves_a_restricted_chain_alone(monkeypatch) -> None:
+    calls = _fake_stages(monkeypatch, {})
+    ctx = _ctx(auto_speed=True, disc_damage=_lane({150}))
+    app._recovery_chain(ctx, [SimpleNamespace(track=2)], "auto", 0, only="span-fixed")
+    assert [c[0] for c in calls] == ["span-fixed"]

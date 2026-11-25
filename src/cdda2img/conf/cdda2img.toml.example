@@ -125,9 +125,8 @@
 # speed: track-constant and span-fixed. recovery_speed is that speed in X, snapped
 # to the nearest speed the drive admits on the disc. "auto" instead holds, for
 # each track, the speed whose earlier speed-ladder re-read of that track flagged
-# the fewest C2 errors; since 2026-11-25 track-constant runs before the ladder
-# for tracks with 0-5 flagged sectors, so there "auto" has no C2 evidence yet and
-# holds the slowest speed. Default: 32
+# the fewest C2 errors; "auto" runs the speed ladder first on every track so that
+# evidence exists before the fixed-speed stages. Default: 32
 # recovery_speed = 32
 
 # Wall-clock ceiling on the whole recovery chain, in seconds. 0 runs every stage to

@@ -498,7 +498,10 @@ read-engine side; "caller" means cdda2img (or any application driving AccuDisc).
   rung). Shipped `single`: `track-constant` and `span-fixed`, which kgr kept
   fixed so they stay distinct. `--recovery-speed auto` holds, per track, the
   rung whose speed-ladder re-read flagged the fewest C2 errors (the ladder asks
-  for C2 for this), the slowest admitted rung until such a re-read has run.
+  for C2 for this), the slowest admitted rung until such a re-read has run. Under
+  `auto` the chain moves `track-ladder` to the front of every track's order (Keith,
+  2026-11-25, `_ladder_first`), because the none and light orders otherwise run
+  `track-constant` and `span-fixed` before the ladder has produced any evidence.
 - **Effort: sweeps and passes** (kgr, 2026-11-24: "set the number of passes to
   the minimum needed to cover all speeds ... Each full round of passes per
   profile = 1x attempt"). A profile's `passes` counts **sweeps**, a sweep being
@@ -2503,4 +2506,4 @@ That set lets a future reader distinguish "we never checked" from "we checked
 thoroughly and this disc cannot be verified" — which is the only useful thing
 left to say about it.
 
-Blake3 c7b7cdc9091935830fd13cc347ca3cfc17be3999e58b8608798bca0db90eafc2
+Blake3 51bb94ad0acae40f9f01bff0fa6bfb959d0654cc63691aa6d75d27f0acc2d194

@@ -1001,9 +1001,10 @@ the remaining profiles, then enforce disabling profiles marked as experimental")
 - **Decided later that evening (Keith):** every chain stage gets at least 3 sweeps
   (`_CHAIN_MIN_SWEEPS`, PROV `recovery_sweeps__<stage>`); span-fixed and max-variation both
   matched only on their last planned read with `recovery_passes = 3`, and the default of 1
-  would have missed both. "none" swapped to `track-constant, track-ladder`. Consequence:
-  `--recovery-speed auto` finds no ladder C2 evidence before track-constant in the none and
-  light orders, so it holds the slowest rung there (open with Keith).
+  would have missed both. "none" swapped to `track-constant, track-ladder`. That left
+  `--recovery-speed auto` with no ladder C2 evidence before track-constant in the none and
+  light orders, so Keith ruled the same evening: under auto the ladder runs first on every
+  track (`_ladder_first`).
 - **sector-hammer investigation** is a live TODO item (Keith: "If it can be transformed into
   a useful profile then we should make the attempt").
 - **Open: span-fixed contradicts its bench result.** The bench (1/16) read "span size is not

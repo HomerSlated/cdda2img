@@ -307,7 +307,11 @@ The one speed, in X, that the recovery chain's fixed\-speed profiles read at,
 snapped to the nearest speed the drive admits on the disc.
 .B auto
 holds, for each track, the speed whose earlier re\-read of that track flagged the
-fewest C2 errors (the slowest admitted speed until such a re\-read has run).
+fewest C2 errors (the slowest admitted speed until such a re\-read has run);
+with
+.B auto
+the chain re\-reads each track across the speed ladder first, so that evidence
+exists before any fixed\-speed profile runs.
 Every other profile changes speed on each read.
 Default: the configuration's
 .BR recovery_speed ,

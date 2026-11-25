@@ -5724,6 +5724,18 @@ _CHAIN_ORDER = {
 _CHAIN_MIN_SWEEPS = 3
 
 
+def _ladder_first(order: tuple[str, ...]) -> tuple[str, ...]:
+    """*order* with ``track-ladder`` moved to the front, for ``recovery_speed =
+    "auto"`` (kgr, 2026-11-25: "run the ladder first when recovery_speed =
+    auto"). auto holds, for a track's fixed-speed stages, the rung whose ladder
+    re-read flagged the fewest C2 errors, so the ladder must run before them;
+    the 2026-11-25 orders put track-constant and span-fixed ahead of it for
+    tracks with 0-5 flagged sectors, which left auto with no evidence there."""
+    if "track-ladder" not in order:
+        return order
+    return ("track-ladder", *(s for s in order if s != "track-ladder"))
+
+
 def _snap_to_ladder(speed: int, ladder: list[int]) -> int:
     """The admitted rung nearest *speed* (ties go to the slower rung). A disc the
     drive throttles may admit nothing near the configured speed: in July the
@@ -6034,6 +6046,8 @@ def _recovery_chain(
         if lbas:
             prov[f"recovery_damage_lbas_track_{result.track}"] = _lba_ranges(lbas)
         order = _CHAIN_ORDER[cls] if only is None else (only,)
+        if ctx.auto_speed:
+            order = _ladder_first(order)
         if only == "whole-disc":
             order = ()
         if "recovery_budget_hit" in prov:
