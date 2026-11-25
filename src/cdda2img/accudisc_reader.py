@@ -49,6 +49,7 @@ from __future__ import annotations
 
 import contextlib
 import contextvars
+import dataclasses
 import functools
 import inspect
 import logging
@@ -1365,6 +1366,9 @@ _FEATURE_READ_BUDGET = "read_budget"
 
 
 _FEATURE_READ_POLICY = "read_policy"
+#: ``ReadStats.cmds`` / ``cmds_failed`` / ``us`` / ``won_by`` / ``speed_changes``
+#: and the ``Stage`` / ``Origin`` enums (0.53.0), filled on every read.
+_FEATURE_EFFORT_STATS = "effort_stats"
 _FEATURE_COMPARE_READ = "compare_read"
 
 #: Every AccuDisc 0.53-0.59 feature a rip turns on (kgr, 2026-11-25: "I would
@@ -1878,6 +1882,16 @@ class CaptureCounters:
     #: The speed the drive reported adopting for the read (PROV
     #: ``capture_speed_honoured``), ``None`` when not reported.
     speed_honoured_x: int | None = None
+    #: AccuDisc 0.53.0 effort stats, ``None`` on an older engine (absent is not
+    #: zero). Per stage (``cmds``, ``cmds_failed``, ``us``) or origin
+    #: (``won_by``), keyed by the enum member's lower-case name, zeros dropped.
+    #: PROV ``capture_cmds`` / ``capture_cmds_failed`` / ``capture_ms`` /
+    #: ``capture_won_by`` / ``capture_speed_changes`` (kgr, 2026-11-25).
+    cmds: dict[str, int] | None = None
+    cmds_failed: dict[str, int] | None = None
+    us: dict[str, int] | None = None
+    won_by: dict[str, int] | None = None
+    speed_changes: int | None = None
 
 
 def _capture_counters(stats: Any, module: Any = None) -> CaptureCounters:
@@ -1889,11 +1903,29 @@ def _capture_counters(stats: Any, module: Any = None) -> CaptureCounters:
     def count(name: str) -> int | None:
         return int(getattr(stats, name)) if hasattr(stats, name) else None
 
-    return CaptureCounters(
+    counters = CaptureCounters(
         sectors_recovered=count("sectors_recovered"),
         sectors_suspect=count("sectors_suspect"),
         subq_misposition=count("subq_misposition"),
         speed_honoured_x=None if module is None else _speed_x_or_none(module, stats),
+    )
+    if module is None or not _has_feature(module, _FEATURE_EFFORT_STATS):
+        return counters
+
+    def table(values: Any, enum: Any) -> dict[str, int]:
+        return {
+            m.name.lower(): int(values[int(m)])
+            for m in enum
+            if int(m) < len(values) and values[int(m)]
+        }
+
+    return dataclasses.replace(
+        counters,
+        cmds=table(stats.cmds, module.Stage),
+        cmds_failed=table(stats.cmds_failed, module.Stage),
+        us=table(stats.us, module.Stage),
+        won_by=table(stats.won_by, module.Origin),
+        speed_changes=int(stats.speed_changes),
     )
 
 

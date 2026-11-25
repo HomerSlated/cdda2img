@@ -3313,8 +3313,25 @@ def _capture_prov(counters: CaptureCounters) -> dict[str, str]:
         "capture_sectors_suspect": counters.sectors_suspect,
         "capture_subq_misposition": counters.subq_misposition,
         "capture_speed_honoured": counters.speed_honoured_x,
+        "capture_speed_changes": counters.speed_changes,
     }
-    return {k: str(v) for k, v in values.items() if v is not None}
+    prov = {k: str(v) for k, v in values.items() if v is not None}
+    # The 0.53 effort tables: absent on an older engine, "none" when reported and
+    # all zero, so "not reported" and "nothing happened" stay apart.
+    for key, table in (
+        ("capture_cmds", counters.cmds),
+        ("capture_cmds_failed", counters.cmds_failed),
+        ("capture_ms", _us_to_ms(counters.us)),
+        ("capture_won_by", counters.won_by),
+    ):
+        if table is not None:
+            prov[key] = ",".join(f"{k}:{v}" for k, v in table.items() if v) or "none"
+    return prov
+
+
+def _us_to_ms(us: dict[str, int] | None) -> dict[str, int] | None:
+    """Microseconds per stage to whole milliseconds, rounded down."""
+    return None if us is None else {k: v // 1000 for k, v in us.items()}
 
 
 def _prov_int(prov: dict[str, str] | None, key: str) -> int | None:
