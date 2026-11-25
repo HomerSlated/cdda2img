@@ -51,7 +51,11 @@ class _Agree(enum.IntEnum):
     DIFFER = 3
 
 
-class _Invalid(Exception):
+class _AccuDiscError(Exception):
+    pass
+
+
+class _Invalid(_AccuDiscError):
     pass
 
 
@@ -121,6 +125,7 @@ def _module(*, defeat: bool = True, reasons: int = 0, refuse: bool = False):
         CacheDefeat=_Defeat,
         AgreeState=_Agree,
         InvalidArgument=_Invalid,
+        AccuDiscError=_AccuDiscError,
         read_policy=read_policy,
     )
     return module, reads, policies
@@ -171,7 +176,7 @@ def test_the_policys_c2_must_match_the_sinks_record_width() -> None:
     module, reads, _p = _module()
     with (
         ar.recovery_policy((32,), c2_usable=True, readable=None),
-        pytest.raises(RuntimeError, match="mis-frame"),
+        pytest.raises(ar.PolicyMismatch, match="record layout"),
     ):
         _gated_read(module)
     assert reads == []
@@ -340,3 +345,61 @@ def test_the_strategy_read_follows_the_policys_c2(monkeypatch) -> None:
         ar.read_span_windows("/dev/null", 0, 8, [(0, 8)], 32)
     ar.read_span_windows("/dev/null", 0, 8, [(0, 8)], 32)  # control: no policy
     assert used == ["c2", "audio"]
+
+
+# ---- a policy contract failure stops the rip (reviewer, 2026-11-25) ------------------
+# dd089ef's bug stayed silent because the seam's guard raised RuntimeError and the
+# recovery loops skip a RuntimeError as one failed read. A contract failure repeats
+# on every read, so it must stop the rip instead.
+
+
+def test_a_policy_mismatch_is_not_an_error_the_loops_skip() -> None:
+    from cdda2img.rip_abort import EXIT_INVESTIGATE, RipAborted
+
+    exc = ar.PolicyMismatch("r", "d")
+    assert not isinstance(exc, (RuntimeError, OSError))
+    assert isinstance(exc, RipAborted)
+    assert exc.code == EXIT_INVESTIGATE
+
+
+def test_a_refused_intent_stops_the_rip() -> None:
+    module, reads, _p = _module(refuse=True)
+    with (
+        ar.recovery_policy((40, 32), c2_usable=False, readable=None),
+        pytest.raises(ar.PolicyMismatch, match="refused a gated_reread read"),
+    ):
+        _gated_read(module)
+    assert reads == []
+
+
+def _raise_mismatch(*_a, **_k):
+    raise ar.PolicyMismatch("r", "d")
+
+
+def test_every_recovery_loop_lets_a_mismatch_through(monkeypatch) -> None:
+    """Each loop catches (RuntimeError, OSError) to skip a failed read; a
+    PolicyMismatch must escape all three instead of becoming ``<speed>:error``."""
+    from cdda2img import cdda2img as app
+    from cdda2img.recovery_profile import load_profile
+    from cdda2img.strategy_reads import ReadReq
+
+    monkeypatch.setattr("cdda2img.accudisc_reader.read_span_attempt", _raise_mismatch)
+    monkeypatch.setattr("cdda2img.accudisc_reader.read_span_windows", _raise_mismatch)
+    monkeypatch.setattr("cdda2img.accudisc_reader.read_span_detail", _raise_mismatch)
+    with pytest.raises(ar.PolicyMismatch):
+        app._ladder_attempt("/dev/null", [0, 100], 200, 0, 0, 32, None, 1, [], None)
+    req_fields = inspect.signature(ReadReq).parameters
+    req = ReadReq(**dict.fromkeys(req_fields, 0))
+    with pytest.raises(ar.PolicyMismatch):
+        app._strategy_attempt("/dev/null", req, [(0, 8)], None)
+    span = SimpleNamespace(start=0, count=4)
+    with pytest.raises(ar.PolicyMismatch):
+        app._span_pass(
+            "/dev/null",
+            (span,),
+            load_profile("span-flagged"),
+            32,
+            None,
+            {},
+            1,
+        )

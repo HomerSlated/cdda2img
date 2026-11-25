@@ -60,6 +60,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, NamedTuple, TypeVar
 
 from cdda2img import drive_work
+from cdda2img.rip_abort import EXIT_INVESTIGATE, RipAborted
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator, Sequence
@@ -1370,6 +1371,27 @@ def missing_rip_features() -> list[str]:
     return [f for f in RIP_FEATURES if not _has_feature(module, f)]
 
 
+class PolicyMismatch(RipAborted):
+    """A recovery read the read policy cannot serve: it refused the intent, or it
+    chose a request our sink cannot take. Stops the rip (exit 3).
+
+    Deliberately not a ``RuntimeError`` or ``OSError``: the recovery loops catch
+    those as one failed read and try the next, and a contract failure repeats on
+    every read. Skipped past, it records ``<speed>:error`` on every attempt and
+    every strategy misses, which is how ``dd089ef``'s bug stayed silent."""
+
+    def __init__(self, reason: str, detail: str) -> None:
+        super().__init__(
+            EXIT_INVESTIGATE,
+            reason,
+            [
+                detail,
+                "This is a defect in what cdda2img asked AccuDisc's read policy "
+                "for, not damage on the disc; it would repeat on every read.",
+            ],
+        )
+
+
 @dataclass
 class RecoveryPolicy:
     """What :func:`accudisc_read_policy` needs to know about one rip's recovery,
@@ -1443,17 +1465,25 @@ def _policy_kwargs(
     if policy is None:
         return None
     cmds, changes = drive_work.engine_budget()
-    chosen = module.read_policy(
-        module.Purpose[purpose],
-        lba,
-        count,
-        c2_usable=policy.c2_usable,
-        admitted=policy.admitted,
-        speed_x=speed_x or 0,
-        readable=policy.readable,
-        budget_cmds=cmds,
-        budget_speed_changes=changes,
-    )
+    try:
+        chosen = module.read_policy(
+            module.Purpose[purpose],
+            lba,
+            count,
+            c2_usable=policy.c2_usable,
+            admitted=policy.admitted,
+            speed_x=speed_x or 0,
+            readable=policy.readable,
+            budget_cmds=cmds,
+            budget_speed_changes=changes,
+        )
+    except getattr(module, "AccuDiscError", _NeverRaised) as exc:
+        reason = f"AccuDisc's read policy refused a {purpose.lower()} read"
+        detail = (
+            f"lba {lba}+{count} at {speed_x or 0}X, admitted "
+            f"{list(policy.admitted)}, c2_usable={policy.c2_usable}: {exc}"
+        )
+        raise PolicyMismatch(reason, detail) from exc
     kw = chosen.read_kwargs()
     kw.update(_POLICY_OVERRIDES.get(purpose, {}))
     names = sorted(
@@ -2428,11 +2458,12 @@ def _defeated_read(
     if policy is not None:
         want = read_kw.get("c2")
         if policy["c2"] != (module.C2.NONE if want is None else want):
-            msg = (
-                f"read policy chose c2={policy['c2']!r} for a read whose sink "
-                f"expects {want!r}; refusing to mis-frame the records"
+            reason = "the read policy chose a record layout the read cannot take"
+            detail = (
+                f"policy c2={policy['c2']!r}, the sink expects {want!r}; "
+                "reading would mis-frame every record"
             )
-            raise RuntimeError(msg)
+            raise PolicyMismatch(reason, detail)
         with module.Device(device) as dev, _cancellable(module) as cancel:
             result = dev.read(sink=sink, copy=False, **policy, **cancel)
         _book_engine_work(module, result.stats)

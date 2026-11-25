@@ -927,6 +927,13 @@ What it changes in this plan, pending AccuDisc's own audit (§268.5) and Keith's
   > sectors absent, or a good sector in the pass compares against zeros as DIFFER. `absent`
   > values other than 0/1 are reserved.
   >
+  > **As built (2026-11-25), `--digital-media` marks nothing absent, deliberately.** There
+  > the capture is the copy being proved, so an unreadable capture sector must abort the rip,
+  > not be excused. With C2 it already aborts before any re-read (an all-ones C2 block). On
+  > a drive without C2 it reaches the compare, which reports it as DIFFER or HARD and aborts.
+  > The abort's detail line counts the states separately. Marking absent applies to a future
+  > caller whose reference may legitimately lack sectors.
+  >
   > **AMENDMENT 2026-11-25 17:26 GMT: adoption brought forward.** Keith: "I would rather
   > do my tests against 0.59.0 with all new features enabled", with AccuDisc 0.59
   > installed system-wide for the runs. This overrides "after the series" above and
