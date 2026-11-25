@@ -3312,8 +3312,15 @@ def _capture_prov(counters: CaptureCounters) -> dict[str, str]:
         "capture_sectors_recovered": counters.sectors_recovered,
         "capture_sectors_suspect": counters.sectors_suspect,
         "capture_subq_misposition": counters.subq_misposition,
+        "capture_speed_honoured": counters.speed_honoured_x,
     }
     return {k: str(v) for k, v in values.items() if v is not None}
+
+
+def _prov_int(prov: dict[str, str] | None, key: str) -> int | None:
+    """An integer PROV value, or ``None`` when absent (absent is not zero)."""
+    value = (prov or {}).get(key)
+    return int(value) if value is not None else None
 
 
 def _rip_disc_stage(
@@ -3640,19 +3647,42 @@ def _require_media_decision(kind: str, evidence: str, override: str | None) -> N
         raise RipAborted(EXIT_FIX_INVOCATION, reason, hint)
 
 
+def _verify_rung(ladder: list[int], ref: int, avoid: list[int]) -> int | None:
+    """The rung a verifying re-read runs at, or ``None`` when none is left.
+
+    AccuDisc's read policy revision 2 (``REFERENCE_VERIFY``, 0.59.0), copied so
+    that moving to it changes nothing: the **nearest** admitted rung other than
+    *ref*, the highest below it, else the lowest above it, and never one in
+    *avoid*. Nearest because it buys a second independent read at close to the
+    capture's cost (a 40x capture is checked at 32x), not because a slower read
+    is more reliable: Keith ruled on 2026-10-22 that it is not."""
+    free = {x for x in ladder if x != ref and x not in avoid}
+    below = [x for x in free if x < ref]
+    if below:
+        return max(below)
+    above = [x for x in free if x > ref]
+    return min(above) if above else None
+
+
 def _digital_media_consensus(
     device: str,
     pcm_file: Path,
     disc_damage: bytes | None,
     ui: TerminalUI | None,
     capture_speed: int | None = None,
+    capture_honoured: int | None = None,
 ) -> dict[str, str]:
     """Prove a ``--digital-media`` rip's audio by byte-identical reads.
 
-    *capture_speed* is the rate the capture pass asked for (``--ad-speed``);
-    ``None`` means the drive's own management, taken as its fastest rung. The
-    re-reads avoid it: a re-read at the capture's own speed is the same-speed
-    agreement this proof exists to rule out.
+    The capture's speed is the one the drive reported using (*capture_honoured*,
+    PROV ``capture_speed_honoured``), else the one asked for (*capture_speed*,
+    ``--ad-speed``), else the drive's fastest rung (its own management). Every
+    re-read runs at a speed no earlier read used (:func:`_verify_rung`), and is
+    checked afterwards against the speed the drive reports for it: a drive that
+    quantizes 32x to 40x would otherwise hand back a second read at the
+    capture's own speed, the same-speed agreement this proof exists to rule out.
+    A drive that cannot give enough distinct speeds is refused (exit 3), never
+    read twice at one speed (until 2026-11-25 it was, silently: kgr's fix).
 
     No disc-ID database holds such a disc, so AccurateRip cannot. Instead the
     capture is read again in full at a **different** admitted rung, and the two
@@ -3680,19 +3710,49 @@ def _digital_media_consensus(
         )
     ladder = drive_speed.admitted_ladder(device)
     extra = 1 if has_c2 else 2
-    captured_at = capture_speed or ladder[0]
-    rungs = [x for x in ladder if x != captured_at][:extra] or ladder[:1]
-    while len(rungs) < extra:
-        rungs.append(rungs[-1])
-    for k, speed in enumerate(rungs, 2):
+    used = [capture_honoured or capture_speed or ladder[0]]
+    for k in range(2, 2 + extra):
+        speed = _verify_rung(ladder, used[-1], used)
+        if speed is None:
+            raise RipAborted(
+                EXIT_INVESTIGATE,
+                f"the drive cannot give read {k} a speed no earlier read used",
+                [
+                    f"Reads so far ran at {', '.join(f'{x}X' for x in used)}; the"
+                    f" drive admits {', '.join(f'{x}X' for x in ladder)} on this disc.",
+                    f"--digital-media needs {extra + 1} distinct speeds"
+                    f" ({'with' if has_c2 else 'without'} C2), because two reads at"
+                    " one speed can agree on the same wrong bytes. Try another drive.",
+                ],
+            )
         _ui_status(ui, f"Digital media: verifying read {k} at {speed}X…")
         again = pcm_file.with_name(f"consensus-{k}.pcm")
         lanes: list[ReadLanes] = []
-        read_disc_c2(device, again, read_speed=speed, map_cb=lanes.append)
+        counters: list[CaptureCounters] = []
         try:
+            read_disc_c2(
+                device,
+                again,
+                read_speed=speed,
+                map_cb=lanes.append,
+                stats_cb=counters.append,
+            )
             diff = _first_difference(pcm_file, again)
         finally:
             again.unlink(missing_ok=True)
+        got = (counters[0].speed_honoured_x if counters else None) or speed
+        if got in used:
+            raise RipAborted(
+                EXIT_INVESTIGATE,
+                f"read {k} asked for {speed}X and the drive read at {got}X,"
+                " a speed an earlier read already used",
+                [
+                    "Two reads at one speed can agree on the same wrong bytes, so"
+                    " they prove nothing under --digital-media. Try another drive.",
+                ],
+            )
+        used.append(got)
+        speed = got
         if diff is not None:
             first, count = diff
             raise RipAborted(
@@ -3710,10 +3770,10 @@ def _digital_media_consensus(
                 f"read {k} at {speed}X flagged C2 errors",
                 ["Every read must be clean under --digital-media."],
             )
-    speeds = ",".join(["capture", *(f"{x}X" for x in rungs)])
+    speeds = ",".join(["capture", *(f"{x}X" for x in used[1:])])
     return {
         "digital_media_consensus": (
-            f"{len(rungs) + 1}@{speeds}:{'clean' if has_c2 else 'unavailable'}"
+            f"{len(used)}@{speeds}:{'clean' if has_c2 else 'unavailable'}"
         )
     }
 
@@ -6349,6 +6409,7 @@ def rip_image(  # noqa: C901
                 disc_damage,
                 ui,
                 capture_speed=strategy.read_speed if strategy is not None else None,
+                capture_honoured=_prov_int(info.prov, "capture_speed_honoured"),
             )
         else:
             _ui_status(ui, "Verifying AccurateRip…")

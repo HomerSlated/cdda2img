@@ -1591,10 +1591,16 @@ class CaptureCounters:
     sectors_recovered: int | None
     sectors_suspect: int | None
     subq_misposition: int | None
+    #: The speed the drive reported adopting for the read (PROV
+    #: ``capture_speed_honoured``), ``None`` when not reported.
+    speed_honoured_x: int | None = None
 
 
-def _capture_counters(stats: Any) -> CaptureCounters:
-    """:class:`CaptureCounters` from a ``ReadStats``, leaving out what it lacks."""
+def _capture_counters(stats: Any, module: Any = None) -> CaptureCounters:
+    """:class:`CaptureCounters` from a ``ReadStats``, leaving out what it lacks.
+
+    The honoured speed needs *module* to feature-detect it; without one it is
+    ``None``, never guessed from the stats."""
 
     def count(name: str) -> int | None:
         return int(getattr(stats, name)) if hasattr(stats, name) else None
@@ -1603,6 +1609,7 @@ def _capture_counters(stats: Any) -> CaptureCounters:
         sectors_recovered=count("sectors_recovered"),
         sectors_suspect=count("sectors_suspect"),
         subq_misposition=count("subq_misposition"),
+        speed_honoured_x=None if module is None else _speed_x_or_none(module, stats),
     )
 
 
@@ -1713,7 +1720,7 @@ def _read_disc_binding(
                 )
     _log_read_caveats(result.stats, "read", module)
     if stats_cb is not None:
-        stats_cb(_capture_counters(result.stats))
+        stats_cb(_capture_counters(result.stats, module))
     return _first_audio_pregap(toc)
 
 

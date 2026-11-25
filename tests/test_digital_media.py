@@ -118,23 +118,38 @@ def _capture(path: Path, sectors: int, flip: int | None = None) -> None:
 
 
 def _consensus(
-    monkeypatch, tmp_path, *, c2: bool, flip=None, damage=False, ladder=(40, 32, 24)
+    monkeypatch,
+    tmp_path,
+    *,
+    c2: bool,
+    flip=None,
+    damage=False,
+    ladder=(40, 32, 24),
+    honours=None,
+    **speeds,
 ):
+    """Run the consensus on fakes. *honours* maps a requested speed to the one
+    the fake drive reports using, through ``stats_cb`` as the engine does."""
+    from cdda2img.accudisc_reader import CaptureCounters
+
     first = tmp_path / "disc.pcm"
     _capture(first, 20)
     calls: list[int | None] = []
 
-    def read(device, out, read_speed=None, map_cb=None, **_k):
+    def read(device, out, read_speed=None, map_cb=None, stats_cb=None, **_k):
         calls.append(read_speed)
         _capture(out, 20, flip)
         if map_cb is not None:
             map_cb(SimpleNamespace(damage=bytearray([1 if damage else 0] * 20)))
+        if stats_cb is not None:
+            got = (honours or {}).get(read_speed, read_speed)
+            stats_cb(CaptureCounters(None, None, None, speed_honoured_x=got))
         return 0
 
     monkeypatch.setattr("cdda2img.accudisc_reader.read_disc_c2", read)
     monkeypatch.setattr("cdda2img.accudisc_reader.drive_supports_c2", lambda _d: c2)
     monkeypatch.setattr("cdda2img.drive_speed.admitted_ladder", lambda _d: list(ladder))
-    prov = app._digital_media_consensus("/dev/sr0", first, bytes(20), None)
+    prov = app._digital_media_consensus("/dev/sr0", first, bytes(20), None, **speeds)
     return prov, calls
 
 
@@ -255,7 +270,77 @@ def test_the_consensus_avoids_the_captures_own_speed(monkeypatch, tmp_path) -> N
     monkeypatch.setattr("cdda2img.accudisc_reader.drive_supports_c2", lambda _d: True)
     monkeypatch.setattr("cdda2img.drive_speed.admitted_ladder", lambda _d: [40, 32, 24])
     app._digital_media_consensus("/dev/sr0", first, bytes(4), None, capture_speed=32)
-    assert calls == [40]
+    # The nearest rung BELOW the capture's (AccuDisc's REFERENCE_VERIFY rule,
+    # adopted 2026-11-25); before then the fastest other rung, 40.
+    assert calls == [24]
+
+
+# ---- no two reads at one speed (kgr, 2026-11-25: "Fix the digital-media consensus
+# now"). Until then a one-rung drive re-read at the capture's own speed and a
+# third read reused the second's rung, both silently.
+
+
+def test_a_one_rung_drive_is_refused_not_read_twice_at_one_speed(
+    monkeypatch, tmp_path
+) -> None:
+    with pytest.raises(ra.RipAborted) as exc:
+        _consensus(monkeypatch, tmp_path, c2=True, ladder=(40,))
+    err = _v(exc)
+    assert err.code == ra.EXIT_INVESTIGATE
+    assert "2 distinct speeds" in " ".join(err.details)
+
+
+def test_two_rungs_without_c2_cannot_give_a_third_speed(monkeypatch, tmp_path) -> None:
+    with pytest.raises(ra.RipAborted) as exc:
+        _consensus(monkeypatch, tmp_path, c2=False, ladder=(8, 4), capture_speed=4)
+    assert "3 distinct speeds" in " ".join(_v(exc).details)
+
+
+def test_a_capture_at_the_lowest_rung_goes_up_and_never_back(
+    monkeypatch, tmp_path
+) -> None:
+    """AccuDisc's own case (outbound 282): 4x, then 8x, then NOT 4x again."""
+    prov, calls = _consensus(
+        monkeypatch, tmp_path, c2=False, ladder=(40, 16, 8, 4), capture_speed=4
+    )
+    assert calls == [8, 16]
+    assert prov["digital_media_consensus"] == "3@capture,8X,16X:unavailable"
+
+
+def test_the_capture_is_keyed_on_the_speed_the_drive_used(
+    monkeypatch, tmp_path
+) -> None:
+    """Asked for 40, the drive read at 32: the re-read must avoid 32, not 40."""
+    _prov, calls = _consensus(
+        monkeypatch, tmp_path, c2=True, capture_speed=40, capture_honoured=32
+    )
+    assert calls == [24]
+
+
+def test_a_reread_the_drive_ran_at_a_used_speed_is_refused(
+    monkeypatch, tmp_path
+) -> None:
+    """The drive quantizes 32x up to 40x, the capture's speed: two reads at one
+    speed prove nothing, whatever they agree on."""
+    with pytest.raises(ra.RipAborted) as exc:
+        _consensus(monkeypatch, tmp_path, c2=True, honours={32: 40})
+    assert "the drive read at 40X" in _v(exc).reason
+
+
+def test_the_record_names_the_speed_each_reread_ran_at(monkeypatch, tmp_path) -> None:
+    prov, _calls = _consensus(monkeypatch, tmp_path, c2=True, honours={32: 24})
+    assert prov["digital_media_consensus"] == "2@capture,24X:clean"
+
+
+def test_the_nearest_rung_rule_matches_accudiscs() -> None:
+    """REFERENCE_VERIFY revision 2: nearest below, else nearest above, never an
+    avoided rung, None when nothing is left."""
+    ladder = [40, 32, 24, 16, 8, 4]
+    assert app._verify_rung(ladder, 40, [40]) == 32
+    assert app._verify_rung(ladder, 4, [4]) == 8
+    assert app._verify_rung(ladder, 8, [4, 8]) == 16
+    assert app._verify_rung([8, 4], 8, [4, 8]) is None
+    assert app._verify_rung(ladder, 48, [48]) == 40  # a speed off the ladder
 
 
 # ---- the digital release's own records (kgr, 2026-11-21) ----------------------------
@@ -643,3 +728,17 @@ def test_the_discogs_release_is_settled_after_the_menu_and_before_writing() -> N
     at = [src.find(s) for s in order]
     assert -1 not in at, dict(zip(order, at, strict=True))
     assert at == sorted(at)
+
+
+def test_the_captures_honoured_speed_is_recorded_and_handed_on() -> None:
+    from cdda2img.accudisc_reader import CaptureCounters
+
+    prov = app._capture_prov(CaptureCounters(1, 0, 0, speed_honoured_x=32))
+    assert prov["capture_speed_honoured"] == "32"
+    assert "capture_speed_honoured" not in app._capture_prov(
+        CaptureCounters(1, 0, 0)  # not reported: absent, never 0
+    )
+    assert app._prov_int(prov, "capture_speed_honoured") == 32
+    assert app._prov_int({}, "capture_speed_honoured") is None
+    src = " ".join(inspect.getsource(app.rip_image).split())
+    assert 'capture_honoured=_prov_int(info.prov, "capture_speed_honoured")' in src
