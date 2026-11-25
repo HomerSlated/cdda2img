@@ -556,8 +556,9 @@ the read arrives at it:
 | `track-constant`, `track-ladder` | the whole track | held / each rung | none |
 | `whole-disc` | the whole audio session, no cache defeat | each rung | none |
 
-`sector-hammer` is the only one in which the drive never reads continuously up to the
-target: it starts reading AT the sector it is asked to fix.
+`sector-hammer` is the only one that reads and writes nothing but the flagged sector: the
+drive starts reading AT the sector it is asked to fix, and no sector around it is ever
+replaced.
 
 **Evidence** (PX-716A, Tracy Chapman, tracks 8 and 9; `--profile-only`; every read `done`,
 every speed honoured, no time limit ever hit):
@@ -580,38 +581,55 @@ cache defeat): 2/20.
   whole-disc read recovered the same sector.
 - **Not repetition.** 150 reads of one sector; `max-variation` needed at most 15 and
   `whole-disc` 4.
-- **Not the targets.** `sector-runup` read the same two sectors with the same ladder policy,
-  the same per-round stepping and the same cache defeat, and matched at read 8. Of
-  everything a read does, the two plans differ only in the 32 sectors before the target and
-  the 2 after it.
 - **Not a fault in the path.** `tools/strategy_replay.py` drove `_recover_by_strategy`
   against a simulated drive at the real read offset and the live dBAR and recovered every
   case it was given (2026-11-24, 8/8 hammer cases as predicted), so a correct sector would
   have been written.
+- **The same targets, a different read.** `sector-runup` read the same two sectors with the
+  same ladder policy, the same per-round stepping and the same cache defeat, and matched at
+  read 8. The two plans differ only in the 32 sectors before the target and the 2 after it,
+  and those sectors are both **read** (the drive streams into the target) and **spliced**
+  (they replace the capture's copies in the working track).
 
-So on this damage the result of a read depends on **how it arrives at the sector**: a read
-that starts at the sector fails every time, and a read that streams into it from 32 or more
-sectors before can succeed. `sector-hammer` lacks exactly the one thing every profile that
-succeeded has. The bench saw the same effect directly: at 114436@40x a bare single-sector
-read was byte-exact 0.20 of the time, against 0.60 with a 16-64 sector run-up.
+So what is measured is: **a plan that re-reads and writes only the flagged sector fails on
+this damage; plans that also read and write the sectors around it succeed.** Two
+explanations fit that, and no run has separated them:
 
-**Why it cannot work on this damage.** Each hammer read is the same experiment: the same
-seek, the same landing, the same one-sector transfer; only the speed changes, and the
-speed has been shown not to be what is missing. A read error that depends on the approach
-is therefore met in the same way on every read, so more reads do not add chances. That is
-the sense of "never": 0 of 700 is not a low rate to be outlasted, it is the plan never
-producing the condition the other profiles produce on every read.
+1. **Reach.** The capture's damage may not be confined to the sectors it flagged. If an
+   unflagged sector near a target is also wrong, no hammer read can produce an AccurateRip
+   match however well it reads the target, because hammer never writes that sector; every
+   other profile does. C2 is precise but blind to some errors (positioning and jitter
+   slips raise no flag), so unflagged damage is plausible.
+2. **Approach.** A read that starts AT the sector may read it worse than one that streams
+   into it. The bench measured this directly: at 114436@40x a bare single-sector read was
+   byte-exact 0.20 of the time, against 0.60 with a 16-64 sector run-up.
 
-**Hypotheses, not measured.** Why the approach matters is a cause, and the bench's rule is
-to rank strategies, not causes. Recorded so they can be tested, not relied on:
+The arithmetic favours reach. Approach alone predicts a low success rate, not zero: at the
+bench's 0.20, 700 reads would be expected to give on the order of a hundred hits, and they
+gave none. Reach (or the cache defeat, below) fits 0/700; approach alone does not.
+
+**Why it cannot work on this damage, and the condition.** If reach is the explanation, the
+"never" is structural: a plan that cannot write the sector that is actually wrong can never
+match, at any read count, speed or approach. That is the strong claim, and it holds **only
+where the capture left unflagged damage within the track**. If approach is the explanation,
+hammer is merely bad (0.20 or less per read), and the 0/700 needs another factor. Either
+way it has never recovered a sector that another profile could not.
+
+**The experiment that decides it.** Keep a failing capture's PCM (the rip deletes its
+scratch; this needs an option to retain it, not yet built), diff each failing track against
+a verified rip of the same disc (Tracy has several), and count the sectors that differ and
+how many of them the capture flagged. Unflagged differing sectors near the targets confirm
+reach; none confirms approach (or the cache defeat).
+
+**Hypotheses for approach, not measured.** Why the approach would matter is a cause, and the
+bench's rule is to rank strategies, not causes. Recorded so they can be tested:
 
 1. *Settling.* A read that begins at the target transfers it straight after a seek, while
-   tracking, focus and the data clock may still be settling, so the damaged sector is read
-   in the worst state any read is in; with a run-up the drive reaches it in steady state.
+   tracking, focus and the data clock may still be settling.
 2. *De-interleaving.* CIRC spreads each sector's bytes over about 108 frames (a little over
-   one sector), so correcting a sector uses frames that lie before and after it; a read
-   that starts at the sector may not give the drive's decoder those frames in the state it
-   needs. Drives normally read ahead of the requested address, which weakens this one.
+   one sector), so correcting a sector uses frames before and after it; a read that starts
+   at the sector may not give the decoder those frames in the state it needs. Drives
+   normally read ahead of the requested address, which weakens this one.
 3. *The tail.* `sector-runup` also reads 2 sectors past the target and hammer reads none;
    no run has separated the run-up from the tail.
 
@@ -2451,4 +2469,4 @@ That set lets a future reader distinguish "we never checked" from "we checked
 thoroughly and this disc cannot be verified" — which is the only useful thing
 left to say about it.
 
-Blake3 05eda0a5bad6673591ab93fd8f292914f82351e2d8454f4d611ad38a4e5be9ec
+Blake3 ab4332c26f0a1999859ee4de331b72bceb9e5a77624c1ee08f234d9af1f53ed7
