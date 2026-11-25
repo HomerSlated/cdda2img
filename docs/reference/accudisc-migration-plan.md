@@ -880,6 +880,16 @@ What it changes in this plan, pending AccuDisc's own audit (§268.5) and Keith's
   > under which agreement is not evidence once a slip is seen. Only our AccurateRip gate can
   > tell which arm delivered the right bytes, so `span-flagged` is scored by it with the flag
   > off and on.
+  >
+  > **0.57.0, the per-read budget (notice 2026-11-25w, reviewed in outbound §279).** Our
+  > `drive_work` will pass the per-rip remainder into each AR-gated read and subtract
+  > `budget_spent_*` afterwards. This is adoption, so it comes after the series; recording
+  > `budget_spent_*` in PROV can come sooner. **The trap: `budget_cmds = 0` and
+  > `budget_speed_changes = 0` mean *unlimited*,** so a remainder of zero cannot be passed
+  > through. When either remainder reaches 0, `drive_work` must raise `DriveBudgetSpent`
+  > before the read is sent; it must not pass the 0 on. Remainders are clamped to the field
+  > widths (uint16 / uint32). The capture is never budgeted: a cut fallback there zero-fills
+  > a chunk of the only full read.
 - **The `--ad-*` passthrough does less than §9.4 and the tests above assume.** `--ad-retries`,
   `--ad-c2-retries`, `--ad-verify`, `--ad-overlap` and `--ad-recovery` are accepted, take
   rung 1 (so the chain gives way to the plain ladder) and are recorded in PROV
