@@ -40,6 +40,7 @@
 # been.
 name         = "whole-disc"
 experimental = true
+best_for     = "several failing tracks or unflagged damage; slow (whole disc)"
 
 sub          = true
 c2           = true

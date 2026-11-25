@@ -26,6 +26,7 @@
 # granularity = "track".
 name         = "track-constant"
 experimental = false
+best_for     = "light damage one re-read at a known-good speed fixes"
 
 sub          = true
 c2           = true

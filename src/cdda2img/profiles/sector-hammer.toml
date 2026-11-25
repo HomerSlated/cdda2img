@@ -46,6 +46,7 @@
 # bind.
 name         = "sector-hammer"
 experimental = true
+best_for     = "a control: transient errors in flagged sectors (none fixed yet)"
 
 sub          = true
 c2           = true

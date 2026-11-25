@@ -30,6 +30,7 @@
 # guard against a stalled drive that should never bind.
 name         = "span-fixed"
 experimental = true
+best_for     = "a control: tells read size from variation (not a candidate)"
 
 sub          = true
 c2           = true

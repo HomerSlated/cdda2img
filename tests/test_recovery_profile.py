@@ -492,7 +492,7 @@ def test_the_profile_listing_keeps_its_columns_for_a_long_user_name() -> None:
         for n in ("track-ladder", "whole-disc")
     ]
     rows.append((long_name, R.load_profile("track-constant"), Path("/u/x.toml")))
-    lines = _profile_listing(rows)
+    lines = [ln for ln in _profile_listing(rows) if not ln.startswith("  best for:")]
     heads, paths = lines[0::2], lines[1::2]
 
     def gran_col(line: str, name: str) -> int:
@@ -505,3 +505,39 @@ def test_the_profile_listing_keeps_its_columns_for_a_long_user_name() -> None:
     assert {len(p) - len(p.lstrip()) for p in paths} == grans  # path under it
     assert all(line == line.rstrip() for line in lines)
     assert "(experimental)" in heads[1] and "(experimental)" not in heads[0]
+
+
+# ---- best_for: what damage each profile is for (kgr, 2026-11-25) ---------------------
+
+
+def test_every_shipped_profile_says_what_damage_it_is_for() -> None:
+    for name in sorted(_SHIPPED):
+        assert R.load_profile(name).best_for, name
+
+
+def test_the_listing_shows_best_for_under_each_profile() -> None:
+    from pathlib import Path
+
+    from cdda2img.cdda2img import _profile_listing
+
+    prof = R.load_profile("sector-runup")
+    lines = _profile_listing([("sector-runup", prof, Path("/p/x.toml"))])
+    assert lines[2] == f"  best for: {prof.best_for}"
+    assert all(len(line) <= 80 for line in lines[2:])
+
+
+def test_a_profile_without_best_for_lists_as_before() -> None:
+    import dataclasses
+    from pathlib import Path
+
+    from cdda2img.cdda2img import _profile_listing
+
+    prof = dataclasses.replace(R.load_profile("track-ladder"), best_for="")
+    assert len(_profile_listing([("track-ladder", prof, Path("/p/x.toml"))])) == 2
+
+
+@pytest.mark.parametrize("value", ["two\nlines", "x" * 69])
+def test_best_for_must_be_one_short_line(value: str) -> None:
+    errors = validate({"name": "p", "best_for": value}, PROFILE_SCHEMA)
+    assert [e.where for e in errors] == ["best_for"]
+    assert validate({"name": "p", "best_for": "x" * 68}, PROFILE_SCHEMA) == []

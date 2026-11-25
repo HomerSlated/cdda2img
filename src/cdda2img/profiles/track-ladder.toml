@@ -27,6 +27,7 @@
 # finishes its sweeps.
 name         = "track-ladder"
 experimental = false
+best_for     = "any damage; the only profile proven on heavy damage"
 
 sub          = true
 c2           = true

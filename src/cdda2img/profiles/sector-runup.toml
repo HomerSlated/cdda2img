@@ -39,6 +39,7 @@
 # bind.
 name         = "sector-runup"
 experimental = true
+best_for     = "a few flagged sectors that single-sector re-reads keep missing"
 
 sub          = true
 c2           = true

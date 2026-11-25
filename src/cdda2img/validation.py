@@ -271,6 +271,10 @@ def _is_profile_name(s: str) -> bool:
 _SECTOR_SHAPED = frozenset({"sector", "span"})
 
 
+#: ``best_for``'s limit: the listing indents it by 2 and labels it "best for: "
+#: (10), and 2 + 10 + 68 = 80 columns.
+BEST_FOR_MAX = 68
+
 PROFILE_SCHEMA = Schema(
     name="profile",
     fields={
@@ -281,6 +285,9 @@ PROFILE_SCHEMA = Schema(
             pattern_desc="must be non-empty and use only [a-z0-9_-]",
         ),
         "experimental": FieldSpec((bool,), default=False),
+        # One line on the damage the profile is for, shown by `rip --list-profiles`
+        # (kgr, 2026-11-25). Documentation only: no read depends on it.
+        "best_for": FieldSpec((str,), default=""),
         # capture (pass 1)
         "sub": FieldSpec((bool,), default=True),
         "c2": FieldSpec((bool,), default=True),
@@ -323,6 +330,12 @@ PROFILE_SCHEMA = Schema(
         "budget_s": FieldSpec((int,), default=300),
     },
     rules=(
+        SanityRule(
+            "best_for",
+            f"must be one line of at most {BEST_FOR_MAX} characters, so "
+            "`rip --list-profiles` fits an 80-column terminal",
+            lambda d: "\n" not in d["best_for"] and len(d["best_for"]) <= BEST_FOR_MAX,
+        ),
         SanityRule("passes", "must be at least 1", lambda d: d["passes"] >= 1),
         SanityRule("budget_s", "must be greater than 0", lambda d: d["budget_s"] > 0),
         SanityRule("run_up", "must not be negative", lambda d: d["run_up"] >= 0),

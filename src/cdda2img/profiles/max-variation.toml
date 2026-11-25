@@ -39,6 +39,7 @@
 # been.
 name         = "max-variation"
 experimental = true
+best_for     = "a handful of flagged sectors; fails on broad damage"
 
 sub          = true
 c2           = true

@@ -75,6 +75,7 @@ class Profile:
 
     name: str
     experimental: bool = False
+    best_for: str = ""
     sub: bool = True
     c2: bool = True
     granularity: str = "track"

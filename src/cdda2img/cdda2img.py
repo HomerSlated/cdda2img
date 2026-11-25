@@ -7220,7 +7220,9 @@ def _report_unanswered(unanswered: list[str]) -> int:
 def _profile_listing(rows: list[tuple[str, Profile, Path]]) -> list[str]:
     """``rip --list-profiles``: two lines per profile, the columns sized to the
     longest entry so a user profile's longer name (``track-constant-x20``) keeps
-    them aligned. The path goes on the second line, under the granularity."""
+    them aligned. The path goes on the second line, under the granularity, and a
+    third line says what damage the profile is for when it says (``best_for``,
+    kgr 2026-11-25)."""
     if not rows:
         return []
     name_w = max(len(name) for name, _p, _path in rows)
@@ -7235,6 +7237,8 @@ def _profile_listing(rows: list[tuple[str, Profile, Path]]) -> list[str]:
         )
         lines.append(head.rstrip())
         lines.append(f"{'':<{name_w}}  {path}")
+        if prof.best_for:
+            lines.append(f"  best for: {prof.best_for}")
     return lines
 
 

@@ -39,6 +39,7 @@
 # policy (SPAN_RESCUE) since 2026-11-25, not fields here.
 name            = "span-flagged"
 experimental    = true
+best_for     = "local clusters of flagged sectors (untested on hardware)"
 
 sub             = true
 c2              = true
