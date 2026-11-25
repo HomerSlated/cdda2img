@@ -344,7 +344,7 @@ def test_the_span_rung_stops_at_its_first_match(monkeypatch, tmp_path) -> None:
     )
     pcm = tmp_path / "disc.pcm"
     pcm.write_bytes(bytes(_LEADOUT * _B))
-    profile = _profile(granularity="span", ladder="full", verify_passes=2)
+    profile = _profile(granularity="span", ladder="full")
     outcomes, _prov = app._recover_flagged_spans(
         "/dev/sr0",
         [SimpleNamespace(track=2)],
@@ -381,7 +381,7 @@ def test_a_span_sweep_is_one_pass_per_rung(monkeypatch, tmp_path) -> None:
         [["block"]],
         3,
         _LADDER,
-        _profile(granularity="span", ladder="full", verify_passes=2),
+        _profile(granularity="span", ladder="full"),
         0,
         bytes(1 if x == 150 else 0 for x in range(_LEADOUT)),
         None,

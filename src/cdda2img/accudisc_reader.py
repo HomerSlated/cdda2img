@@ -48,6 +48,7 @@ Consequences worth knowing before they surprise someone:
 from __future__ import annotations
 
 import contextlib
+import contextvars
 import functools
 import inspect
 import logging
@@ -1339,6 +1340,236 @@ _FEATURE_READABLE_RANGE = "readable_range"
 _FEATURE_READ_BUDGET = "read_budget"
 
 
+_FEATURE_READ_POLICY = "read_policy"
+_FEATURE_COMPARE_READ = "compare_read"
+
+#: Every AccuDisc 0.53-0.59 feature a rip turns on (kgr, 2026-11-25: "I would
+#: rather do my tests against 0.59.0 with all new features enabled"). A rip
+#: refuses an engine missing any of them rather than run half of them while the
+#: user believes all are on (``cdda2img._require_engine_features``).
+RIP_FEATURES = (
+    _FEATURE_READ_POLICY,
+    _FEATURE_COMPARE_READ,
+    _FEATURE_READ_BUDGET,
+    "shift_search",
+    "rescue_by_rung",
+)
+
+#: Where cdda2img overrides AccuDisc's read-policy table, per purpose. Revision 2
+#: leaves ``shift_search`` off in ``SPAN_RESCUE`` pending a hardware A/B; kgr
+#: turned every new feature on for his tests (2026-11-25), so it is on, and PROV
+#: ``recovery_policy_overrides`` says so beside the table's own reason bit.
+_POLICY_OVERRIDES: dict[str, dict[str, Any]] = {"SPAN_RESCUE": {"shift_search": True}}
+
+
+def missing_rip_features() -> list[str]:
+    """The :data:`RIP_FEATURES` the engine lacks (all of them without a binding)."""
+    module, _why = _import_binding()
+    if module is None:
+        return list(RIP_FEATURES)
+    return [f for f in RIP_FEATURES if not _has_feature(module, f)]
+
+
+@dataclass
+class RecoveryPolicy:
+    """What :func:`accudisc_read_policy` needs to know about one rip's recovery,
+    and what it chose (PROV ``recovery_policy``).
+
+    *admitted* is the recovery ladder the rip bound (the user's rungs under
+    ``--ad-ladder``): the policy refuses a ``speed_x`` outside it and builds the
+    span rescue ladder from it."""
+
+    admitted: tuple[int, ...]
+    c2_usable: bool
+    readable: tuple[int, int] | None
+    seen: dict[str, set[str]] = field(default_factory=dict)
+
+    def record(self) -> str | None:
+        """``<purpose>:r<revision>:<reasons>`` per distinct choice, comma-separated."""
+        items = [f"{k}:{v}" for k in sorted(self.seen) for v in sorted(self.seen[k])]
+        return ",".join(items) or None
+
+    def overrides_record(self) -> str | None:
+        """The overrides that applied, ``<purpose>:<field>=<value>``."""
+        items = [
+            f"{purpose.lower()}:{name}={'on' if value is True else value}"
+            for purpose, fields in sorted(_POLICY_OVERRIDES.items())
+            if purpose.lower() in self.seen
+            for name, value in sorted(fields.items())
+        ]
+        return ",".join(items) or None
+
+
+_POLICY: contextvars.ContextVar[RecoveryPolicy | None] = contextvars.ContextVar(
+    "cdda2img_recovery_policy"
+)
+
+
+@contextlib.contextmanager
+def recovery_policy(
+    admitted: Sequence[int], *, c2_usable: bool, readable: tuple[int, int] | None
+) -> Iterator[RecoveryPolicy]:
+    """Fill every recovery read inside the block from AccuDisc's read policy.
+
+    Outside it (the capture, the track preview, the bench tools) reads are built
+    as before. Inside it the policy owns every field that decides what a read
+    does; the seam adds only the sink, maps and cancel flag."""
+    policy = RecoveryPolicy(tuple(admitted), c2_usable, readable)
+    token = _POLICY.set(policy)
+    try:
+        yield policy
+    finally:
+        _POLICY.reset(token)
+
+
+def _policy_c2(default: bool) -> bool:
+    """Whether a windowed read carries C2: the policy's answer inside a rip's
+    recovery (``GATED_REREAD`` asks for C2 whenever the drive has it), else
+    *default*."""
+    policy = _POLICY.get(None)
+    return default if policy is None else policy.c2_usable
+
+
+def _policy_kwargs(
+    module: Any, purpose: str, lba: int, count: int, speed_x: int | None
+) -> dict[str, Any] | None:
+    """The policy-owned ``Device.read`` keywords for one recovery read, or
+    ``None`` outside a rip's recovery.
+
+    The per-read budget is what is left of the rip's (:func:`drive_work.engine_budget`,
+    which refuses the read when nothing is left rather than pass 0, which means
+    unlimited). The choice is recorded for PROV."""
+    policy = _POLICY.get(None)
+    if policy is None:
+        return None
+    cmds, changes = drive_work.engine_budget()
+    chosen = module.read_policy(
+        module.Purpose[purpose],
+        lba,
+        count,
+        c2_usable=policy.c2_usable,
+        admitted=policy.admitted,
+        speed_x=speed_x or 0,
+        readable=policy.readable,
+        budget_cmds=cmds,
+        budget_speed_changes=changes,
+    )
+    kw = chosen.read_kwargs()
+    kw.update(_POLICY_OVERRIDES.get(purpose, {}))
+    names = sorted(
+        r.name.lower()
+        for r in module.PolicyReason
+        if r.name is not None and r in chosen.reasons
+    )
+    policy.seen.setdefault(purpose.lower(), set()).add(
+        f"r{chosen.revision}:{'+'.join(names) or 'none'}"
+    )
+    return kw
+
+
+class NoVerifyRung(RuntimeError):
+    """The read policy found no admitted rung a verifying read may use: every one
+    left is the reference's or the excluded one (``REFERENCE_VERIFY``)."""
+
+
+@dataclass(frozen=True)
+class VerifyRead:
+    """One full read held sector by sector against the capture (AccuDisc 0.59.0
+    ``compare_read`` under ``REFERENCE_VERIFY``).
+
+    *first_disagreement* is the first LBA whose state is neither ``AGREE`` nor
+    ``AGREE_C2``, or ``None`` when every sector agreed byte for byte."""
+
+    speed_requested: int
+    speed_honoured: int | None
+    agree: int
+    agree_c2: int
+    differ: int
+    shifted: int
+    hard: int
+    not_compared: int
+    first_disagreement: int | None
+    policy: str
+
+
+def verify_against_capture(
+    device: str,
+    capture: Path,
+    *,
+    ref_speed_x: int,
+    exclude_speed_x: int,
+    admitted: Sequence[int],
+    c2_usable: bool,
+    readable: tuple[int, int] | None,
+    on_speed: Callable[[int], None] | None = None,
+) -> VerifyRead:
+    """Read the disc again and compare every sector with *capture* (raw PCM from
+    LBA 0, as the capture wrote it: no offset arithmetic on either side).
+
+    AccuDisc's read policy picks the rung: the nearest admitted one other than
+    *ref_speed_x* (the reference's honoured speed) and *exclude_speed_x*;
+    :class:`NoVerifyRung` when none is left. *on_speed* hears it before the read
+    starts. The reference callback runs on the engine's buffer thread and reads
+    the capture through its own handle."""
+    module = _binding("compare read")
+    count = capture.stat().st_size // _SECTOR_BYTES
+    try:
+        chosen = module.read_policy(
+            module.Purpose.REFERENCE_VERIFY,
+            0,
+            count,
+            c2_usable=c2_usable,
+            admitted=tuple(admitted),
+            speed_x=0,
+            readable=readable,
+            ref_speed_x=ref_speed_x,
+            exclude_speed_x=exclude_speed_x,
+        )
+    except module.InvalidArgument as exc:
+        raise NoVerifyRung(str(exc)) from exc
+    kw = chosen.read_kwargs()
+    if on_speed is not None:
+        on_speed(int(kw["speed_x"]))
+    names = sorted(
+        r.name.lower()
+        for r in module.PolicyReason
+        if r.name is not None and r in chosen.reasons
+    )
+
+    def run() -> Any:
+        with (
+            capture.open("rb") as fh,
+            module.Device(device) as dev,
+            _cancellable(module) as cancel,
+        ):
+
+            def reference(lba: int, n: int) -> tuple[bytes, None]:
+                fh.seek(lba * _SECTOR_BYTES)
+                return fh.read(n * _SECTOR_BYTES), None
+
+            return dev.compare_read(reference=reference, **kw, **cancel)
+
+    result = _call(module, "compare read", run)
+    states = bytes(result.agree_map)
+    ok = {int(module.AgreeState.AGREE), int(module.AgreeState.AGREE_C2)}
+    first = next((i for i, b in enumerate(states) if (b & 0x0F) not in ok), None)
+    stats = result.compare
+    return VerifyRead(
+        speed_requested=int(kw["speed_x"]),
+        speed_honoured=_speed_x_or_none(module, result.stats),
+        agree=stats.agree,
+        agree_c2=stats.agree_c2,
+        differ=stats.differ,
+        shifted=stats.shifted,
+        hard=stats.hard,
+        not_compared=sum(
+            1 for b in states if (b & 0x0F) == int(module.AgreeState.NOT_COMPARED)
+        ),
+        first_disagreement=first,
+        policy=f"r{chosen.revision}:{'+'.join(names) or 'none'}",
+    )
+
+
 def _book_engine_work(module: Any, stats: Any) -> None:
     """Book a recovery read's own engine spend to the rip's drive work.
 
@@ -2043,27 +2274,18 @@ def _read_windows_binding(
         if progress_cb is not None:
             progress_cb(pos // _SECTOR_BYTES, count)
 
-    extra: dict[str, Any] = {}
-    if cache_defeat and _has_feature(module, _FEATURE_CACHE_DEFEAT):
-        extra["cache_defeat"] = True
-    with module.Device(device) as dev, _cancellable(module) as cancel:
-        # copy=False is safe: `collect` consumes the view synchronously into
-        # `buf` and never retains it past the call.
-        result = dev.read(
-            start_lba,
-            count,
-            sink=collect,
-            copy=False,
-            speed_x=read_speed or 0,
-            **extra,
-            **_readable_kw(module, readable),
-            **cancel,
-        )
-    _book_engine_work(module, result.stats)
-    defeat = "off"
-    if extra:
-        _log_cache_defeat(result.stats, start_lba, module)
-        defeat = module.CacheDefeat(result.stats.cache_defeat).name.lower()
+    # copy=False is safe: `collect` consumes the view synchronously into `buf`
+    # and never retains it past the call.
+    result, defeat = _defeated_read(
+        module,
+        device,
+        start_lba,
+        count,
+        collect,
+        read_speed,
+        cache_defeat,
+        **_readable_kw(module, readable),
+    )
 
     # Length is a guarantee on the subprocess path — AccuDisc zero-fills
     # hard-unreadable sectors, so the output file is always exactly `count`
@@ -2090,8 +2312,11 @@ def _read_windows_binding(
 
 
 def _windowed_read(c2: bool) -> Callable[..., WindowsRead]:
-    """The windowed read to use: with C2 pointers counted, or audio only."""
-    return _read_windows_with_c2 if c2 else _read_windows_binding
+    """The windowed read to use: with C2 pointers counted, or audio only.
+
+    Inside a rip's recovery the read policy decides (:func:`_policy_c2`), so the
+    record width the sink expects is the one the read will carry."""
+    return _read_windows_with_c2 if _policy_c2(c2) else _read_windows_binding
 
 
 def _read_windows_with_c2(
@@ -2192,7 +2417,29 @@ def _defeated_read(
     cache_defeat: bool,
     **read_kw: Any,
 ) -> tuple[Any, str]:
-    """``Device.read`` with the optional cache defeat; ``(result, defeat)``."""
+    """``Device.read`` with the optional cache defeat; ``(result, defeat)``.
+
+    Inside a rip's recovery the read policy (``GATED_REREAD``) fills the request
+    instead, cache defeat included; the C2 layout must be the one the caller's
+    sink expects, or the sink would mis-frame every record. *defeat* is then
+    ``"declined"`` when the policy chose none (no target, e.g. a whole-disc read).
+    """
+    policy = _policy_kwargs(module, "GATED_REREAD", start_lba, count, read_speed)
+    if policy is not None:
+        want = read_kw.get("c2")
+        if policy["c2"] != (module.C2.NONE if want is None else want):
+            msg = (
+                f"read policy chose c2={policy['c2']!r} for a read whose sink "
+                f"expects {want!r}; refusing to mis-frame the records"
+            )
+            raise RuntimeError(msg)
+        with module.Device(device) as dev, _cancellable(module) as cancel:
+            result = dev.read(sink=sink, copy=False, **policy, **cancel)
+        _book_engine_work(module, result.stats)
+        if not policy["cache_defeat"]:
+            return result, "declined"
+        _log_cache_defeat(result.stats, start_lba, module)
+        return result, module.CacheDefeat(result.stats.cache_defeat).name.lower()
     extra: dict[str, Any] = {}
     if cache_defeat and _has_feature(module, _FEATURE_CACHE_DEFEAT):
         extra["cache_defeat"] = True
@@ -2687,24 +2934,35 @@ def _read_span_detail_binding(
             raise RuntimeError(msg)
         status = bytearray(count)
         subq = bytearray(count)
+        # Inside a rip's recovery the read policy (SPAN_RESCUE) owns the request:
+        # verify 2, overlap 0, the cache defeat, the rescue ladder below this
+        # speed, rescue_by_rung, and shift_search by cdda2img's override.
+        policy = _policy_kwargs(module, "SPAN_RESCUE", start_lba, count, read_speed)
+        if policy is None:
+            request: dict[str, Any] = {
+                "lba": start_lba,
+                "count": count,
+                "c2": module.C2.PTRS,
+                "sub": module.Sub.RAW,
+                "speed_x": read_speed or 0,
+                "verify_passes": verify_passes,
+                "overlap_sectors": overlap_sectors,
+                "c2_retries": c2_retries,
+                "speed_ladder": speed_ladder,
+                **_readable_kw(module, readable),
+            }
+        else:
+            request = policy
+            verify_passes = int(policy["verify_passes"])
         # copy=False is safe: `collect` consumes the view synchronously and
         # never retains it past the call.
         with _cancellable(module) as cancel:
             result = dev.read(
-                start_lba,
-                count,
                 sink=collect,
                 copy=False,
-                c2=module.C2.PTRS,
-                sub=module.Sub.RAW,
-                speed_x=read_speed or 0,
-                verify_passes=verify_passes,
-                overlap_sectors=overlap_sectors,
-                c2_retries=c2_retries,
-                speed_ladder=speed_ladder,
                 status_map=status,
                 subq_map=subq,
-                **_readable_kw(module, readable),
+                **request,
                 **cancel,
             )
         _book_engine_work(module, result.stats)

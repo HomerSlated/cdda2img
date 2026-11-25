@@ -21,9 +21,9 @@
 # passes. `budget_s` is seconds per span read: a track may take budget_s x spans x
 # passes, a guard against a stalled drive that should never bind.
 #
-# verify_passes = 2 is required (the schema refuses less for granularity = "span"):
-# the acceptance rule needs a position witness. c2_retries stays 0 until a
-# measurement shows it helps under verification (plan §4.3).
+# The engine's settings (verify 2, overlap 0, the cache defeat, a rescue ladder
+# below each attempt's speed, rescue_by_rung, shift_search) are AccuDisc's read
+# policy (SPAN_RESCUE) since 2026-11-25, not fields here.
 name            = "span-flagged"
 experimental    = true
 
@@ -38,7 +38,4 @@ span_pad        = 4
 variation       = "none"
 
 ctdb            = "auto"
-verify_passes   = 2
-overlap_sectors = 4
-c2_retries      = 0
 budget_s        = 30

@@ -132,10 +132,11 @@ To protect the drive,
 changes between them (0 = no limit); a rip stopped by either aborts and names
 the limit to raise.
 .B recovery_max_engine_cmds
-(default 10000) is the intended limit on the engine\(cqs own recovery commands
-inside those reads; for now it is
-.I recorded only
-and limits nothing.
+(default 10000) bounds the engine\(cqs own recovery commands inside those
+reads, and the engine\(cqs speed changes count against
+.BR recovery_max_speed_changes .
+Every recovery read is set up by AccuDisc\(cqs read policy, and a rip refuses
+an AccuDisc older than 0.59.0.
 A track that never matches keeps its original audio \(em an unverified splice is
 never written.
 .PP

@@ -312,13 +312,10 @@ PROFILE_SCHEMA = Schema(
         # recovery adjuncts
         "ctdb": FieldSpec((str,), default="auto", enum=frozenset({"off", "auto"})),
         "verify": FieldSpec((bool,), default=False),
-        # Engine knobs the span rung needs as real fields (--ad-c2-retries, deleted
-        # 2026-11-25, never reached a read). Under that day's re-read ownership
-        # ruling (kgr) they are AccuDisc's policy, so they leave this schema when
-        # AccuDisc's policy surface lands (accudisc-migration-plan.md §9.9).
-        "verify_passes": FieldSpec((int,), default=0),
-        "overlap_sectors": FieldSpec((int,), default=0),
-        "c2_retries": FieldSpec((int,), default=0),
+        # verify_passes, overlap_sectors and c2_retries were span-rung engine knobs
+        # here until 2026-11-25, when AccuDisc's read policy took them over (kgr:
+        # every 0.53-0.59 feature on; accudisc-migration-plan.md §9.9). A profile
+        # still setting one is refused as an unknown key: the policy would ignore it.
         # Seconds per read (kgr, 2026-11-24): a track may take budget_s x its
         # planned reads (a span read for the span rung, a whole-disc read for
         # whole-disc). A guard against a stalled drive, never meant to bind; the
@@ -395,27 +392,6 @@ PROFILE_SCHEMA = Schema(
             lambda d: d["variation"] != "full" or d["ladder"] == "full",
         ),
         SanityRule(
-            "verify_passes",
-            "verify_passes is a span-rung engine knob; the strategies at granularity="
-            '"sector" or "whole-disc" do not read it',
-            lambda d: d["verify_passes"] <= 0
-            or d["granularity"] not in {"sector", "whole-disc"},
-        ),
-        SanityRule(
-            "overlap_sectors",
-            "overlap_sectors is a span-rung engine knob; the strategies at granularity="
-            '"sector" or "whole-disc" do not read it',
-            lambda d: d["overlap_sectors"] <= 0
-            or d["granularity"] not in {"sector", "whole-disc"},
-        ),
-        SanityRule(
-            "c2_retries",
-            "c2_retries is a span-rung engine knob; the strategies at granularity="
-            '"sector" or "whole-disc" do not read it',
-            lambda d: d["c2_retries"] <= 0
-            or d["granularity"] not in {"sector", "whole-disc"},
-        ),
-        SanityRule(
             "span_gap",
             'span_gap > 0 requires granularity="span"',
             lambda d: d["span_gap"] <= 0 or d["granularity"] == "span",
@@ -427,44 +403,6 @@ PROFILE_SCHEMA = Schema(
         ),
         SanityRule("span_gap", "must not be negative", lambda d: d["span_gap"] >= 0),
         SanityRule("span_pad", "must not be negative", lambda d: d["span_pad"] >= 0),
-        SanityRule(
-            "verify_passes",
-            "must not be negative",
-            lambda d: d["verify_passes"] >= 0,
-        ),
-        # AccuDisc 0.43.0 returns ERR_INVAL for this combination. Checking it here
-        # is not duplication: without it a hand-edited profile fails MID-RIP, from
-        # the engine, after the disc has been read — with it, the profile is
-        # rejected at load. Same class as --retries 256, which parses as a fine
-        # integer and then becomes 0 in an unguarded uint8_t cast.
-        SanityRule(
-            "c2_retries",
-            "c2_retries > 0 requires verify_passes >= 2 (AccuDisc 0.43.0 returns "
-            "ERR_INVAL otherwise); a single pass cannot witness its own position",
-            lambda d: d["c2_retries"] <= 0 or d["verify_passes"] >= 2,
-        ),
-        # The span rung's acceptance rule turns on a position witness, and the
-        # seam's read_span_detail refuses verify_passes=0 outright. Without this a
-        # span profile left at the default would load, read the whole disc, and
-        # then fail at the first span re-read.
-        SanityRule(
-            "verify_passes",
-            'granularity="span" requires verify_passes >= 2; a single pass cannot '
-            "witness its own position",
-            lambda d: d["granularity"] != "span" or d["verify_passes"] >= 2,
-        ),
-        SanityRule(
-            "c2_retries",
-            "must not be negative",
-            lambda d: d["c2_retries"] >= 0,
-        ),
-        # The engine clamps to 8; refusing here means the profile says what will
-        # happen rather than being silently narrowed at read time.
-        SanityRule(
-            "overlap_sectors",
-            "must be between 0 and 8 (the engine clamps above 8)",
-            lambda d: 0 <= d["overlap_sectors"] <= 8,
-        ),
     ),
 )
 
@@ -533,9 +471,8 @@ CONFIG_SCHEMA = Schema(
         # heavily damaged disc cannot become a command storm. 0 = no limit.
         "recovery_max_reads": FieldSpec((int,), default=5000),
         "recovery_max_speed_changes": FieldSpec((int,), default=1000),
-        # kgr, 2026-11-25: the engine's own recovery commands per rip. RECORDED ONLY
-        # (PROV recovery_engine_work): nothing enforces it until the per-read budget
-        # is adopted after kgr's per-profile hardware series.
+        # kgr, 2026-11-25: the engine's own recovery commands per rip, handed to
+        # AccuDisc's per-read budget (enforced; PROV recovery_engine_work).
         "recovery_max_engine_cmds": FieldSpec((int,), default=10000),
         "c2_recovery": FieldSpec(
             (str,), default="auto", enum=frozenset({"auto", "on", "off"})

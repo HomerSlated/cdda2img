@@ -4,9 +4,10 @@ AccuDisc 0.57.0 reports what each read spent on its own recovery
 (``ReadStats.budget_spent_cmds`` / ``budget_spent_changes``). The seam books it
 into the rip's drive work after each recovery read returns, and the rip records
 it as PROV ``recovery_engine_work``. kgr set the per-rip limit at 10,000 ("Go
-ahead with 10,000") on the understanding that it is RECORDED ONLY until the
-per-read budget is adopted after his series: these tests pin that it never stops
-anything yet, as well as that the record is right.
+ahead with 10,000"), and the same day turned every 0.53-0.59 feature on ("I would
+rather do my tests against 0.59.0 with all new features enabled"), so the limit
+is enforced: each read's engine gets what is left of the rip's budget, and a
+spent budget refuses the read, because AccuDisc's 0 means unlimited.
 """
 
 from __future__ import annotations
@@ -14,10 +15,12 @@ from __future__ import annotations
 import inspect
 from types import SimpleNamespace
 
+import pytest
+
 from cdda2img import accudisc_reader as ar
 from cdda2img import cdda2img as app
 from cdda2img import drive_work
-from cdda2img.drive_work import DriveWork
+from cdda2img.drive_work import DriveBudgetSpent, DriveWork
 from cdda2img.validation import CONFIG_SCHEMA, validate
 
 
@@ -62,16 +65,48 @@ def test_no_report_is_absent_not_zero() -> None:
     assert DriveWork().engine_record() is None
 
 
-def test_the_engine_limit_is_recorded_only_and_never_stops_a_rip() -> None:
-    """kgr approved 10,000 as inert until the series ends: booking past the limit
-    must not raise, and must not stop our own reads either."""
-    with drive_work.budget(5000, 1000, 10) as w:
-        drive_work.book_engine(50, 0)
-        drive_work.book_engine(50, 0)
-        drive_work.charge(32, far_read=False)  # our next read still goes ahead
-    assert w.max_engine_cmds == 10
-    assert w.engine_cmds == 100
-    assert w.reads == 1
+def test_each_read_gets_what_is_left_of_the_rips_engine_budget() -> None:
+    with drive_work.budget(5000, 1000, 100) as w:
+        drive_work.charge(32, far_read=True)  # our head speed set: 1 change
+        assert drive_work.engine_budget() == (100, 999)
+        drive_work.book_engine(60, 4)
+        assert drive_work.engine_budget() == (40, 995)
+    assert w.all_speed_changes == 5
+
+
+def test_a_spent_engine_budget_refuses_the_read_rather_than_pass_zero() -> None:
+    """AccuDisc's 0 means UNLIMITED (outbound 279): a remainder of 0 must stop."""
+    with drive_work.budget(5000, 1000, 10):
+        drive_work.book_engine(10, 0)
+        with pytest.raises(DriveBudgetSpent) as exc:
+            drive_work.engine_budget()
+        assert isinstance(exc.value, DriveBudgetSpent)
+        assert exc.value.what == "engine_cmds"
+        with pytest.raises(DriveBudgetSpent):
+            drive_work.charge(32, far_read=False)  # and our next read is not sent
+
+
+def test_engine_speed_changes_share_the_one_spindle_limit() -> None:
+    with drive_work.budget(5000, 3, 0):
+        drive_work.charge(40, far_read=False)  # ours: 1
+        drive_work.book_engine(0, 2)  # the engine's: 2, so 3 of 3
+        with pytest.raises(DriveBudgetSpent) as exc:
+            drive_work.engine_budget()
+        assert isinstance(exc.value, DriveBudgetSpent)
+        assert exc.value.what == "speed_changes"
+        with pytest.raises(DriveBudgetSpent):
+            drive_work.charge(32, far_read=False)
+
+
+def test_a_wide_remainder_is_clamped_to_the_field_not_wrapped() -> None:
+    with drive_work.budget(0, 70000, 2**33):
+        assert drive_work.engine_budget() == (0xFFFFFFFF, 0xFFFF)
+
+
+def test_no_limit_and_no_rip_both_mean_no_engine_budget() -> None:
+    assert drive_work.engine_budget() == (0, 0)  # the capture: never budgeted
+    with drive_work.budget(0, 0, 0):
+        assert drive_work.engine_budget() == (0, 0)
 
 
 def test_booking_outside_a_rip_is_a_no_op() -> None:
@@ -101,14 +136,13 @@ def test_an_engine_without_read_budget_books_nothing() -> None:
 
 
 def test_every_recovery_read_in_the_seam_books_its_spend() -> None:
-    """The three recovery reads (window, defeated, span detail) book after their
-    ``Device.read``; the capture does not (it is never inside a budget, and its
-    own counts are ``capture_*``)."""
-    for fn in (
-        ar._read_windows_binding,
-        ar._defeated_read,
-        ar._read_span_detail_binding,
-    ):
+    """Both recovery read paths (every windowed read goes through
+    ``_defeated_read``; the span detail read) book after their ``Device.read``;
+    the capture does not (it is never inside a budget, and its own counts are
+    ``capture_*``)."""
+    assert "_defeated_read(" in inspect.getsource(ar._read_windows_binding)
+    assert "_defeated_read(" in inspect.getsource(ar._read_windows_with_c2)
+    for fn in (ar._defeated_read, ar._read_span_detail_binding):
         src = inspect.getsource(fn)
         assert "_book_engine_work(module, result.stats)" in src, fn.__name__
         assert src.index("dev.read(") < src.index("_book_engine_work("), fn.__name__
@@ -138,8 +172,6 @@ def test_the_real_binding_names_the_fields_the_seam_reads() -> None:
     any engine publishing ``read_budget``, which no recovery loop catches: the rip
     would end. So check the real ``ReadStats``. Skipped inside the test (not
     ``skipif``) for the reason ``test_ctdb_repair`` gives."""
-    import pytest
-
     module = ar._import_binding()[0]
     if module is None or "read_budget" not in getattr(module, "features", ()):
         pytest.skip("AccuDisc binding before 0.57.0, or not importable")

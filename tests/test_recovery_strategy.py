@@ -184,23 +184,6 @@ def test_the_kind_comes_from_fields_not_the_file_name() -> None:
             {"granularity": "sector", "ladder": "single", "variation": "full"},
             "ladder",
         ),
-        (
-            {"granularity": "sector", "ladder": "single", "verify_passes": 2},
-            "verify_passes",
-        ),
-        (
-            {"granularity": "whole-disc", "ladder": "single", "overlap_sectors": 4},
-            "overlap_sectors",
-        ),
-        (
-            {
-                "granularity": "sector",
-                "ladder": "single",
-                "c2_retries": 3,
-                "verify_passes": 2,
-            },
-            "c2_retries",
-        ),
     ],
 )
 def test_a_combination_no_strategy_can_carry_out_is_refused(data, where) -> None:

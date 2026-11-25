@@ -539,3 +539,20 @@ def test_an_unfetched_discogs_release_is_retry_later() -> None:
     with pytest.raises(ra.RipAborted) as exc:
         app._require_discogs_release(prov, archival=True)
     assert _v(exc).code == ra.EXIT_RETRY_LATER
+
+
+def test_a_rip_refuses_an_engine_without_every_new_feature(monkeypatch) -> None:
+    """kgr, 2026-11-25: tests against 0.59.0 with every new feature on. An older
+    engine is refused before the drive is touched, never run with half of them."""
+    monkeypatch.setattr(
+        "cdda2img.accudisc_reader.missing_rip_features",
+        lambda: ["read_policy", "compare_read"],
+    )
+    with pytest.raises(RuntimeError, match=r"AccuDisc 0\.59\.0") as exc:
+        app._require_engine_features()
+    assert "read_policy, compare_read" in str(exc.value)
+    monkeypatch.setattr("cdda2img.accudisc_reader.missing_rip_features", list)
+    app._require_engine_features()  # control: a complete engine passes
+    src = inspect.getsource(app._dispatch)
+    rip = src[src.index('"rip"') :]
+    assert rip.index("_require_engine_features()") < rip.index("rip_image(")

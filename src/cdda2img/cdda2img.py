@@ -3647,23 +3647,6 @@ def _require_media_decision(kind: str, evidence: str, override: str | None) -> N
         raise RipAborted(EXIT_FIX_INVOCATION, reason, hint)
 
 
-def _verify_rung(ladder: list[int], ref: int, avoid: list[int]) -> int | None:
-    """The rung a verifying re-read runs at, or ``None`` when none is left.
-
-    AccuDisc's read policy revision 2 (``REFERENCE_VERIFY``, 0.59.0), copied so
-    that moving to it changes nothing: the **nearest** admitted rung other than
-    *ref*, the highest below it, else the lowest above it, and never one in
-    *avoid*. Nearest because it buys a second independent read at close to the
-    capture's cost (a 40x capture is checked at 32x), not because a slower read
-    is more reliable: Keith ruled on 2026-10-22 that it is not."""
-    free = {x for x in ladder if x != ref and x not in avoid}
-    below = [x for x in free if x < ref]
-    if below:
-        return max(below)
-    above = [x for x in free if x > ref]
-    return min(above) if above else None
-
-
 def _digital_media_consensus(
     device: str,
     pcm_file: Path,
@@ -3671,31 +3654,36 @@ def _digital_media_consensus(
     ui: TerminalUI | None,
     capture_speed: int | None = None,
     capture_honoured: int | None = None,
+    readable: tuple[int, int] | None = None,
 ) -> dict[str, str]:
     """Prove a ``--digital-media`` rip's audio by byte-identical reads.
 
+    No disc-ID database holds such a disc, so AccurateRip cannot. Instead the
+    disc is read again in full, at a **different** admitted rung, and every
+    sector is compared with the capture (AccuDisc 0.59.0 ``compare_read`` under
+    its read policy's ``REFERENCE_VERIFY``; kgr, 2026-11-25). A different rung,
+    not the same one: read errors are stable per speed, so two reads at one speed
+    can agree on the same wrong bytes. With C2 the capture and every re-read must
+    also flag nothing; a drive without C2 cannot vouch for a read that way, so a
+    third read at a third rung is required instead.
+
     The capture's speed is the one the drive reported using (*capture_honoured*,
     PROV ``capture_speed_honoured``), else the one asked for (*capture_speed*,
-    ``--ad-speed``), else the drive's fastest rung (its own management). Every
-    re-read runs at a speed no earlier read used (:func:`_verify_rung`), and is
-    checked afterwards against the speed the drive reports for it: a drive that
-    quantizes 32x to 40x would otherwise hand back a second read at the
-    capture's own speed, the same-speed agreement this proof exists to rule out.
-    A drive that cannot give enough distinct speeds is refused (exit 3), never
-    read twice at one speed (until 2026-11-25 it was, silently: kgr's fix).
-
-    No disc-ID database holds such a disc, so AccurateRip cannot. Instead the
-    capture is read again in full at a **different** admitted rung, and the two
-    must agree byte for byte. A different rung, not the same one: read errors are
-    stable per speed, so two reads at one speed can agree on the same wrong
-    bytes. With C2 the capture and every re-read must also flag nothing; a drive
-    without C2 cannot vouch for a read that way, so a third read at a third rung
-    is required instead. Any disagreement, or any C2 flag, aborts (exit 3): there
-    is no AccurateRip to verify a repair against. Returns PROV
-    ``digital_media_consensus``.
+    ``--ad-speed``), else the drive's fastest rung. The policy picks each
+    re-read's rung (the nearest admitted one no earlier read used), and each
+    re-read is checked afterwards against the speed the drive reports for it: a
+    drive that quantizes 32x to 40x would otherwise hand back a second read at
+    the capture's own speed. Too few distinct speeds, a re-read at a used speed,
+    any disagreement (a byte, a displacement, an unreadable sector) or any C2
+    flag aborts (exit 3): there is no AccurateRip to verify a repair against.
+    Returns PROV ``digital_media_consensus`` and ``digital_media_policy``.
     """
     from cdda2img import drive_speed
-    from cdda2img.accudisc_reader import drive_supports_c2, read_disc_c2
+    from cdda2img.accudisc_reader import (
+        NoVerifyRung,
+        drive_supports_c2,
+        verify_against_capture,
+    )
 
     has_c2 = drive_supports_c2(device)
     if has_c2 and disc_damage is not None and any(disc_damage):
@@ -3711,9 +3699,22 @@ def _digital_media_consensus(
     ladder = drive_speed.admitted_ladder(device)
     extra = 1 if has_c2 else 2
     used = [capture_honoured or capture_speed or ladder[0]]
+    policies: list[str] = []
     for k in range(2, 2 + extra):
-        speed = _verify_rung(ladder, used[-1], used)
-        if speed is None:
+        try:
+            got = verify_against_capture(
+                device,
+                pcm_file,
+                ref_speed_x=used[-1],
+                exclude_speed_x=used[-2] if len(used) > 1 else 0,
+                admitted=ladder,
+                c2_usable=has_c2,
+                readable=readable,
+                on_speed=lambda x, k=k: _ui_status(
+                    ui, f"Digital media: verifying read {k} at {x}X…"
+                ),
+            )
+        except NoVerifyRung as exc:
             raise RipAborted(
                 EXIT_INVESTIGATE,
                 f"the drive cannot give read {k} a speed no earlier read used",
@@ -3723,48 +3724,35 @@ def _digital_media_consensus(
                     f"--digital-media needs {extra + 1} distinct speeds"
                     f" ({'with' if has_c2 else 'without'} C2), because two reads at"
                     " one speed can agree on the same wrong bytes. Try another drive.",
+                    f"AccuDisc: {exc}",
                 ],
-            )
-        _ui_status(ui, f"Digital media: verifying read {k} at {speed}X…")
-        again = pcm_file.with_name(f"consensus-{k}.pcm")
-        lanes: list[ReadLanes] = []
-        counters: list[CaptureCounters] = []
-        try:
-            read_disc_c2(
-                device,
-                again,
-                read_speed=speed,
-                map_cb=lanes.append,
-                stats_cb=counters.append,
-            )
-            diff = _first_difference(pcm_file, again)
-        finally:
-            again.unlink(missing_ok=True)
-        got = (counters[0].speed_honoured_x if counters else None) or speed
-        if got in used:
+            ) from exc
+        speed = got.speed_honoured or got.speed_requested
+        if speed in used:
             raise RipAborted(
                 EXIT_INVESTIGATE,
-                f"read {k} asked for {speed}X and the drive read at {got}X,"
-                " a speed an earlier read already used",
+                f"read {k} asked for {got.speed_requested}X and the drive read at"
+                f" {speed}X, a speed an earlier read already used",
                 [
                     "Two reads at one speed can agree on the same wrong bytes, so"
                     " they prove nothing under --digital-media. Try another drive.",
                 ],
             )
-        used.append(got)
-        speed = got
-        if diff is not None:
-            first, count = diff
+        used.append(speed)
+        policies.append(got.policy)
+        if got.first_disagreement is not None:
             raise RipAborted(
                 EXIT_INVESTIGATE,
                 f"read {k} at {speed}X disagrees with the capture",
                 [
-                    f"{count} sector(s) differ, the first at LBA {first}.",
+                    f"{got.differ} sector(s) differ, {got.shifted} are displaced,"
+                    f" {got.hard} could not be read and {got.not_compared} were not"
+                    f" compared; the first at LBA {got.first_disagreement}.",
                     "Under --digital-media the audio is proved only by reads that"
                     " agree; clean the disc or try another drive.",
                 ],
             )
-        if has_c2 and lanes and any(lanes[0].damage):
+        if has_c2 and got.agree_c2:
             raise RipAborted(
                 EXIT_INVESTIGATE,
                 f"read {k} at {speed}X flagged C2 errors",
@@ -3774,35 +3762,9 @@ def _digital_media_consensus(
     return {
         "digital_media_consensus": (
             f"{len(used)}@{speeds}:{'clean' if has_c2 else 'unavailable'}"
-        )
+        ),
+        "digital_media_policy": ",".join(policies),
     }
-
-
-def _first_difference(a: Path, b: Path) -> tuple[int, int] | None:
-    """``(first_lba, differing_sectors)`` between two raw captures, or ``None``
-    when they are byte-identical. A length difference counts every missing
-    sector."""
-    sector = _R6_BYTES_PER_FRAME
-    first: int | None = None
-    count = 0
-    lba = 0
-    with a.open("rb") as fa, b.open("rb") as fb:
-        while True:
-            ca, cb = fa.read(sector * 512), fb.read(sector * 512)
-            if not ca and not cb:
-                break
-            if ca != cb:
-                n = max(len(ca), len(cb)) // sector + 1
-                for i in range(n):
-                    if (
-                        ca[i * sector : (i + 1) * sector]
-                        != cb[i * sector : (i + 1) * sector]
-                    ):
-                        count += 1
-                        if first is None:
-                            first = lba + i
-            lba += max(len(ca), len(cb)) // sector
-    return None if first is None else (first, count)
 
 
 def _require_every_track_verified(
@@ -3830,7 +3792,10 @@ def _require_every_track_verified(
         )
     if "recovery_budget_hit" in provenance:
         what, _, limit = provenance["recovery_budget_hit"].partition(":")
-        key = {"reads": "recovery_max_reads"}.get(what, "recovery_max_speed_changes")
+        key = {
+            "reads": "recovery_max_reads",
+            "engine_cmds": "recovery_max_engine_cmds",
+        }.get(what, "recovery_max_speed_changes")
         details.append(
             f"The drive-work budget ({limit} {what.replace('_', ' ')}) stopped"
             f" recovery to protect the drive ({provenance.get('recovery_drive_work')})."
@@ -5080,18 +5045,18 @@ def _span_pass(
 
     for span in spans:
         # Before the try: a spent budget must stop the rung, not be skipped past.
-        # No cache defeat is asked for here, so no far read of ours is counted;
-        # the engine's own verify far reads are AccuDisc's to count.
-        drive_work.charge(speed, far_read=False)
+        # The read policy (SPAN_RESCUE) asks for a cache defeat, counted as our
+        # seek; the engine's own verify and rescue far reads are booked from its
+        # report after the read (recovery_engine_work).
+        drive_work.charge(speed, far_read=True)
         try:
+            # The engine knobs (verify, overlap, C2 retries, rescue ladder) are
+            # the read policy's since 2026-11-25, not the profile's.
             detail = read_span_detail(
                 device,
                 span.start,
                 span.count,
                 read_speed=speed,
-                verify_passes=profile.verify_passes,
-                overlap_sectors=profile.overlap_sectors,
-                c2_retries=profile.c2_retries,
                 progress_cb=prog_cb,
                 readable=readable,
             )
@@ -6410,6 +6375,7 @@ def rip_image(  # noqa: C901
                 ui,
                 capture_speed=strategy.read_speed if strategy is not None else None,
                 capture_honoured=_prov_int(info.prov, "capture_speed_honoured"),
+                readable=readable,
             )
         else:
             _ui_status(ui, "Verifying AccurateRip…")
@@ -6619,14 +6585,27 @@ def rip_image(  # noqa: C901
             # kgr, 2026-11-25: every recovery read is charged to one per-rip drive
             # budget before it is sent (drive_work), so a heavily damaged disc
             # cannot turn recovery into a command storm on the drive.
-            # The engine's own recovery commands are booked after each read and
-            # recorded (recovery_engine_work); recovery_max_engine_cmds is carried
-            # but not enforced until the per-read budget is adopted (kgr's series).
-            with drive_work.budget(
-                cfg.recovery_max_reads,
-                cfg.recovery_max_speed_changes,
-                cfg.recovery_max_engine_cmds,
-            ) as work:
+            # kgr, 2026-11-25: "I would rather do my tests against 0.59.0 with all
+            # new features enabled". Every recovery read is filled by AccuDisc's
+            # read policy (GATED_REREAD for the ladder and strategy reads,
+            # SPAN_RESCUE for the span rung, shift_search on by our override), and
+            # its engine gets what is left of the rip's budget, enforced
+            # (recovery_max_engine_cmds; engine speed changes share
+            # recovery_max_speed_changes).
+            from cdda2img.accudisc_reader import drive_supports_c2, recovery_policy
+
+            with (
+                drive_work.budget(
+                    cfg.recovery_max_reads,
+                    cfg.recovery_max_speed_changes,
+                    cfg.recovery_max_engine_cmds,
+                ) as work,
+                recovery_policy(
+                    recovery_ladder,
+                    c2_usable=bool(recovery_ladder) and drive_supports_c2(device),
+                    readable=readable,
+                ) as read_policy,
+            ):
                 try:
                     if (
                         bound is not None
@@ -6757,6 +6736,12 @@ def rip_image(  # noqa: C901
                     engine = work.engine_record()
                     if engine is not None:
                         ladder_prov["recovery_engine_work"] = engine
+                    for key, value in (
+                        ("recovery_policy", read_policy.record()),
+                        ("recovery_policy_overrides", read_policy.overrides_record()),
+                    ):
+                        if value is not None:
+                            ladder_prov[key] = value
 
             rip_type = f"{rip_type}+c2rec"
             _ui_status(ui, "Verifying AccurateRip (re-read)…")
@@ -7159,6 +7144,27 @@ def _require_rip_services_configured() -> None:
         raise RuntimeError(msg)
 
 
+def _require_engine_features() -> None:
+    """Refuse a rip, before the drive is touched, on an AccuDisc without every
+    0.53-0.59 feature the rip turns on (kgr, 2026-11-25: "I would rather do my
+    tests against 0.59.0 with all new features enabled").
+
+    Feature-detected, never version-checked. Refusing rather than running what
+    the engine has is the point: on an older install a rip would otherwise get
+    half the features while its user believes every one is on. Raises
+    ``RuntimeError``, which ``main`` reports with exit 1 ("fix the
+    configuration": install AccuDisc 0.59.0 or later)."""
+    from cdda2img.accudisc_reader import engine_version, missing_rip_features
+
+    missing = missing_rip_features()
+    if missing:
+        msg = (
+            f"a rip needs AccuDisc 0.59.0 or later (found {engine_version()}); "
+            f"this engine lacks: {', '.join(missing)}"
+        )
+        raise RuntimeError(msg)
+
+
 def _network_preflight(
     pipeline: str, *, auto: bool, allow_offline: bool, cddb_server: str | None
 ) -> str:
@@ -7278,6 +7284,7 @@ def _dispatch(args: argparse.Namespace) -> int:
         )
         auto = args.auto if args.auto is not None else cfg.auto
         _require_rip_services_configured()
+        _require_engine_features()
         preflight = _network_preflight(
             "rip-digital" if args.media_override == "digital_media" else "rip",
             auto=auto,

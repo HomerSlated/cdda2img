@@ -87,9 +87,6 @@ class Profile:
     variation: str = "none"
     ctdb: str = "auto"
     verify: bool = False
-    verify_passes: int = 0
-    overlap_sectors: int = 0
-    c2_retries: int = 0
     budget_s: int = 300
 
     @classmethod

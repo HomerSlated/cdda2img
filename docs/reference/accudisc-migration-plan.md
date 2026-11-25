@@ -926,6 +926,27 @@ What it changes in this plan, pending AccuDisc's own audit (§268.5) and Keith's
   > The reference callback returns `(audio, absent_offsets)`. Mark the capture's HARD
   > sectors absent, or a good sector in the pass compares against zeros as DIFFER. `absent`
   > values other than 0/1 are reserved.
+  >
+  > **AMENDMENT 2026-11-25 17:26 GMT: adoption brought forward.** Keith: "I would rather
+  > do my tests against 0.59.0 with all new features enabled", with AccuDisc 0.59
+  > installed system-wide for the runs. This overrides "after the series" above and
+  > §268.1's "no change while the series runs". In force from this commit:
+  > - Every recovery read is filled by the read policy (`accudisc_reader.recovery_policy`):
+  >   `GATED_REREAD` for the ladder and strategy reads, **with C2 whenever the drive has
+  >   it**, and `SPAN_RESCUE` for the span rung, with `rescue_by_rung` on and
+  >   `shift_search` **on by our override** of revision 2's table.
+  > - The per-read budget is enforced (`recovery_max_engine_cmds` 10000; engine speed
+  >   changes share the 1000).
+  > - `--digital-media` uses `compare_read` under `REFERENCE_VERIFY`.
+  > - A rip refuses an engine missing any of the five features. The span profile's
+  >   engine fields are gone.
+  >
+  > `c2_retries`, `c2_witness` and Posture B are unchanged; none of them is a 0.53–0.59
+  > feature. **What this costs:** Keith's earlier runs (0.52, every feature off) and the
+  > later ones (0.59, every feature on) differ in all of these at once. A gain can be
+  > ranked, but not credited to any one feature. That fits the bench method (rank
+  > strategies, not causes); it is noted here so nobody reads one feature's effect off
+  > the difference.
 - **The `--ad-*` passthrough does less than §9.4 and the tests above assume.** `--ad-retries`,
   `--ad-c2-retries`, `--ad-verify`, `--ad-overlap` and `--ad-recovery` are accepted, take
   rung 1 (so the chain gives way to the plain ladder) and are recorded in PROV

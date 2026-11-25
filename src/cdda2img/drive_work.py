@@ -27,11 +27,16 @@ that here **after** the read returns (:func:`book_engine`), for the record
 (PROV ``recovery_engine_work``). Booking never raises.
 
 ``max_engine_cmds`` (config ``recovery_max_engine_cmds``, kgr 2026-11-25: 10,000)
-is **recorded only, not enforced**. Enforcing it means passing the per-rip
-remainder into each read as AccuDisc's ``budget_cmds``, which changes what a
-read does and waits for the end of kgr's per-profile hardware series. When it
-is adopted, mind AccuDisc's contract: 0 there means *unlimited*, so a remainder
-of 0 must refuse the read here, never be passed through (outbound 279).
+bounds those engine commands, and the engine's speed changes count against
+``max_speed_changes`` together with ours: one spindle, one limit. Since
+2026-11-25 (kgr: "I would rather do my tests against 0.59.0 with all new
+features enabled") both are enforced inside each read: :func:`engine_budget`
+hands the remainder to AccuDisc's per-read budget (``budget_cmds`` /
+``budget_speed_changes``). **AccuDisc's 0 means unlimited**, so a remainder of
+0 refuses the read here (:class:`DriveBudgetSpent`) and is never passed on
+(outbound 279); a remainder too wide for the field is clamped, which is still a
+limit. Each read's budget is the remainder, so the engine cannot take the rip
+past either limit.
 
 The budget is carried in a :class:`contextvars.ContextVar` set by the rip for its
 recovery only (:func:`budget`), so nothing outside a rip is ever charged and the
@@ -60,7 +65,7 @@ class DriveWork:
     """Limits (0 = none) and what recovery has asked of the drive so far.
 
     The ``engine_*`` fields are what the engine reported spending inside those
-    reads (:meth:`book_engine`); ``max_engine_cmds`` is carried, not enforced."""
+    reads (:meth:`book_engine`), limited by ``max_engine_cmds``."""
 
     max_reads: int = 0
     max_speed_changes: int = 0
@@ -82,14 +87,40 @@ class DriveWork:
         if (
             change
             and self.max_speed_changes
-            and self.speed_changes + 1 > self.max_speed_changes
+            and self.all_speed_changes + 1 > self.max_speed_changes
         ):
             raise DriveBudgetSpent("speed_changes", self.max_speed_changes)
+        if self.max_engine_cmds and self.engine_cmds >= self.max_engine_cmds:
+            raise DriveBudgetSpent("engine_cmds", self.max_engine_cmds)
         self.reads += 1
         self.seeks += int(far_read)
         if change:
             self.speed_changes += 1
             self.last_speed = speed
+
+    @property
+    def all_speed_changes(self) -> int:
+        """Ours (each read's head set) and the engine's inside the reads."""
+        return self.speed_changes + self.engine_speed_changes
+
+    def engine_budget(self) -> tuple[int, int]:
+        """``(budget_cmds, budget_speed_changes)`` for the next read's engine.
+
+        0 means no limit, which is what AccuDisc's 0 means too. A limit with
+        nothing left raises :class:`DriveBudgetSpent`: passing 0 would ask for
+        no limit at all."""
+        cmds = changes = 0
+        if self.max_engine_cmds:
+            cmds = self.max_engine_cmds - self.engine_cmds
+            if cmds <= 0:
+                raise DriveBudgetSpent("engine_cmds", self.max_engine_cmds)
+            cmds = min(cmds, _UINT32_MAX)
+        if self.max_speed_changes:
+            changes = self.max_speed_changes - self.all_speed_changes
+            if changes <= 0:
+                raise DriveBudgetSpent("speed_changes", self.max_speed_changes)
+            changes = min(changes, _UINT16_MAX)
+        return cmds, changes
 
     def book_engine(self, cmds: int, speed_changes: int) -> None:
         """Add what one read's engine spent on its own recovery. Never raises."""
@@ -117,6 +148,11 @@ class DriveWork:
             f"reported_reads:{self.engine_reads}"
         )
 
+
+#: AccuDisc's field widths: ``budget_cmds`` is uint32, ``budget_speed_changes``
+#: uint16. A wider remainder is clamped; a wrapped one would be a smaller limit.
+_UINT32_MAX = 0xFFFFFFFF
+_UINT16_MAX = 0xFFFF
 
 _CURRENT: contextvars.ContextVar[DriveWork | None] = contextvars.ContextVar(
     "cdda2img_drive_work"
@@ -152,3 +188,10 @@ def book_engine(cmds: int, speed_changes: int) -> None:
     work = _CURRENT.get(None)
     if work is not None:
         work.book_engine(cmds, speed_changes)
+
+
+def engine_budget() -> tuple[int, int]:
+    """The next read's engine budget (:meth:`DriveWork.engine_budget`); ``(0, 0)``,
+    no limit, outside a rip's recovery (the capture is never budgeted)."""
+    work = _CURRENT.get(None)
+    return (0, 0) if work is None else work.engine_budget()

@@ -185,31 +185,11 @@ def test_a_sector_shaped_field_is_also_valid_at_span_granularity(
     for. The negative control above still rejects track."""
     assert (
         validate(
-            {"name": "p", field_name: 4, "granularity": "span", "verify_passes": 2},
+            {"name": "p", field_name: 4, "granularity": "span"},
             PROFILE_SCHEMA,
         )
         == []
     )
-
-
-def test_span_granularity_without_a_position_witness_is_rejected_at_load() -> None:
-    """The seam's read_span_detail refuses verify_passes=0, and the acceptance rule
-    is unsound without a witness. Left to the default, a span profile would load,
-    read the whole disc, and fail at the first re-read."""
-    for passes in (0, 1):
-        errors = validate(
-            {"name": "p", "granularity": "span", "verify_passes": passes},
-            PROFILE_SCHEMA,
-        )
-        assert _where(errors) == ["verify_passes"]
-    assert (
-        validate(
-            {"name": "p", "granularity": "span", "verify_passes": 2}, PROFILE_SCHEMA
-        )
-        == []
-    )
-    # Control: the rule is scoped to span; track granularity keeps its default.
-    assert validate({"name": "p", "granularity": "track"}, PROFILE_SCHEMA) == []
 
 
 @pytest.mark.parametrize("field_name", ["span_gap", "span_pad"])
@@ -226,35 +206,20 @@ def test_a_clustering_field_requires_span_granularity(
     assert _where(errors) == [field_name]
 
 
-def test_c2_retries_without_a_position_witness_is_rejected_at_load() -> None:
-    """AccuDisc 0.43.0 answers ERR_INVAL for this. Checking it here is not
-    duplication: the engine's refusal arrives MID-RIP, after the disc has been
-    read, while this one arrives at profile load."""
-    errors = validate({"name": "p", "c2_retries": 3}, PROFILE_SCHEMA)
-    assert _where(errors) == ["c2_retries"]
+@pytest.mark.parametrize(
+    "field_name", ["verify_passes", "overlap_sectors", "c2_retries"]
+)
+@pytest.mark.parametrize("granularity", ["span", "sector", "track", "whole-disc"])
+def test_the_engine_knobs_are_the_read_policys_not_a_profiles(
+    field_name: str, granularity: str
+) -> None:
+    """Since 2026-11-25 AccuDisc's read policy sets these (kgr: every 0.53-0.59
+    feature on). A profile setting one would record a value no read uses, the
+    defect the deleted --ad-* flags had, so it is refused as an unknown key."""
     errors = validate(
-        {"name": "p", "c2_retries": 3, "verify_passes": 1}, PROFILE_SCHEMA
+        {"name": "p", field_name: 2, "granularity": granularity}, PROFILE_SCHEMA
     )
-    assert _where(errors) == ["c2_retries"]
-
-
-def test_c2_retries_with_two_verify_passes_is_accepted() -> None:
-    """Negative control: the rule must have a passing side, or it is
-    indistinguishable from c2_retries being unusable."""
-    assert (
-        validate({"name": "p", "c2_retries": 3, "verify_passes": 2}, PROFILE_SCHEMA)
-        == []
-    )
-
-
-@pytest.mark.parametrize("value", [-1, 9, 100])
-def test_overlap_sectors_outside_the_engines_range_is_rejected(value: int) -> None:
-    """The engine clamps above 8. Refusing here means the profile says what will
-    happen, rather than being silently narrowed at read time — a profile that
-    reads 16 and behaves as 8 mislabels every measurement taken under it."""
-    assert _where(
-        validate({"name": "p", "overlap_sectors": value}, PROFILE_SCHEMA)
-    ) == ["overlap_sectors"]
+    assert field_name in _where(errors)
 
 
 def test_every_profile_schema_field_exists_on_the_profile_dataclass() -> None:
