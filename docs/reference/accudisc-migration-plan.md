@@ -846,6 +846,17 @@ What it changes in this plan, pending AccuDisc's own audit (§268.5) and Keith's
   span rung (`granularity = "span"`), and they are the only place cdda2img sets any of them;
   the capture, ladder and strategy reads are single-pass (engine `retries` only). Whether they
   leave the schema depends on §268.5a: a policy surface AccuDisc offers, or a recipe we apply.
+
+  > **CORRECTION 2026-11-25 (AccuDisc 2026-11-25a, A.1 and A.2).** "Single-pass" is wrong
+  > for any read with `sub = RAW`, which is the capture and the span rung. The engine's
+  > Q-position rescue is always on for those reads, not a knob: a sector whose CRC-valid Q
+  > names another LBA, widened to ±4 sectors within the chunk, gets up to 4 single-sector
+  > re-reads, so RECOVERED and SUSPECT can occur with every knob at default
+  > (`engine.c:1135`). Only the ladder and strategy reads (`sub = none`) re-read solely after
+  > a failed transfer. Separately, the span rung's *first* transfer is not cache-defeated:
+  > verify defeats only its own second transfer, so the rung should pass `cache_defeat`.
+  > AccuDisc's answer (policy surface as a pure function, the stats and budget fields, the
+  > reference-compare primitive, Posture A) is awaiting Keith's decisions.
 - **The `--ad-*` passthrough does less than §9.4 and the tests above assume.** `--ad-retries`,
   `--ad-c2-retries`, `--ad-verify`, `--ad-overlap` and `--ad-recovery` are accepted, take
   rung 1 (so the chain gives way to the plain ladder) and are recorded in PROV
