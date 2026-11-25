@@ -79,7 +79,15 @@ def main() -> int:
     ap.add_argument("rbi", nargs="+", type=Path)
     ap.add_argument("--sectors", type=int, default=3000, help="sampled per container")
     ap.add_argument("--seed", type=int, default=20261125)
+    ap.add_argument(
+        "--predicate",
+        action="store_true",
+        help="measure AccuDisc's proposed shift test (corrected form) instead",
+    )
     args = ap.parse_args()
+    if args.predicate:
+        predicate(args.rbi, args.sectors, args.seed)
+        return 0
     rng = random.Random(args.seed)  # noqa: S311 - a reproducible sample, not a secret
     bands = (
         ("quiet  < -40 dBFS", -math.inf, -40.0),
@@ -124,6 +132,93 @@ def main() -> int:
             + ", ".join(f"{m} at k={k:+d}" for m, k, _ in smallest)
         )
     return 0
+
+
+# ---- --predicate: AccuDisc's proposed shift test, measured (2026-11-25) -------------
+#
+# Their 25l reference searches k in [-588, +588]. At |k| = 588 a 2352-byte sector has
+# NO overlap with itself shifted, so diff = 0 there and their has_signal() is False for
+# every sector: the literal predicate can never call anything shifted. Near the edge the
+# overlap is a few bytes, which chance matches. So this measures a corrected form:
+#   * |k| <= MAX_K, keeping at least half a sector of overlap;
+#   * "rates": every condition compares differing bytes PER BYTE OF OVERLAP, since
+#     raw counts over shrinking overlaps favour large |k| by construction.
+# False positives: y = x damaged in place (not shifted). True positives: y = the
+# stream displaced by k samples, then damaged. Damage = N random bytes replaced.
+
+MAX_K = 294
+DAMAGE = (16, 64, 256, 624)  # bytes; 09-16g measured 2-624 at the true offset
+TRUE_K = (1, 6, 12, 24)
+
+
+def _rates(x: np.ndarray, y: np.ndarray) -> np.ndarray:
+    """Per k in [-MAX_K, MAX_K]: bytes differing per byte of overlap (x vs y@k)."""
+    out = np.empty(2 * MAX_K + 1)
+    n = len(x)
+    for j, k in enumerate(range(-MAX_K, MAX_K + 1)):
+        b = SAMPLE * k
+        a, c = (x[: n - b], y[b:]) if b >= 0 else (x[-b:], y[: n + b])
+        out[j] = np.count_nonzero(a != c) / len(a)
+    return out
+
+
+def _shifted(self_r: np.ndarray, x: np.ndarray, y: np.ndarray) -> int | None:
+    r = _rates(x, y)
+    r0 = r[MAX_K]
+    ok = (r <= r0 / 2) & (r <= 0.5) & (r <= self_r / 2)
+    ok[MAX_K] = False
+    if not ok.any():
+        return None
+    j = int(np.argmin(np.where(ok, r, np.inf)))
+    return j - MAX_K
+
+
+def _damage(x: np.ndarray, n: int, rng: random.Random) -> np.ndarray:
+    y = x.copy()
+    for i in rng.sample(range(len(x)), n):
+        y[i] = (int(y[i]) + rng.randrange(1, 256)) % 256
+    return y
+
+
+def predicate(paths: list[Path], sectors: int, seed: int) -> None:
+    rng = random.Random(seed)  # noqa: S311 - a reproducible sample, not a secret
+    print(
+        f"{'container':26} {'band':8} {'n':>4}  "
+        + "  ".join(f"FP@{d:<3}" for d in DAMAGE)
+        + "  "
+        + "  ".join(f"TP k={k:<2}" for k in TRUE_K)
+        + "   (TP at 624 B damage)"
+    )
+    for path in paths:
+        pcm = _pcm(path)
+        n_sec = len(pcm) // SECTOR
+        rows: dict[str, list] = {"quiet": [], "middle": [], "loud": []}
+        for i in rng.sample(range(4, n_sec - 4), sectors):
+            x = np.asarray(pcm[i * SECTOR : (i + 1) * SECTOR])
+            self_r = _rates(x, x)
+            self_r[MAX_K] = np.inf
+            if not x.any() or (self_r == 0).any():
+                continue  # no alignment signal: the engine declines these already
+            lvl = _level_dbfs(x)
+            band = "quiet" if lvl < -40 else "middle" if lvl < -20 else "loud"
+            fp = [_shifted(self_r, x, _damage(x, d, rng)) is not None for d in DAMAGE]
+            tp = []
+            for k in TRUE_K:
+                lo = i * SECTOR - SAMPLE * k
+                y = _damage(np.asarray(pcm[lo : lo + SECTOR]), DAMAGE[-1], rng)
+                tp.append(_shifted(self_r, x, y) == k)
+            rows[band].append((fp, tp))
+        for band, got in rows.items():
+            if not got:
+                continue
+            m = len(got)
+            fps = "  ".join(
+                f"{sum(g[0][j] for g in got):3}/{m:<3}" for j in range(len(DAMAGE))
+            )
+            tps = "  ".join(
+                f"{sum(g[1][j] for g in got):3}/{m:<3}" for j in range(len(TRUE_K))
+            )
+            print(f"{path.name[:26]:26} {band:8} {m:4}  {fps}  {tps}")
 
 
 if __name__ == "__main__":
