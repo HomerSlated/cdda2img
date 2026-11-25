@@ -20,7 +20,7 @@ if TYPE_CHECKING:
     import random
     from typing import BinaryIO
 
-    from cdda2img.accudisc_reader import ReadLanes, SpanDetail
+    from cdda2img.accudisc_reader import CaptureCounters, ReadLanes, SpanDetail
     from cdda2img.accuraterip import ARVerifyResult
     from cdda2img.config import Config
     from cdda2img.ctdb_repair import CtdbRepairResult
@@ -3293,6 +3293,18 @@ class _RipPhase:
         return max(len(self._disc_text()), self._MAX_TRACK_LABEL)
 
 
+def _capture_prov(counters: CaptureCounters) -> dict[str, str]:
+    """PROV ``capture_*`` from what the engine re-read on its own during the
+    capture (rbi_spec). A counter the engine did not report is left out: absent
+    is not zero."""
+    values = {
+        "capture_sectors_recovered": counters.sectors_recovered,
+        "capture_sectors_suspect": counters.sectors_suspect,
+        "capture_subq_misposition": counters.subq_misposition,
+    }
+    return {k: str(v) for k, v in values.items() if v is not None}
+
+
 def _rip_disc_stage(
     device: str,
     pcm_file: Path,
@@ -3373,6 +3385,11 @@ def _rip_disc_stage(
     # cell that was damaged and was NOT repaired is the one worth a human's
     # attention, and neither map alone can show that.
     captured: list[ReadLanes] = []
+    # What the engine re-read on its own during the capture (its Q-position rescue
+    # always runs with the raw subchannel; AccuDisc 2026-11-25a, A.1). Recorded in
+    # PROV `capture_*` (kgr, 2026-11-25), so how often it fires on real rips is
+    # measured rather than guessed.
+    counters: list[CaptureCounters] = []
 
     def _map_cb(lanes: ReadLanes) -> None:
         # The progress bar becomes the disc map for the length of the read: the
@@ -3404,6 +3421,7 @@ def _rip_disc_stage(
             # much use for a repair map afterwards as an interactive one. The
             # *rendering* stays gated; the capture never was the reason for it.
             map_cb=_map_cb,
+            stats_cb=counters.append,
         )
     finally:
         # Release the buffer on the failure path too — the renderer holds a
@@ -3427,6 +3445,8 @@ def _rip_disc_stage(
         # nothing left to build a disc from, and no second engine to ask.
         msg = f"disc metadata assembly failed: {exc}"
         raise RuntimeError(msg) from exc
+    if counters:
+        info = info._replace(prov={**(info.prov or {}), **_capture_prov(counters[0])})
     readable = readable_extent(fulltoc_file.read_bytes())
     return info, "accudisc", (c2_file if want_c2 else None), disc_damage, readable
 
@@ -3532,7 +3552,7 @@ def _require_usable_q(prov: dict[str, str]) -> None:
         EXIT_INVESTIGATE,
         "the subchannel Q stream is unusable",
         details,
-        {k: v for k, v in prov.items() if k.startswith(("subq_", "toc_"))},
+        {k: v for k, v in prov.items() if k.startswith(("subq_", "toc_", "capture_"))},
     )
 
 

@@ -1555,6 +1555,36 @@ def _damage_from_status_map(module: Any, status: Any, damage: Any) -> None:
         damage[i] = 1 if module.map_state(byte) in bad else 0
 
 
+@dataclass(frozen=True)
+class CaptureCounters:
+    """What the engine did on its own during a capture, from its ``ReadStats``.
+
+    The capture asks for the raw subchannel, so AccuDisc's always-on Q-position
+    rescue runs on it: a sector whose CRC-valid Q names another LBA, widened to
+    ±4 sectors within its chunk, is re-read up to 4 times (AccuDisc 2026-11-25a,
+    A.1). So the capture is not a single pass, and these say how far it was not.
+    Each is ``None`` when the engine does not report that counter: absent is not
+    zero. PROV ``capture_*`` (rbi_spec); relative evidence, never verification.
+    """
+
+    sectors_recovered: int | None
+    sectors_suspect: int | None
+    subq_misposition: int | None
+
+
+def _capture_counters(stats: Any) -> CaptureCounters:
+    """:class:`CaptureCounters` from a ``ReadStats``, leaving out what it lacks."""
+
+    def count(name: str) -> int | None:
+        return int(getattr(stats, name)) if hasattr(stats, name) else None
+
+    return CaptureCounters(
+        sectors_recovered=count("sectors_recovered"),
+        sectors_suspect=count("sectors_suspect"),
+        subq_misposition=count("subq_misposition"),
+    )
+
+
 def _read_disc_binding(
     module: Any,
     device: str,
@@ -1566,6 +1596,7 @@ def _read_disc_binding(
     read_speed: int | None,
     progress_cb: Callable[[int, int], None] | None,
     map_cb: Callable[[ReadLanes], None] | None = None,
+    stats_cb: Callable[[CaptureCounters], None] | None = None,
 ) -> int:
     """:func:`read_disc_c2` over the binding: one ``Device``, one spin-up.
 
@@ -1588,7 +1619,9 @@ def _read_disc_binding(
       different measurement, not a different carrier.
     * Everything else is left at its default, matching ``ACCUDISC_READ_REQ_INIT``
       — a designated initialiser, so retries/chunk/overlap are all zero on the
-      CLI path too.
+      CLI path too. That is still not a single pass: with ``sub = RAW`` the
+      engine's Q-position rescue always runs (AccuDisc 2026-11-25a, A.1), and
+      *stats_cb* hands its counts back (:class:`CaptureCounters`).
 
     ``read_to_file`` is not used despite doing the same de-interleave: it has no
     progress callback, and a whole-disc rip with no progress is not an option.
@@ -1658,6 +1691,8 @@ def _read_disc_binding(
                     **cancel,
                 )
     _log_read_caveats(result.stats, "read", module)
+    if stats_cb is not None:
+        stats_cb(_capture_counters(result.stats))
     return _first_audio_pregap(toc)
 
 
@@ -1767,6 +1802,7 @@ def read_disc_c2(
     read_speed: int | None = None,
     progress_cb: Callable[[int, int], None] | None = None,
     map_cb: Callable[[ReadLanes], None] | None = None,
+    stats_cb: Callable[[CaptureCounters], None] | None = None,
 ) -> int:
     """Full-disc raw audio (s16le, no byte-swap) + C2 bitmap via ``accudisc read``.
 
@@ -1800,6 +1836,10 @@ def read_disc_c2(
     verify chunk, is bounded to the audio session (``readable=``, AccuDisc 0.51.0;
     kgr, 2026-11-22), as the recovery re-reads are.
 
+    *stats_cb(counters)* is called once, after a read that completed, with what
+    the engine re-read on its own (:class:`CaptureCounters`); the rip records it
+    in PROV.
+
     Raises RuntimeError only on a genuine read failure; "completed with caveats"
     is not a failure, and since the library returns no verdict for it,
     :func:`_log_read_caveats` rebuilds one from ``ReadStats``."""
@@ -1818,6 +1858,7 @@ def read_disc_c2(
             read_speed,
             progress_cb,
             map_cb,
+            stats_cb,
         ),
     )
 

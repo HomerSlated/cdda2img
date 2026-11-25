@@ -3651,3 +3651,49 @@ def test_the_capture_omits_readable_on_an_engine_without_it(tmp_path) -> None:
     device = _FakeDiscDevice(leadout=195656, chunks=(_FakeReadChunk(1),))
     _run_disc(device, tmp_path, output_pcm=tmp_path / "a.pcm")
     assert "readable" not in device.read_kwargs
+
+
+# ---- the capture's own re-reads reach the caller (kgr, 2026-11-25) -----------
+
+
+def test_the_capture_hands_back_what_the_engine_reread(tmp_path: Path) -> None:
+    """With the raw subchannel the engine's Q-position rescue always runs
+    (AccuDisc 2026-11-25a, A.1), so the capture is not a single pass. Its counts
+    must reach the caller, which records them in PROV."""
+    stats = _FakeStats(sectors_recovered=22, sectors_suspect=1)
+    stats.subq_misposition = 17  # type: ignore[attr-defined]
+    got: list[ar.CaptureCounters] = []
+    device = _FakeDiscDevice(chunks=(_FakeReadChunk(1),), stats=stats)
+
+    _run_disc(device, tmp_path, stats_cb=got.append)
+
+    assert got == [
+        ar.CaptureCounters(sectors_recovered=22, sectors_suspect=1, subq_misposition=17)
+    ]
+
+
+def test_a_counter_the_engine_does_not_report_is_none_not_zero(
+    tmp_path: Path,
+) -> None:
+    """Absent is not zero: a PROV `0` would claim the rescue never fired."""
+    got: list[ar.CaptureCounters] = []
+    device = _FakeDiscDevice(chunks=(_FakeReadChunk(1),))  # no subq_misposition
+
+    _run_disc(device, tmp_path, stats_cb=got.append)
+
+    assert got[0].subq_misposition is None
+    assert got[0].sectors_recovered == 0  # control: a reported zero stays zero
+
+
+def test_read_disc_c2_forwards_the_stats_callback(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    device = _FakeDiscDevice(
+        chunks=(_FakeReadChunk(1),), stats=_FakeStats(sectors_recovered=3)
+    )
+    _install(monkeypatch, _disc_binding(device))
+    got: list[ar.CaptureCounters] = []
+
+    ar.read_disc_c2("/dev/sr0", tmp_path / "a.pcm", stats_cb=got.append)
+
+    assert [c.sectors_recovered for c in got] == [3]
