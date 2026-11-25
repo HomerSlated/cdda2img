@@ -998,9 +998,14 @@ the remaining profiles, then enforce disabling profiles marked as experimental")
 - **`experimental = true` disables a profile** (`recovery_profile.load_enabled_profile`;
   the chain records `<stage>:disabled`). It was a label only until now. Only `sector-hammer`
   carries it; why it never works is in RECOVERY.md.
-- **Open, not decided:** a minimum of 3 passes for chain stages. span-fixed and max-variation
-  both matched only on their last planned read with Keith's `recovery_passes = 3`; the default
-  of 1 would have missed both.
+- **Decided later that evening (Keith):** every chain stage gets at least 3 sweeps
+  (`_CHAIN_MIN_SWEEPS`, PROV `recovery_sweeps__<stage>`); span-fixed and max-variation both
+  matched only on their last planned read with `recovery_passes = 3`, and the default of 1
+  would have missed both. "none" swapped to `track-constant, track-ladder`. Consequence:
+  `--recovery-speed auto` finds no ladder C2 evidence before track-constant in the none and
+  light orders, so it holds the slowest rung there (open with Keith).
+- **sector-hammer investigation** is a live TODO item (Keith: "If it can be transformed into
+  a useful profile then we should make the attempt").
 - **Open: span-fixed contradicts its bench result.** The bench (1/16) read "span size is not
   the story"; on 0.59 it recovered track 8 at a fixed speed with no variation. Every rip read
   asks for a cache defeat and no bench read did; that confound is unresolved.

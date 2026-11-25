@@ -471,8 +471,9 @@ read-engine side; "caller" means cdda2img (or any application driving AccuDisc).
   `--ad-*` flags, which no read ever received, were deleted on 2026-11-25.)
 - **Order**: per failed track, by `n`, the sectors the capture pass flagged in
   it (the bench found `n`, not radius, decides which strategy wins):
-  - **none flagged**: `track-ladder`, `track-constant` (the sector shapes would aim
-    at the track's first sector; the span rung has nothing to read);
+  - **none flagged**: `track-constant`, `track-ladder` (swapped 2026-11-25 by Keith,
+    the light-damage rule; the sector shapes would aim at the track's first sector
+    and the span rung has nothing to read);
   - **1 to 5** (the bench's threshold): `span-flagged`, `span-fixed`,
     `sector-runup`, `max-variation`, `track-constant`, `track-ladder`
     (reordered 2026-11-25 by Keith after the AccuDisc 0.59 profile series, by
@@ -509,7 +510,11 @@ read-engine side; "caller" means cdda2img (or any application driving AccuDisc).
   the flagged sectors vary, so every shipped profile has `passes = 1`.
   `recovery_passes` (config, or `--recovery-passes`; default 1, 0 = no recovery)
   repeats each stage's sweeps inside one call, so a strategy's working copy keeps
-  every read. It was `recovery_attempts` from 2026-11-24 until Keith merged it into
+  every read. **Every chain stage gets at least 3 sweeps** (Keith, 2026-11-25;
+  `_CHAIN_MIN_SWEEPS`, PROV `recovery_sweeps__<stage>`): on Tracy track 8 span-fixed
+  and max-variation each matched only on the last read of three sweeps, and one
+  sweep would have missed both. The first match still ends a stage, so the floor
+  costs reads only where a stage is failing anyway. It was `recovery_attempts` from 2026-11-24 until Keith merged it into
   `recovery_passes` on 2026-11-25 ("keep the name as recovery_passes"); the kept
   name changed meaning, having counted only the `--ad-*` path's ladder sweeps.
   `budget_s` is seconds per read: a track may take `budget_s` x its planned
@@ -2492,4 +2497,4 @@ That set lets a future reader distinguish "we never checked" from "we checked
 thoroughly and this disc cannot be verified" — which is the only useful thing
 left to say about it.
 
-Blake3 2283f30fa93f35a4ce2fdfde1106ac087481b12d1d4454bd1da7efffbb541220
+Blake3 52748d730e254fa93f674addcc3235cc97fdaf7ce18ad9ad4a41839031a1e8f4

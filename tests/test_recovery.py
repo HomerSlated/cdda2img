@@ -723,7 +723,7 @@ def test_every_recovery_path_in_the_rip_carries_the_session() -> None:
     ("caller", "callees"),
     [
         (
-            "_run_chain_stage",
+            "_dispatch_chain_stage",
             {
                 "_recover_flagged_spans",
                 "_recover_failed_tracks",

@@ -5700,9 +5700,10 @@ _LOW_N_MAX = 5
 #: the 12th of 15 reads); then the whole-track shapes, track-constant (3 reads at
 #: 32X) before track-ladder (hit at 4X, the 5th read). sector-hammer left the chain:
 #: it never recovered anything, 150 one-sector reads of 113044 included, and it is
-#: now ``experimental``, i.e. disabled. "none" and "high" are unchanged.
+#: now ``experimental``, i.e. disabled. "none" follows the same rule the same day
+#: (kgr): track-constant before track-ladder. "high" is unchanged.
 _CHAIN_ORDER = {
-    "none": ("track-ladder", "track-constant"),
+    "none": ("track-constant", "track-ladder"),
     "low": (
         "span-flagged",
         "span-fixed",
@@ -5713,6 +5714,14 @@ _CHAIN_ORDER = {
     ),
     "high": ("track-ladder", "track-constant", "span-flagged"),
 }
+
+
+#: The fewest sweeps any chain stage gets (kgr, 2026-11-25: "set minimum 3 passes
+#: for chain stages"). On Tracy track 8, span-fixed and max-variation each matched
+#: only on the last read of three sweeps; one sweep, the shipped default, would
+#: have missed both. The first AccurateRip match still ends a stage early, so the
+#: floor costs reads only where a stage is failing anyway, under the drive budget.
+_CHAIN_MIN_SWEEPS = 3
 
 
 def _snap_to_ladder(speed: int, ladder: list[int]) -> int:
@@ -5782,18 +5791,30 @@ def _run_chain_stage(
     (``unrecovered``) or absence is a miss. The stage reuses the code each
     profile already runs on its own: the span rung, the speed ladder (with its
     displaced-re-read test and per-attempt record), and the bench strategies.
+    The stage's PROV gains ``recovery_sweeps`` (the sweeps it was given).
     """
-    import secrets
-
     from cdda2img.recovery_profile import load_profile
-    from cdda2img.strategy_reads import strategy_kind
 
     profile = load_profile(stage)
-    n_tracks = len(ctx.track_lsns)
     # A pass is one sweep: every target at every speed the profile reads at (the
     # ladder's one sweep per pass, the span rung's one pass per rung, a strategy's
-    # targets x rungs reads). recovery_passes repeats the profile's passes.
-    sweeps = profile.passes * ctx.recovery_passes
+    # targets x rungs reads). recovery_passes repeats the profile's passes, and
+    # no stage gets fewer than _CHAIN_MIN_SWEEPS. recovery_passes = 0 never gets
+    # here: it turns recovery off before the chain is built.
+    sweeps = max(_CHAIN_MIN_SWEEPS, profile.passes * ctx.recovery_passes)
+    got, prov = _dispatch_chain_stage(stage, profile, results, ctx, sweeps)
+    return got, {**prov, "recovery_sweeps": str(sweeps)}
+
+
+def _dispatch_chain_stage(
+    stage: str, profile: Any, results: list, ctx: _ChainContext, sweeps: int
+) -> tuple[dict[int, str], dict[str, str]]:
+    """Hand *results* to the code *profile*'s fields describe, *sweeps* times over."""
+    import secrets
+
+    from cdda2img.strategy_reads import strategy_kind
+
+    n_tracks = len(ctx.track_lsns)
     # Dispatch on the profile's FIELDS, never its name: a user profile may shadow a
     # shipped one, or be new, and PROV must describe what ran.
     if profile.granularity == "span":

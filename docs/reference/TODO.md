@@ -2,6 +2,52 @@
 
 ## Open
 
+### 🔬 LIVE — sector-hammer: find the systematic failure, then try to make it a useful profile (kgr, 2026-11-25)
+
+kgr: *"Add the sector-hammer experiment to the TODO, as you noted this is a systemic failure
+that should be addressed. If it can be transformed into a useful profile then we should make
+the attempt."* Background and evidence: `RECOVERY.md` §2.5d. In short: **0 of 700 reads on six
+sectors**, five of which another profile recovered from captures that flagged them. At the
+bench's single-sector rate (0.20) that is about a hundred expected hits, so the cause is
+systematic, not chance. The profile is disabled (`experimental = true`) until this is done.
+
+**Step 1: decide between the explanations.** Each predicts something different in one diff.
+- *Reach*: the capture left wrong sectors it did not flag, and hammer never writes them.
+  Predicts unflagged differing sectors near the targets.
+- *Approach as mispositioning* (AccuDisc's H4): the drive lands on the wrong sector after the
+  5000-sector cache-defeat seek through damaged Q. Predicts a hammer read that is a clean copy
+  of a NEIGHBOURING sector.
+- *Approach as settling* (H1): predicts a hammer read that is damaged in place, not shifted.
+
+The experiment:
+1. Add an option to keep a failing rip's scratch (capture PCM, C2 lane, and every hammer read's
+   bytes; not built). Scratch rule: on `/var/tmp`, deleted when the analysis is done.
+2. Run `--profile` on a copy of sector-hammer with `experimental = false`, on a Tracy capture
+   that fails track 8.
+3. Diff the capture's failing track, and each hammer read, against a verified Tracy RBI.
+4. Count:
+   - the differing sectors, and how many the capture flagged;
+   - for each hammer read, whether it equals the reference sector, a reference sector at
+     another LBA (a misposition), or neither (damaged in place).
+
+No new damage data is needed: Tracy fails track 8 on many captures.
+
+**Step 2: transform the profile, depending on the answer.** Fields only, no new mechanism
+where avoidable, measured against the same damage (`recovery_damage_lbas_track_<n>`):
+- **Reach**: hammer's premise (the flagged sector is the whole problem) is false for this
+  damage. Widen what it writes to the flagged sector's neighbours. At that point it converges
+  on sector-runup or span-flagged, so the honest outcome may be to retire it.
+- **Mispositioning**: give each read a short run-up (a few sectors), or drop the far-read cache
+  defeat for hammer alone, so it arrives by continuity. Note: a run-up is sector-runup at a
+  smaller `run_up`, which measures the smallest run-up that works. That is worth knowing in
+  its own right.
+- **Settling**: same remedies; the measurement is how short the run-up can be.
+
+Then re-run on Tracy. Clear the `experimental` mark only on a hit against damage another
+profile was also handed. Done when: the profile recovers such damage and joins the chain in
+its measured place, or the diff shows its premise cannot hold, and it is retired with that
+result recorded in RECOVERY.md §2.5d.
+
 ### 📋 QUEUED — kgr's TODO cleanup rulings, 2026-08-13
 
 Recorded verbatim on receipt so they survive a context compaction. **Work order set

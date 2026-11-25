@@ -84,7 +84,7 @@ def test_every_enabled_shipped_profile_is_in_the_chain_and_no_disabled_one() -> 
 def test_nothing_flagged_gets_only_whole_track_shapes() -> None:
     """The sector shapes would aim at the track's first sector; the span rung
     has nothing to read."""
-    assert app._CHAIN_ORDER["none"] == ("track-ladder", "track-constant")
+    assert app._CHAIN_ORDER["none"] == ("track-constant", "track-ladder")  # kgr 11-25
 
 
 def test_light_damage_starts_targeted_and_heavy_damage_with_the_ladder() -> None:
@@ -158,11 +158,11 @@ def test_unrecovered_tracks_share_one_whole_disc_stage(monkeypatch) -> None:
 
 
 def test_a_recovered_track_is_not_read_again(monkeypatch) -> None:
-    calls = _fake_stages(monkeypatch, {"track-ladder": {1}})
+    calls = _fake_stages(monkeypatch, {"track-constant": {1}})
     tracks = [SimpleNamespace(track=1), SimpleNamespace(track=2)]
     app._recovery_chain(_ctx(), tracks, 32, 0)
     assert ("whole-disc", (2,)) in calls
-    assert all(1 not in t for name, t in calls if name != "track-ladder")
+    assert all(1 not in t for name, t in calls if name != "track-constant")
 
 
 def test_every_stage_runs_to_exhaustion_without_a_ceiling(monkeypatch) -> None:
@@ -248,7 +248,7 @@ def test_a_declined_span_stage_is_a_recorded_miss(monkeypatch) -> None:
         "span-flagged", [SimpleNamespace(track=2)], _ctx(disc_damage=None)
     )
     assert got == {}
-    assert prov == {"span_declined": "no_damage_map"}
+    assert prov == {"span_declined": "no_damage_map", "recovery_sweeps": "3"}
 
 
 # ---- wiring --------------------------------------------------------------------------
@@ -357,7 +357,10 @@ def test_auto_holds_the_rung_the_ladder_found_closest(monkeypatch) -> None:
         return {t: "unrecovered"}, {}
 
     monkeypatch.setattr(app, "_run_chain_stage", stage)
-    ctx = _ctx(fixed_speed=4, auto_speed=True)
+    # Heavy damage: the only order left in which the ladder (the C2 evidence)
+    # runs before track-constant (kgr's 2026-11-25 orders put track-constant
+    # first for light damage and none).
+    ctx = _ctx(fixed_speed=4, auto_speed=True, disc_damage=_lane(set(range(10, 50))))
     _o, prov = app._recovery_chain(ctx, [SimpleNamespace(track=1)], "auto", 0)
     assert held == [24]
     assert prov["recovery_speed_track_1"] == "24X:c2=2"
@@ -478,3 +481,54 @@ def test_a_disabled_whole_disc_stage_is_recorded_on_every_track(
     assert prov["recovery_chain_track_1"].endswith("whole-disc:disabled")
     assert prov["recovery_chain_track_2"].endswith("whole-disc:disabled")
     assert outcomes == {1: "unrecovered", 2: "unrecovered"}
+
+
+# ---- the sweep floor (kgr, 2026-11-25) ---------------------------------------------
+
+
+def _sweeps_seen(monkeypatch, recovery_passes: int) -> tuple[list[int], dict]:
+    seen: list[int] = []
+
+    def strategy(_kind, _profile, **kw):
+        seen.append(kw["sweeps"])
+        return {}, {}
+
+    monkeypatch.setattr(app, "_recover_by_strategy", strategy)
+    _got, prov = app._run_chain_stage(
+        "sector-runup",
+        [SimpleNamespace(track=2)],
+        _ctx(recovery_passes=recovery_passes),
+    )
+    return seen, prov
+
+
+def test_every_chain_stage_gets_at_least_three_sweeps(monkeypatch) -> None:
+    """span-fixed and max-variation each matched Tracy's track 8 only on the last
+    read of three sweeps; the shipped passes (1) x the default (1) would miss."""
+    seen, prov = _sweeps_seen(monkeypatch, recovery_passes=1)
+    assert seen == [3]
+    assert prov["recovery_sweeps"] == "3"
+
+
+def test_recovery_passes_above_the_floor_still_multiplies(monkeypatch) -> None:
+    """Control: the floor is a minimum, not a fixed value."""
+    seen, prov = _sweeps_seen(monkeypatch, recovery_passes=5)
+    assert seen == [5]
+    assert prov["recovery_sweeps"] == "5"
+
+
+def test_the_sweep_record_is_suffixed_per_stage(monkeypatch) -> None:
+    _fake_stages(monkeypatch, {})
+    monkeypatch.setattr(
+        app,
+        "_run_chain_stage",
+        lambda name, results, _c: (
+            {r.track: "unrecovered" for r in results},
+            {"recovery_sweeps": "3"},
+        ),
+    )
+    _o, prov = app._recovery_chain(
+        _ctx(disc_damage=_lane({150})), [SimpleNamespace(track=2)], 32, 0
+    )
+    assert prov["recovery_sweeps__span_fixed"] == "3"
+    assert prov["recovery_sweeps__whole_disc"] == "3"
