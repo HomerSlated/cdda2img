@@ -186,9 +186,9 @@ def test_every_recovery_read_is_charged_before_it_is_sent() -> None:
 
 
 def test_the_rip_runs_recovery_inside_the_budget_and_records_the_work() -> None:
-    src = inspect.getsource(app.rip_image)
+    src = " ".join(inspect.getsource(app.rip_image).split())
     assert "drive_work.budget(" in src
-    assert "cfg.recovery_max_reads, cfg.recovery_max_speed_changes" in src
+    assert "cfg.recovery_max_reads, cfg.recovery_max_speed_changes," in src
     assert 'ladder_prov["recovery_drive_work"] = work.record()' in src
 
 

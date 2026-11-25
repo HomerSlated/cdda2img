@@ -233,6 +233,9 @@ class Config:
     # and speed changes it may ask for. 0 = no limit.
     recovery_max_reads: int = 5000
     recovery_max_speed_changes: int = 1000
+    # The engine's own recovery commands per rip (kgr, 2026-11-25). Recorded only:
+    # not enforced until the per-read budget is adopted after kgr's series.
+    recovery_max_engine_cmds: int = 10000
     # C2-erasure-assisted CTDB recovery gate (item 8). "off" (default) rips via cdrdao
     # read-cd as usual — CTDB error-only ctanalyse still repairs above cd-paranoia. "auto"
     # uses the drive's C2 error pointers as RS erasures when the drive advertises +
@@ -381,6 +384,7 @@ def _build(d: dict) -> Config:
         recovery_passes=d["recovery_passes"],
         recovery_max_reads=d["recovery_max_reads"],
         recovery_max_speed_changes=d["recovery_max_speed_changes"],
+        recovery_max_engine_cmds=d["recovery_max_engine_cmds"],
         recovery_speed=d["recovery_speed"],
         recovery_ceiling_s=d["recovery_ceiling_s"],
         c2_recovery=d["c2_recovery"],

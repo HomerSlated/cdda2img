@@ -890,6 +890,13 @@ What it changes in this plan, pending AccuDisc's own audit (§268.5) and Keith's
   > before the read is sent; it must not pass the 0 on. Remainders are clamped to the field
   > widths (uint16 / uint32). The capture is never budgeted: a cut fallback there zero-fills
   > a chunk of the only full read.
+  >
+  > **Done 2026-11-25 (Keith: "Go ahead with 10,000").** Config `recovery_max_engine_cmds`
+  > (default 10000, 0 = none) is added and **recorded only**. The engine's spend per recovery
+  > read is booked after each read and recorded as PROV `recovery_engine_work` (`cmds`,
+  > `speed_changes`, `max_read_cmds`, `reported_reads`). Engine speed changes will share
+  > `recovery_max_speed_changes` (1000) when enforced, not get a limit of their own.
+  > Re-derive the 10,000 from recorded rips before adoption.
 - **The `--ad-*` passthrough does less than §9.4 and the tests above assume.** `--ad-retries`,
   `--ad-c2-retries`, `--ad-verify`, `--ad-overlap` and `--ad-recovery` are accepted, take
   rung 1 (so the chain gives way to the plain ladder) and are recorded in PROV

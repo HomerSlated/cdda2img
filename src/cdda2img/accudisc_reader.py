@@ -58,6 +58,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, NamedTuple, TypeVar
 
+from cdda2img import drive_work
+
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator, Sequence
 
@@ -1329,6 +1331,25 @@ _FEATURE_TOC_FROM_FULL_TOC = "toc_from_full_toc"
 #: binding raises ``TypeError`` on the keyword, as for ``cache_defeat``.
 _FEATURE_READABLE_RANGE = "readable_range"
 
+#: ``Device.read(budget_cmds=, budget_speed_changes=)`` and the always-filled
+#: ``ReadStats.budget_spent_cmds`` / ``budget_spent_changes`` (0.57.0, AccuDisc
+#: ``a3a6557``, 2026-11-25): the engine's own recovery work inside one read.
+#: cdda2img passes no budget yet (adoption waits for kgr's series); it books
+#: what each recovery read spent, for PROV ``recovery_engine_work``.
+_FEATURE_READ_BUDGET = "read_budget"
+
+
+def _book_engine_work(module: Any, stats: Any) -> None:
+    """Book a recovery read's own engine spend to the rip's drive work.
+
+    Outside a rip's recovery this is a no-op (no budget is active), which is what
+    keeps the capture and the track preview out of it. On an engine before 0.57.0
+    nothing is booked, so the record is absent rather than a false zero."""
+    if _has_feature(module, _FEATURE_READ_BUDGET):
+        drive_work.book_engine(
+            int(stats.budget_spent_cmds), int(stats.budget_spent_changes)
+        )
+
 
 def _has_feature(module: Any, name: str) -> bool:
     """Whether the binding publishes capability *name* in ``accudisc.features``.
@@ -2031,6 +2052,7 @@ def _read_windows_binding(
             **_readable_kw(module, readable),
             **cancel,
         )
+    _book_engine_work(module, result.stats)
     defeat = "off"
     if extra:
         _log_cache_defeat(result.stats, start_lba, module)
@@ -2178,6 +2200,7 @@ def _defeated_read(
             **extra,
             **cancel,
         )
+    _book_engine_work(module, result.stats)
     defeat = "off"
     if extra:
         _log_cache_defeat(result.stats, start_lba, module)
@@ -2677,6 +2700,7 @@ def _read_span_detail_binding(
                 **_readable_kw(module, readable),
                 **cancel,
             )
+        _book_engine_work(module, result.stats)
 
     if pos != count:
         how = "short" if pos < count else "over-long"

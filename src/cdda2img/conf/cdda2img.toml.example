@@ -140,6 +140,14 @@
 # recovery_max_reads = 5000
 # recovery_max_speed_changes = 1000
 
+# The engine's own recovery commands inside those reads (its error fallback, Q and
+# C2 rescue, consensus, verify witnesses, and their seeks), per rip.
+# NOT ENFORCED YET: the rip records what the engine spent (recovery_engine_work,
+# AccuDisc 0.57.0 or later), and this limit takes effect only when the per-read
+# budget is adopted. Lowering it today protects nothing. 0 = no limit.
+# Default: 10000
+# recovery_max_engine_cmds = 10000
+
 # Restrict the recovery chain to one profile when neither --profile nor any --ad-*
 # flag is given. Unset (the default) runs the full automatic chain: every shipped
 # profile, in an order chosen from each failing track's damage, until every track

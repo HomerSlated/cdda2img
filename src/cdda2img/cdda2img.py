@@ -6558,8 +6558,13 @@ def rip_image(  # noqa: C901
             # kgr, 2026-11-25: every recovery read is charged to one per-rip drive
             # budget before it is sent (drive_work), so a heavily damaged disc
             # cannot turn recovery into a command storm on the drive.
+            # The engine's own recovery commands are booked after each read and
+            # recorded (recovery_engine_work); recovery_max_engine_cmds is carried
+            # but not enforced until the per-read budget is adopted (kgr's series).
             with drive_work.budget(
-                cfg.recovery_max_reads, cfg.recovery_max_speed_changes
+                cfg.recovery_max_reads,
+                cfg.recovery_max_speed_changes,
+                cfg.recovery_max_engine_cmds,
             ) as work:
                 try:
                     if (
@@ -6688,6 +6693,9 @@ def rip_image(  # noqa: C901
                     ladder_prov["recovery_budget_hit"] = str(exc)
                 finally:
                     ladder_prov["recovery_drive_work"] = work.record()
+                    engine = work.engine_record()
+                    if engine is not None:
+                        ladder_prov["recovery_engine_work"] = engine
 
             rip_type = f"{rip_type}+c2rec"
             _ui_status(ui, "Verifying AccurateRip (re-read)…")

@@ -533,6 +533,10 @@ CONFIG_SCHEMA = Schema(
         # heavily damaged disc cannot become a command storm. 0 = no limit.
         "recovery_max_reads": FieldSpec((int,), default=5000),
         "recovery_max_speed_changes": FieldSpec((int,), default=1000),
+        # kgr, 2026-11-25: the engine's own recovery commands per rip. RECORDED ONLY
+        # (PROV recovery_engine_work): nothing enforces it until the per-read budget
+        # is adopted after kgr's per-profile hardware series.
+        "recovery_max_engine_cmds": FieldSpec((int,), default=10000),
         "c2_recovery": FieldSpec(
             (str,), default="auto", enum=frozenset({"auto", "on", "off"})
         ),
@@ -603,6 +607,11 @@ CONFIG_SCHEMA = Schema(
             "recovery_max_speed_changes",
             "must not be negative (0 = no limit)",
             lambda d: d["recovery_max_speed_changes"] >= 0,
+        ),
+        SanityRule(
+            "recovery_max_engine_cmds",
+            "must not be negative (0 = no limit)",
+            lambda d: d["recovery_max_engine_cmds"] >= 0,
         ),
         SanityRule(
             "recovery_passes",

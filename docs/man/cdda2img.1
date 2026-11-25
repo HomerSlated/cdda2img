@@ -124,6 +124,18 @@ at the configured
 The first AccurateRip\-verified result is spliced in sample\-exactly.
 .B recovery_ceiling_s
 bounds the whole chain in time (0, the default, lets it run to exhaustion).
+To protect the drive,
+.B recovery_max_reads
+(default 5000) and
+.B recovery_max_speed_changes
+(default 1000) bound the re\-reads one rip may send and the spindle speed
+changes between them (0 = no limit); a rip stopped by either aborts and names
+the limit to raise.
+.B recovery_max_engine_cmds
+(default 10000) is the intended limit on the engine\(cqs own recovery commands
+inside those reads; for now it is
+.I recorded only
+and limits nothing.
 A track that never matches keeps its original audio \(em an unverified splice is
 never written.
 .PP
