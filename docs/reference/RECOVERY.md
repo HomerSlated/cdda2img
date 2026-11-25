@@ -604,15 +604,19 @@ explanations fit that, and no run has separated them:
    into it. The bench measured this directly: at 114436@40x a bare single-sector read was
    byte-exact 0.20 of the time, against 0.60 with a 16-64 sector run-up.
 
-The arithmetic favours reach. Approach alone predicts a low success rate, not zero: at the
-bench's 0.20, 700 reads would be expected to give on the order of a hundred hits, and they
-gave none. Reach (or the cache defeat, below) fits 0/700; approach alone does not.
+The arithmetic narrows approach. As a settling penalty it predicts a low success rate, not
+zero: at the bench's 0.20, 700 reads would be expected to give on the order of a hundred
+hits, and they gave none. What fits 0/700 is a SYSTEMATIC cause: reach, the long seek the
+cache defeat imposes (below), or approach as mispositioning (hypothesis 4), which delivers
+the same wrong sector the same way every time.
 
 **Why it cannot work on this damage, and the condition.** If reach is the explanation, the
 "never" is structural: a plan that cannot write the sector that is actually wrong can never
 match, at any read count, speed or approach. That is the strong claim, and it holds **only
 where the capture left unflagged damage within the track**. If approach is the explanation,
-hammer is merely bad (0.20 or less per read), and the 0/700 needs another factor. Either
+the "never" holds only for as long as hammer keeps the approach that fails: as a settling
+penalty it would merely be bad (0.20 or less per read, so the 0/700 needs another factor);
+as mispositioning after a long seek it would also be structural. Either
 way it has never recovered a sector that another profile could not.
 
 **The experiment that decides it.** Keep a failing capture's PCM (the rip deletes its
@@ -627,18 +631,37 @@ bench's rule is to rank strategies, not causes. Recorded so they can be tested:
 1. *Settling.* A read that begins at the target transfers it straight after a seek, while
    tracking, focus and the data clock may still be settling.
 2. *De-interleaving.* CIRC spreads each sector's bytes over about 108 frames (a little over
-   one sector), so correcting a sector uses frames before and after it; a read that starts
-   at the sector may not give the decoder those frames in the state it needs. Drives
-   normally read ahead of the requested address, which weakens this one.
+   one sector), so correcting a sector uses frames before and after it. AccuDisc (2026-11-25ag)
+   points out that a drive cannot "begin decoding at the address": CD-DA sectors carry no
+   header, so the drive finds the address by decoding Q, and must already be decoding
+   when the target passes. This therefore folds mostly into 1: what matters is how far
+   before the target the drive lands after the seek, and its state by then. Neither is
+   measured (the PX-716A's read-AHEAD past a span's end is, 0.7-0.9 ms per buffered
+   sector; read-behind is not).
 3. *The tail.* `sector-runup` also reads 2 sectors past the target and hammer reads none;
    no run has separated the run-up from the tail.
+4. *Position* (AccuDisc, 2026-11-25ag). After a long seek the drive locates the target by
+   searching Q, and Tracy's Q is badly damaged in exactly these regions. Landing on the
+   wrong sector delivers a whole, error-free but wrong or shifted sector, which
+   AccurateRip rejects every time and the same way on every read that approaches the
+   same way; a streaming read reaches the target by continuity instead. The engine's
+   records cannot exclude it: its misposition flag fires only on a Q frame whose CRC
+   passes and whose address disagrees, so `subq_misposition = 0` on this damage means
+   "nothing contradicted the position", not "the position was confirmed".
 
 **Open: the cache defeat.** Every rip hammer read follows a far read; no bench read did. The
 bench's 2/20 and its 0.20 single-sector rate were measured without it (and without it a
 back-to-back re-read of the PX-716A may be answered from its cache, measured 2026-11-21, so
 the bench's reads may not all have been reads of the disc). Whether the defeat is what took
-a single-sector read from 0.20 to 0 is not measured. It is the same confound as
-`span-fixed`'s (2.5b).
+a single-sector read from 0.20 to 0 is not measured. **For hammer the defeat is a seek-length
+variable** (AccuDisc, 2026-11-25ag): in the rip every hammer read is a seek of about 5000
+sectors (67 s of audio) onto the target, where a bench re-read was a jump back of about one
+revolution, or a cache answer with no disc access. So for hammer this confound and
+hypothesis 1 may be one variable; `sector-runup` makes the same 5000-sector seek and
+succeeds, so a 32-sector run-up would be enough to absorb whatever the seek leaves
+unsettled. For `span-fixed` (2.5b) the defeat may act the other way: it makes each re-read
+an independent disc access, where some bench re-reads may have been cache echoes, which
+would make the bench's 1/16 an undercount. One confound, possibly two mechanisms.
 
 **What damage it could work on.** A transient error: a sector that reads correctly when
 simply asked again, from any approach (a one-off transport error, for example, which the
@@ -2469,4 +2492,4 @@ That set lets a future reader distinguish "we never checked" from "we checked
 thoroughly and this disc cannot be verified" — which is the only useful thing
 left to say about it.
 
-Blake3 ab4332c26f0a1999859ee4de331b72bceb9e5a77624c1ee08f234d9af1f53ed7
+Blake3 2283f30fa93f35a4ce2fdfde1106ac087481b12d1d4454bd1da7efffbb541220
