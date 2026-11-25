@@ -832,6 +832,33 @@ shipped-name collision and illegal-char both rejected; `--ad-*` present → prof
 (`recovery_source=ad-flags`); AccuDisc mid-rip error → we exit non-zero, temp dir gone,
 AccuDisc's message shown verbatim.
 
+### 9.9 Re-read ownership (Keith, 2026-11-25) — OPEN with AccuDisc, outbound §268
+
+> **AMENDMENT 2026-11-25. Nothing below is implemented yet.** Keith: "Re-reads that only
+> reference local resources (e.g. C2 pointers) belong to AccuDisc. Re-reads that reference
+> online resources (e.g. AccurateRip) belong to cdda2img." This extends RECOVERY.md §1's split
+> of the gates ("absolute → cdda2img; relative → AccuDisc") to the re-reads the gates drive.
+
+What it changes in this plan, pending AccuDisc's own audit (§268.5) and Keith's go:
+
+- **The engine's local re-read settings are AccuDisc's policy, not profile fields.**
+  `verify_passes`, `overlap_sectors` and `c2_retries` were added to the §9.2 schema for the
+  span rung (`granularity = "span"`), and they are the only place cdda2img sets any of them;
+  the capture, ladder and strategy reads are single-pass (engine `retries` only). Whether they
+  leave the schema depends on §268.5a: a policy surface AccuDisc offers, or a recipe we apply.
+- **The `--ad-*` passthrough does less than §9.4 and the tests above assume.** `--ad-retries`,
+  `--ad-c2-retries`, `--ad-verify`, `--ad-overlap` and `--ad-recovery` are accepted, take
+  rung 1 (so the chain gives way to the plain ladder) and are recorded in PROV
+  `recovery_ad_flags`, but no read receives them; only `--ad-ladder` and `--ad-speed` act.
+  Measured 2026-11-25 by reading every consumer of `ad_flags`. Proposed: delete the five
+  (Keith's call), since under the ruling the knobs are not ours to pass.
+- **`profile.passes` × `recovery_attempts` and `recovery_passes` overlap** (§9.2's note above
+  resolved the first overlap; `recovery_attempts`, added 2026-11-24, made a second). To be
+  settled with Keith.
+- **Constraints agreed in §268.1:** no default flips in the engine (our checkout tracks
+  AccuDisc's HEAD); no change while Keith's per-profile hardware series runs; engine effort
+  recorded in PROV apart from ours; per-read budgets re-derived by whichever side owns them.
+
 ---
 
 ## 10. Cross-project contracts and findings from the 2026-07-24 coordination round
