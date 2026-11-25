@@ -5858,17 +5858,22 @@ def _stage_keys(prov: dict[str, str], stage: str) -> dict[str, str]:
     return {f"{k}__{tag}": v for k, v in prov.items()}
 
 
-def _flagged_in_track(ctx: _ChainContext, track: int) -> int:
-    """Sectors the capture pass flagged in *track*'s raw window, the disc's final
-    sector excluded (a lead-out artefact), as the span rung counts them."""
+def _flagged_lbas_in_track(ctx: _ChainContext, track: int) -> list[int]:
+    """The raw LBAs the capture pass flagged in *track*'s raw window, the disc's
+    final sector excluded (a lead-out artefact), as the span rung targets them."""
     from cdda2img.span_planner import locate_targets
 
     if not ctx.disc_damage:
-        return 0
+        return []
     w = _raw_track_window(ctx.track_lsns, ctx.disc_last_lsn, track - 1, ctx.read_offset)
-    return len(
+    return list(
         locate_targets(ctx.disc_damage, w.lo, w.hi - w.lo, exclude=(ctx.disc_last_lsn,))
     )
+
+
+def _flagged_in_track(ctx: _ChainContext, track: int) -> int:
+    """How many sectors :func:`_flagged_lbas_in_track` finds."""
+    return len(_flagged_lbas_in_track(ctx, track))
 
 
 def _chain_one_track(
@@ -5973,9 +5978,14 @@ def _recovery_chain(
     outcomes: dict[int, str] = {}
     chains: dict[int, list[str]] = {}
     for result in failed_tracks:
-        flagged = _flagged_in_track(ctx, result.track)
+        lbas = _flagged_lbas_in_track(ctx, result.track)
+        flagged = len(lbas)
         cls = _damage_class(flagged)
         prov[f"recovery_damage_track_{result.track}"] = f"{flagged}:{cls}"
+        # kgr, 2026-11-25: which sectors, so any profile's run can be matched to
+        # the damage it was handed.
+        if lbas:
+            prov[f"recovery_damage_lbas_track_{result.track}"] = _lba_ranges(lbas)
         order = _CHAIN_ORDER[cls] if only is None else (only,)
         if only == "whole-disc":
             order = ()

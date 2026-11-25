@@ -112,6 +112,7 @@ def test_a_light_track_walks_its_order_and_stops_at_the_first_hit(monkeypatch) -
     assert [c[0] for c in calls] == ["span-flagged", "max-variation", "track-ladder"]
     assert outcomes == {2: "track-ladder@ok"}
     assert prov["recovery_damage_track_2"] == "2:low"
+    assert prov["recovery_damage_lbas_track_2"] == "150-151"  # kgr 2026-11-25
     assert prov["recovery_chain_track_2"] == (
         "span-flagged:miss,max-variation:miss,track-ladder:hit"
     )
@@ -137,6 +138,7 @@ def test_unrecovered_tracks_share_one_whole_disc_stage(monkeypatch) -> None:
     assert outcomes == {1: "whole-disc@ok", 2: "unrecovered"}
     assert prov["recovery_chain_track_2"].endswith("whole-disc:miss")
     assert prov["recovery_damage_track_1"] == "0:none"
+    assert "recovery_damage_lbas_track_1" not in prov  # nothing flagged
 
 
 def test_a_recovered_track_is_not_read_again(monkeypatch) -> None:
@@ -389,3 +391,18 @@ def test_the_config_accepts_a_rate_or_auto() -> None:
     assert validate({"recovery_speed": 24}, CONFIG_SCHEMA) == []
     assert validate({"recovery_speed": "fast"}, CONFIG_SCHEMA)
     assert validate({"recovery_speed": 0}, CONFIG_SCHEMA)
+
+
+def test_a_named_profile_records_the_flagged_sectors_too(monkeypatch) -> None:
+    """kgr, 2026-11-25: "record the flagged sectors for every profile". A named
+    --profile runs the chain restricted to that stage, through the same record."""
+    _fake_stages(monkeypatch, {"sector-runup": {2}})
+    _o, prov = app._recovery_chain(
+        _ctx(disc_damage=_lane({150, 160, 161, 162})),
+        [SimpleNamespace(track=2)],
+        32,
+        0,
+        only="sector-runup",
+    )
+    assert prov["recovery_damage_lbas_track_2"] == "150,160-162"
+    assert prov["recovery_chain_track_2"] == "sector-runup:hit"
