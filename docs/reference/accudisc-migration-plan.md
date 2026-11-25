@@ -909,6 +909,23 @@ What it changes in this plan, pending AccuDisc's own audit (§268.5) and Keith's
   > `--ad-ladder` rungs go in as `admitted_x`, since the policy refuses a `speed_x` outside it.
   > We pass 0 for `CAPTURE`'s budgets. A refusal on AccuDisc's side was declined: the rule is
   > archival policy, and it is ours.
+  >
+  > **0.59.0, `accudisc_compare_read()` and policy revision 2 (`b65761c`, AccuDisc
+  > 2026-11-25ab; reviewed in outbound §282). The design sequence 0.53–0.59 is complete.**
+  > Everything in it is opt-in, nothing changes our reads, and our suite is green on each
+  > release. **`REFERENCE_VERIFY` replaces `_digital_media_consensus` first.** It names the
+  > nearest admitted rung other than the reference's **honoured** speed. With
+  > `exclude_speed_x` it also avoids a second rung (the no-C2 third pass), and it refuses
+  > when no rung is left. Ours falls back to the capture's own rung, and reuses the second
+  > pass's rung for the third, both silently.
+  >
+  > **The Python call form when adopting:** `kw = policy.read_kwargs()`, then
+  > `dev.compare_read(reference=ref, **kw)`. Not `dev.compare_read(lba, count, ref, **kw)`:
+  > `read_kwargs()` carries `lba` and `count`, so that form raises `TypeError`.
+  >
+  > The reference callback returns `(audio, absent_offsets)`. Mark the capture's HARD
+  > sectors absent, or a good sector in the pass compares against zeros as DIFFER. `absent`
+  > values other than 0/1 are reserved.
 - **The `--ad-*` passthrough does less than §9.4 and the tests above assume.** `--ad-retries`,
   `--ad-c2-retries`, `--ad-verify`, `--ad-overlap` and `--ad-recovery` are accepted, take
   rung 1 (so the chain gives way to the plain ladder) and are recorded in PROV
