@@ -394,10 +394,16 @@ def parse_args() -> argparse.Namespace:
     # merging it with a profile would produce a configuration nobody asked for.
     # --ad-speed is exempt because it sets the INITIAL pass rate, which no profile has
     # an opinion about, so there is nothing for it to conflict with.
+    #
+    # --ad-retries, --ad-c2-retries, --ad-verify, --ad-overlap and --ad-recovery
+    # were deleted on 2026-11-25 (kgr). No read ever received them: they took rung 1
+    # and were written to PROV recovery_ad_flags as if applied. Under the re-read
+    # ownership ruling of that day, the engine's local re-read settings are
+    # AccuDisc's to choose, not a cdda2img flag's.
     _ad = r_cmd.add_argument_group(
         "AccuDisc passthrough",
-        "Drive AccuDisc's recovery knobs directly. Any of these except --ad-speed "
-        "disables profiles.",
+        "Set the drive's read speeds directly. --ad-ladder replaces the recovery "
+        "profiles with the plain speed ladder; --ad-speed composes with them.",
     )
     _ad.add_argument(
         "--ad-speed",
@@ -408,39 +414,10 @@ def parse_args() -> argparse.Namespace:
         "Composes with --profile",
     )
     _ad.add_argument(
-        "--ad-retries",
-        type=int,
-        metavar="K",
-        help="Per-sector attempts after a chunk fails (AccuDisc default 2)",
-    )
-    _ad.add_argument(
-        "--ad-c2-retries",
-        type=int,
-        metavar="N",
-        dest="ad_c2",
-        help="Cache-defeated rereads hunting a C2-clean copy of each flagged sector",
-    )
-    _ad.add_argument(
-        "--ad-verify",
-        type=int,
-        metavar="P",
-        help="Whole-range verify passes; consensus decides disagreements",
-    )
-    _ad.add_argument(
-        "--ad-overlap",
-        type=int,
-        metavar="K",
-        help="Extend each chunk by K trailing sectors and compare against the next "
-        "chunk's head, catching drive slips at chunk seams (0-8)",
-    )
-    _ad.add_argument(
         "--ad-ladder",
         metavar="LIST",
         help='Recovery speed rungs, in attempt order, e.g. "32,16,8". Taken verbatim '
         "— not filtered against the drive's admitted set",
-    )
-    _ad.add_argument(
-        "--ad-recovery", metavar="FLAGS", help="Raw AccuDisc recovery flag string"
     )
     r_cmd.add_argument(
         "--device",

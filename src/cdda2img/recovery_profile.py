@@ -194,7 +194,11 @@ def load_profile(name: str, *, profiles: dict[str, Path] | None = None) -> Profi
 # Resolution (§9.4)
 # --------------------------------------------------------------------------
 
-AD_FLAGS = ("speed", "retries", "c2", "recovery", "ladder", "verify", "overlap")
+#: The `--ad-*` flags that exist. ``retries``, ``c2``, ``recovery``, ``verify`` and
+#: ``overlap`` were deleted on 2026-11-25 (kgr): no read ever received them, yet they
+#: took rung 1 and were recorded in PROV ``recovery_ad_flags`` as if applied. The
+#: engine's local re-read settings are AccuDisc's under that day's ruling.
+AD_FLAGS = ("speed", "ladder")
 
 
 @dataclass(frozen=True)
@@ -283,11 +287,12 @@ _MAX_SPEED_X = 72
 def _read_speed_from(value: object) -> int | None:
     """Validate ``--ad-speed`` into an ``int`` in ``[1, 72]``, or ``None``.
 
-    Rejects rather than clamps. A clamp here would be the ``--ad-retries 256`` defect
-    wearing different clothes: that value parses as a fine integer, is silently cut to
-    a ``uint8_t``, and arrives at the drive as 2 — the opposite of what was asked, with
-    the rip carrying on and every measurement taken under it mislabelled. When a
-    number cannot be honoured the only safe answer is to say so before the drive spins.
+    Rejects rather than clamps. A clamp here would be the ``--retries 256`` defect in
+    AccuDisc's CLI wearing different clothes: that value parses as a fine integer, is
+    silently cut to a ``uint8_t``, and arrives at the drive as 2 — the opposite of
+    what was asked, with the rip carrying on and every measurement taken under it
+    mislabelled. When a number cannot be honoured the only safe answer is to say so
+    before the drive spins.
 
     ``0`` is refused too, even though the library reads it as "fastest possible":
     ``--ad-speed 0`` from a human is a mistake, not a request for maximum, and the way

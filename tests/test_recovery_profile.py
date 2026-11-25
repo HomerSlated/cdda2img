@@ -346,25 +346,61 @@ def test_ad_flags_bypass_profiles_entirely_rather_than_merging() -> None:
     """A blend of an escape hatch and a profile is a configuration neither the user
     nor the profile author asked for, and PROV could not name it honestly."""
     s = R.resolve_recovery(
-        ad_flags={"retries": 7},
+        ad_flags={"ladder": "32,16"},
         profile_name="whole-disc",
         config_default="max-variation",
     )
     assert s.source == "ad-flags"
     assert s.profile is None
-    assert s.ad_flags == {"retries": 7}
+    assert s.ad_flags == {"ladder": "32,16"}
 
 
 def test_absent_ad_flags_do_not_count_as_supplied() -> None:
     """argparse hands over every --ad-* key with None when unset; treating those as
     present would fire rung 1 on literally every invocation."""
-    s = R.resolve_recovery(ad_flags={"retries": None, "speed": None})
+    s = R.resolve_recovery(ad_flags={"ladder": None, "speed": None})
     assert s.source == "builtin"
 
 
 def test_an_unknown_ad_flag_is_refused() -> None:
     with pytest.raises(R.ProfileError, match="unknown --ad-\\* flag"):
         R.resolve_recovery(ad_flags={"turbo": 1})
+
+
+@pytest.mark.parametrize(
+    "flag", ["--ad-retries", "--ad-c2-retries", "--ad-verify", "--ad-overlap"]
+)
+def test_the_deleted_ad_flags_are_not_options(monkeypatch, flag: str) -> None:
+    """kgr, 2026-11-25: deleted, because no read ever received them. The command
+    line now refuses them (exit 1) instead of recording them in PROV."""
+    from cdda2img import cdda2img as app
+
+    monkeypatch.setattr("sys.argv", ["cdda2img", "rip", flag, "2"])
+    with pytest.raises(SystemExit) as exc:
+        app.parse_args()
+    assert isinstance(exc.value, SystemExit)
+    assert exc.value.code == 1
+
+
+def test_ad_recovery_is_not_an_option(monkeypatch) -> None:
+    """The raw flag string had nothing in AccuDisc to reach (their 2026-11-25a B.5)."""
+    from cdda2img import cdda2img as app
+
+    monkeypatch.setattr("sys.argv", ["cdda2img", "rip", "--ad-recovery", "x"])
+    with pytest.raises(SystemExit) as exc:
+        app.parse_args()
+    assert isinstance(exc.value, SystemExit)
+    assert exc.value.code == 1
+
+
+def test_ad_ladder_and_ad_speed_remain(monkeypatch) -> None:
+    from cdda2img import cdda2img as app
+
+    monkeypatch.setattr(
+        "sys.argv", ["cdda2img", "rip", "--ad-ladder", "32,8", "--ad-speed", "8"]
+    )
+    args = app.parse_args()
+    assert (args.ad_ladder, args.ad_speed) == ("32,8", 8)
 
 
 # ---- ladder binding (2026-11-21: the chain decides each read's speed) ----------

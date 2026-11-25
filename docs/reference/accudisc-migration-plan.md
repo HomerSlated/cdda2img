@@ -861,8 +861,9 @@ What it changes in this plan, pending AccuDisc's own audit (§268.5) and Keith's
   `--ad-c2-retries`, `--ad-verify`, `--ad-overlap` and `--ad-recovery` are accepted, take
   rung 1 (so the chain gives way to the plain ladder) and are recorded in PROV
   `recovery_ad_flags`, but no read receives them; only `--ad-ladder` and `--ad-speed` act.
-  Measured 2026-11-25 by reading every consumer of `ad_flags`. Proposed: delete the five
-  (Keith's call), since under the ruling the knobs are not ours to pass.
+  Measured 2026-11-25 by reading every consumer of `ad_flags`. **Deleted the same day**
+  (Keith: "Yes to all", 10:22 GMT); rbi_spec's `recovery_ad_flags` row carries the audit note
+  for older containers.
 - **`profile.passes` × `recovery_attempts` and `recovery_passes` overlap** (§9.2's note above
   resolved the first overlap; `recovery_attempts`, added 2026-11-24, made a second). To be
   settled with Keith.

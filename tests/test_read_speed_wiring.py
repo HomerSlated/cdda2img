@@ -42,10 +42,10 @@ def test_ad_speed_alone_does_not_bypass_the_profile() -> None:
 
 def test_ad_speed_rides_along_with_a_real_bypassing_flag() -> None:
     """When another flag DOES bypass, the speed still has to arrive."""
-    s = resolve_recovery(ad_flags={"speed": 8, "retries": 7})
+    s = resolve_recovery(ad_flags={"speed": 8, "ladder": "32,16"})
     assert s.source == "ad-flags"
     assert s.read_speed == 8
-    assert s.ad_flags == {"retries": 7}
+    assert s.ad_flags == {"ladder": "32,16"}
 
 
 def test_ad_speed_survives_with_ladder() -> None:
@@ -57,7 +57,7 @@ def test_ad_speed_survives_with_ladder() -> None:
 
 
 def test_other_ad_flags_still_bypass_entirely() -> None:
-    s = resolve_recovery(ad_flags={"retries": 7}, config_default=None)
+    s = resolve_recovery(ad_flags={"ladder": "32,16"}, config_default=None)
     assert s.source == "ad-flags"
     assert s.profile is None
 
@@ -67,8 +67,8 @@ def test_other_ad_flags_still_bypass_entirely() -> None:
 
 @pytest.mark.parametrize("bad", [0, -1, 73, 1000])
 def test_out_of_range_speed_is_refused(bad: int) -> None:
-    """A clamp here would be `--ad-retries 256` in different clothes: that value
-    parses fine, is cut to a uint8_t, and reaches the drive as 2 — the opposite of
+    """A clamp here would be AccuDisc's `--retries 256` in different clothes: that
+    value parses fine, is cut to a uint8_t, and reaches the drive as 2 — the opposite of
     what was asked, with the rip carrying on and mislabelled."""
     with pytest.raises(ProfileError, match="ad-speed"):
         resolve_recovery(ad_flags={"speed": bad})
@@ -134,11 +134,13 @@ def test_ad_ladder_is_not_filtered_against_the_admitted_set(
     assert recovery_profile.bind_ladder(s, "/dev/null").ladder == (48, 3)
 
 
-def test_ad_flags_without_a_ladder_invent_nothing() -> None:
-    """`--ad-retries 7` alone still means no recovery ladder. Fixing the ladder
-    gap must not turn every bypassing flag into a silent ladder."""
-    s = resolve_recovery(ad_flags={"retries": 7})
-    assert recovery_profile.bind_ladder(s, "/dev/null").ladder == ()
+@pytest.mark.parametrize("gone", ["retries", "c2", "verify", "overlap", "recovery"])
+def test_the_deleted_ad_flags_are_refused(gone: str) -> None:
+    """kgr, 2026-11-25: these five reached no read. They took rung 1 and were
+    recorded in PROV as if applied, so a value that still arrives is refused
+    rather than recorded."""
+    with pytest.raises(ProfileError, match="unknown --ad-\\* flag"):
+        resolve_recovery(ad_flags={gone: 7})
 
 
 # ── the hand-over points, read from the source ───────────────────────────────

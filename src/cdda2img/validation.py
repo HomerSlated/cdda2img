@@ -312,8 +312,10 @@ PROFILE_SCHEMA = Schema(
         # recovery adjuncts
         "ctdb": FieldSpec((str,), default="auto", enum=frozenset({"off", "auto"})),
         "verify": FieldSpec((bool,), default=False),
-        # Engine knobs the span rung needs as real fields. Until now the only way
-        # to reach them was --ad-c2-retries, which goes to PROV and nowhere else.
+        # Engine knobs the span rung needs as real fields (--ad-c2-retries, deleted
+        # 2026-11-25, never reached a read). Under that day's re-read ownership
+        # ruling (kgr) they are AccuDisc's policy, so they leave this schema when
+        # AccuDisc's policy surface lands (accudisc-migration-plan.md §9.9).
         "verify_passes": FieldSpec((int,), default=0),
         "overlap_sectors": FieldSpec((int,), default=0),
         "c2_retries": FieldSpec((int,), default=0),
