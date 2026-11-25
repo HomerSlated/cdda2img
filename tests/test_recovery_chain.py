@@ -249,7 +249,8 @@ def test_every_profile_runs_through_the_chain() -> None:
     assert 'bound.source == "builtin"' not in cond
     branch = src[src.index("and bound.profile is not None") - 200 :]
     assert "_recovery_chain(" in branch[:2500]
-    assert 'only=None if bound.source == "builtin" else bound.profile.name' in branch
+    flat = " ".join(branch.split())  # independent of how the formatter wraps it
+    assert 'only=None if bound.source == "builtin" else bound.profile.name' in flat
 
 
 def test_a_named_profile_restricts_the_chain_to_its_stage(monkeypatch) -> None:

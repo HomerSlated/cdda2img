@@ -529,6 +529,10 @@ CONFIG_SCHEMA = Schema(
         # the whole chain, 0 meaning run every stage to exhaustion.
         "recovery_speed": FieldSpec((int, str), default=32),
         "recovery_ceiling_s": FieldSpec((int,), default=0),
+        # kgr, 2026-11-25: the per-rip drive-work budget (drive_work.py), so a
+        # heavily damaged disc cannot become a command storm. 0 = no limit.
+        "recovery_max_reads": FieldSpec((int,), default=5000),
+        "recovery_max_speed_changes": FieldSpec((int,), default=1000),
         "c2_recovery": FieldSpec(
             (str,), default="auto", enum=frozenset({"auto", "on", "off"})
         ),
@@ -589,6 +593,16 @@ CONFIG_SCHEMA = Schema(
             "recovery_ceiling_s",
             "must not be negative (0 = no ceiling)",
             lambda d: d["recovery_ceiling_s"] >= 0,
+        ),
+        SanityRule(
+            "recovery_max_reads",
+            "must not be negative (0 = no limit)",
+            lambda d: d["recovery_max_reads"] >= 0,
+        ),
+        SanityRule(
+            "recovery_max_speed_changes",
+            "must not be negative (0 = no limit)",
+            lambda d: d["recovery_max_speed_changes"] >= 0,
         ),
         SanityRule(
             "recovery_passes",

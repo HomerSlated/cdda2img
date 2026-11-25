@@ -131,6 +131,15 @@
 # this) is distinguishable from a disc the chain could not recover. Default: 0
 # recovery_ceiling_s = 0
 
+# Drive-work budget for one rip's recovery, to protect the drive: at most this many
+# recovery reads, and this many spindle speed changes between them. Every read is
+# counted before it is sent, and the rip records the totals (recovery_drive_work).
+# A rip stopped by the budget aborts and says which limit to raise. On a lightly
+# damaged disc recovery uses about a hundred reads. 0 = no limit.
+# Defaults: 5000 and 1000
+# recovery_max_reads = 5000
+# recovery_max_speed_changes = 1000
+
 # Restrict the recovery chain to one profile when neither --profile nor any --ad-*
 # flag is given. Unset (the default) runs the full automatic chain: every shipped
 # profile, in an order chosen from each failing track's damage, until every track

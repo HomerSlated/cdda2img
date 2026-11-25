@@ -35,6 +35,7 @@ if TYPE_CHECKING:
     from cdda2img.terminal_ui import TerminalUI
     from cdda2img.track_preview import TrackPreview
 
+from cdda2img import drive_work
 from cdda2img.concat import concat_wav
 from cdda2img.container import (
     TempFiles,
@@ -3767,6 +3768,15 @@ def _require_every_track_verified(
             " chain before every stage ran: raise recovery_ceiling_s (0 = none) to let"
             " it finish, rather than concluding the disc cannot be recovered."
         )
+    if "recovery_budget_hit" in provenance:
+        what, _, limit = provenance["recovery_budget_hit"].partition(":")
+        key = {"reads": "recovery_max_reads"}.get(what, "recovery_max_speed_changes")
+        details.append(
+            f"The drive-work budget ({limit} {what.replace('_', ' ')}) stopped"
+            f" recovery to protect the drive ({provenance.get('recovery_drive_work')})."
+            f" Raise {key} (0 = no limit) only if the drive can take more, rather"
+            " than concluding the disc cannot be recovered."
+        )
     for t in failed:
         chain = provenance.get(f"recovery_chain_track_{t}")
         if chain:
@@ -4692,6 +4702,8 @@ def _ladder_attempt(
         read_offset,
         margin=_LADDER_MARGIN if cohort else 0,
     )
+    # Before the read, so a spent budget stops recovery without sending it.
+    drive_work.charge(speed, far_read=True)
     read = read_span_attempt(
         device,
         w.lo,
@@ -5007,6 +5019,10 @@ def _span_pass(
     from cdda2img.accudisc_reader import read_span_detail
 
     for span in spans:
+        # Before the try: a spent budget must stop the rung, not be skipped past.
+        # No cache defeat is asked for here, so no far read of ours is counted;
+        # the engine's own verify far reads are AccuDisc's to count.
+        drive_work.charge(speed, far_read=False)
         try:
             detail = read_span_detail(
                 device,
@@ -5202,6 +5218,8 @@ def _strategy_attempt(
     from cdda2img.accudisc_reader import read_span_windows
 
     where = f"{req.start}+{req.count}@"
+    # Before the try: a spent budget must stop the strategy, not be skipped past.
+    drive_work.charge(req.speed, far_read=cache_defeat)
     try:
         got = read_span_windows(
             device,
@@ -5581,6 +5599,13 @@ _LOW_N_MAX = 5
 #: heavy damage starts with the speed ladder, the only shape reliable at n = 47.
 #: The bench's weakest shapes come last in both. One shared ``whole-disc`` stage
 #: follows for every track still failing, since one read serves them all.
+#:
+#: Heavy damage leaves out the four per-target strategies (kgr, 2026-11-25:
+#: protect the drive). Their reads scale as flagged sectors x speeds x passes, so
+#: 300 flagged sectors on 10 tracks asked for ~189,000 re-reads and ~45,000 speed
+#: changes, while the bench scored them weakest exactly there (max-variation 0/9
+#: at high n). span-flagged stays: its reads scale with clustered spans, not
+#: sectors. A profile named with --profile still runs, under the drive budget.
 _CHAIN_ORDER = {
     "none": ("track-ladder", "track-constant"),
     "low": (
@@ -5592,15 +5617,7 @@ _CHAIN_ORDER = {
         "span-fixed",
         "sector-hammer",
     ),
-    "high": (
-        "track-ladder",
-        "track-constant",
-        "span-flagged",
-        "max-variation",
-        "sector-runup",
-        "span-fixed",
-        "sector-hammer",
-    ),
+    "high": ("track-ladder", "track-constant", "span-flagged"),
 }
 
 
@@ -5782,9 +5799,16 @@ def _chain_one_track(
     if ctx.auto_speed:
         prov[f"recovery_speed_track_{t}"] = f"{ctx.fixed_speed}X:no_c2_data"
     for stage in order:
-        if expired():
+        if expired() or "recovery_budget_hit" in prov:
             break
-        got, stage_prov = _run_chain_stage(stage, [result], ctx)
+        try:
+            got, stage_prov = _run_chain_stage(stage, [result], ctx)
+        except drive_work.DriveBudgetSpent as exc:
+            # The stage's own record is lost with it; the reads it made are in the
+            # drive-work totals. Recovery stops here for every track.
+            prov["recovery_budget_hit"] = str(exc)
+            chain.append(f"{stage}:budget")
+            break
         prov.update(_stage_keys(stage_prov, stage))
         c2_record = stage_prov.get(f"recovery_c2_track_{t}")
         if ctx.auto_speed and c2_record:
@@ -5797,6 +5821,30 @@ def _chain_one_track(
             outcomes[t] = got[t]
             break
     return chain
+
+
+def _shared_whole_disc(
+    remaining: list,
+    ctx: _ChainContext,
+    prov: dict[str, str],
+    outcomes: dict[int, str],
+    chains: dict[int, list[str]],
+) -> None:
+    """The chain's one ``whole-disc`` stage for every track still failing; a spent
+    drive budget is recorded on every one of them (``whole-disc:budget``)."""
+    try:
+        got, stage_prov = _run_chain_stage("whole-disc", remaining, ctx)
+    except drive_work.DriveBudgetSpent as exc:
+        prov["recovery_budget_hit"] = str(exc)
+        for r in remaining:
+            chains[r.track].append("whole-disc:budget")
+        return
+    prov.update(_stage_keys(stage_prov, "whole-disc"))
+    for r in remaining:
+        hit = got.get(r.track, "unrecovered") != "unrecovered"
+        chains[r.track].append(f"whole-disc:{'hit' if hit else 'miss'}")
+        if hit:
+            outcomes[r.track] = got[r.track]
 
 
 def _recovery_chain(
@@ -5845,18 +5893,19 @@ def _recovery_chain(
         order = _CHAIN_ORDER[cls] if only is None else (only,)
         if only == "whole-disc":
             order = ()
+        if "recovery_budget_hit" in prov:
+            order = ()
         chains[result.track] = _chain_one_track(
             result, order, ctx, expired, prov, outcomes
-        )
+        ) or (["budget"] if "recovery_budget_hit" in prov else [])
     remaining = [r for r in failed_tracks if r.track not in outcomes]
-    if remaining and not expired() and only in (None, "whole-disc"):
-        got, stage_prov = _run_chain_stage("whole-disc", remaining, ctx)
-        prov.update(_stage_keys(stage_prov, "whole-disc"))
-        for r in remaining:
-            hit = got.get(r.track, "unrecovered") != "unrecovered"
-            chains[r.track].append(f"whole-disc:{'hit' if hit else 'miss'}")
-            if hit:
-                outcomes[r.track] = got[r.track]
+    if (
+        remaining
+        and not expired()
+        and "recovery_budget_hit" not in prov
+        and only in (None, "whole-disc")
+    ):
+        _shared_whole_disc(remaining, ctx, prov, outcomes, chains)
     if expired() and any(r.track not in outcomes for r in failed_tracks):
         prov["recovery_ceiling_hit"] = str(ceiling_s)
     for t, chain in chains.items():
@@ -6506,119 +6555,139 @@ def rip_image(  # noqa: C901
             # in an order chosen from each track's damage, until every track
             # verifies (_recovery_chain). A named profile restricts the chain to
             # that one stage. Only --ad-* flags (no profile) take the old path.
-            if (
-                bound is not None
-                and bound.profile is not None
-                and recovery_ladder
-                and failed_tracks
-            ):
-                chain_outcomes, chain_prov = _recovery_chain(
-                    _ChainContext(
-                        device=device,
-                        track_lsns=final_track_lsns,
-                        disc_last_lsn=final_disc_last_lsn,
-                        pcm_file=temp.pcm_file,
-                        responses=ar_responses,
-                        ladder=recovery_ladder,
-                        fixed_speed=_initial_fixed_speed(
-                            recovery_speed or cfg.recovery_speed, recovery_ladder
-                        ),
-                        auto_speed=(recovery_speed or cfg.recovery_speed) == "auto",
-                        read_offset=read_offset,
-                        disc_damage=disc_damage,
-                        ui=ui,
-                        cohort=ar_cohort or None,
-                        readable=readable,
-                        recovery_passes=passes,
-                    ),
-                    failed_tracks,
-                    recovery_speed or cfg.recovery_speed,
-                    cfg.recovery_ceiling_s,
-                    only=None if bound.source == "builtin" else bound.profile.name,
-                )
-                recovery_outcomes.update(chain_outcomes)
-                ladder_prov.update(chain_prov)
-            else:
-                span_outcomes, span_keys, failed_tracks = _run_span_rung(
-                    bound.profile if bound is not None else None,
-                    failed_tracks,
-                    device=device,
-                    track_lsns=final_track_lsns,
-                    disc_last_lsn=final_disc_last_lsn,
-                    pcm_file=temp.pcm_file,
-                    responses=ar_responses,
-                    ladder=list(bound.ladder) if bound is not None else [],
-                    recovery_passes=passes,
-                    read_offset=read_offset,
-                    disc_damage=disc_damage,
-                    ui=ui,
-                    readable=readable,
-                )
-                recovery_outcomes.update(span_outcomes)
-                span_prov.update(span_keys)
-                # A bench strategy (sector-* / span-fixed / max-variation / whole-disc,
-                # picked from the profile's FIELDS) runs instead of the speed ladder and
-                # stands alone (kgr, 2026-11-21). It needs the same preconditions the
-                # ladder does: AR responses to gate with, recovery enabled, and a bound
-                # ladder to take its speeds from.
-                from cdda2img.strategy_reads import strategy_kind as _strategy_kind
+            # kgr, 2026-11-25: every recovery read is charged to one per-rip drive
+            # budget before it is sent (drive_work), so a heavily damaged disc
+            # cannot turn recovery into a command storm on the drive.
+            with drive_work.budget(
+                cfg.recovery_max_reads, cfg.recovery_max_speed_changes
+            ) as work:
+                try:
+                    if (
+                        bound is not None
+                        and bound.profile is not None
+                        and recovery_ladder
+                        and failed_tracks
+                    ):
+                        chain_outcomes, chain_prov = _recovery_chain(
+                            _ChainContext(
+                                device=device,
+                                track_lsns=final_track_lsns,
+                                disc_last_lsn=final_disc_last_lsn,
+                                pcm_file=temp.pcm_file,
+                                responses=ar_responses,
+                                ladder=recovery_ladder,
+                                fixed_speed=_initial_fixed_speed(
+                                    recovery_speed or cfg.recovery_speed,
+                                    recovery_ladder,
+                                ),
+                                auto_speed=(recovery_speed or cfg.recovery_speed)
+                                == "auto",
+                                read_offset=read_offset,
+                                disc_damage=disc_damage,
+                                ui=ui,
+                                cohort=ar_cohort or None,
+                                readable=readable,
+                                recovery_passes=passes,
+                            ),
+                            failed_tracks,
+                            recovery_speed or cfg.recovery_speed,
+                            cfg.recovery_ceiling_s,
+                            only=None
+                            if bound.source == "builtin"
+                            else bound.profile.name,
+                        )
+                        recovery_outcomes.update(chain_outcomes)
+                        ladder_prov.update(chain_prov)
+                    else:
+                        span_outcomes, span_keys, failed_tracks = _run_span_rung(
+                            bound.profile if bound is not None else None,
+                            failed_tracks,
+                            device=device,
+                            track_lsns=final_track_lsns,
+                            disc_last_lsn=final_disc_last_lsn,
+                            pcm_file=temp.pcm_file,
+                            responses=ar_responses,
+                            ladder=list(bound.ladder) if bound is not None else [],
+                            recovery_passes=passes,
+                            read_offset=read_offset,
+                            disc_damage=disc_damage,
+                            ui=ui,
+                            readable=readable,
+                        )
+                        recovery_outcomes.update(span_outcomes)
+                        span_prov.update(span_keys)
+                        # A bench strategy (sector-* / span-fixed / max-variation / whole-disc,
+                        # picked from the profile's FIELDS) runs instead of the speed ladder and
+                        # stands alone (kgr, 2026-11-21). It needs the same preconditions the
+                        # ladder does: AR responses to gate with, recovery enabled, and a bound
+                        # ladder to take its speeds from.
+                        from cdda2img.strategy_reads import (
+                            strategy_kind as _strategy_kind,
+                        )
 
-                bound_profile = bound.profile if bound is not None else None
-                strategy_kind = (
-                    _strategy_kind(bound_profile) if bound_profile is not None else None
-                )
-                if (
-                    strategy_kind is not None
-                    and bound_profile is not None
-                    and recovery_ladder
-                    and failed_tracks
-                ):
-                    import secrets
+                        bound_profile = bound.profile if bound is not None else None
+                        strategy_kind = (
+                            _strategy_kind(bound_profile)
+                            if bound_profile is not None
+                            else None
+                        )
+                        if (
+                            strategy_kind is not None
+                            and bound_profile is not None
+                            and recovery_ladder
+                            and failed_tracks
+                        ):
+                            import secrets
 
-                    outcomes, strategy_keys = _recover_by_strategy(
-                        strategy_kind,
-                        bound_profile,
-                        device=device,
-                        failed_tracks=failed_tracks,
-                        track_lsns=final_track_lsns,
-                        disc_last_lsn=final_disc_last_lsn,
-                        pcm_file=temp.pcm_file,
-                        responses=ar_responses,
-                        ladder=recovery_ladder,
-                        read_offset=read_offset,
-                        disc_damage=disc_damage,
-                        ui=ui,
-                        seed=secrets.randbits(32),
-                        readable=readable,
-                    )
-                    recovery_outcomes.update(outcomes)
-                    ladder_prov.update(strategy_keys)
-                elif recovery_ladder and failed_tracks:
-                    outcomes, attempts_prov = _recover_failed_tracks(
-                        device,
-                        failed_tracks,
-                        final_track_lsns,
-                        final_disc_last_lsn,
-                        temp.pcm_file,
-                        ar_responses,
-                        len(final_track_lsns),
-                        recovery_ladder,
-                        passes,
-                        read_offset,
-                        ui,
-                        disc_damage,
-                        ar_cohort or None,
-                        readable=readable,
-                    )
-                    recovery_outcomes.update(outcomes)
-                    ladder_prov.update(attempts_prov)
-                    # No restore here any more. The ladder leaves the drive at its last
-                    # rung, and the `finally` at the end of this function puts it back to
-                    # the rate captured at entry — which covers this path *and* the clean
-                    # rip that never reaches it. Restoring twice was not harmful, but the
-                    # old call restored to MAX while the finally restores as-found, so
-                    # leaving both would have made the drive's final state depend on
-                    # whether recovery happened to run.
+                            outcomes, strategy_keys = _recover_by_strategy(
+                                strategy_kind,
+                                bound_profile,
+                                device=device,
+                                failed_tracks=failed_tracks,
+                                track_lsns=final_track_lsns,
+                                disc_last_lsn=final_disc_last_lsn,
+                                pcm_file=temp.pcm_file,
+                                responses=ar_responses,
+                                ladder=recovery_ladder,
+                                read_offset=read_offset,
+                                disc_damage=disc_damage,
+                                ui=ui,
+                                seed=secrets.randbits(32),
+                                readable=readable,
+                            )
+                            recovery_outcomes.update(outcomes)
+                            ladder_prov.update(strategy_keys)
+                        elif recovery_ladder and failed_tracks:
+                            outcomes, attempts_prov = _recover_failed_tracks(
+                                device,
+                                failed_tracks,
+                                final_track_lsns,
+                                final_disc_last_lsn,
+                                temp.pcm_file,
+                                ar_responses,
+                                len(final_track_lsns),
+                                recovery_ladder,
+                                passes,
+                                read_offset,
+                                ui,
+                                disc_damage,
+                                ar_cohort or None,
+                                readable=readable,
+                            )
+                            recovery_outcomes.update(outcomes)
+                            ladder_prov.update(attempts_prov)
+                            # No restore here any more. The ladder leaves the drive at its last
+                            # rung, and the `finally` at the end of this function puts it back to
+                            # the rate captured at entry — which covers this path *and* the clean
+                            # rip that never reaches it. Restoring twice was not harmful, but the
+                            # old call restored to MAX while the finally restores as-found, so
+                            # leaving both would have made the drive's final state depend on
+                            # whether recovery happened to run.
+                except drive_work.DriveBudgetSpent as exc:
+                    # The chain handles its own; this is the --ad-ladder path.
+                    ladder_prov["recovery_budget_hit"] = str(exc)
+                finally:
+                    ladder_prov["recovery_drive_work"] = work.record()
 
             rip_type = f"{rip_type}+c2rec"
             _ui_status(ui, "Verifying AccurateRip (re-read)…")
