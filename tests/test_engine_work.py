@@ -130,3 +130,20 @@ def test_the_rip_carries_the_limit_and_records_the_engine_work() -> None:
     src = " ".join(inspect.getsource(app.rip_image).split())
     assert "cfg.recovery_max_engine_cmds," in src
     assert 'ladder_prov["recovery_engine_work"] = engine' in src
+
+
+def test_the_real_binding_names_the_fields_the_seam_reads() -> None:
+    """The fakes above supply the names the seam chose, so they cannot catch a
+    wrong one. A wrong name raises ``AttributeError`` on the first recovery read of
+    any engine publishing ``read_budget``, which no recovery loop catches: the rip
+    would end. So check the real ``ReadStats``. Skipped inside the test (not
+    ``skipif``) for the reason ``test_ctdb_repair`` gives."""
+    import pytest
+
+    module = ar._import_binding()[0]
+    if module is None or "read_budget" not in getattr(module, "features", ()):
+        pytest.skip("AccuDisc binding before 0.57.0, or not importable")
+    import dataclasses
+
+    names = {f.name for f in dataclasses.fields(module.ReadStats)}
+    assert {"budget_spent_cmds", "budget_spent_changes"} <= names
