@@ -994,10 +994,33 @@ def engine_version() -> str:
     except RuntimeError:
         return "accudisc (version unknown)"
     try:
-        return f"accudisc {module.version_string()}"
+        banner = f"accudisc {module.version_string()}"
     except Exception:
         log.debug("accudisc version_string() failed", exc_info=True)
         return "accudisc (version unknown)"
+    return banner + _binding_skew(module)
+
+
+def _binding_skew(module: Any) -> str:
+    """`` (binding X.Y.Z)`` when the Python binding was built for a different
+    library than the one loaded, else ``""``.
+
+    ``version_string()`` names the LOADED library. An older binding loads a newer
+    library without complaint, by design (AccuDisc 2026-11-25ac: the size rules
+    make it safe), so the banner alone read ``0.59.0`` from a pipx venv still
+    holding the 0.52.0 binding, with none of 0.53-0.59's surface bound. Shown only
+    on a mismatch: a constant suffix in a provenance field is noise."""
+    binding = getattr(module, "version", None)
+    loaded = getattr(module, "library_version", None)
+    if not isinstance(binding, tuple) or loaded is None:
+        return ""
+    try:
+        if tuple(loaded()) == binding:
+            return ""
+    except Exception:
+        log.debug("accudisc library_version() failed", exc_info=True)
+        return ""
+    return f" (binding {'.'.join(str(x) for x in binding)})"
 
 
 @dataclass(frozen=True)

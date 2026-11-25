@@ -3697,3 +3697,19 @@ def test_read_disc_c2_forwards_the_stats_callback(
     ar.read_disc_c2("/dev/sr0", tmp_path / "a.pcm", stats_cb=got.append)
 
     assert [c.sectors_recovered for c in got] == [3]
+
+
+def test_the_engine_banner_names_a_binding_older_than_the_library(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AccuDisc 2026-11-25ac: kgr's pipx venv held the 0.52.0 binding over the
+    installed 0.59.0 library, and the banner (the loaded library's version) read
+    0.59.0, so the RLOG could not show the skew."""
+    fake = _FakeBinding()
+    monkeypatch.setattr(fake, "version_string", lambda: "0.59.0", raising=False)
+    monkeypatch.setattr(fake, "library_version", lambda: (0, 59, 0), raising=False)
+    monkeypatch.setattr(fake, "version", (0, 52, 0), raising=False)
+    _install(monkeypatch, fake)
+    assert ar.engine_version() == "accudisc 0.59.0 (binding 0.52.0)"
+    monkeypatch.setattr(fake, "version", (0, 59, 0), raising=False)
+    assert ar.engine_version() == "accudisc 0.59.0"  # control: matched, no suffix
