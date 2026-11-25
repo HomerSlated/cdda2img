@@ -258,20 +258,44 @@ def resolve_recovery(
     if profile_name:
         return ResolvedStrategy(
             "profile",
-            profile=load_profile(profile_name, profiles=profiles),
+            profile=load_enabled_profile(profile_name, profiles=profiles),
             read_speed=read_speed,
         )
     if config_default:
         return ResolvedStrategy(
             "config-default",
-            profile=load_profile(config_default, profiles=profiles),
+            profile=load_enabled_profile(config_default, profiles=profiles),
             read_speed=read_speed,
         )
     return ResolvedStrategy(
         "builtin",
-        profile=load_profile(BUILTIN_PROFILE, profiles=profiles),
+        profile=load_enabled_profile(BUILTIN_PROFILE, profiles=profiles),
         read_speed=read_speed,
     )
+
+
+def load_enabled_profile(
+    name: str, *, profiles: dict[str, Path] | None = None
+) -> Profile:
+    """:func:`load_profile`, refusing a profile marked ``experimental``.
+
+    ``experimental = true`` DISABLES a profile (kgr, 2026-11-25): no rip runs it,
+    whether named with ``--profile``, set as ``default_profile`` or reached by the
+    automatic chain (which skips it, see ``cdda2img._stage_disabled``). Until then
+    the mark was a label only, and six of the eight shipped profiles carried it;
+    after the 0.59 hardware runs every profile but ``sector-hammer`` has recovered
+    damage and lost the mark. The test is on the LOADED profile's flag, never a
+    name, since a user profile may shadow a shipped one. ``rip --list-profiles``
+    still lists a disabled profile, so it can be found and its file read.
+    """
+    profile = load_profile(name, profiles=profiles)
+    if profile.experimental:
+        msg = (
+            f"recovery profile {name!r} is marked experimental, which disables it: "
+            f"set `experimental = false` in its file to run it"
+        )
+        raise ProfileError(msg)
+    return profile
 
 
 #: Upper bound on ``--ad-speed``. AccuDisc's ``read_req.speed_x`` is a ``uint16_t``,

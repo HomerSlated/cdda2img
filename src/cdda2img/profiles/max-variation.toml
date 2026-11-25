@@ -34,11 +34,12 @@
 # The seed of its random choices is in PROV (recovery_seed), so its reads can
 # be regenerated.
 #
-# EXPERIMENTAL until a hardware run of this code reproduces the bench (kgr,
-# 2026-11-21): the read plan was scored on a drive, this implementation has not
-# been.
+# Was EXPERIMENTAL until a hardware run of this code reproduced the bench (kgr,
+# 2026-11-21). On AccuDisc 0.59, 2026-11-25, Tracy: track 9 at the 2nd read,
+# track 8 at the 12th of 15 (with recovery_passes = 3; one sweep, 5 reads, would
+# have missed). Mark removed (kgr); `experimental = true` now disables a profile.
 name         = "max-variation"
-experimental = true
+experimental = false
 best_for     = "a handful of flagged sectors; fails on broad damage"
 
 sub          = true

@@ -111,7 +111,7 @@ track from the audio already captured, writing it only on an AccurateRip match.
 Only for tracks neither exit recovered does the drive spin again.
 With no
 .B \-\-profile
-given, every recovery profile is used in an order chosen from how damaged each
+given, every enabled recovery profile is used in an order chosen from how damaged each
 track is (how many sectors the first pass flagged): a lightly damaged track is
 first re\-read at its flagged sectors, a heavily damaged one across the drive\(cqs
 admitted speed ladder, and each profile follows in turn until the track matches
@@ -182,15 +182,18 @@ Each profile runs one sweep per pass: every flagged sector (or the track, or
 the disc) at every speed the profile reads at, the least that tries them all;
 .B \-\-recovery\-passes
 repeats the sweep, and the first AccurateRip match ends a track's re\-reads.
-.B NOTE:
-every profile but
-.BR track\-ladder " and " track\-constant
-is marked experimental: the strategies were measured on a drive, and their
-implementation in
-.B rip
-has run on one only since November 2026, too briefly to rank them.
-The mark is a label only: it changes nothing at run time, and the automatic
-chain uses every profile.
+A profile marked
+.B experimental = true
+is disabled: no rip runs it, whether named with
+.BR \-\-profile ,
+set as
+.BR default_profile ,
+or reached by the automatic chain, which records it as skipped.
+.B rip \-\-list\-profiles
+still lists it.
+Of the shipped profiles only
+.B sector\-hammer
+is marked: it is kept as a control and has never recovered a sector.
 .PP
 If no track verifies at all, neither exit runs: re\-reading cannot fix a disc
 that is wrong everywhere (a wrong drive offset, a pressing AccurateRip does not

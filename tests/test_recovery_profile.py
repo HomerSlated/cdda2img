@@ -274,18 +274,34 @@ def test_the_builtin_default_is_the_bench_winner() -> None:
     assert R.load_profile(R.BUILTIN_PROFILE).ladder == "full"
 
 
-def test_the_experimental_arms_are_flagged_and_the_shipped_ones_are_not() -> None:
+def test_only_sector_hammer_is_experimental() -> None:
+    """kgr, 2026-11-25: every profile that recovered damage on AccuDisc 0.59 lost
+    the mark; sector-hammer, which never has, keeps it and is disabled."""
     flags = {n: R.load_profile(n).experimental for n in R.list_profiles()}
-    assert {n for n, e in flags.items() if e} == {
-        "sector-runup",
-        "sector-hammer",
-        "span-fixed",
-        "span-flagged",  # never run on hardware, so it says so in `--list-profiles`
-        # kgr, 2026-11-21: experimental until a hardware run of the rip-path
-        # strategy code (cdda2img.strategy_reads) reproduces the bench.
-        "max-variation",
-        "whole-disc",
-    }
+    assert {n for n, e in flags.items() if e} == {"sector-hammer"}
+
+
+@pytest.mark.parametrize("via", ["profile_name", "config_default"])
+def test_an_experimental_profile_is_refused_however_it_is_named(via: str) -> None:
+    with pytest.raises(R.ProfileError, match="experimental, which disables it"):
+        R.resolve_recovery(**{via: "sector-hammer"})  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("via", ["profile_name", "config_default"])
+def test_an_unmarked_profile_resolves_the_same_way(via: str) -> None:
+    """Negative control for the refusal above."""
+    got = R.resolve_recovery(**{via: "sector-runup"})  # type: ignore[arg-type]
+    assert got.profile is not None and got.profile.name == "sector-runup"
+
+
+def test_a_user_profile_marked_experimental_is_refused(tmp_path: Path) -> None:
+    """The test is on the loaded profile's flag, not on a list of names."""
+    f = tmp_path / "mine.toml"
+    f.write_text('name = "mine"\nexperimental = true\n')
+    with pytest.raises(R.ProfileError, match="experimental"):
+        R.resolve_recovery(profile_name="mine", profiles={"mine": f})
+    f.write_text('name = "mine"\nexperimental = false\n')
+    assert R.resolve_recovery(profile_name="mine", profiles={"mine": f}).profile
 
 
 def test_an_unknown_profile_names_what_is_available(tmp_path: Path) -> None:
@@ -489,7 +505,7 @@ def test_the_profile_listing_keeps_its_columns_for_a_long_user_name() -> None:
     long_name = "track-constant-x20"
     rows = [
         (n, R.load_profile(n), Path(f"/p/{n}.toml"))
-        for n in ("track-ladder", "whole-disc")
+        for n in ("track-ladder", "sector-hammer")
     ]
     rows.append((long_name, R.load_profile("track-constant"), Path("/u/x.toml")))
     lines = [ln for ln in _profile_listing(rows) if not ln.startswith("  best for:")]
@@ -504,7 +520,8 @@ def test_the_profile_listing_keeps_its_columns_for_a_long_user_name() -> None:
     assert len(grans) == 1  # granularity column
     assert {len(p) - len(p.lstrip()) for p in paths} == grans  # path under it
     assert all(line == line.rstrip() for line in lines)
-    assert "(experimental)" in heads[1] and "(experimental)" not in heads[0]
+    assert "(experimental: disabled)" in heads[1]
+    assert "experimental" not in heads[0]
 
 
 # ---- best_for: what damage each profile is for (kgr, 2026-11-25) ---------------------

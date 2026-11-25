@@ -70,12 +70,15 @@ def test_the_damage_class_threshold_is_the_benchs(n: int, cls: str) -> None:
     assert app._damage_class(n) == cls
 
 
-def test_every_shipped_profile_is_in_the_chain() -> None:
-    """Full utilisation of all recovery profiles: none may be left uninvokable."""
-    from cdda2img.recovery_profile import list_profiles
+def test_every_enabled_shipped_profile_is_in_the_chain_and_no_disabled_one() -> None:
+    """Full utilisation of all recovery profiles: none may be left uninvokable,
+    except one marked experimental, which is disabled (kgr, 2026-11-25)."""
+    from cdda2img.recovery_profile import list_profiles, load_profile
 
+    enabled = {n for n in list_profiles() if not load_profile(n).experimental}
     used = set(app._CHAIN_ORDER["low"]) | set(app._CHAIN_ORDER["high"]) | {"whole-disc"}
-    assert used == set(list_profiles())
+    assert used == enabled
+    assert "sector-hammer" not in used
 
 
 def test_nothing_flagged_gets_only_whole_track_shapes() -> None:
@@ -85,8 +88,21 @@ def test_nothing_flagged_gets_only_whole_track_shapes() -> None:
 
 
 def test_light_damage_starts_targeted_and_heavy_damage_with_the_ladder() -> None:
-    assert app._CHAIN_ORDER["low"][:2] == ("span-flagged", "max-variation")
-    assert app._CHAIN_ORDER["high"][0] == "track-ladder"
+    """The light-damage order after the 0.59 Tracy runs (kgr, 2026-11-25):
+    success per unit of drive work, cheapest reads first."""
+    assert app._CHAIN_ORDER["low"] == (
+        "span-flagged",
+        "span-fixed",
+        "sector-runup",
+        "max-variation",
+        "track-constant",
+        "track-ladder",
+    )
+    assert app._CHAIN_ORDER["high"] == (
+        "track-ladder",
+        "track-constant",
+        "span-flagged",
+    )
 
 
 @pytest.mark.parametrize(
@@ -106,15 +122,15 @@ def test_the_fixed_speed_snaps_to_an_admitted_rung(speed, ladder, snapped) -> No
 
 
 def test_a_light_track_walks_its_order_and_stops_at_the_first_hit(monkeypatch) -> None:
-    calls = _fake_stages(monkeypatch, {"track-ladder": {2}})
+    calls = _fake_stages(monkeypatch, {"sector-runup": {2}})
     ctx = _ctx(disc_damage=_lane({150, 151}))
     outcomes, prov = app._recovery_chain(ctx, [SimpleNamespace(track=2)], 32, 0)
-    assert [c[0] for c in calls] == ["span-flagged", "max-variation", "track-ladder"]
-    assert outcomes == {2: "track-ladder@ok"}
+    assert [c[0] for c in calls] == ["span-flagged", "span-fixed", "sector-runup"]
+    assert outcomes == {2: "sector-runup@ok"}
     assert prov["recovery_damage_track_2"] == "2:low"
     assert prov["recovery_damage_lbas_track_2"] == "150-151"  # kgr 2026-11-25
     assert prov["recovery_chain_track_2"] == (
-        "span-flagged:miss,max-variation:miss,track-ladder:hit"
+        "span-flagged:miss,span-fixed:miss,sector-runup:hit"
     )
     assert prov["recovery_speed"] == "32X>32X"
 
@@ -125,7 +141,7 @@ def test_stage_keys_never_overwrite_each_other(monkeypatch) -> None:
         _ctx(disc_damage=_lane({150})), [SimpleNamespace(track=2)], 32, 0
     )
     assert prov["strategy_reads_track_2__span_flagged"] == "span-flagged-reads"
-    assert prov["strategy_reads_track_2__max_variation"] == "max-variation-reads"
+    assert prov["strategy_reads_track_2__span_fixed"] == "span-fixed-reads"
     assert "strategy_reads_track_2" not in prov
 
 
@@ -406,3 +422,59 @@ def test_a_named_profile_records_the_flagged_sectors_too(monkeypatch) -> None:
     )
     assert prov["recovery_damage_lbas_track_2"] == "150,160-162"
     assert prov["recovery_chain_track_2"] == "sector-runup:hit"
+
+
+# ---- experimental = disabled (kgr, 2026-11-25) ------------------------------------
+
+
+def _shadow(monkeypatch, tmp_path, name: str, experimental: bool) -> None:
+    """A user profile shadowing shipped *name*, with its fields and the given mark."""
+    from cdda2img import recovery_profile as R
+
+    shipped = (R.shipped_profiles_dir() / f"{name}.toml").read_text()
+    flag = "true" if experimental else "false"
+    lines = [
+        f"experimental = {flag}" if ln.startswith("experimental") else ln
+        for ln in shipped.splitlines()
+    ]
+    (tmp_path / f"{name}.toml").write_text("\n".join(lines) + "\n")
+    monkeypatch.setattr(R, "user_profiles_dir", lambda: tmp_path)
+
+
+def test_the_chain_skips_a_stage_marked_experimental_and_says_so(
+    monkeypatch, tmp_path
+) -> None:
+    """The test is on the LOADED profile, so a user file shadowing a shipped
+    stage with `experimental = true` turns that stage off."""
+    _shadow(monkeypatch, tmp_path, "span-fixed", experimental=True)
+    calls = _fake_stages(monkeypatch, {"sector-runup": {2}})
+    _o, prov = app._recovery_chain(
+        _ctx(disc_damage=_lane({150})), [SimpleNamespace(track=2)], 32, 0
+    )
+    assert [c[0] for c in calls] == ["span-flagged", "sector-runup"]
+    assert prov["recovery_chain_track_2"] == (
+        "span-flagged:miss,span-fixed:disabled,sector-runup:hit"
+    )
+
+
+def test_the_same_shadow_unmarked_runs_the_stage(monkeypatch, tmp_path) -> None:
+    """Negative control for the test above: only the mark differs."""
+    _shadow(monkeypatch, tmp_path, "span-fixed", experimental=False)
+    calls = _fake_stages(monkeypatch, {"sector-runup": {2}})
+    app._recovery_chain(
+        _ctx(disc_damage=_lane({150})), [SimpleNamespace(track=2)], 32, 0
+    )
+    assert [c[0] for c in calls] == ["span-flagged", "span-fixed", "sector-runup"]
+
+
+def test_a_disabled_whole_disc_stage_is_recorded_on_every_track(
+    monkeypatch, tmp_path
+) -> None:
+    _shadow(monkeypatch, tmp_path, "whole-disc", experimental=True)
+    calls = _fake_stages(monkeypatch, {})
+    tracks = [SimpleNamespace(track=1), SimpleNamespace(track=2)]
+    outcomes, prov = app._recovery_chain(_ctx(), tracks, 32, 0)
+    assert all(name != "whole-disc" for name, _t in calls)
+    assert prov["recovery_chain_track_1"].endswith("whole-disc:disabled")
+    assert prov["recovery_chain_track_2"].endswith("whole-disc:disabled")
+    assert outcomes == {1: "unrecovered", 2: "unrecovered"}

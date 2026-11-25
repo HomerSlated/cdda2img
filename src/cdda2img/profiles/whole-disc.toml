@@ -35,11 +35,12 @@
 # 1200 s), a guard against a stalled drive that should never bind. On Tracy one
 # sweep is about 20 minutes.
 #
-# EXPERIMENTAL until a hardware run of this code reproduces the bench (kgr,
-# 2026-11-21): the read plan was scored on a drive, this implementation has not
-# been.
+# Was EXPERIMENTAL until a hardware run of this code reproduced the bench (kgr,
+# 2026-11-21). On AccuDisc 0.59, 2026-11-25, Tracy track 8 (113044 flagged): it
+# matched at the 4th whole-disc read, at 8X, after 40, 32 and 24X missed. Mark
+# removed (kgr); `experimental = true` now disables a profile.
 name         = "whole-disc"
-experimental = true
+experimental = false
 best_for     = "several failing tracks or unflagged damage; slow (whole disc)"
 
 sub          = true

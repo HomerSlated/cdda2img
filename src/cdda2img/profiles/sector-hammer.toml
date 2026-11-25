@@ -6,13 +6,23 @@
 #              MEASURED, nothing yet: 2/20 on the bench, 0/25 on the disc that
 #              motivated it, 0/520 on Tracy tracks 8-9 (Nov 2026), and on 2026-11-25
 #              30 failed reads of the two flagged sectors (112502, 113058) that
-#              sector-runup then fixed in 8.
+#              sector-runup then fixed in 8, and 150 failed reads of 113044.
 #   Poor for:  damage outside the flagged sectors themselves, which it cannot
 #              reach, and (as measured) most real damage.
 #   Exists as a CONTROL: the least-variation re-read there is, anchoring the low
 #   end so that the other profiles' gains mean something.
 #
-# EXPERIMENTAL, and the measured floor: on the bench (one speed, 32x) the minimum
+# EXPERIMENTAL, which DISABLES it (kgr, 2026-11-25): no rip runs it, named or in
+# the automatic chain. It is the only profile that has never recovered anything.
+# The decisive run: a clone at `passes = 10` x recovery_passes 3 made 150 one-sector
+# reads of 113044 (Tracy track 8), 30 at each of 40, 32, 24, 8 and 4X, every one
+# with a cache defeat, and matched none; whole-disc recovered the same sector at
+# 8X and max-variation within 15 reads. Why it cannot work on this damage, and how
+# it compares with the rest: docs/reference/RECOVERY.md, "sector-hammer: why it
+# never works". To run it anyway, copy it to a user profile with
+# `experimental = false`.
+#
+# The measured floor: on the bench (one speed, 32x) the minimum
 # variation of every arm. 2/20 (0.10), 0/25 on the disc that motivated the whole
 # bench, while plain whole-disc passes on the same disc came back clean ~27% of
 # the time.
@@ -46,7 +56,7 @@
 # bind.
 name         = "sector-hammer"
 experimental = true
-best_for     = "a control: transient errors in flagged sectors (none fixed yet)"
+best_for     = "a control only: has never recovered a sector (disabled)"
 
 sub          = true
 c2           = true

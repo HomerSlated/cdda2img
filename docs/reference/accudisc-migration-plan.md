@@ -972,6 +972,39 @@ What it changes in this plan, pending AccuDisc's own audit (§268.5) and Keith's
   AccuDisc's HEAD); no change while Keith's per-profile hardware series runs; engine effort
   recorded in PROV apart from ours; per-read budgets re-derived by whichever side owns them.
 
+### 9.10 The chain after the 0.59 profile series (Keith, 2026-11-25)
+
+Keith ran every shipped profile on Tracy with AccuDisc 0.59 and every read-policy feature on
+(`--profile X --profile-only`, so CTDB and the displacement check were skipped). Each capture
+left different damage, so the runs are compared on `recovery_damage_lbas_track_<n>`:
+
+| profile | damage handed to it | result |
+|---|---|---|
+| span-flagged | t8, 1 sector (capture rescue took 20) | hit, pass 1, one span read |
+| span-fixed | t2 15268; t8 112766 + 113058 | hit at read 1; hit at read 6 of 6, all 32X |
+| sector-runup | t8 112502 + 113058 | hit at read 8 (hammer: 0/30 on the same two) |
+| max-variation | t9; t8 (likely 113044) | hit at read 2; hit at read 12 of 15 |
+| track-constant | t8, t11 | both in 3 reads at 32X |
+| track-ladder | t8, 3 sectors | hit at read 5, 4X |
+| whole-disc | t8 113044 + 114437 | hit at read 4, 8X |
+| sector-hammer | t8 112502 + 113058; then 113044 | 0/30; then 0/150 (30 per rung, 40-4X) |
+
+Decisions (Keith: "Go ahead with your proposed chain order"; "Remove the experimental flag from
+the remaining profiles, then enforce disabling profiles marked as experimental"):
+
+- **Light damage (1-5 flagged)** now runs `span-flagged, span-fixed, sector-runup,
+  max-variation, track-constant, track-ladder`, ordered by success per unit of drive work; the
+  shared `whole-disc` stage stays last. "none" and "high" are unchanged.
+- **`experimental = true` disables a profile** (`recovery_profile.load_enabled_profile`;
+  the chain records `<stage>:disabled`). It was a label only until now. Only `sector-hammer`
+  carries it; why it never works is in RECOVERY.md.
+- **Open, not decided:** a minimum of 3 passes for chain stages. span-fixed and max-variation
+  both matched only on their last planned read with Keith's `recovery_passes = 3`; the default
+  of 1 would have missed both.
+- **Open: span-fixed contradicts its bench result.** The bench (1/16) read "span size is not
+  the story"; on 0.59 it recovered track 8 at a fixed speed with no variation. Every rip read
+  asks for a cache defeat and no bench read did; that confound is unresolved.
+
 ---
 
 ## 10. Cross-project contracts and findings from the 2026-07-24 coordination round

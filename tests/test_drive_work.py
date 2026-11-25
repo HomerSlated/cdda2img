@@ -113,9 +113,9 @@ def test_heavy_damage_leaves_out_the_per_target_strategies() -> None:
         "track-constant",
         "span-flagged",
     )
-    assert (
-        set(app._CHAIN_ORDER["low"]) >= _PER_TARGET
-    )  # control: light damage keeps them
+    # Control: light damage keeps them, except sector-hammer, which is disabled
+    # (experimental, kgr 2026-11-25) and in no order at all.
+    assert set(app._CHAIN_ORDER["low"]) >= _PER_TARGET - {"sector-hammer"}
 
 
 def test_a_heavily_damaged_track_runs_no_per_target_strategy(monkeypatch) -> None:
@@ -131,7 +131,7 @@ def test_a_spent_budget_stops_the_whole_chain_and_says_so(monkeypatch) -> None:
 
     def stage(name, results, _ctx):
         calls.append(name)
-        if name == "max-variation":
+        if name == "span-fixed":
             raise DriveBudgetSpent("reads", 5000)
         return {r.track: "unrecovered" for r in results}, {}
 
@@ -140,9 +140,9 @@ def test_a_spent_budget_stops_the_whole_chain_and_says_so(monkeypatch) -> None:
     outcomes, prov = app._recovery_chain(
         _ctx(disc_damage=_lane({150, 250})), tracks, 32, 0
     )
-    assert calls == ["span-flagged", "max-variation"]  # nothing after, no whole-disc
+    assert calls == ["span-flagged", "span-fixed"]  # nothing after, no whole-disc
     assert prov["recovery_budget_hit"] == "reads:5000"
-    assert prov["recovery_chain_track_2"] == "span-flagged:miss,max-variation:budget"
+    assert prov["recovery_chain_track_2"] == "span-flagged:miss,span-fixed:budget"
     assert prov["recovery_chain_track_3"] == "budget"
     assert outcomes == {2: "unrecovered", 3: "unrecovered"}
 

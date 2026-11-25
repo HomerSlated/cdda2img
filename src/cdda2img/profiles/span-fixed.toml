@@ -1,22 +1,27 @@
 # span-fixed — re-read a large FIXED span ending at the flagged sector, at one speed.
 #
 # WHAT DAMAGE IT IS FOR (kgr, 2026-11-25: "why does this profile exist")
-#   Best for:  not a candidate: a CONTROL. In principle, damage wider than the
-#              flagged sectors, read in one long streaming pass at a speed known
-#              to be good.
-#   Poor for:  measured 1/16, against max-variation's 2/3 on the same target.
-#   Exists to separate two explanations of max-variation's wins: a big read, or
-#   variation. This holds the read big and the variation at zero, and showed that
-#   size alone is not it.
+#   Best for:  a FEW flagged sectors, read with a long streaming approach (the
+#              512 sectors before each) at one fast speed. Measured on AccuDisc
+#              0.59, Tracy (2026-11-25): track 2's 15268 at the first read, and
+#              track 8's 112766 + 113058 at the 6th read, all at 32X; sector-hammer
+#              had failed 113058 in 30 reads.
+#   Poor for:  broad damage: it reads once per flagged sector, so its reads grow
+#              with the damage (the chain does not run it above 5 flagged).
+#   Exists first as a CONTROL: it separates read size from variation in
+#   max-variation's wins, by holding the read big and the variation at zero.
 #
-# EXPERIMENTAL, and a control rather than a candidate. It exists to separate two
-# confounded explanations of max-variation's wins: it reads 145-664 sectors AND it
-# randomises speed and run-up, while sector-runup reads 35 and randomises nothing.
-# span-fixed holds the span large and the randomness at zero.
+# Bench result (2026-07): 1/16 (0.06) against max-variation's 2/3 on the same
+# target with the same splice rule, read then as "span size is NOT the story, the
+# variation is". The 0.59 runs on Tracy CONTRADICT that: zero variation, fixed 32X,
+# and it recovered track 8. One difference is known and unresolved: every rip read
+# asks AccuDisc for a cache defeat first, and no bench read did. Which of the two
+# results describes span-fixed is open; the arm stays runnable so either can be
+# falsified.
 #
-# Result: 1/16 (0.06) against max-variation's 2/3 on the same target with the same
-# splice rule. Span size is therefore NOT the story — the variation is. Keeping the
-# arm keeps that conclusion falsifiable on the next disc.
+# Was EXPERIMENTAL until 2026-11-25, when its 0.59 hardware results earned it a
+# place in the automatic chain, second for light damage (kgr). `experimental = true`
+# now disables a profile.
 #
 # In the rip since 2026-11-21 (cdda2img.strategy_reads, the bench's own read plan,
 # picked from these fields rather than this file's name): it stands alone, so a
@@ -29,8 +34,8 @@
 # `budget_s` is seconds per read: a track may take budget_s x its planned reads, a
 # guard against a stalled drive that should never bind.
 name         = "span-fixed"
-experimental = true
-best_for     = "a control: tells read size from variation (not a candidate)"
+experimental = false
+best_for     = "a few flagged sectors, each read after a 512-sector run-up"
 
 sub          = true
 c2           = true

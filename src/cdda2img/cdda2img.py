@@ -5692,16 +5692,24 @@ _LOW_N_MAX = 5
 #: changes, while the bench scored them weakest exactly there (max-variation 0/9
 #: at high n). span-flagged stays: its reads scale with clustered spans, not
 #: sectors. A profile named with --profile still runs, under the drive budget.
+#:
+#: Light damage reordered after the 0.59 hardware runs on Tracy (kgr, 2026-11-25:
+#: "Go ahead with your proposed chain order"): the order is success per unit of
+#: drive work. span-flagged and span-fixed (one span read, 515 sectors, each)
+#: first; sector-runup (35 sectors a read); max-variation (hit on track 8, but at
+#: the 12th of 15 reads); then the whole-track shapes, track-constant (3 reads at
+#: 32X) before track-ladder (hit at 4X, the 5th read). sector-hammer left the chain:
+#: it never recovered anything, 150 one-sector reads of 113044 included, and it is
+#: now ``experimental``, i.e. disabled. "none" and "high" are unchanged.
 _CHAIN_ORDER = {
     "none": ("track-ladder", "track-constant"),
     "low": (
         "span-flagged",
-        "max-variation",
-        "track-ladder",
-        "track-constant",
-        "sector-runup",
         "span-fixed",
-        "sector-hammer",
+        "sector-runup",
+        "max-variation",
+        "track-constant",
+        "track-ladder",
     ),
     "high": ("track-ladder", "track-constant", "span-flagged"),
 }
@@ -5876,6 +5884,17 @@ def _flagged_in_track(ctx: _ChainContext, track: int) -> int:
     return len(_flagged_lbas_in_track(ctx, track))
 
 
+def _stage_disabled(stage: str) -> bool:
+    """Whether chain stage *stage* resolves to a profile marked ``experimental``,
+    which disables it (kgr, 2026-11-25; ``recovery_profile.load_enabled_profile``).
+    Asked of the LOADED profile, so a user file shadowing a shipped stage with
+    ``experimental = true`` turns that stage off; the chain records it as
+    ``<stage>:disabled`` rather than dropping it from the record."""
+    from cdda2img.recovery_profile import load_profile
+
+    return load_profile(stage).experimental
+
+
 def _chain_one_track(
     result: object,
     order: tuple[str, ...],
@@ -5892,6 +5911,9 @@ def _chain_one_track(
     for stage in order:
         if expired() or "recovery_budget_hit" in prov:
             break
+        if _stage_disabled(stage):
+            chain.append(f"{stage}:disabled")
+            continue
         try:
             got, stage_prov = _run_chain_stage(stage, [result], ctx)
         except drive_work.DriveBudgetSpent as exc:
@@ -5923,6 +5945,10 @@ def _shared_whole_disc(
 ) -> None:
     """The chain's one ``whole-disc`` stage for every track still failing; a spent
     drive budget is recorded on every one of them (``whole-disc:budget``)."""
+    if _stage_disabled("whole-disc"):
+        for r in remaining:
+            chains[r.track].append("whole-disc:disabled")
+        return
     try:
         got, stage_prov = _run_chain_stage("whole-disc", remaining, ctx)
     except drive_work.DriveBudgetSpent as exc:
@@ -7284,7 +7310,7 @@ def _profile_listing(rows: list[tuple[str, Profile, Path]]) -> list[str]:
     ladder_w = max(len(p.ladder) for _n, p, _path in rows)
     lines = []
     for name, prof, path in rows:
-        mark = "  (experimental)" if prof.experimental else ""
+        mark = "  (experimental: disabled)" if prof.experimental else ""
         head = (
             f"{name:<{name_w}}  {prof.granularity:<{gran_w}}  "
             f"ladder={prof.ladder:<{ladder_w}}{mark}"

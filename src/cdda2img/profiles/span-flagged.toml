@@ -4,11 +4,12 @@
 # does not recover. Design: docs/reference/span-recovery-plan.md.
 #
 # WHAT DAMAGE IT IS FOR (kgr, 2026-11-25: "why does this profile exist")
-#   Best for:  by design, NOT YET MEASURED ON HARDWARE: localised damage, a few
-#              clusters of flagged sectors such as a scratch, where re-reading
-#              just those spans and letting AccuDisc's engine verify and rescue
-#              them locally assembles a clean track. The automatic chain tries it
-#              first when a track has 1-5 flagged sectors.
+#   Best for:  localised damage, a few clusters of flagged sectors such as a
+#              scratch, where re-reading just those spans and letting AccuDisc's
+#              engine verify and rescue them locally assembles a clean track.
+#              Measured once on hardware (AccuDisc 0.59, Tracy track 8, 2026-11-25):
+#              matched on the first pass, one span read. The automatic chain tries
+#              it first when a track has 1-5 flagged sectors.
 #   Poor for:  damage the capture did not flag (it reads only around flagged
 #              sectors).
 #   Exists as the least drive work of any re-read: it touches only the sectors
@@ -16,11 +17,12 @@
 #   detection) to the engine, which owns local evidence under the 2026-11-25
 #   re-read ownership ruling.
 #
-# EXPERIMENTAL and OPT-IN (`--profile span-flagged` only). It has NEVER run on
-# hardware: the H1/H2 bench runs in the plan were cancelled on 2026-09-24 under the
-# replacement PX-716A's minimal-testing terms, a ruling rescinded on 2026-11-21, so
-# a run may now happen; until one does it is validated offline alone. track-ladder
-# remains the default.
+# First run on hardware 2026-11-25 (AccuDisc 0.59, all read-policy features on):
+# one flagged sector left by the capture's own rescue, matched at the first pass.
+# The plan's H1/H2 bench runs were cancelled on 2026-09-24 and that ruling was
+# rescinded on 2026-11-21. Was EXPERIMENTAL until 2026-11-25 (kgr);
+# `experimental = true` now disables a profile. One run is not a ranking: the
+# engine's shift search was on and had nothing to find (AccuDisc 25ae).
 #
 # span_gap / span_pad are UNMEASURED. The captures the plan meant to tune them
 # against were deleted under the scratch rule. pad = 4 matches the ±4 margin
@@ -38,8 +40,8 @@
 # below each attempt's speed, rescue_by_rung, shift_search) are AccuDisc's read
 # policy (SPAN_RESCUE) since 2026-11-25, not fields here.
 name            = "span-flagged"
-experimental    = true
-best_for     = "local clusters of flagged sectors (untested on hardware)"
+experimental    = false
+best_for        = "local clusters of flagged sectors, such as a scratch"
 
 sub             = true
 c2              = true

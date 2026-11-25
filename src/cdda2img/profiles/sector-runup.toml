@@ -14,10 +14,11 @@
 #   114436@40x, against 0.60 with a 16-64 sector run-up. Why the run-up helps is
 #   not measured, only that it does.
 #
-# EXPERIMENTAL. Bench: 2/20 (0.10), and both wins were on one degenerate n=1 target.
-# 0/3 on every hard target. Kept because it is the cheapest arm that still gives the
-# drive a streaming approach to the defect, and because a negative result is only
-# useful if the arm that produced it stays runnable.
+# Bench: 2/20 (0.10), and both wins were on one degenerate n=1 target; 0/3 on every
+# hard target. Kept because it is the cheapest arm that still gives the drive a
+# streaming approach to the defect. Was EXPERIMENTAL until 2026-11-25, when it
+# fixed in 8 reads the two sectors sector-hammer missed in 30 (kgr);
+# `experimental = true` now disables a profile.
 #
 # Each read covers the `run_up` (32) sectors before a flagged sector and the 2 after
 # it, so it also repairs unflagged damage that close (sector-hammer cannot). It
@@ -38,7 +39,7 @@
 # budget_s x its planned reads, a guard against a stalled drive that should never
 # bind.
 name         = "sector-runup"
-experimental = true
+experimental = false
 best_for     = "a few flagged sectors that single-sector re-reads keep missing"
 
 sub          = true
