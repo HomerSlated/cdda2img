@@ -353,9 +353,18 @@ def test_rip_image_runs_the_span_rung_before_the_ladder() -> None:
 
 def test_a_span_read_record_names_its_stages_and_slips() -> None:
     """AccuDisc 2026-11-25ae: consensus > 0 marks a read where shift_search had a
-    pair to judge; far + witness alone means it had nothing to compare."""
-    quiet = _detail(113054, 9, bytes(9 * _SECTOR), stage_cmds={"far": 1, "witness": 1})
-    assert C._span_read_record(quiet, 40) == "113054+9@40X:far=1/witness=1:slips=0"
+    pair to judge. The quiet shape is the real engine's for a span read with no
+    disagreement (2026-11-25af): the head's far read and speed set+read-back are
+    counted here though never charged to the budget."""
+    quiet = _detail(
+        113054,
+        9,
+        bytes(9 * _SECTOR),
+        stage_cmds={"stream": 1, "far": 2, "speed": 2, "witness": 1},
+    )
+    assert C._span_read_record(quiet, 40) == (
+        "113054+9@40X:stream=1/far=2/speed=2/witness=1:slips=0"
+    )
     busy = _detail(
         113054,
         9,
