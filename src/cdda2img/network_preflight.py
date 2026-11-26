@@ -273,17 +273,17 @@ def format_report(outcome: PreflightOutcome) -> list[str]:
     if len(down) == len(outcome.results):
         if all(r.detail == "DNS lookup failed" for r in down):
             headline = (
-                "  No network: every service is unreachable and DNS lookups are "
+                "   No network: every service is unreachable and DNS lookups are "
                 "failing — the WAN or local DNS looks down."
             )
         else:
-            headline = "  No network: every service is unreachable."
+            headline = "   No network: every service is unreachable."
     else:
-        headline = "  Some network services are not answering:"
+        headline = "   Some network services are not answering:"
     lines = [headline]
     for r in outcome.results:
         marker = "  (required)" if r.service.required else ""
-        lines.append(f"    {r.state:<5} {r.service.name:<18} {r.detail}{marker}")
+        lines.append(f"     {r.state:<5} {r.service.name:<18} {r.detail}{marker}")
     return lines
 
 
@@ -295,9 +295,9 @@ def _prompt(input_fn: Callable[[str], str] = input, *, archival: bool = False) -
     service (kgr, 2026-11-21).
     """
     question = (
-        "  [r]etry or [a]bort? [r/A] "
+        "   [r]etry or [a]bort? [r/A] "
         if archival
-        else "  [r]etry, [c]ontinue anyway, or [a]bort? [r/c/A] "
+        else "   [r]etry, [c]ontinue anyway, or [a]bort? [r/c/A] "
     )
     while True:
         answer = input_fn(question).strip().lower()
@@ -326,7 +326,7 @@ def _proceed(
     for line in format_report(outcome):
         out(line)
     if not outcome.required_down:
-        out(f"  Continuing without: {_names(outcome.down)}")
+        out(f"   Continuing without: {_names(outcome.down)}")
         return True
     required = _names(outcome.required_down)
     if interactive:
@@ -334,13 +334,13 @@ def _proceed(
         if choice == "retry":
             return False
         if choice == "continue":
-            out("  Continuing; the container will record what was unavailable.")
+            out("   Continuing; the container will record what was unavailable.")
             return True
         msg = f"aborted: required network service(s) unavailable: {required}"
         raise NetworkUnavailable(msg)
     if allow_offline and not archival:
         out(
-            "  --allow-offline: continuing; the container will record what was unavailable."
+            "   --allow-offline: continuing; the container will record what was unavailable."
         )
         return True
     if archival:
@@ -380,12 +380,12 @@ def run_preflight(
         if not outcome.down:
             n = len(outcome.results)
             out(
-                f"  Network check: {n}/{n} services answered "
+                f"   Network check: {n}/{n} services answered "
                 f"({time.monotonic() - started:.1f} s)"
             )
             for r in outcome.results:
                 if r.state in ("slow", "busy"):
-                    out(f"    note: {r.service.name} — {r.state} ({r.detail})")
+                    out(f"     note: {r.service.name} — {r.state} ({r.detail})")
             return outcome
         if _proceed(
             outcome,

@@ -322,6 +322,21 @@ def test_all_answering_proceeds_quietly():
     assert len(lines) == 1 and "2/2 services answered" in lines[0]
 
 
+def test_the_check_line_lines_up_with_the_rip_header():
+    """kgr, 2026-11-26: "Network check" sat one column left of the "Drive:" and
+    "Read offset:" lines printed under it. Every pre-flight line now starts in
+    the header's label column (cdda2img._fmt_kv)."""
+    from cdda2img.cdda2img import _fmt_kv
+
+    _o, lines, _ = _run({"musicbrainz": "ok", "discogs": "ok"})
+    header = _fmt_kv("Drive", "X")
+    indent = len(header) - len(header.lstrip())
+    assert len(lines[0]) - len(lines[0].lstrip()) == indent
+    report = npf.format_report(_run({"musicbrainz": "ok", "discogs": "down"})[0])
+    assert all(len(ln) - len(ln.lstrip()) >= indent for ln in report)
+    assert len(report[0]) - len(report[0].lstrip()) == indent
+
+
 def test_advisory_down_warns_and_continues_even_headless():
     outcome, lines, _ = _run({"musicbrainz": "ok", "discogs": "down"})
     assert outcome.prov_value == "degraded:discogs"
