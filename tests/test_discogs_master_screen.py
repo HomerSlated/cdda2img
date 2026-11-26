@@ -620,3 +620,76 @@ def test_without_a_pinned_pressing_nothing_is_hidden(monkeypatch) -> None:
     _step(ctl, "")
     _step(ctl, "")
     assert len(_screen(ctl).shown()) == 4
+
+
+# ---- the details page pages (kgr, 2026-11-26: it overflowed the screen) -------------
+
+
+def _long_details(monkeypatch):
+    from dataclasses import replace
+
+    notes = "\n".join(f"Note line {i}: " + "word " * 20 for i in range(1, 31))
+    monkeypatch.setattr(
+        "cdda2img.discogs_lookup.release_details",
+        lambda _r: replace(_DETAILS, notes=notes),
+    )
+
+
+def _size(monkeypatch, lines: int) -> None:
+    import os
+
+    monkeypatch.setattr(
+        "shutil.get_terminal_size", lambda _f=None: os.terminal_size((80, lines))
+    )
+
+
+@pytest.mark.usefixtures("discogs")
+def test_long_details_page_to_the_terminal(monkeypatch, capsys) -> None:
+    _long_details(monkeypatch)
+    _size(monkeypatch, 24)
+    ctl = _ctl()
+    for keys in ("", "", "2"):
+        _step(ctl, keys)
+    capsys.readouterr()
+    ctl.stack[-1].render(ctl)
+    first = capsys.readouterr().out.splitlines()
+    assert any("[1/" in ln for ln in first[:5])  # the page number, in the title
+    assert len(first) <= 24
+    assert all(len(ln) <= 80 for ln in first)
+    assert "[n] next" in first[-1]
+    _step(ctl, "n")
+    capsys.readouterr()
+    ctl.stack[-1].render(ctl)
+    second = capsys.readouterr().out
+    assert "[p] prev" in second
+    assert "Title     :" not in second  # the top of the page scrolled away
+    _step(ctl, "a")  # taking it works from any page
+    assert ctl.disc.discogs_release_id == 5222631
+
+
+@pytest.mark.usefixtures("discogs")
+def test_a_taller_terminal_shows_more_per_page(monkeypatch, capsys) -> None:
+    _long_details(monkeypatch)
+    ctl = _ctl()
+    for keys in ("", "", "2"):
+        _step(ctl, keys)
+    _size(monkeypatch, 24)
+    capsys.readouterr()
+    ctl.stack[-1].render(ctl)
+    short = len(capsys.readouterr().out.splitlines())
+    _size(monkeypatch, 60)
+    ctl.stack[-1].render(ctl)
+    tall = len(capsys.readouterr().out.splitlines())
+    assert tall > short
+
+
+@pytest.mark.usefixtures("discogs")
+def test_a_short_release_has_no_pager(capsys) -> None:
+    ctl = _ctl()
+    for keys in ("", "", "2"):
+        _step(ctl, keys)
+    capsys.readouterr()
+    ctl.stack[-1].render(ctl)
+    out = capsys.readouterr().out
+    assert "[n] next" not in out
+    assert "[1/" not in out

@@ -131,7 +131,7 @@ class RetryNotice(logging.Handler):
             if ui is not None and not ui.is_paused():
                 ui.set_status_text(text)
             else:
-                print(f"  {text}", flush=True)
+                print(f"   {text}", flush=True)
         except Exception:
             self.handleError(record)
 

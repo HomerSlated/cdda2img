@@ -962,9 +962,9 @@ def create_image(
             # which has no MB disc-ID match to gate, but kept for symmetry.
             auto_apply = _gate_adjusted_auto(auto, provenance)
             if auto_apply:
-                print(f"  Metadata auto-confirmed — {match_dist.summary()}")
+                print(f"   Metadata auto-confirmed — {match_dist.summary()}")
             else:
-                print(f"  Metadata: {match_dist.summary()}")
+                print(f"   Metadata: {match_dist.summary()}")
             disc = run_metadata_menu(
                 disc, source_wavs=source_wavs, tui=tui, auto_apply=auto_apply
             )
@@ -2206,7 +2206,7 @@ def _store_match_distance(
         # The line printed before the menu grades the automatic guess (N6); this
         # one grades what the container ended up believing, so a release the
         # user confirmed with the disc in hand shows as such (kgr, 2026-11-26).
-        print(f"  Metadata after your review: {final.summary()}")
+        print(f"   Metadata after your review: {final.summary()}")
     return final
 
 
@@ -2760,9 +2760,9 @@ def _finalize_import(
     if ui is not None:
         ui.pause()
     if auto_apply:
-        print(f"  Metadata auto-confirmed — {match_dist.summary()}")
+        print(f"   Metadata auto-confirmed — {match_dist.summary()}")
     else:
-        print(f"  Metadata: {match_dist.summary()}")
+        print(f"   Metadata: {match_dist.summary()}")
     # N5: the pressing menu's population, and the claim to record about how the
     # pressing was chosen. Note `selected_release_id` is already pinned by the
     # full ladder — including the preference rungs the menu excludes. That pin

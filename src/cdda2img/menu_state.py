@@ -1730,10 +1730,54 @@ class DiscogsReleaseDetailScreen(Screen):
         self.parent = parent
         self.details = None
         self._fetched = False
+        # kgr, 2026-11-26: a release's notes can run past the screen, so the
+        # details page (kgr: "needs a pager"), sized to the terminal.
+        self.page = 0
 
-    def render(self, ctl: MenuController) -> None:
+    def _lines(self) -> list[str]:
+        """Everything the page shows, wrapped to 80 columns, before paging."""
         import textwrap
 
+        v, d = self.version, self.details
+        out: list[str] = []
+
+        def put(text: str, indent: str = "  ") -> None:
+            out.extend(
+                textwrap.wrap(
+                    text, 78, initial_indent=indent, subsequent_indent=indent + "    "
+                )
+                or [""]
+            )
+
+        if d is None:
+            put("Discogs did not return the release; the list's summary follows.")
+            put(f"{v.title} | {v.country} | {v.year or '----'} | {v.label} | {v.catno}")
+        else:
+            put(f"Title     : {d.title}")
+            put(f"Country   : {d.country or '-'}     Released: {d.released or '-'}")
+            put(f"Label     : {d.label or '-'}")
+            put(f"Cat #     : {d.catno or '-'}")
+            put(f"Format    : {'; '.join(d.formats) or '-'}")
+            put(f"Barcode   : {', '.join(d.barcodes) or 'not listed'}")
+            for kind, value, note in d.identifiers:
+                label = f"{kind}{f' ({note})' if note else ''}"
+                put(f"{_trunc_label(label)}: {value}")
+            if d.notes:
+                out.append("")
+                for para in d.notes.splitlines():
+                    put(para)
+        out.append("")
+        out.append(f"  https://www.discogs.com/release/{v.release_id}")
+        return out
+
+    @staticmethod
+    def _rows() -> int:
+        """Body rows per page: the terminal's height less the header and footer."""
+        import shutil
+
+        return max(6, shutil.get_terminal_size((80, 24)).lines - 9)
+
+    def render(self, ctl: MenuController) -> None:
         from cdda2img.metadata_menu import _header
 
         if not self._fetched:
@@ -1742,39 +1786,34 @@ class DiscogsReleaseDetailScreen(Screen):
             self._fetched = True
             print("  Fetching the release from Discogs...")
             self.details = release_details(self.version.release_id)
-        v, d = self.version, self.details
-        _header(f"Discogs release {v.release_id}")
-        if d is None:
-            print("  Discogs did not return the release; the list's summary follows.")
-            print(
-                f"  {v.title} | {v.country} | {v.year or '----'} | {v.label} | {v.catno}"
-            )
-        else:
-            print(f"  Title     : {d.title}")
-            print(f"  Country   : {d.country or '-'}     Released: {d.released or '-'}")
-            print(f"  Label     : {d.label or '-'}")
-            print(f"  Cat #     : {d.catno or '-'}")
-            print(f"  Format    : {'; '.join(d.formats) or '-'}")
-            print(f"  Barcode   : {', '.join(d.barcodes) or 'not listed'}")
-            for kind, value, note in d.identifiers:
-                label = f"{kind}{f' ({note})' if note else ''}"
-                print(f"  {_trunc_label(label)}: {value}")
-            if d.notes:
-                print()
-                for para in d.notes.splitlines():
-                    for line in textwrap.wrap(para, 74) or [""]:
-                        print(f"  {line}")
+        lines, rows = self._lines(), self._rows()
+        pages = max(1, (len(lines) + rows - 1) // rows)
+        self.page = min(self.page, pages - 1)
+        title = f"Discogs release {self.version.release_id}"
+        _header(title + (f"  [{self.page + 1}/{pages}]" if pages > 1 else ""))
+        for line in lines[self.page * rows : (self.page + 1) * rows]:
+            print(line)
         print()
-        print(f"  https://www.discogs.com/release/{v.release_id}")
-        print()
-        print("  [a] this is my disc    any other key: back to the list")
+        keys = ["[a] this is my disc"]
+        if self.page > 0:
+            keys.append("[p] prev")
+        if self.page < pages - 1:
+            keys.append("[n] next")
+        print("  " + "   ".join(keys) + "   any other key: back to the list")
 
     def handle_input(self, ctl: MenuController) -> Nav:
         from dataclasses import replace
 
         from cdda2img.metadata_menu import _prompt
 
-        if _prompt("  > ").strip().lower() != "a":
+        choice = _prompt("  > ").strip().lower()
+        if choice == "n":
+            self.page += 1  # clamped on the next paint
+            return Stay()
+        if choice == "p":
+            self.page = max(0, self.page - 1)
+            return Stay()
+        if choice != "a":
             return Pop()
         master = (
             self.details.master_id if self.details else None

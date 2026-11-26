@@ -95,7 +95,7 @@ def test_without_a_tui_the_notice_is_its_own_line(monkeypatch, capsys) -> None:
     h = mb_lookup.RetryNotice()
     h.handle(_rec("socket timeout"))
     h.handle(_rec("retrying after delay (#1)"))
-    assert capsys.readouterr().out == "  MusicBrainz slow: try 2/8\n"
+    assert capsys.readouterr().out == "   MusicBrainz slow: try 2/8\n"
 
 
 def test_a_paused_tui_gets_a_line_not_a_status(monkeypatch, capsys) -> None:
@@ -169,5 +169,5 @@ def test_the_entry_point_shows_the_notice_and_keeps_the_chatter_off_the_terminal
     mb.info("socket timeout")
     mb.info("retrying after delay (#1)")
     captured = capsys.readouterr()
-    assert captured.out == "  MusicBrainz slow: try 2/8\n"
+    assert captured.out == "   MusicBrainz slow: try 2/8\n"
     assert captured.err == ""

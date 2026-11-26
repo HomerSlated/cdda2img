@@ -447,3 +447,24 @@ def test_the_final_grade_is_printed_after_an_interactive_menu(capsys) -> None:
     app._store_match_distance(prov, disc)  # unattended: stored, not printed
     assert capsys.readouterr().out == ""
     assert prov["match_confidence"] == "1.000"
+
+
+def test_the_metadata_lines_start_in_the_rip_headers_column(capsys) -> None:
+    """kgr, 2026-11-26: "Metadata: ..." and "MusicBrainz busy: ..." sat one column
+    left of "Container:" and the rest of the rip's report."""
+    import inspect
+
+    from cdda2img import cdda2img as app
+    from cdda2img.cdda2img import _fmt_kv
+
+    header = _fmt_kv("Container", "X")
+    indent = " " * (len(header) - len(header.lstrip()))
+    src = inspect.getsource(app._finalize_import) + inspect.getsource(app.create_image)
+    for text in ('"{indent}Metadata: {{', '"{indent}Metadata auto-confirmed'):
+        assert text.format(indent=indent) in src.replace('f"', '"')
+    app._store_match_distance(
+        {"release_selection": "manual"}, RBIDisc(album="A", artist="B"), show=True
+    )
+    out = capsys.readouterr().out
+    assert out.startswith(indent + "Metadata after your review")
+    assert not out.startswith(indent + " ")
