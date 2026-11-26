@@ -12,6 +12,7 @@ import functools
 import importlib.metadata
 import logging
 import os
+from dataclasses import dataclass
 
 from cdda2img import query_log
 from cdda2img.barcode import normalize_barcode
@@ -185,6 +186,7 @@ def _parse_result(r) -> DiscMeta:
         artist=artist or None,
         barcode=barcode,
         discogs_release_id=int(release_id) if release_id else None,
+        discogs_master_id=_master_id(data),
         release_date=year,
         country=discogs_country_code(country),
         label=str(label) if label else None,
@@ -272,6 +274,7 @@ def _parse_full_release(r) -> DiscMeta:
         artist=artist or None,
         barcode=barcode,
         discogs_release_id=int(data["id"]) if data.get("id") else None,
+        discogs_master_id=_master_id(data),
         release_date=year,
         country=discogs_country_code(country),
         label=str(label) if label else None,
@@ -337,107 +340,264 @@ def search_releases(
 _BARCODE_SEARCH_MAX_PAGES = 4
 
 
-#: Pages of 100 read from a master's versions: a runaway guard, not a cap any
-#: real album reaches (*No Jacket Required*, master 98041, has 11 UK CDs).
+def _master_id(data: dict) -> int | None:
+    """A release's master id; Discogs writes 0 or omits it for a release with no
+    master."""
+    try:
+        value = int(data.get("master_id") or 0)
+    except (TypeError, ValueError):
+        return None
+    return value or None
+
+
+# ---------------------------------------------------------------------------
+# Master versions: trust_model_design.md §12
+# ---------------------------------------------------------------------------
+
+#: Pages of 100 read per country from a master's versions: a runaway guard, not a
+#: cap any one country of a real album reaches. Logged when it binds.
 _MASTER_VERSIONS_MAX_PAGES = 5
 
 
-def master_versions(master_id: int, *, fmt: str = "CD") -> list[DiscMeta]:
-    """The releases of Discogs master *master_id* in format *fmt*, as stubs
-    (id, country code, year, label, catalogue number). ``[]`` on error.
+@dataclass(frozen=True)
+class DiscogsVersion:
+    """One release of a Discogs master, as the versions list gives it (no
+    request per release)."""
 
-    Every pressing of an album on Discogs, barcoded or not: the post-menu chooser
-    draws on it because a barcode search cannot find a release whose disc carries
-    no barcode (Discogs 5222631, the original GB *No Jacket Required*).
+    release_id: int
+    title: str
+    country: str  # Discogs' own name ("UK", "Europe", "UK & Europe")
+    year: str | None  # None when Discogs records none ("0")
+    label: str
+    catno: str
+    formats: str  # e.g. "Album, Reissue"
+
+
+@dataclass(frozen=True)
+class MasterVersions:
+    """The versions of a master in one format, for the chosen countries."""
+
+    versions: tuple[DiscogsVersion, ...]
+    total: int  # how many Discogs reported, across the chosen countries
+    years: tuple[tuple[str, int], ...]  # the released facet: (year, count)
+    truncated: bool  # the page guard bound; ``versions`` is short of ``total``
+
+    @property
+    def undated(self) -> int:
+        """Versions with no year: the facet lists dated ones only."""
+        return max(0, self.total - sum(n for _y, n in self.years))
+
+
+def _versions_url(master_id: int, fmt: str, country: str | None, page: int, per: int):
+    from urllib.parse import urlencode
+
+    query = {"format": fmt, "per_page": per, "page": page}
+    if country is not None:
+        query["country"] = country
+    return (
+        f"https://api.discogs.com/masters/{int(master_id)}/versions?{urlencode(query)}"
+    )
+
+
+def master_countries(
+    master_id: int, *, fmt: str = "CD"
+) -> tuple[tuple[tuple[str, int], ...], int] | None:
+    """The countries a master's *fmt* versions come from, with counts, and the
+    total: one request (the facet rides on the first page). ``None`` on error.
+
+    Measured on *No Jacket Required* (master 98041): 108 CDs, ``US 36, Europe 18,
+    UK 11, Japan 9, …``. The names are Discogs' own; "Germany" is not among them
+    although MusicBrainz says a German pressing exists, because Discogs files it
+    under "Europe".
     """
     client = _get_client()
     if not client:
-        return []
-    out: list[DiscMeta] = []
+        return None
     try:
-        for page in range(1, _MASTER_VERSIONS_MAX_PAGES + 1):
-            data = client._get(
-                f"https://api.discogs.com/masters/{int(master_id)}/versions"
-                f"?format={fmt}&per_page=100&page={page}"
-            )
-            for v in data.get("versions") or []:
-                released = str(v.get("released") or "")[:4]
-                out.append(
-                    DiscMeta(
-                        album=v.get("title") or None,
-                        discogs_release_id=int(v["id"]) if v.get("id") else None,
-                        country=discogs_country_code(v.get("country") or None),
-                        release_date=released if released.strip("0") else None,
-                        label=v.get("label") or None,
-                        catalog_number=v.get("catno") or None,
-                        source="discogs",
-                    )
-                )
-            if page >= int((data.get("pagination") or {}).get("pages") or 1):
-                break
-        else:
-            log.warning(
-                "Discogs master %d has more than %d pages of %s versions; the rest"
-                " are not offered",
-                master_id,
-                _MASTER_VERSIONS_MAX_PAGES,
-                fmt,
-            )
+        data = client._get(_versions_url(master_id, fmt, None, 1, 1))
     except Exception as exc:
-        log.debug("Discogs master versions failed for %d: %s", master_id, exc)
-        return []
-    return out
+        log.debug("Discogs master %d countries failed: %s", master_id, exc)
+        return None
+    total = int((data.get("pagination") or {}).get("items") or 0)
+    return _facet(data, "country"), total
 
 
-def release_details(release_id: int) -> list[str]:
-    """Lines that tell one pressing of a release from another, for the post-menu
-    chooser: format, barcode (or that there is none), the first matrix/runout,
-    and the notes (whitespace folded, cut at 240 characters). Discogs' own words;
-    ``[]`` on error.
+def _facet(data: dict, name: str) -> tuple[tuple[str, int], ...]:
+    for facet in data.get("filter_facets") or []:
+        if facet.get("id") == name:
+            # ``title``, not ``value``: Discogs sends ``value`` already
+            # URL-encoded ("UK+%26+Europe"), and the filter is encoded once more
+            # when it is sent back.
+            return tuple(
+                (str(v.get("title") or ""), int(v.get("count") or 0))
+                for v in facet.get("values") or []
+                if v.get("title")
+            )
+    return ()
 
-    Several releases of one album can share label, catalogue number and even
-    barcode (*No Jacket Required* GB, CDV 2345: eleven CD releases); what
-    separates them is "No barcode", "black print on label", SPARS codes and the
-    runout, all of which live here.
+
+def _version(v: dict) -> DiscogsVersion | None:
+    if not v.get("id"):
+        return None
+    released = str(v.get("released") or "")[:4]
+    return DiscogsVersion(
+        release_id=int(v["id"]),
+        title=v.get("title") or "",
+        country=v.get("country") or "",
+        year=released if released.strip("0") else None,
+        label=v.get("label") or "",
+        catno=v.get("catno") or "",
+        formats=v.get("format") or "",
+    )
+
+
+def master_versions(
+    master_id: int, *, countries: tuple[str, ...] = (), fmt: str = "CD"
+) -> MasterVersions | None:
+    """Every *fmt* version of *master_id* from *countries* (Discogs names; empty =
+    every country), filtered on Discogs' side, with the year facet for that set.
+    ``None`` on error.
+
+    Years are NOT filtered here: Discogs' ``released`` filter drops undated
+    versions, and on *No Jacket Required* 60 of 108 CDs have no year, including
+    near-duplicates of the disc kgr held. The year is narrowed by the caller,
+    keeping undated versions unless asked not to (§12 D4).
     """
     client = _get_client()
     if not client:
-        return []
+        return None
+    seen: set[int] = set()
+    versions: list[DiscogsVersion] = []
+    years: dict[str, int] = {}
+    total = 0
+    truncated = False
+    try:
+        for country in countries or (None,):
+            for page in range(1, _MASTER_VERSIONS_MAX_PAGES + 1):
+                data = client._get(_versions_url(master_id, fmt, country, page, 100))
+                if page == 1:
+                    total += int((data.get("pagination") or {}).get("items") or 0)
+                    for year, n in _facet(data, "released"):
+                        years[year] = years.get(year, 0) + n
+                for v in data.get("versions") or []:
+                    parsed = _version(v)
+                    if parsed and parsed.release_id not in seen:
+                        seen.add(parsed.release_id)
+                        versions.append(parsed)
+                if page >= int((data.get("pagination") or {}).get("pages") or 1):
+                    break
+            else:
+                truncated = True
+                log.warning(
+                    "Discogs master %d: more than %d pages of %s versions from %s;"
+                    " the rest are not offered",
+                    master_id,
+                    _MASTER_VERSIONS_MAX_PAGES,
+                    fmt,
+                    country or "every country",
+                )
+    except Exception as exc:
+        log.debug("Discogs master %d versions failed: %s", master_id, exc)
+        return None
+    return MasterVersions(
+        tuple(versions), total, tuple(sorted(years.items())), truncated
+    )
+
+
+@dataclass(frozen=True)
+class ReleaseDetails:
+    """What tells one pressing of a release from another (§12 D5)."""
+
+    release_id: int
+    master_id: int | None
+    title: str
+    country: str
+    released: str
+    label: str
+    catno: str
+    formats: tuple[str, ...]
+    barcodes: tuple[str, ...]  # as listed; empty = Discogs lists none
+    identifiers: tuple[tuple[str, str, str], ...]  # (type, value, description)
+    notes: str
+
+
+def release_details(release_id: int) -> ReleaseDetails | None:
+    """One release in full, for the details screen; ``None`` on error.
+
+    *No Jacket Required* GB, CDV 2345: eleven CD releases share label and
+    catalogue number; "No barcode", "black print on label", SPARS codes and the
+    runout are what separate them, and all of them live here.
+    """
+    client = _get_client()
+    if not client:
+        return None
     try:
         r = client.release(release_id)
         r.refresh()
         data: dict = getattr(r, "data", {}) or {}
     except Exception as exc:
         log.debug("Discogs release fetch failed for %d: %s", release_id, exc)
-        return []
-    lines: list[str] = []
-    fmts = [
-        ", ".join([f.get("name") or "", *(f.get("descriptions") or [])]).strip(", ")
-        for f in data.get("formats") or []
-        if isinstance(f, dict)
-    ]
+        return None
+    labels = [lab for lab in data.get("labels") or [] if isinstance(lab, dict)]
     idents = [i for i in data.get("identifiers") or [] if isinstance(i, dict)]
-    barcodes = [
-        i.get("value") for i in idents if (i.get("type") or "").lower() == "barcode"
-    ]
-    matrix = [
-        i.get("value")
-        for i in idents
-        if (i.get("type") or "").lower().startswith("matrix")
-    ]
-    # "not listed", never "no barcode": Discogs entries that list none include
-    # discs whose notes say they carry one (master 98041, 23721866).
-    head = [
-        "; ".join(f for f in fmts if f),
-        f"barcode: {barcodes[0]}" if barcodes else "barcode: not listed",
-    ]
-    if matrix:
-        head.append(f"matrix: {matrix[0]}")
-    lines.append(" · ".join(h for h in head if h))
-    notes = " ".join((data.get("notes") or "").split())
-    if notes:
-        lines.append(notes if len(notes) <= 240 else notes[:239] + "…")
-    return lines
+    return ReleaseDetails(
+        release_id=int(data.get("id") or release_id),
+        master_id=_master_id(data),
+        title=data.get("title") or "",
+        country=data.get("country") or "",
+        released=str(data.get("released") or ""),
+        label=", ".join(lab.get("name") or "" for lab in labels),
+        catno=", ".join(lab.get("catno") or "" for lab in labels),
+        formats=tuple(
+            ", ".join([f.get("name") or "", *(f.get("descriptions") or [])]).strip(", ")
+            for f in data.get("formats") or []
+            if isinstance(f, dict)
+        ),
+        barcodes=tuple(
+            str(i.get("value") or "")
+            for i in idents
+            if (i.get("type") or "").lower() == "barcode"
+        ),
+        identifiers=tuple(
+            (
+                str(i.get("type") or ""),
+                str(i.get("value") or ""),
+                str(i.get("description") or ""),
+            )
+            for i in idents
+            if (i.get("type") or "").lower() != "barcode"
+        ),
+        notes=(data.get("notes") or "").strip(),
+    )
+
+
+@dataclass(frozen=True)
+class MasterHit:
+    """A Discogs master from a search (§12.2: no master linked)."""
+
+    master_id: int
+    title: str
+    year: str | None
+
+
+def search_masters(artist: str, album: str) -> list[MasterHit]:
+    """Discogs masters matching *artist* and *album*, for a release group
+    MusicBrainz links to none. ``[]`` on error."""
+    client = _get_client()
+    if not client:
+        return []
+    try:
+        results = client.search(album, artist=artist, type="master")
+        hits: list[MasterHit] = []
+        for r in results.page(1):
+            data: dict = getattr(r, "data", {}) or {}
+            if data.get("id"):
+                year = str(data.get("year") or "") or None
+                hits.append(MasterHit(int(data["id"]), data.get("title") or "", year))
+    except Exception as exc:
+        log.debug("Discogs master search failed: %s", exc)
+        return []
+    return hits
 
 
 def search_by_barcode(barcode: str) -> list[DiscMeta]:

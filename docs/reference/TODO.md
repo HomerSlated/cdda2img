@@ -2,16 +2,15 @@
 
 ## Open
 
-### 🔬 LIVE — Discogs release selection by master (kgr, 2026-11-26)
+### ✅ DONE 2026-11-26 — Discogs release selection by master (kgr)
 
-Design and decisions: `trust_model_design.md` §12. Master-first Discogs identification:
-the CD versions of the master MusicBrainz links the release group to, narrowed by a
-country the user picks (Discogs' own facet list) and a year the user picks (undated
-versions kept by default; never pruned automatically: 60 of 108 *No Jacket Required* CDs
-have no year), shown as a paged list with details (barcode, runout, notes) on selection.
-`--auto` records `discogs_master_id` when no single release is settled, and the archival
-gate accepts it there. Retires the post-menu stopgap chooser of 2026-11-26. Build order
-§12.4; live check is a re-rip of *No Jacket Required* (expects Discogs 5222631).
+Built the same day it was decided: `trust_model_design.md` §12, as-built notes §12.5.
+**Open follow-ups**: (1) a Discogs pick changes only the Discogs ids, so the catalogue
+fields keep the MusicBrainz pressing's values (*No Jacket Required*: MusicBrainz's barcode,
+the reissue's, beside Discogs 5222631, which lists none): overwrite, clear, or leave? kgr's
+call. (2) R11 could read `discogs_master_id` directly. (3) `list`, the catalogue and the
+RLOG do not name the master. Live check outstanding: kgr's interactive and `--auto` re-rips
+of *No Jacket Required*.
 
 ### 🔬 LIVE — sector-hammer: find the systematic failure, then try to make it a useful profile (kgr, 2026-11-25)
 

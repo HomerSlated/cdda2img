@@ -376,6 +376,10 @@ class RBIDisc:
         None  # MB release-group UUID for original-release lookup
     )
     discogs_release_id: int | None = None  # Discogs release ID (for R11 master lookup)
+    # Discogs MASTER id: a different numbering from release ids, so never stored
+    # in discogs_release_id. Under --auto it may be the only Discogs identifier
+    # (trust_model_design.md §12, D7).
+    discogs_master_id: int | None = None
     set_title: str | None = (
         None  # box set / release title when medium has its own album title
     )

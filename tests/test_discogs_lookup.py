@@ -9,6 +9,7 @@ cover is treating that subset as the whole answer.
 from __future__ import annotations
 
 from unittest.mock import patch
+from urllib.parse import quote_plus
 
 from cdda2img import discogs_lookup
 
@@ -85,15 +86,18 @@ def test_search_by_barcode_returns_empty_on_error() -> None:
     assert _search(_Boom()) == []  # type: ignore[arg-type]
 
 
-# ---- master versions and release details (No Jacket Required, 2026-11-26) ----
+# ---- master versions and release details (trust_model_design.md §12) ---------
+#
+# Shapes as Discogs returned them for master 98041 (No Jacket Required) on
+# 2026-11-26, including its quirk: facet ``value`` arrives URL-encoded.
 
 
 class _FakeClient:
-    """Answers ``_get`` with one versions page per call, and ``release`` with a
-    record whose ``data`` is fixed."""
+    """Answers ``_get`` from *pages* by URL order, and ``release`` with a record
+    whose ``data`` is fixed. Records every URL asked for."""
 
     def __init__(self, pages=None, release_data=None) -> None:
-        self.pages = pages or []
+        self.pages = list(pages or [])
         self.urls: list[str] = []
         self._data = release_data or {}
 
@@ -106,9 +110,20 @@ class _FakeClient:
         return type("R", (), {"data": data, "refresh": lambda _s: None})()
 
 
-def _versions_page(ids, page, pages):
+def _facets(countries=(), years=()):
+    def values(pairs):
+        return [{"title": t, "value": quote_plus(t), "count": n} for t, n in pairs]
+
+    return [
+        {"id": "country", "values": values(countries)},
+        {"id": "released", "values": values(years)},
+    ]
+
+
+def _page(ids, page, pages, items, *, years=(), countries=()):
     return {
-        "pagination": {"page": page, "pages": pages},
+        "pagination": {"page": page, "pages": pages, "items": items},
+        "filter_facets": _facets(countries, years),
         "versions": [
             {
                 "id": i,
@@ -117,59 +132,152 @@ def _versions_page(ids, page, pages):
                 "released": "1985" if i == 5222631 else "0",
                 "label": "Virgin",
                 "catno": "CDV 2345",
+                "format": "Album",
             }
             for i in ids
         ],
     }
 
 
-def test_master_versions_reads_every_page_and_maps_the_country() -> None:
+def _with(client):
+    return patch.object(discogs_lookup, "_get_client", return_value=client)
+
+
+def test_master_countries_takes_titles_not_the_encoded_values() -> None:
     client = _FakeClient([
-        _versions_page([5222631, 5221810], 1, 2),
-        _versions_page([19343422], 2, 2),
+        _page([], 1, 108, 108, countries=[("UK", 11), ("UK & Europe", 1)])
     ])
-    with patch.object(discogs_lookup, "_get_client", return_value=client):
+    with _with(client):
+        got = discogs_lookup.master_countries(98041)
+    assert got == ((("UK", 11), ("UK & Europe", 1)), 108)
+    assert "per_page=1" in client.urls[0]
+    assert "format=CD" in client.urls[0]
+
+
+def test_master_versions_filters_by_country_on_the_server_and_pages() -> None:
+    client = _FakeClient([
+        _page([5222631, 5221810], 1, 2, 3, years=[("1985", 1)]),
+        _page([19343422], 2, 2, 3),
+    ])
+    with _with(client):
+        got = discogs_lookup.master_versions(98041, countries=("UK & Europe",))
+    assert got is not None
+    assert [v.release_id for v in got.versions] == [5222631, 5221810, 19343422]
+    assert got.versions[0].year == "1985"
+    assert got.versions[1].year is None  # Discogs "0" = unknown
+    assert got.total == 3
+    assert got.years == (("1985", 1),)
+    assert got.undated == 2
+    assert all("country=UK+%26+Europe" in u for u in client.urls)  # encoded once
+    assert all("/masters/98041/versions" in u for u in client.urls)
+
+
+def test_master_versions_never_filters_by_year() -> None:
+    """Discogs' year filter drops undated versions: 60 of 108 here (§12 D4)."""
+    client = _FakeClient([_page([1], 1, 1, 1)])
+    with _with(client):
+        discogs_lookup.master_versions(98041, countries=("UK",))
+    assert "released=" not in client.urls[0]
+
+
+def test_master_versions_sums_several_countries_and_drops_repeats() -> None:
+    client = _FakeClient([
+        _page([1, 2], 1, 1, 2, years=[("1985", 2)]),
+        _page([2, 3], 1, 1, 2, years=[("1985", 1), ("1986", 1)]),
+    ])
+    with _with(client):
+        got = discogs_lookup.master_versions(98041, countries=("Europe", "UK & Europe"))
+    assert got is not None
+    assert [v.release_id for v in got.versions] == [1, 2, 3]
+    assert got.total == 4
+    assert got.years == (("1985", 3), ("1986", 1))
+
+
+def test_master_versions_reports_when_the_page_guard_binds() -> None:
+    n = discogs_lookup._MASTER_VERSIONS_MAX_PAGES
+    client = _FakeClient([_page([i], i, n + 3, n + 3) for i in range(1, n + 1)])
+    with _with(client):
         got = discogs_lookup.master_versions(98041)
-    assert [g.discogs_release_id for g in got] == [5222631, 5221810, 19343422]
-    assert {g.country for g in got} == {"GB"}  # Discogs "UK"
-    assert got[0].release_date == "1985"
-    assert got[1].release_date is None  # Discogs "0" = unknown
-    assert all("format=CD" in u and "/masters/98041/" in u for u in client.urls)
-    assert len(client.urls) == 2
+    assert got is not None
+    assert got.truncated
+    assert len(client.urls) == n
 
 
-def test_master_versions_is_empty_on_error() -> None:
-    client = _FakeClient([])  # IndexError inside _get
-    with patch.object(discogs_lookup, "_get_client", return_value=client):
-        assert discogs_lookup.master_versions(98041) == []
+def test_master_versions_is_none_on_error() -> None:
+    with _with(_FakeClient([])):  # IndexError inside _get
+        assert discogs_lookup.master_versions(98041) is None
 
 
-def test_release_details_says_what_separates_pressings() -> None:
+def test_release_details_keeps_what_separates_pressings() -> None:
     data = {
+        "id": 5222631,
+        "master_id": 98041,
+        "title": "No Jacket Required",
+        "country": "UK",
+        "released": "1985",
+        "labels": [{"name": "Virgin", "catno": "CDV 2345"}],
         "formats": [{"name": "CD", "descriptions": ["Album"]}],
         "identifiers": [
-            {"type": "SPARS Code", "value": "AAD"},
+            {
+                "type": "SPARS Code",
+                "value": "AAD",
+                "description": "Back page of booklet",
+            },
             {"type": "Matrix / Runout", "value": "CDV 2345 :   NIMBUS ENGLAND"},
         ],
-        "notes": "8 Page sleeve\nNo barcode\n\nManufactured in the UK",
+        "notes": "8 Page sleeve\nNo barcode\n",
     }
-    client = _FakeClient(release_data=data)
-    with patch.object(discogs_lookup, "_get_client", return_value=client):
-        lines = discogs_lookup.release_details(5222631)
-    assert lines[0] == (
-        "CD, Album · barcode: not listed · matrix: CDV 2345 :   NIMBUS ENGLAND"
-    )
-    assert lines[1] == "8 Page sleeve No barcode Manufactured in the UK"
+    with _with(_FakeClient(release_data=data)):
+        d = discogs_lookup.release_details(5222631)
+    assert d is not None
+    assert d.master_id == 98041
+    assert d.barcodes == ()
+    assert d.formats == ("CD, Album",)
+    assert ("Matrix / Runout", "CDV 2345 :   NIMBUS ENGLAND", "") in d.identifiers
+    assert d.notes == "8 Page sleeve\nNo barcode"
 
 
-def test_release_details_names_a_listed_barcode_and_cuts_long_notes() -> None:
+def test_release_details_lists_barcodes_apart_from_other_identifiers() -> None:
     data = {
-        "formats": [{"name": "CD", "descriptions": ["Album", "Reissue"]}],
-        "identifiers": [{"type": "Barcode", "value": "5012981234522"}],
-        "notes": "x" * 500,
+        "identifiers": [
+            {"type": "Barcode", "value": "5012981234522"},
+            {"type": "SPARS Code", "value": "ADD"},
+        ],
+        "master_id": 0,  # Discogs' "no master"
     }
-    client = _FakeClient(release_data=data)
-    with patch.object(discogs_lookup, "_get_client", return_value=client):
-        lines = discogs_lookup.release_details(5221810)
-    assert lines[0] == "CD, Album, Reissue · barcode: 5012981234522"
-    assert len(lines[1]) == 240
+    with _with(_FakeClient(release_data=data)):
+        d = discogs_lookup.release_details(5221810)
+    assert d is not None
+    assert d.barcodes == ("5012981234522",)
+    assert d.identifiers == (("SPARS Code", "ADD", ""),)
+    assert d.master_id is None
+
+
+def test_a_fetched_release_carries_its_master() -> None:
+    data = {"id": 5222631, "title": "No Jacket Required", "master_id": 98041}
+    with _with(_FakeClient(release_data=data)):
+        got = discogs_lookup.fetch_release(5222631)
+    assert got is not None
+    assert got.discogs_master_id == 98041
+
+
+def test_search_masters_reads_the_first_page() -> None:
+    class _Hit:
+        def __init__(self, i, title, year):
+            self.data = {"id": i, "title": title, "year": year}
+
+    paged = type(
+        "P",
+        (),
+        {
+            "page": lambda _s, _n: [
+                _Hit(98041, "Phil Collins - No Jacket Required", 1985)
+            ]
+        },
+    )()
+    client = type("C", (), {"search": lambda _s, *a, **k: paged})()
+    with _with(client):
+        hits = discogs_lookup.search_masters("Phil Collins", "No Jacket Required")
+    assert hits == [
+        discogs_lookup.MasterHit(98041, "Phil Collins - No Jacket Required", "1985")
+    ]

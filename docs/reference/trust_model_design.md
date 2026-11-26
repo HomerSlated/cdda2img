@@ -1037,7 +1037,7 @@ time), so the trace is never a retrofit. The dump UI lands with B-7.
 - `_pick_canonical_mcn`, the §10 rung, the AcoustID gate, the renderer: untouched.
 - Run on min Python (3.10) per [[feedback_verify_min_python]]; ship via `scripts/sync.py`.
 
-## 12. Discogs release selection by master (DECIDED 2026-11-26, not yet built)
+## 12. Discogs release selection by master (DECIDED and BUILT 2026-11-26)
 
 kgr, 2026-11-26: *"The main problem is that the primary means of identification, after
 the TOC-based MB DiscID (which only yields the release group), is the barcode, but the
@@ -1045,7 +1045,10 @@ exact match on Discogs often lacks a barcode."* This section replaces barcode-fi
 Discogs identification with **master-first narrowing by what the disc in hand shows**.
 The post-menu chooser shipped the same day (`_discogs_after_menu` →
 `_discogs_candidates_after_menu` → `_choose_discogs_release`, commits `3ebb8c6a`,
-`dc6c7e74`, `1df61ce8`) is a **stopgap** that this design retires.
+`dc6c7e74`, `1df61ce8`) was a **stopgap**, retired by this design the same day. Built in `menu_state.DiscogsMasterScreen` /
+`DiscogsReleaseDetailScreen`, `discogs_lookup.master_countries` / `master_versions` /
+`release_details` / `search_masters`, `mb_lookup.discogs_master_of_release_group`, and
+`cdda2img._discogs_after_menu`; §12.5 lists where the build departs from the text below.
 
 ### 12.0 The case that forced it
 
@@ -1148,8 +1151,8 @@ existing Fetch → Discogs search screen stays as the free-form escape.
 
 - **No master linked on the release group.** Interactive: offer a Discogs master search
   by artist and album (one confirmation, then D3 to D5 on the chosen master). `--auto`:
-  abort (exit 3), since there is no release and no master to record. *Proposed, not yet
-  ruled on.*
+  abort (exit 3), since there is no release and no master to record. (kgr, 2026-11-26:
+  agreed.)
 - **Large masters** (a *Thriller* holds around a thousand CD versions). Country and year
   are applied as server-side filters (`country=`, `released=`), and the facets come with
   the first page, so a pick never pages through the whole master; the list pages only the
@@ -1191,3 +1194,29 @@ is no release.
 5. Live check: kgr re-rips *No Jacket Required* interactively (expects 5222631 under UK,
    1985 + undated) and once under `--auto` (expects `discogs_master_id=98041`, no
    release). `tools/archival_replay.py` on the written container, both ways.
+
+### 12.5 As built (2026-11-26)
+
+- **Unattended** means `--auto` **or** no terminal: the rule is "no human can be
+  asked", which is what D7 is about. The screens never run without a terminal.
+- **Leaving without a pick.** The screen has `[s]` (keep what is set) and `[q]` (put
+  back what was there on entry); there is no separate `[x]`. An interactive rip that
+  leaves with no release records `discogs_release=not_chosen` and aborts. The screen is
+  not opened a second time for an unchanged pressing: it was already offered in the
+  menu (D8).
+- **Pressing changed in the menu, no MusicBrainz link.** The screen reopens on its own
+  after the menu (`metadata_menu.run_discogs_menu`), with that pressing's single
+  barcode hit marked if there is one.
+- **What a pick changes.** Only `discogs_release_id` and `discogs_master_id`. The
+  catalogue fields (label, catalogue number, country, barcode) stay as the
+  MusicBrainz pressing gave them. On *No Jacket Required* that leaves `barcode=
+  5012981234522` (MusicBrainz's, the reissue's) beside Discogs 5222631, which lists
+  none. **Open with kgr**: whether a Discogs pick should overwrite or clear them.
+- **`discogs_master_id` for a settled release** comes from the release itself (its
+  `master_id`, one Discogs request when nothing set it), not from the release group's
+  link: a release can sit under a different master from the one the group links.
+- **R11 is unchanged**: it still reads the master through `discogs_release_id`, and
+  runs before the menu, when an unattended master is not yet known. Reading
+  `discogs_master_id` directly is a follow-up.
+- **Renderers**: `discogs_master_id` is a PROV key; `list`, the catalogue and the RLOG
+  were not changed to name it.

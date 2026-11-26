@@ -691,6 +691,8 @@ def run_metadata_menu(
     auto_apply: bool = False,
     pressing_candidates: Sequence[DiscMeta] = (),
     provenance: dict[str, str] | None = None,
+    discogs_open: bool = False,
+    discogs_barcode_hit: int | None = None,
 ) -> RBIDisc:
     """Display current metadata and run the interactive enrichment/confirmation menu.
 
@@ -706,6 +708,10 @@ def run_metadata_menu(
     screen. *provenance* — when given, the pressing outcome
     (``unique``/``auto_tiebreak``/``manual``/``rejected``) and the chosen
     candidate's MB free text are written into it after the menu closes.
+    *discogs_open* — open the Discogs master screen (trust_model_design.md §12)
+    once the pressing is settled; *discogs_barcode_hit* marks the one release the
+    pressing's barcode found (§12 D6). A release picked there is written to
+    *provenance* (:func:`_record_discogs_pick`).
 
     Returns the (possibly updated) RBIDisc. Returns *disc* unchanged when stdin
     is not a TTY (batch/scripted mode).
@@ -725,11 +731,46 @@ def run_metadata_menu(
         auto_apply=auto_apply,
         pressing_candidates=pressing_candidates,
         pressing_outcome=(provenance or {}).get("release_selection", "unique"),
+        discogs_open=discogs_open,
+        discogs_barcode_hit=discogs_barcode_hit,
     )
     disc = ctl.run()
     if provenance is not None:
         _record_pressing_outcome(provenance, ctl)
+        _record_discogs_pick(provenance, ctl)
     return disc
+
+
+def run_discogs_menu(
+    disc: RBIDisc,
+    *,
+    tui: bool = True,
+    barcode_hit: int | None = None,
+    provenance: dict[str, str] | None = None,
+) -> RBIDisc:
+    """The Discogs master screen on its own, after the metadata menu: the user
+    picked another pressing there and nothing settled its Discogs release
+    (trust_model_design.md §12). Leaving the screen ends it."""
+    from cdda2img.menu_state import MenuController
+
+    ctl = MenuController(
+        disc, tui=tui, discogs_only=True, discogs_barcode_hit=barcode_hit
+    )
+    disc = ctl.run()
+    if provenance is not None:
+        _record_discogs_pick(provenance, ctl)
+    return disc
+
+
+def _record_discogs_pick(provenance: dict[str, str], ctl) -> None:
+    """A Discogs release picked on the master screen, and the filters it was
+    picked under (rbi_spec.md ``discogs_master``)."""
+    if ctl.discogs_pick is None or ctl.disc.discogs_release_id is None:
+        return
+    provenance["discogs_release"] = str(ctl.disc.discogs_release_id)
+    provenance["discogs_release_via"] = "master_versions"
+    provenance["discogs_master"] = ctl.discogs_pick
+    provenance.pop("discogs_release_barcode", None)
 
 
 def _record_pressing_outcome(provenance: dict[str, str], ctl) -> None:

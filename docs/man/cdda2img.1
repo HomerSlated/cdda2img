@@ -248,14 +248,23 @@ and
 are set; both are free, and without them the archive cannot be complete.
 .PP
 A rip names one Discogs release. When the disc ID matches several pressings,
-the metadata menu lists every one of them; pick the one in the drive. If
-MusicBrainz links that pressing to no Discogs release and its barcode does not
-find exactly one, an interactive rip lists the CD releases of the Discogs master
-MusicBrainz links the album to (those from the pressing's country when there
-are any) after the menu, each with its format, barcode, runout, notes and URL;
-they can differ only in print on the label, so cdda2img never picks one itself.
-Declining, or a run without a terminal, aborts (3) with the candidates in the
-failure report.
+the metadata menu lists every one of them; pick the one in the drive. Unless
+MusicBrainz links that pressing to its Discogs release, the menu then opens the
+Discogs screen (also
+.B [d]
+from the main menu): the CD releases of the album's Discogs master, narrowed by
+the country printed on your disc (Discogs' own names, with counts) and a year
+(releases Discogs leaves undated are kept unless you drop them), then a list
+whose entries show the barcode or "not listed", the matrix/runout, SPARS codes
+and Discogs' notes. Releases can differ only in print on the label, so
+cdda2img never picks one itself in an interactive rip; leaving without one
+aborts (3). Under
+.B \-\-auto
+(or with no terminal) a release MusicBrainz links, or the one release the
+pressing's barcode finds, is taken; otherwise the album's Discogs master is
+recorded as
+.B discogs_master_id
+with no release.
 .PP
 .BI "cdda2img rip " "[options]"
 .TP

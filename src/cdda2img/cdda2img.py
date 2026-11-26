@@ -748,6 +748,8 @@ def _add_release_provenance(provenance: dict, disc: RBIDisc) -> None:  # noqa: C
         provenance["mb_release_group_id"] = disc.mb_release_group_id
     if disc.discogs_release_id is not None:
         provenance["discogs_release_id"] = str(disc.discogs_release_id)
+    if disc.discogs_master_id is not None:
+        provenance["discogs_master_id"] = str(disc.discogs_master_id)
     if disc.set_title:
         provenance["set_title"] = disc.set_title
     # R14: aggregate pre-emphasis flag (cdrdao path populates; other parsers
@@ -2755,6 +2757,10 @@ def _finalize_import(
     pressing_candidates = list(mb_result.menu_candidates)
     if len(pressing_candidates) > 1:
         provenance["release_selection"] = "auto_tiebreak"
+    # §12 D6/D8: an interactive rip opens the Discogs master screen unless
+    # MusicBrainz's own link settled the release; a single barcode hit is a
+    # marked row there, not a decision.
+    via = provenance.get("discogs_release_via")
     disc = run_metadata_menu(
         disc,
         source_pcm=pcm_file,
@@ -2763,14 +2769,19 @@ def _finalize_import(
         auto_apply=auto_apply,
         pressing_candidates=pressing_candidates,
         provenance=provenance,
+        discogs_open=archival and via != "mb_link",
+        discogs_barcode_hit=disc.discogs_release_id if via == "barcode" else None,
     )
     _note_corroboration_target(provenance, mb_result.selected_release_id, disc)
-    _discogs_after_menu(
+    disc = _discogs_after_menu(
         disc,
         provenance,
         mb_result.selected_release_id,
-        choose=_discogs_chooser(archival=archival, auto=auto_apply),
+        reopen=_discogs_reopener(
+            archival=archival, auto=auto_apply, tui=tui, provenance=provenance
+        ),
     )
+    _settle_discogs_master(disc)
     _require_discogs_release(provenance, archival=archival)
     # N6: NOW store the score, against the post-menu disc and provenance. Sited
     # after `_note_corroboration_target` rather than straight after the menu —
@@ -4164,37 +4175,54 @@ def _discogs_after_menu(
     provenance: dict[str, str],
     provisional: str | None,
     *,
-    choose: Callable[[list[DiscMeta]], DiscMeta | None] | None = None,
-) -> None:
-    """Make the Discogs release follow the pressing the menu settled on.
+    reopen: Callable[[RBIDisc, int | None], RBIDisc] | None = None,
+) -> RBIDisc:
+    """Settle the Discogs release for the pressing the menu settled on
+    (trust_model_design.md §12). Returns the disc, which *reopen* may replace.
 
-    Before the menu, :func:`_discogs_release` resolved it for the pressing the
-    ladder pinned (``provisional``). A user who picks another pressing (ABBA
-    *Gold*: 09cc6e86 and 159d12a8 share a disc ID and a barcode, and the ladder
-    can only break that tie alphabetically) needs that pressing's Discogs
-    release: its MusicBrainz link is followed. With no link, a release found by
-    a single barcode hit still stands when the chosen pressing carries that same
-    barcode (Discogs then has one release for it); otherwise
-    :func:`_discogs_candidates_after_menu` looks again for the chosen pressing
-    (until 2026-11-26 the provisional pressing's barcode outcome was reused, so
-    picking the GB pressing of *No Jacket Required* reported the German
-    barcode's 20 hits). A Discogs release the user set in the menu is theirs and
-    is recorded as ``discogs_release_via=menu``.
-
-    The pressing left unchanged with no Discogs release resolved is looked up
-    again only when there is a *choose* (an interactive rip's chooser) to settle
-    it; with no chooser, or none picked, :func:`_require_discogs_release` aborts.
+    - A release picked on the Discogs master screen
+      (``discogs_release_via=master_versions``) or set from the menu's Discogs
+      search (``menu``) is the user's and stands.
+    - When the user picked another pressing, its MusicBrainz Discogs link is
+      followed (ABBA *Gold*: 09cc6e86 and 159d12a8 share a disc ID and a barcode,
+      ``mb_link_after_menu``); a release found by the provisional pressing's single
+      barcode hit stands when the chosen pressing carries that barcode.
+    - Otherwise *reopen* (an interactive rip) opens the Discogs master screen for
+      the chosen pressing, its single barcode hit marked (§12 D6); unattended,
+      that hit settles it (``barcode_after_menu``) and, failing that, the master
+      MusicBrainz links the release group to is recorded instead of a release
+      (``discogs_release=master_only:<id>``, §12 D7).
     """
+    if provenance.get("discogs_release_via") == "master_versions":
+        return disc
     auto = provenance.get("discogs_release")
     if disc.discogs_release_id is not None and auto != str(disc.discogs_release_id):
         provenance["discogs_release"] = str(disc.discogs_release_id)
         provenance["discogs_release_via"] = "menu"
-        return
+        return disc
     chosen = disc.mb_release_id
-    if not chosen or chosen == provisional:
-        if choose is not None and disc.discogs_release_id is None:
-            _discogs_candidates_after_menu(disc, provenance, disc.barcode, choose)
-        return
+    if chosen and chosen != provisional:
+        return _discogs_for_new_pressing(disc, provenance, chosen, reopen)
+    if disc.discogs_release_id is not None:
+        return disc
+    if reopen is not None:
+        # The master screen was open in the menu (§12 D8) and nothing was taken.
+        provenance["discogs_release"] = "not_chosen"
+        return disc
+    _record_discogs_master_only(disc, provenance)
+    return disc
+
+
+def _discogs_for_new_pressing(
+    disc: RBIDisc,
+    provenance: dict[str, str],
+    chosen: str,
+    reopen: Callable[[RBIDisc, int | None], RBIDisc] | None,
+) -> RBIDisc:
+    """The Discogs release for a pressing the user picked in the menu: its
+    MusicBrainz link; or the provisional release, when it was found by the same
+    barcode; or the master screen (interactive, its single barcode hit marked);
+    or, unattended, that hit, else the master (:func:`_discogs_after_menu`)."""
     from cdda2img.mb_lookup import discogs_link_and_barcode
 
     linked, chosen_barcode = discogs_link_and_barcode(chosen)
@@ -4204,167 +4232,100 @@ def _discogs_after_menu(
         and chosen_barcode
         and chosen_barcode == provenance.get("discogs_release_barcode")
     ):
-        return
+        return disc
     provenance.pop("discogs_release_via", None)
     disc.discogs_release_id = None
-    if linked is None:
-        # The chosen pressing's own barcode, as MusicBrainz holds it: never
-        # disc.barcode, which still names the provisional pressing when the
-        # chosen one has none.
-        _discogs_candidates_after_menu(disc, provenance, chosen_barcode, choose)
-        return
-    disc.discogs_release_id = _discogs_release(disc, provenance, None, linked_id=linked)
-    if disc.discogs_release_id is not None:
-        provenance["discogs_release_via"] = "mb_link_after_menu"
+    disc.discogs_master_id = None
+    if linked is not None:
+        disc.discogs_release_id = _discogs_release(
+            disc, provenance, None, linked_id=linked
+        )
+        if disc.discogs_release_id is not None:
+            provenance["discogs_release_via"] = "mb_link_after_menu"
+        return disc
+    # The chosen pressing's own barcode, as MusicBrainz holds it: never
+    # disc.barcode, which still names the provisional pressing when the chosen
+    # one has none.
+    hit = _single_barcode_hit(disc, provenance, chosen_barcode)
+    if reopen is not None:
+        disc = reopen(disc, hit.discogs_release_id if hit else None)
+        if provenance.get("discogs_release_via") != "master_versions":
+            provenance["discogs_release"] = "not_chosen"
+        return disc
+    if hit is not None:
+        disc.discogs_release_id = hit.discogs_release_id
+        provenance["discogs_release"] = str(hit.discogs_release_id)
+        provenance["discogs_release_via"] = "barcode_after_menu"
+        return disc
+    _record_discogs_master_only(disc, provenance)
+    return disc
 
 
-def _discogs_candidates_after_menu(
-    disc: RBIDisc,
-    provenance: dict[str, str],
-    barcode: str | None,
-    choose: Callable[[list[DiscMeta]], DiscMeta | None] | None,
-) -> None:
-    """Find the Discogs release of the settled pressing when MusicBrainz links it
-    to none.
-
-    1. A search by the pressing's *barcode* that finds exactly one release naming
-       the album settles it (``discogs_release_via=barcode_after_menu``), the
-       same rule the pre-menu resolver applies.
-    2. Otherwise the candidates are the CD versions of the Discogs **master**
-       MusicBrainz links the release group to, those from the pressing's
-       country when there are any, plus any barcode hits. A barcode search alone
-       is not enough: *No Jacket Required*'s GB pressing (MusicBrainz 0a19729e)
-       carries barcode 5012981234522 on MusicBrainz, which finds only the two
-       barcoded reissues (5221810, 19343422), while the disc kgr held was
-       Discogs 5222631, "No barcode", one of master 98041's eleven UK CDs.
-    3. *choose* (an interactive rip) offers them (``via=chosen``); nothing here
-       picks one, since they can differ only in label print or runout. With no
-       pick, ``discogs_release`` says why and ``discogs_release_candidates``
-       names them for :func:`_require_discogs_release`.
-    """
+def _single_barcode_hit(
+    disc: RBIDisc, provenance: dict[str, str], barcode: str | None
+) -> DiscMeta | None:
+    """The one Discogs release *barcode* finds naming the album, or ``None``.
+    Records ``discogs_barcode_after_menu=<barcode>:<n>``."""
     from cdda2img import discogs_lookup
     from cdda2img.barcode import normalize_barcode
+
+    if not barcode or not discogs_lookup.is_available():
+        return None
+    code = normalize_barcode(barcode, require_check_digit=False) or barcode
+    hits = [
+        h
+        for h in discogs_lookup.search_by_barcode(code)
+        if h.discogs_release_id and _albums_match(disc.album, h.album)
+    ]
+    provenance["discogs_barcode_after_menu"] = f"{code}:{len(hits)}"
+    return hits[0] if len(hits) == 1 else None
+
+
+def _record_discogs_master_only(disc: RBIDisc, provenance: dict[str, str]) -> None:
+    """Unattended, with no single Discogs release: record the master MusicBrainz
+    links the release group to (§12 D7). Discogs numbers masters and releases
+    separately, so it goes in ``discogs_master_id`` and the release stays empty.
+    """
     from cdda2img.mb_lookup import discogs_master_of_release_group
 
-    if not discogs_lookup.is_available():
-        provenance["discogs_release"] = "disabled"
-        return
-    hits: list[DiscMeta] = []
-    code = (
-        (normalize_barcode(barcode, require_check_digit=False) or barcode)
-        if barcode
-        else None
-    )
-    if code:
-        hits = [
-            h
-            for h in discogs_lookup.search_by_barcode(code)
-            if h.discogs_release_id and _albums_match(disc.album, h.album)
-        ]
-        provenance["discogs_barcode_after_menu"] = f"{code}:{len(hits)}"
-    if len(hits) == 1:
-        _settle_discogs(disc, provenance, hits[0], "barcode_after_menu", code)
-        return
-    pool: list[DiscMeta] = []
     group = disc.mb_release_group_id
     master = discogs_master_of_release_group(group) if group else None
-    if master is not None:
-        versions = discogs_lookup.master_versions(master)
-        country = (disc.country or "").upper()
-        local = [v for v in versions if country and v.country == country]
-        pool = local or versions
-        where = f"@{country}" if local else ""
-        provenance["discogs_master"] = f"{master}:{len(pool)}{where}"
-    seen = {v.discogs_release_id for v in pool}
-    pool += [h for h in hits if h.discogs_release_id not in seen]
-    picked = choose(pool) if pool and choose is not None else None
-    if picked is not None:
-        _settle_discogs(disc, provenance, picked, "chosen", code)
+    if master is None:
+        provenance["discogs_release"] = "no_master"
         return
-    why = "no_match" if not pool else f"ambiguous_{len(pool)}"
-    provenance["discogs_release"] = f"after_menu:{why}"
-    if pool:
-        provenance["discogs_release_candidates"] = ",".join(
-            str(v.discogs_release_id) for v in pool
-        )
+    disc.discogs_master_id = master
+    provenance["discogs_release"] = f"master_only:{master}"
 
 
-def _settle_discogs(
-    disc: RBIDisc,
-    provenance: dict[str, str],
-    release: DiscMeta,
-    via: str,
-    barcode: str | None,
-) -> None:
-    """Record *release* as the disc's Discogs release, found *via*."""
-    disc.discogs_release_id = release.discogs_release_id
-    provenance["discogs_release"] = str(release.discogs_release_id)
-    provenance["discogs_release_via"] = via
-    if barcode and via == "barcode_after_menu":
-        provenance["discogs_release_barcode"] = barcode
-    provenance.pop("discogs_release_candidates", None)
+def _settle_discogs_master(disc: RBIDisc) -> None:
+    """Fill ``discogs_master_id`` from the settled release when nothing set it:
+    the release's own master, one Discogs request."""
+    if disc.discogs_release_id is None or disc.discogs_master_id is not None:
+        return
+    from cdda2img import discogs_lookup
+
+    record = discogs_lookup.fetch_release(disc.discogs_release_id)
+    if record is not None:
+        disc.discogs_master_id = record.discogs_master_id
 
 
-def _discogs_chooser(
-    *, archival: bool, auto: bool
-) -> Callable[[list[DiscMeta]], DiscMeta | None] | None:
-    """The post-menu Discogs chooser, for an interactive ``rip`` only: ``rip`` is
-    the pipeline that requires a single Discogs release, and a prompt needs a
+def _discogs_reopener(
+    *, archival: bool, auto: bool, tui: bool, provenance: dict[str, str]
+) -> Callable[[RBIDisc, int | None], RBIDisc] | None:
+    """The post-menu Discogs master screen, for an interactive ``rip`` only:
+    ``rip`` is the pipeline that requires a Discogs release, and a screen needs a
     terminal and no ``--auto``. ``import`` shares :func:`_finalize_import` and is
     never asked."""
-    return _choose_discogs_release if archival and _interactive(auto) else None
+    if not (archival and _interactive(auto)):
+        return None
+    from cdda2img.metadata_menu import run_discogs_menu
 
+    def reopen(disc: RBIDisc, barcode_hit: int | None) -> RBIDisc:
+        return run_discogs_menu(
+            disc, tui=tui, barcode_hit=barcode_hit, provenance=provenance
+        )
 
-#: Above this many candidates the chooser lists them without fetching each
-#: release's details (one Discogs request apiece; Discogs allows 60 a minute).
-_DISCOGS_CHOOSER_DETAILS_MAX = 20
-
-
-def _choose_discogs_release(
-    candidates: list[DiscMeta],
-    *,
-    input_fn: Callable[[str], str] = input,
-    details: Callable[[int], list[str]] | None = None,
-) -> DiscMeta | None:
-    """Ask the user which Discogs release is the disc; ``None`` = none of them.
-
-    One row per candidate (id, country, year, label, catalogue number), then
-    what tells them apart (format, barcode or "no barcode", runout, the notes:
-    :func:`discogs_lookup.release_details`, fetched when there are at most
-    :data:`_DISCOGS_CHOOSER_DETAILS_MAX`) and the URL. Enter or Ctrl-D declines,
-    which aborts the rip: a guess is not an archive.
-    """
-    if details is None:
-        from cdda2img.discogs_lookup import release_details as details
-    show = len(candidates) <= _DISCOGS_CHOOSER_DETAILS_MAX
-    if show:
-        print(f"\n   Fetching {len(candidates)} Discogs releases...")
-    print(f"\n   Discogs lists {len(candidates)} releases this disc could be:")
-    for i, c in enumerate(candidates, start=1):
-        rid = c.discogs_release_id
-        bits = [
-            c.country or "?",
-            (c.release_date or "")[:4] or "----",
-            c.label or "?",
-            c.catalog_number or "?",
-        ]
-        print(f"\n   {i:>3}  {rid}  {'  '.join(bits)}")
-        for line in details(rid) if show and rid else []:
-            for part in textwrap.wrap(line, 70)[:4]:
-                print(f"        {part}")
-        print(f"        https://www.discogs.com/release/{rid}")
-    while True:
-        try:
-            answer = input_fn(
-                f"\n   Which is your disc? [1-{len(candidates)}, Enter = none] "
-            )
-        except EOFError:
-            return None
-        answer = answer.strip()
-        if not answer:
-            return None
-        if answer.isdigit() and 1 <= int(answer) <= len(candidates):
-            return candidates[int(answer) - 1]
+    return reopen
 
 
 def _require_discogs_release(provenance: dict[str, str], *, archival: bool) -> None:
@@ -4378,6 +4339,11 @@ def _require_discogs_release(provenance: dict[str, str], *, archival: bool) -> N
     from cdda2img import query_log
 
     if not archival:
+        return
+    if provenance.get("discogs_release", "").startswith("master_only:"):
+        # Unattended (--auto, no terminal): the master stands in for the release
+        # (trust_model_design.md §12 D7, kgr 2026-11-26). Only the unattended path
+        # writes it; an interactive rip still needs a release.
         return
     why = _service_gap("Discogs", "discogs_release", provenance)
     if why is None:

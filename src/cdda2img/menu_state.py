@@ -152,6 +152,8 @@ class MenuState(Enum):
     ORIGINAL_RELEASE = auto()
     PRESSING = auto()
     PRESSING_DETAIL = auto()
+    DISCOGS_MASTER = auto()
+    DISCOGS_RELEASE_DETAIL = auto()
     DONE = auto()
 
 
@@ -239,6 +241,7 @@ class MainScreen(Screen):
                 f"  [s]  Choose the pressing "
                 f"({len(ctl.pressing_candidates)} candidates matched this TOC)"
             )
+        print(f"  [d]  Choose the Discogs release ({_discogs_state(ctl.disc)})")
         print("  [u]  Reset to original (undo all changes this session)")
         print("  [c]  Clear all metadata")
         print()
@@ -257,6 +260,8 @@ class MainScreen(Screen):
             return Push(OriginalReleaseScreen())
         if choice == "s" and len(ctl.pressing_candidates) > 1:
             return Push(PressingScreen(ctl.pressing_candidates, ctl.disc.mb_release_id))
+        if choice == "d":
+            return Push(DiscogsMasterScreen(barcode_hit=ctl.discogs_barcode_hit))
         if choice == "u":
             ctl.disc = copy.deepcopy(ctl._original_disc)
             ctl.mb_rg_id = None
@@ -268,9 +273,9 @@ class MainScreen(Screen):
             ctl.banner = "All metadata cleared."
             return Stay()
         keys = (
-            "a / f / e / r / s / u / c"
+            "a / f / e / r / s / d / u / c"
             if len(ctl.pressing_candidates) > 1
-            else ("a / f / e / r / u / c")
+            else ("a / f / e / r / d / u / c")
         )
         ctl.banner = f"Unknown command. Use {keys}."
         return Stay()
@@ -1239,6 +1244,411 @@ class PressingDetailScreen(Screen):
         return Pop()
 
 
+def _discogs_state(disc: RBIDisc) -> str:
+    """One phrase for the main menu: what Discogs release is settled now."""
+    if disc.discogs_release_id is not None:
+        return f"now {disc.discogs_release_id}"
+    if disc.discogs_master_id is not None:
+        return f"master {disc.discogs_master_id}, no release"
+    return "none chosen"
+
+
+def _preselected_countries(
+    countries: tuple[tuple[str, int], ...], code: str | None
+) -> tuple[str, ...]:
+    """The Discogs country names that map to MusicBrainz country *code* (GB ->
+    "UK"; XE -> "Europe" and the joint regions folded into it). Empty when none
+    map, or for XW, which names no place (§12 D3)."""
+    from cdda2img.countries import discogs_country_code
+
+    code = (code or "").upper()
+    if not code or code == "XW":
+        return ()
+    return tuple(name for name, _n in countries if discogs_country_code(name) == code)
+
+
+class DiscogsMasterScreen(Screen):
+    """Choose the Discogs release by narrowing the album's Discogs master
+    (trust_model_design.md §12, kgr 2026-11-26).
+
+    Phases on one screen, so the filters survive moving between them:
+    ``master`` (only when MusicBrainz links the release group to no master: a
+    Discogs master search by artist and album), ``country`` (the master's CD
+    countries with counts, Discogs' own names, the settled pressing's country
+    marked), ``year`` (that set's years with counts plus undated; a chosen year
+    keeps the undated versions unless [u] drops them, since Discogs leaves most
+    CD versions undated: 60 of 108 on *No Jacket Required*), then ``list`` (a
+    paged list; a row opens :class:`DiscogsReleaseDetailScreen`).
+
+    The first paint looks up the master and its countries: the one deliberate
+    exception to a pure repaint, as in :class:`PressingDetailScreen`, guarded so
+    a repaint does not repeat it.
+    """
+
+    state = MenuState.DISCOGS_MASTER
+
+    def __init__(self, *, barcode_hit: int | None = None) -> None:
+        self.barcode_hit = barcode_hit
+        self.loaded = False
+        self.available = True
+        self.master: int | None = None
+        self.phase = "country"
+        self.countries: tuple[tuple[str, int], ...] = ()
+        self.total = 0
+        self.marked: tuple[str, ...] = ()
+        self.chosen: tuple[str, ...] = ()
+        self.versions = None  # discogs_lookup.MasterVersions
+        self.year: str | None = None
+        self.keep_undated = True
+        self.page = 0
+        self.hits: list = []  # discogs_lookup.MasterHit, master phase
+        self._entry: tuple[RBIDisc, str | None] | None = None
+
+    # -- loading ------------------------------------------------------------
+
+    def _load(self, ctl: MenuController) -> None:
+        from cdda2img import discogs_lookup
+        from cdda2img.mb_lookup import discogs_master_of_release_group
+
+        self.loaded = True
+        self._entry = (copy.deepcopy(ctl.disc), ctl.discogs_pick)
+        if not discogs_lookup.is_available():
+            self.available = False
+            return
+        group = ctl.disc.mb_release_group_id
+        print("  Looking up the album's Discogs master...")
+        master = discogs_master_of_release_group(group) if group else None
+        if master is None:
+            self.phase = "master"
+            return
+        self._open_master(ctl, master)
+
+    def _open_master(self, ctl: MenuController, master: int) -> None:
+        from cdda2img import discogs_lookup
+
+        self.master = master
+        self.phase = "country"
+        found = discogs_lookup.master_countries(master)
+        self.countries, self.total = found if found else ((), 0)
+        self.marked = _preselected_countries(self.countries, ctl.disc.country)
+
+    # -- rendering ----------------------------------------------------------
+
+    def render(self, ctl: MenuController) -> None:
+        from cdda2img.metadata_menu import _header
+
+        if not self.loaded:
+            self._load(ctl)
+        _header(self._title())
+        if not self.available:
+            print("  Discogs requires a free personal access token (DISCOGS_TOKEN).")
+        elif self.phase == "master":
+            self._render_master(ctl)
+        elif self.phase == "country":
+            self._render_country()
+        elif self.phase == "year":
+            self._render_year()
+        else:
+            self._render_list(ctl)
+        if ctl.banner:
+            print()
+            print(f"  ! {ctl.banner}")
+            ctl.banner = ""
+
+    def _title(self) -> str:
+        if self.master is None:
+            return "Choose the Discogs release"
+        return f"Choose the Discogs release  (master {self.master}: {self.total} CDs)"
+
+    def _render_master(self, ctl: MenuController) -> None:
+        print("  MusicBrainz links this album to no Discogs master.")
+        print(
+            f"  Search Discogs for: {ctl.disc.artist or '?'} - {ctl.disc.album or '?'}"
+        )
+        print()
+        for i, h in enumerate(self.hits, start=1):
+            print(f"  {i:>3}  {h.master_id:<9}  {h.year or '----'}  {h.title}")
+        print()
+        print("  [f] search    1-n choose a master    [s] save and continue")
+
+    def _render_country(self) -> None:
+        print("  Which country does your disc say it was made in? Discogs' own names:")
+        print()
+        for i, (name, n) in enumerate(self.countries, start=1):
+            mark = "*" if name in self.marked else " "
+            print(f"  {i:>3}{mark} {name} ({n})")
+        print()
+        if self.marked:
+            print("  * = your pressing's country, from MusicBrainz")
+        print("  Number(s), e.g. 3 or 3,17.  Enter = the marked one(s).")
+        print("  [a] every country    [s] save and continue    [q] exit without saving")
+
+    def _render_year(self) -> None:
+        v = self.versions
+        where = ", ".join(self.chosen) or "every country"
+        print(f"  {where}: {v.total if v else 0} CDs. Which year?")
+        print()
+        for i, (year, n) in enumerate(v.years if v else (), start=1):
+            print(f"  {i:>3}  {year} ({n})")
+        print(f"       undated: {v.undated if v else 0}")
+        print()
+        undated = "kept" if self.keep_undated else "dropped"
+        print(f"  Number = that year (undated releases {undated}).  Enter = any year.")
+        print("  [u] keep/drop undated   [c] country")
+        print("  [s] save and continue   [q] exit without saving")
+
+    def shown(self) -> list:
+        """The versions the list offers under the current filters."""
+        if self.versions is None:
+            return []
+        return [
+            v
+            for v in self.versions.versions
+            if self.year is None
+            or v.year == self.year
+            or (v.year is None and self.keep_undated)
+        ]
+
+    def filters(self) -> str:
+        """PROV ``discogs_master``: ``<id>:<shown>/<total>[@<countries>][,<year>
+        [+undated]]`` (rbi_spec.md)."""
+        text = f"{self.master}:{len(self.shown())}/{self.total}"
+        if self.chosen:
+            text += "@" + "|".join(self.chosen)
+        if self.year is not None:
+            text += f",{self.year}" + ("+undated" if self.keep_undated else "")
+        return text
+
+    def _render_list(self, ctl: MenuController) -> None:
+        from cdda2img.metadata_menu import _PAGE, _trunc
+
+        rows = self.shown()
+        pages = max(1, (len(rows) + _PAGE - 1) // _PAGE)
+        self.page = min(self.page, pages - 1)
+        where = ", ".join(self.chosen) or "every country"
+        year = self.year or "any year"
+        if self.year and self.keep_undated:
+            year += " + undated"
+        print(f"  {where}, {year}: {len(rows)} releases   [{self.page + 1}/{pages}]")
+        if self.versions is not None and self.versions.truncated:
+            print("  ! Discogs has more than could be listed; narrow the country.")
+        print()
+        print(
+            f"  {'#':>3}  {'Discogs':<9} {'Country':<10} {'Year':<4}  "
+            f"{'Label':<12}  {'Cat #':<14}  Format"
+        )
+        start = self.page * _PAGE
+        for i, v in enumerate(rows[start : start + _PAGE], start=start + 1):
+            mark = "*" if v.release_id == ctl.disc.discogs_release_id else " "
+            hit = "=" if v.release_id == self.barcode_hit else " "
+            print(
+                f"  {i:>3}{mark}{hit}{v.release_id:<9} {_trunc(v.country, 10):<10}"
+                f" {v.year or '----':<4}  {_trunc(v.label, 12):<12}"
+                f"  {_trunc(v.catno, 14):<14}  {_trunc(v.formats, 18)}"
+            )
+        print()
+        legend = "  * = selected now"
+        if self.barcode_hit is not None:
+            legend += "    = = the one release your pressing's barcode found"
+        print(legend)
+        nav = ["Number = details"]
+        if self.page > 0:
+            nav.append("[p] prev")
+        if self.page < pages - 1:
+            nav.append("[n] next")
+        nav += ["[c] country", "[y] year"]
+        print("  " + "   ".join(nav))
+        print("  [s] save and continue   [q] exit without saving")
+
+    # -- input --------------------------------------------------------------
+
+    def handle_input(self, ctl: MenuController) -> Nav:
+        from cdda2img.metadata_menu import _prompt
+
+        choice = _prompt("  > ").strip().lower()
+        if choice in ("s", "b"):
+            return Pop()
+        if choice == "q":
+            if self._entry is not None:
+                ctl.disc, ctl.discogs_pick = self._entry
+            ctl.banner = "Discogs release left as it was."
+            return Pop()
+        if not self.available:
+            return Pop()
+        handler = {
+            "master": self._input_master,
+            "country": self._input_country,
+            "year": self._input_year,
+        }.get(self.phase, self._input_list)
+        return handler(ctl, choice)
+
+    def _input_master(self, ctl: MenuController, choice: str) -> Nav:
+        from cdda2img import discogs_lookup
+
+        if choice in ("f", ""):
+            print("  Searching Discogs masters...")
+            self.hits = discogs_lookup.search_masters(
+                ctl.disc.artist or "", ctl.disc.album or ""
+            )
+            if not self.hits:
+                ctl.banner = "Discogs found no master for that artist and album."
+            return Stay()
+        if choice.isdigit() and 1 <= int(choice) <= len(self.hits):
+            self._open_master(ctl, self.hits[int(choice) - 1].master_id)
+            return Stay()
+        ctl.banner = "Invalid selection."
+        return Stay()
+
+    def _input_country(self, ctl: MenuController, choice: str) -> Nav:
+        if choice == "a":
+            chosen: tuple[str, ...] = ()
+        elif choice == "":
+            if not self.marked:
+                ctl.banner = "Nothing is marked: choose a number, or [a] for all."
+                return Stay()
+            chosen = self.marked
+        else:
+            try:
+                picks = [int(x) for x in choice.replace(" ", "").split(",") if x]
+            except ValueError:
+                ctl.banner = "Invalid selection."
+                return Stay()
+            if not picks or not all(1 <= n <= len(self.countries) for n in picks):
+                ctl.banner = "Invalid selection."
+                return Stay()
+            chosen = tuple(self.countries[n - 1][0] for n in picks)
+        return self._fetch_versions(ctl, chosen)
+
+    def _fetch_versions(self, ctl: MenuController, chosen: tuple[str, ...]) -> Nav:
+        from cdda2img import discogs_lookup
+
+        print("  Fetching the list from Discogs...")
+        found = discogs_lookup.master_versions(self.master or 0, countries=chosen)
+        if found is None:
+            ctl.banner = "Discogs did not answer; try again."
+            return Stay()
+        self.chosen, self.versions = chosen, found
+        self.year, self.page = None, 0
+        self.phase = "year" if found.years else "list"
+        return Stay()
+
+    def _input_year(self, ctl: MenuController, choice: str) -> Nav:
+        years = self.versions.years if self.versions else ()
+        if choice == "u":
+            self.keep_undated = not self.keep_undated
+            return Stay()
+        if choice == "c":
+            self.phase = "country"
+            return Stay()
+        if choice == "":
+            self.year = None
+        elif choice.isdigit() and 1 <= int(choice) <= len(years):
+            self.year = years[int(choice) - 1][0]
+        else:
+            ctl.banner = "Invalid selection."
+            return Stay()
+        self.phase, self.page = "list", 0
+        return Stay()
+
+    def _input_list(self, ctl: MenuController, choice: str) -> Nav:
+        rows = self.shown()
+        if choice == "n":
+            self.page += 1
+            return Stay()
+        if choice == "p":
+            self.page = max(0, self.page - 1)
+            return Stay()
+        if choice == "c":
+            self.phase = "country"
+            return Stay()
+        if choice == "y":
+            self.phase = "year" if self.versions and self.versions.years else "list"
+            return Stay()
+        if choice.isdigit() and 1 <= int(choice) <= len(rows):
+            return Push(DiscogsReleaseDetailScreen(rows[int(choice) - 1], self))
+        ctl.banner = "Invalid selection."
+        return Stay()
+
+
+class DiscogsReleaseDetailScreen(Screen):
+    """One Discogs release in full, then [a] to take it (§12 D5): barcode or
+    "not listed", every identifier (runout, SPARS, ...), the notes, the URL.
+    Fetched once, on first paint, for this release only."""
+
+    state = MenuState.DISCOGS_RELEASE_DETAIL
+
+    def __init__(self, version, parent: DiscogsMasterScreen) -> None:
+        self.version = version
+        self.parent = parent
+        self.details = None
+        self._fetched = False
+
+    def render(self, ctl: MenuController) -> None:
+        import textwrap
+
+        from cdda2img.metadata_menu import _header
+
+        if not self._fetched:
+            from cdda2img.discogs_lookup import release_details
+
+            self._fetched = True
+            print("  Fetching the release from Discogs...")
+            self.details = release_details(self.version.release_id)
+        v, d = self.version, self.details
+        _header(f"Discogs release {v.release_id}")
+        if d is None:
+            print("  Discogs did not return the release; the list's summary follows.")
+            print(
+                f"  {v.title} | {v.country} | {v.year or '----'} | {v.label} | {v.catno}"
+            )
+        else:
+            print(f"  Title     : {d.title}")
+            print(f"  Country   : {d.country or '-'}     Released: {d.released or '-'}")
+            print(f"  Label     : {d.label or '-'}")
+            print(f"  Cat #     : {d.catno or '-'}")
+            print(f"  Format    : {'; '.join(d.formats) or '-'}")
+            print(f"  Barcode   : {', '.join(d.barcodes) or 'not listed'}")
+            for kind, value, note in d.identifiers:
+                label = f"{kind}{f' ({note})' if note else ''}"
+                print(f"  {_trunc_label(label)}: {value}")
+            if d.notes:
+                print()
+                for para in d.notes.splitlines():
+                    for line in textwrap.wrap(para, 74) or [""]:
+                        print(f"  {line}")
+        print()
+        print(f"  https://www.discogs.com/release/{v.release_id}")
+        print()
+        print("  [a] this is my disc    any other key: back to the list")
+
+    def handle_input(self, ctl: MenuController) -> Nav:
+        from dataclasses import replace
+
+        from cdda2img.metadata_menu import _prompt
+
+        if _prompt("  > ").strip().lower() != "a":
+            return Pop()
+        master = (
+            self.details.master_id if self.details else None
+        ) or self.parent.master
+        ctl.disc = replace(
+            ctl.disc,
+            discogs_release_id=self.version.release_id,
+            discogs_master_id=master,
+        )
+        ctl.discogs_pick = self.parent.filters()
+        ctl.banner = (
+            f"Discogs release set to {self.version.release_id}. "
+            "[s] keeps it, [q] discards it."
+        )
+        return Pop()
+
+
+def _trunc_label(label: str) -> str:
+    """An identifier's label, padded or cut to the detail screen's 10 columns."""
+    return f"{label[:10]:<10}" if len(label) <= 10 else label
+
+
 class MenuController:
     """Screen-stack controller for the metadata menu.
 
@@ -1261,6 +1671,9 @@ class MenuController:
         auto_apply: bool = False,
         pressing_candidates: Sequence[DiscMeta] = (),
         pressing_outcome: str = "unique",
+        discogs_open: bool = False,
+        discogs_barcode_hit: int | None = None,
+        discogs_only: bool = False,
     ) -> None:
         self.disc: RBIDisc = disc
         self._original_disc: RBIDisc = copy.deepcopy(disc)  # undo savepoint
@@ -1296,7 +1709,22 @@ class MenuController:
         self.banner: str = ""
         # True once the user accepts at the root; ends run().
         self.done: bool = False
-        self.stack: list[Screen] = [MainScreen()]
+        # §12: the Discogs release picked on DiscogsMasterScreen, as the PROV
+        # `discogs_master` filter record; None = nothing picked there.
+        self.discogs_pick: str | None = None
+        self.discogs_barcode_hit = discogs_barcode_hit
+        if discogs_only:
+            # Post-menu: the pressing changed and nothing settled its Discogs
+            # release. The screen is the root, so leaving it ends the run.
+            self.stack: list[Screen] = [
+                DiscogsMasterScreen(barcode_hit=discogs_barcode_hit)
+            ]
+            return
+        self.stack = [MainScreen()]
+        if discogs_open:
+            # §12 D8: below the pressing screen, so it opens once the pressing
+            # is settled and pre-selects that pressing's country.
+            self.stack.append(DiscogsMasterScreen(barcode_hit=discogs_barcode_hit))
         if len(self.pressing_candidates) > 1:
             # N5: the pressing screen OPENS on a multi-candidate disc — kgr's
             # wording is that no-auto "will activate the alternatives menu",

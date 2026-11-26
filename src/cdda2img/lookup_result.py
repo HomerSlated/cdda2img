@@ -34,6 +34,7 @@ class DiscMeta:
     mb_release_id: str | None = None  # MusicBrainz release UUID
     mb_release_group_id: str | None = None  # MusicBrainz release group UUID
     discogs_release_id: int | None = None  # Discogs integer release ID
+    discogs_master_id: int | None = None  # Discogs master (its own numbering)
     release_date: str | None = None  # YYYY, YYYY-MM, or YYYY-MM-DD
     original_release_date: str | None = None
     country: str | None = None
