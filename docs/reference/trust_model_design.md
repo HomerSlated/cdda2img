@@ -1244,3 +1244,142 @@ is no release.
   and Toca under `--digital-media` (51867) all pass, each with its release.
 - **Renderers**: `discogs_master_id` is a PROV key; `list`, the catalogue and the RLOG
   were not changed to name it.
+
+## 13. Matching MusicBrainz and Discogs releases field by field (DECIDED 2026-11-26, not yet built)
+
+kgr, 2026-11-26: *"The problem we're dealing with here is sloppy submissions, with little
+to no auditing. So now we're forced to grab missing data from multiple sources, and try
+to match it to a single product."* §12 settled *which Discogs release* a disc is; this
+section pairs it with *which MusicBrainz pressing*, and fills each side's gaps from the
+other.
+
+### 13.0 The cases that forced it
+
+- **Dire Straits, *Brothers in Arms*** (disc ID `fiOAciPzXBMSgC_0Fm.AZ4V3tKg-`, measured
+  2026-11-26): five MusicBrainz pressings. Four (5a5330cd, 584fc120, 7f90585e,
+  aa230c42) share barcode `042282449924` and catalogue number `824 499-2`; only
+  aa230c42 carries a date (1986). What separates them is free text ("made in France by
+  PDO, BIEM / STEMRA" against "…PMDC" and "…GEMA"). The pinned and the picked
+  pressing both had no date, so the "Original" line, gated on the disc's own year,
+  read "Unknown, unknown release (unknown year)" although the release group's first
+  release (1985) was known.
+- ***No Jacket Required*** (§12.0): MusicBrainz gives the GB pressing barcode
+  5012981234522; the disc kgr held, Discogs 5222631, lists none.
+
+### 13.1 Principles (kgr, 2026-11-26)
+
+1. **A contradiction rejects.** Two present, normalised values that disagree mean the
+   two records are not the same product.
+2. **Absence is silent.** An empty field, or one claiming no data exists ("no
+   barcode"), neither confirms nor refutes. kgr: *"'no barcode' must always be
+   interpreted as 'no barcode submitted'."*
+3. **Match what exists; adopt what is one-sided.** A value present on one side only is
+   taken over, provided enough other present fields agree (§13.3).
+4. **The floor is the album.** The disc ID identifies a MusicBrainz release *group*
+   (its pressings share it), and that group links a Discogs *master*. In some cases
+   that is all `--auto` can ever resolve, and the master may be missing too.
+5. **Ask only for what cannot be settled.** The manual path asks the user for whatever
+   the field match leaves ambiguous, and nothing else.
+
+### 13.2 Fields and normalisation
+
+| Field | Normalised as | Contradiction when |
+|---|---|---|
+| barcode | GTIN-13 (`barcode.normalize_barcode`) | both present and different |
+| catalogue number | case folded; spaces, hyphens, dots, slashes removed (`824 499-2` = `8244992`) | both present and different |
+| label | case folded; trailing "Records", "Ltd", "Inc", "GmbH" and punctuation folded | both present and no shared label (either side may list several) |
+| country | MusicBrainz code against Discogs name, by **compatibility**, not equality: XE is compatible with any European country and with "Europe" and the joint regions containing it; XW and Discogs "Unknown" are absent | the two name places that cannot contain each other (GB against US) |
+| year | compared at the precision both have | both present and different |
+| format | CD (or File under `--digital-media`, §12) | different |
+| track count | the disc's TOC against the release's tracklist | different |
+
+### 13.3 What is "sufficient" (kgr: "we'll try your recommendation")
+
+A pair matches when **a strong identifier, barcode or catalogue number, is present on
+both sides and agrees**, and **no field contradicts**. Country, year, label, format and
+track count support a match but cannot make one on their own: they are shared by too
+many pressings.
+
+kgr expects this to be too strict in practice (*"releases that only have a barcode and/or
+catalogue number on one side but not the other"*), and names the fallbacks to add when it
+is: **album title, total tracks, artist name**, and whatever else is needed. Build the rule
+as a list of evidence classes with one threshold, so a fallback is an added entry and not a
+rewrite, and record in PROV which fields matched, so the misses show which fallback to add.
+
+### 13.4 Pairing, both ways
+
+- **Candidates.** MusicBrainz: the disc ID's pressings. Discogs: the master's versions in
+  the disc's format (§12).
+- **Order of evidence.** (a) The MusicBrainz pressing's own Discogs release link.
+  (b) The reverse link: MusicBrainz's URL lookup (`/ws/2/url?resource=<discogs release
+  URL>&inc=release-rels`) names the MusicBrainz releases linking a Discogs release.
+  (c) The field match (§13.3).
+- **Rate limit.** The versions list carries catalogue number, label, country and year at
+  no cost; a barcode needs one release fetch (60 a minute). Match on the free fields
+  first and fetch details only for the survivors.
+
+### 13.5 `--auto` (and any run without a terminal, §12.5)
+
+- **Exactly one compatible pair:** take it, and fill each side's gaps from the other.
+- **Otherwise: the release group only.** kgr: *"record the release group only and drop
+  mb_release_id, as we have no way of corroborating the truth."* `mb_release_id` is not
+  written; `mb_release_group_id` and the Discogs master (`master_only`, §12) are. A disc
+  ID that matches a single pressing keeps it, since nothing was chosen between.
+  **Changes every multi-pressing `--auto` rip**: today they record the ladder's guess as
+  `release_selection=auto_tiebreak`.
+- **No Discogs master either:** OPEN (§13.9 Q1).
+
+### 13.6 The manual path
+
+- Pick the pressing (§10.3 menu); the Discogs screen (§12) then lists only versions
+  **compatible** with it, ranked by how many fields agree, and pre-selects its country.
+- Or pick on Discogs first: the reverse link, else a unique field match, selects the
+  pressing.
+- The user is asked only where more than one candidate survives on a side.
+
+### 13.7 Filling one side from the other
+
+- A value present on one side only is adopted for the pair, and PROV records its source.
+- **Barcode** (kgr: recommendation accepted): a barcode adopted from the partner is kept in
+  PROV but never becomes the TOC's MCN. `_finalize_identifiers` synthesises `CATALOG`
+  from a barcode only when that barcode was stated by a release the user picked, or by the
+  pressing-level MusicBrainz release itself; otherwise a CD-R burned from the RBI would
+  carry an MCN the original may not.
+- **Conflicts** cannot occur within a matched pair (a contradiction rejects the pair).
+  Between the user's pick and a value from elsewhere, the pick wins.
+
+### 13.8 The original release
+
+kgr: *"I'd prefer to abort rather than have the 'original' PROV blank or incomplete."* A
+rip whose original release cannot be determined, with both a title and a year, aborts
+(exit 3; 2 when the lookup failed on an outage). Sources: the MusicBrainz release group's
+first release date, then the Discogs master's year as a fallback source (today it only
+corroborates, R11). Also record **why** the release-group answer was rejected (R3 gate:
+`track_count`, `durations`, `isrc`, `title_fuzz`): on *Brothers in Arms* the rip rejected
+an answer that an exact replay accepted, and nothing recorded which gate fired.
+
+Whether a disc whose own year is still unknown, after both sources are combined, also
+aborts is OPEN (§13.9 Q2).
+
+### 13.9 Open with kgr
+
+- **Q1.** `--auto` and no Discogs master: abort (today), or write the container with
+  MusicBrainz only?
+- **Q2.** The original release found (title and year) but this disc's own year unknown on
+  both sides: abort too, or write it, with the "Original" line saying the comparison
+  cannot be made? The PROV keys `original_release_*` are complete in that case; only the
+  "is this disc the original" answer is unknown.
+
+### 13.10 Build sequence
+
+1. `rbi_spec.md` rows for the new PROV keys (matched fields per pair, adopted fields and
+   their source, the R3 rejection reason), and the changed `mb_release_id` rule.
+2. A pure matcher (`release_match.py`): normalisers, compatibility, contradiction,
+   sufficiency, over plain records; tested on recorded *Brothers in Arms* and *No Jacket
+   Required* data.
+3. The reverse-link lookup (`mb_lookup`) and the detail fetch limited to survivors.
+4. `--auto`: unique pair or release group only. Manual: the filtered Discogs list, and
+   pressing-from-Discogs.
+5. The original-release gate and the R3 reason.
+6. `tools/archival_replay.py` over every container on disk before shipping, since the
+   `--auto` change alters what multi-pressing rips record.

@@ -2,6 +2,13 @@
 
 ## Open
 
+### 🔬 LIVE — Match MusicBrainz and Discogs releases field by field (kgr, 2026-11-26)
+
+Decided, not built: `trust_model_design.md` §13. A contradiction rejects, absence is
+silent, one-sided values are adopted when barcode or catalogue number agree; `--auto`
+without a unique pair records the release group only (no `mb_release_id`); a rip without a
+complete original release aborts. Two questions open (§13.9).
+
 ### ✅ DONE 2026-11-26 — Discogs release selection by master (kgr)
 
 Built the same day it was decided: `trust_model_design.md` §12, as-built notes §12.5.
