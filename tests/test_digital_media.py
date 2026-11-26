@@ -695,6 +695,36 @@ def test_an_unchanged_pressing_without_a_release_can_be_chosen(monkeypatch) -> N
     assert prov["discogs_release_via"] == "chosen"
 
 
+@pytest.mark.usefixtures("_discogs_on")
+def test_an_unchanged_pressing_is_not_searched_again_without_a_chooser(
+    monkeypatch,
+) -> None:
+    """Control for the test above: headless, the pre-menu reason stands."""
+    asked = _discogs_search(monkeypatch, [11, 22, 33])
+    disc, prov = _njr_disc(mbid=_NJR_DE), _njr_prov()
+    app._discogs_after_menu(disc, prov, _NJR_DE)
+    assert asked == []
+    assert prov["discogs_release"] == "ambiguous_20+no_link"
+
+
+@pytest.mark.parametrize(
+    ("archival", "auto", "tty", "offered"),
+    [
+        (True, False, True, True),  # an interactive rip
+        (False, False, True, False),  # import: needs no single Discogs release
+        (True, True, True, False),  # --auto
+        (True, False, False, False),  # no terminal
+    ],
+)
+def test_only_an_interactive_rip_gets_the_discogs_chooser(
+    monkeypatch, archival, auto, tty, offered
+) -> None:
+    monkeypatch.setattr("sys.stdin.isatty", lambda: tty)
+    got = app._discogs_chooser(archival=archival, auto=auto)
+    assert (got is app._choose_discogs_release) is offered
+    assert (got is None) is not offered
+
+
 def test_the_discogs_chooser_returns_the_picked_row() -> None:
     from cdda2img.lookup_result import DiscMeta
 

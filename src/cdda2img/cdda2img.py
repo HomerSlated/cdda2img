@@ -2769,7 +2769,7 @@ def _finalize_import(
         disc,
         provenance,
         mb_result.selected_release_id,
-        choose=_choose_discogs_release if _interactive(auto_apply) else None,
+        choose=_discogs_chooser(archival=archival, auto=auto_apply),
     )
     _require_discogs_release(provenance, archival=archival)
     # N6: NOW store the score, against the post-menu disc and provenance. Sited
@@ -4182,8 +4182,8 @@ def _discogs_after_menu(
     is recorded as ``discogs_release_via=menu``.
 
     The pressing left unchanged with no Discogs release resolved is searched
-    again too, so *choose* (an interactive run's chooser) can settle it; with no
-    chooser, or none picked, :func:`_require_discogs_release` aborts.
+    again only when there is a *choose* (an interactive rip's chooser) to settle
+    it; with no chooser, or none picked, :func:`_require_discogs_release` aborts.
     """
     auto = provenance.get("discogs_release")
     if disc.discogs_release_id is not None and auto != str(disc.discogs_release_id):
@@ -4192,7 +4192,7 @@ def _discogs_after_menu(
         return
     chosen = disc.mb_release_id
     if not chosen or chosen == provisional:
-        if disc.discogs_release_id is None and disc.barcode:
+        if choose is not None and disc.discogs_release_id is None and disc.barcode:
             _discogs_by_barcode_after_menu(disc, provenance, disc.barcode, choose)
         return
     from cdda2img.mb_lookup import discogs_link_and_barcode
@@ -4271,6 +4271,16 @@ def _discogs_by_barcode_after_menu(
     provenance["discogs_release_via"] = via
     provenance["discogs_release_barcode"] = code
     provenance.pop("discogs_release_candidates", None)
+
+
+def _discogs_chooser(
+    *, archival: bool, auto: bool
+) -> Callable[[list[DiscMeta]], DiscMeta | None] | None:
+    """The post-menu Discogs chooser, for an interactive ``rip`` only: ``rip`` is
+    the pipeline that requires a single Discogs release, and a prompt needs a
+    terminal and no ``--auto``. ``import`` shares :func:`_finalize_import` and is
+    never asked."""
+    return _choose_discogs_release if archival and _interactive(auto) else None
 
 
 #: Above this many candidates the chooser lists the search rows without fetching
