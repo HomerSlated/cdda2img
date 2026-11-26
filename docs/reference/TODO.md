@@ -2,6 +2,17 @@
 
 ## Open
 
+### 🔬 LIVE — Discogs release selection by master (kgr, 2026-11-26)
+
+Design and decisions: `trust_model_design.md` §12. Master-first Discogs identification:
+the CD versions of the master MusicBrainz links the release group to, narrowed by a
+country the user picks (Discogs' own facet list) and a year the user picks (undated
+versions kept by default; never pruned automatically: 60 of 108 *No Jacket Required* CDs
+have no year), shown as a paged list with details (barcode, runout, notes) on selection.
+`--auto` records `discogs_master_id` when no single release is settled, and the archival
+gate accepts it there. Retires the post-menu stopgap chooser of 2026-11-26. Build order
+§12.4; live check is a re-rip of *No Jacket Required* (expects Discogs 5222631).
+
 ### 🔬 LIVE — sector-hammer: find the systematic failure, then try to make it a useful profile (kgr, 2026-11-25)
 
 kgr: *"Add the sector-hammer experiment to the TODO, as you noted this is a systemic failure

@@ -1036,3 +1036,158 @@ time), so the trace is never a retrofit. The dump UI lands with B-7.
   first run; keep it as the regression gate against new field-interaction drift.
 - `_pick_canonical_mcn`, the §10 rung, the AcoustID gate, the renderer: untouched.
 - Run on min Python (3.10) per [[feedback_verify_min_python]]; ship via `scripts/sync.py`.
+
+## 12. Discogs release selection by master (DECIDED 2026-11-26, not yet built)
+
+kgr, 2026-11-26: *"The main problem is that the primary means of identification, after
+the TOC-based MB DiscID (which only yields the release group), is the barcode, but the
+exact match on Discogs often lacks a barcode."* This section replaces barcode-first
+Discogs identification with **master-first narrowing by what the disc in hand shows**.
+The post-menu chooser shipped the same day (`_discogs_after_menu` →
+`_discogs_candidates_after_menu` → `_choose_discogs_release`, commits `3ebb8c6a`,
+`dc6c7e74`, `1df61ce8`) is a **stopgap** that this design retires.
+
+### 12.0 The case that forced it
+
+Phil Collins, *No Jacket Required*, disc ID `DCvSBmF2Sn35OCvgXtnULUypFkw-`. Every
+fact below was measured live on 2026-11-26.
+
+- **MusicBrainz** holds four releases for the disc ID: two records of one German
+  WEA pressing (`d73bd2e7`, `5302ea74`, barcode `022925169921`, XE), US Atlantic
+  (`0136fad2`), and GB Virgin CDV 2345 (`0a19729e`, barcode `5012981234522`). The
+  `barcode_plurality` rung narrowed the menu to the two German rows; it no longer
+  narrows the menu (§10.3, `menu_candidates`).
+- **The GB release has no Discogs link of its own.** Its release *group*
+  (`86b4651b`) links Discogs **master 98041**. The MusicBrainz release page shows the
+  group's links in its sidebar, which reads as the release's own.
+- **The disc in the drive is Discogs 5222631**: "No barcode", 1985, "Manufactured in
+  the UK", ADD on the back sleeve and AAD in the booklet. MusicBrainz's barcode for the
+  GB pressing belongs to the '80s reissue ("Reissue of [r=5222631]. '80s reissue adds
+  a barcode"), so a barcode search finds only 5221810 and 19343422 and can never reach
+  the disc. 10759988 is a near-identical Nimbus pressing told apart only by SPARS codes.
+- **The master's versions endpoint** (`/masters/98041/versions?format=CD`) returns
+  108 CD versions and, in the same response, **facet counts**:
+  country `US 36, Europe 18, UK 11, Japan 9, Canada 7, Australia 4, Brazil 4,
+  France 3, Russia 3, …, UK & Europe 1, UK, Europe & US 1, Unknown 1`;
+  released `1985 18, 1986 2, 1987 2, 1988 3, …, 2026 2`, which sums to **48 of
+  108: 60 CD versions carry no year**, including 8 of the 11 UK CDs.
+- **Discogs and MusicBrainz countries do not correspond one to one.** The German WEA
+  pressing (MusicBrainz XE, "manufactured in Germany") is filed under Discogs
+  "Europe"; "Germany" is not a facet of this master at all. Joint regions ("UK &
+  Europe", "UK, Europe & US") exist.
+
+### 12.1 Decisions (kgr, 2026-11-26)
+
+**D1. Master first.** The Discogs candidates for a pressing are the versions of the
+master that MusicBrainz links the release **group** to
+(`mb_lookup.discogs_master_of_release_group`). The barcode is demoted from entry point
+to a column and a hint: it is never a pre-selection, since the barcode MusicBrainz
+holds for a pressing can belong to a reissue (§12.0).
+
+**D2. CD only, on the server.** `format=CD` on the versions request. CD-R ("CDr"),
+SACD and others are separate Discogs formats and are excluded by it.
+
+**D3. Country is chosen by the user, from Discogs' own list.** The picker lists the
+master's CD countries with their counts, exactly as the facet reports them, with the
+settled MusicBrainz pressing's country pre-selected where it maps
+(`countries.discogs_country_code` in reverse: GB → UK, XE → Europe and the joint
+regions containing it) and one key to clear the filter. Free-text country entry is not
+offered: a name Discogs does not use matches nothing.
+
+**D4. Year is chosen by the user, after country, and NEVER pruned automatically.** The
+picker lists the years the facet reports for the chosen country, plus `unknown (n)`.
+**Choosing a year keeps the undated versions by default** (kgr: yes), with a toggle to
+exclude them. An automatic "matches the MusicBrainz year" filter would treat "year
+unknown" as "not that year" and drop 56% of this master's CDs, including near-duplicates
+of the disc in the drive. A missing value is a third state, not a non-match.
+
+**D5. A paged list, details on selection.** List rows come from the versions data alone
+(id, country, year, label, catalogue number, format text): no request per row. Opening a
+row fetches that one release (`discogs_lookup.release_details`, extended) and shows
+**the barcode (or "not listed")**, every matrix/runout line, SPARS and other
+identifiers, formats, label and catalogue number, the full notes, and the URL; [a]
+applies it, any other key goes back. This replaces the stopgap's eager fetch of up to
+20 releases before anything is shown.
+
+**D6. A single barcode hit is a marked row in an interactive rip, not a decision**
+(kgr: yes). When the settled pressing's barcode finds exactly one Discogs release, the
+list shows it marked ("barcode matches MusicBrainz") and the user confirms or picks
+another. On *No Jacket Required* an automatic one-hit rule would have taken a reissue had
+Discogs held only one. Under `--auto` the one-hit rule stands (D7).
+
+**D7. `--auto` records the master and relaxes the single-release rule** (kgr: yes).
+Manual disambiguation is unavailable, and picking one of 108 releases by heuristic
+records a pressing nobody checked. So, in order:
+1. the MusicBrainz release's own Discogs release link, as now;
+2. else exactly one Discogs release for the pressing's barcode naming the album, as now;
+3. else **the master** MusicBrainz links the release group to, stored as a new
+   identifier `discogs_master_id`. `discogs_release_id` stays **empty**: Discogs
+   numbers masters and releases separately (98041 as a *release* is an unrelated
+   record), so a master id in the release field would make every later
+   `fetch_release` silently fetch the wrong album.
+
+The archival gate (`_require_discogs_release`) becomes: **a Discogs release, or under
+`--auto` a Discogs master**. An interactive rip still requires a release. Neither
+`preferred_country` nor an earliest-year rule selects a Discogs release under `--auto`:
+with D7.3 there is nothing for them to narrow. `release_date` keeps coming from the
+MusicBrainz release the §10.3 ladder pinned; the release group's earliest year is
+already `original_release_year`, and copying it into `release_date` would date every
+reissue as the first pressing. `preferred_country` keeps its §10.2 role in the
+MusicBrainz ladder.
+
+**D8. Where it lives.** A screen in the metadata menu (`menu_state`), beside the
+MusicBrainz pressing screen (`PressingScreen`), with the same paging (`[n]`/`[p]`)
+and exits (`[s]` save, `[q]` discard, `[x]` none of these). It opens by itself after
+the pressing screen when no Discogs release is settled, and stays reachable from the
+menu to change a settled one (including one taken from the MusicBrainz link). Leaving it
+with no release in an interactive rip aborts at `_require_discogs_release`, as now. The
+post-menu prompt (`_choose_discogs_release`, `_discogs_chooser`) is deleted. The
+existing Fetch → Discogs search screen stays as the free-form escape.
+
+### 12.2 Edge cases
+
+- **No master linked on the release group.** Interactive: offer a Discogs master search
+  by artist and album (one confirmation, then D3 to D5 on the chosen master). `--auto`:
+  abort (exit 3), since there is no release and no master to record. *Proposed, not yet
+  ruled on.*
+- **Large masters** (a *Thriller* holds around a thousand CD versions). Country and year
+  are applied as server-side filters (`country=`, `released=`), and the facets come with
+  the first page, so a pick never pages through the whole master; the list pages only the
+  survivors. `discogs_lookup._MASTER_VERSIONS_MAX_PAGES` then guards the filtered set,
+  not the master.
+- **Regions.** Pre-selection for MusicBrainz `XE` covers "Europe" and the joint regions
+  containing it; `XW` pre-selects nothing. The user can always clear the filter.
+- **Multi-disc sets.** A box set's Discogs release covers every disc; choosing it for
+  disc *n* is correct, and nothing per-disc is stored from it. Unchanged from today.
+
+### 12.3 Container and PROV
+
+Spec first (`rbi_spec.md`), no format bump: PROV keys are optional.
+
+| Key | Kind | Meaning |
+|---|---|---|
+| `discogs_master_id` | identifier | The Discogs master: the master the chosen release belongs to (its `master_id`), or under `--auto` the one MusicBrainz links the release group to when no release was settled (D7.3). |
+| `discogs_release_id` | identifier | Unchanged meaning; **may be absent under `--auto`** when `discogs_master_id` is present. |
+| `discogs_release` | observation | Gains `master_only:<master id>` (D7.3). |
+| `discogs_release_via` | observation | Gains `master_versions` (picked on the D8 screen). `chosen` and `barcode_after_menu` retire with the stopgap; containers written in between keep them. |
+| `discogs_master` | observation | `<id>:<shown>/<total>[@<country>][,<year>[+undated]]`: the master the screen opened, how many versions it listed of how many CD versions, and the filters in force when the user picked. |
+
+`R11` (original-release corroboration) currently walks `release.master.main_release`;
+with `discogs_master_id` known it can read the master directly, including under
+`--auto` with no release. `list`, the catalogue and the RLOG name the master when there
+is no release.
+
+### 12.4 Build sequence
+
+1. `rbi_spec.md` rows (done with this section), then `RBIDisc.discogs_master_id` and its
+   PROV write and read.
+2. `discogs_lookup`: `master_versions(master, *, country=None, year=None, page=)`
+   returning the page and the facets; `release_details` gains every runout line and the
+   other identifiers.
+3. `menu_state`: the master screen (D3 to D6, D8), driven by fakes in tests and by a
+   recorded *No Jacket Required* fixture (facets and versions as measured, §12.0).
+4. `_discogs_after_menu` → the auto rules (D7); `_require_discogs_release` relaxed for
+   `--auto`; stopgap deleted.
+5. Live check: kgr re-rips *No Jacket Required* interactively (expects 5222631 under UK,
+   1985 + undated) and once under `--auto` (expects `discogs_master_id=98041`, no
+   release). `tools/archival_replay.py` on the written container, both ways.
