@@ -286,6 +286,40 @@ def test_discogs_parse_result_artist_album_split():
     assert meta.source == "discogs"
 
 
+class _LazyRow:
+    """A search row as ``discogs_client`` builds it: ``data`` holds the search's
+    dict, and any other attribute read would fetch the whole release, so here it
+    is recorded instead."""
+
+    def __init__(self, data: dict) -> None:
+        self.data = data
+        self.fetched: list[str] = []
+
+    def __getattr__(self, name: str):
+        self.fetched.append(name)
+        return None
+
+
+def test_discogs_parse_result_never_reads_past_the_search_data():
+    """Brothers in Arms, 2026-11-26: a row with no year or country used to fetch
+    its release; 99 barcode hits passed Discogs' 60-a-minute limit."""
+    from cdda2img.discogs_lookup import _parse_result
+
+    row = _LazyRow({"id": 2750309, "title": "Dire Straits - Brothers In Arms"})
+    meta = _parse_result(row)
+    assert row.fetched == []
+    assert meta.discogs_release_id == 2750309
+    assert meta.release_date is None
+    assert meta.country is None
+
+
+def test_discogs_parse_result_control_an_attribute_read_is_recorded():
+    """Control: the fake does record an attribute read, so the test above can fail."""
+    row = _LazyRow({})
+    _ = row.year
+    assert row.fetched == ["year"]
+
+
 def test_discogs_parse_result_no_separator():
     from cdda2img.discogs_lookup import _parse_result
 

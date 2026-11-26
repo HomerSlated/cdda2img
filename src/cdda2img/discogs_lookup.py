@@ -153,22 +153,30 @@ def _discogs_primary_type(formats) -> str | None:
 def _parse_result(r) -> DiscMeta:
     """Parse a Discogs search result object into a DiscMeta.
 
-    Search results return a flattened dict via r.data; full Release objects have
-    richer nested structures. We handle both shapes defensively.
+    Reads ``r.data`` ONLY, never an attribute of *r*. A search row is a
+    ``discogs_client`` Release object holding the search's flattened dict, and
+    reading one of its attributes that the dict lacks (``r.year`` on a row with no
+    year) makes the client fetch the whole release: one request per such row.
+    Until 2026-11-26 this function fell back to ``getattr(r, "year")`` and the
+    like "defensively", so a barcode search cost up to one request per hit; *Dire
+    Straits, Brothers in Arms* (99 hits) passed Discogs' 60-a-minute limit at the
+    61st, the search raised ``HTTP 429``, returned nothing, and the rip aborted
+    with ``lookup_status_discogs=empty``. A full release is parsed by
+    :func:`_parse_full_release`, never here.
     """
     data: dict = getattr(r, "data", {}) or {}
 
-    raw_title = data.get("title") or getattr(r, "title", "") or ""
+    raw_title = data.get("title") or ""
     if " - " in raw_title:
         parts = raw_title.split(" - ", 1)
         artist, album = parts[0].strip(), parts[1].strip()
     else:
         artist, album = "", raw_title
 
-    year_raw = data.get("year") or getattr(r, "year", None)
+    year_raw = data.get("year")
     year = str(int(year_raw)) if year_raw else None
 
-    country = data.get("country") or getattr(r, "country", None)
+    country = data.get("country")
 
     # labels: search result returns list[str]; full release returns list[Label]
     label_raw = data.get("label") or []
@@ -180,7 +188,7 @@ def _parse_result(r) -> DiscMeta:
     barcodes: list = data.get("barcode") or []
     barcode = next((n for n in (normalize_barcode(b) for b in barcodes) if n), None)
 
-    release_id = data.get("id") or getattr(r, "id", None)
+    release_id = data.get("id")
     return DiscMeta(
         album=album or None,
         artist=artist or None,
