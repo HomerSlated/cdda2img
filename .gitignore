@@ -320,6 +320,10 @@ __marimo__/
 # Compiled tools/ helpers (source is tracked; the binary is a local build artifact)
 /tools/cdreset
 
+# Local development tools, not part of the release (kgr, 2026-11-26): the Wayback
+# Machine fetcher used by the wayback skill and the deep-research-collector agent.
+/tools/wayback/fetch.py
+
 # Disc capture artifacts in the repo root (e.g. from running RECOVERY.md's c2read
 # recipes here) — actual audio content, never committable. Root-anchored: the same
 # extensions are legitimate as test fixtures under tests/fixtures/.

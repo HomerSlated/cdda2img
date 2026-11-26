@@ -282,7 +282,7 @@ signs. These signatures are committed and pushed, so anyone with a clone can
 confirm a given file is byte-for-byte what was audited and signed.
 
 Signatures may appear beside files in `src/cdda2img/`, `tests/`,
-`tests/fixtures/`, `tools/`, and `tools/wayback/`. The signing public key is
+`tests/fixtures/` and `tools/`. The signing public key is
 committed at `docs/guardian_public.asc`.
 
 ```bash
