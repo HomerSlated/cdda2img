@@ -1207,21 +1207,33 @@ is no release.
 - **Pressing changed in the menu, no MusicBrainz link.** The screen reopens on its own
   after the menu (`metadata_menu.run_discogs_menu`), with that pressing's single
   barcode hit marked if there is one.
-- **What a pick changes.** Only `discogs_release_id` and `discogs_master_id`. The
-  catalogue fields (label, catalogue number, country, barcode) stay as the
-  MusicBrainz pressing gave them. On *No Jacket Required* that leaves `barcode=
-  5012981234522` (MusicBrainz's, the reissue's) beside Discogs 5222631, which lists
-  none. **Open with kgr**: whether a Discogs pick should overwrite or clear them.
+- **What a pick changes** (kgr, 2026-11-26: "allow Discogs fields to overwrite MB
+  fields, but only where they exist"). `discogs_release_id`, `discogs_master_id`,
+  and each of `label`, `catalog_number`, `country`, `barcode`, `release_date` that
+  the Discogs release states (`ReleaseDetails.catalogue_fields`); a blank never
+  erases, and a Discogs region with no ISO code is left out. Recorded as PROV
+  `discogs_overwrote`. On *No Jacket Required* 5222631 lists no barcode, so
+  MusicBrainz's 5012981234522 (the reissue's) stays. Album, artist and tracks are
+  not touched: they are album-level, and Discogs' artist names carry suffixes
+  ("Phil Collins (2)") of their own.
 - **`discogs_master_id` for a settled release** comes from the release itself (its
   `master_id`, one Discogs request when nothing set it), not from the release group's
   link: a release can sit under a different master from the one the group links.
 - **R11 is unchanged**: it still reads the master through `discogs_release_id`, and
   runs before the menu, when an unattended master is not yet known. Reading
   `discogs_master_id` directly is a follow-up.
-- **`--digital-media` never uses a master**: its Discogs release comes from the digital
-  release's own link, or the rip aborts as before. A master's CD versions are the wrong
-  media type for a disc made from a download (kgr, 2026-11-21: fetch that media type's
-  data or abort). Offering `format=File` versions there instead is open with kgr.
+- **`--digital-media` lists the master's `File` versions** (kgr, 2026-11-26: "always
+  use Discogs master's format=File versions for digital media, as anything else would
+  be incorrect"), on the in-menu screen and the post-menu reopen alike; unattended,
+  the master is recorded as for a pressed disc. Measured: Toca's master 51867 has two
+  File versions, one of them its own digital release 22970945.
+- **Confidence** (kgr, 2026-11-26: the user holding the disc is "always the strongest
+  signal"). `match_distance.final_match_distance` already stored 1.000 / `strong` for
+  a pressing picked by hand (`release_selection=manual`); a Discogs release picked on
+  the master screen now counts too, when MusicBrainz offered one pressing or none, but
+  not beside an un-reviewed `auto_tiebreak` pressing, which would still be a guess.
+  After an interactive menu the stored grade is printed ("Metadata after your
+  review"); before, only the pre-menu hint was ever shown.
 - **A pick is credited only while the disc still carries it**: a release applied
   afterwards from Fetch → Discogs, or a `[u]` reset, is not recorded as
   `master_versions`, and a master the pick left behind is cleared.

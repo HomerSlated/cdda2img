@@ -519,6 +519,52 @@ class ReleaseDetails:
     barcodes: tuple[str, ...]  # as listed; empty = Discogs lists none
     identifiers: tuple[tuple[str, str, str], ...]  # (type, value, description)
     notes: str
+    labels: tuple[tuple[str, str], ...] = ()  # (name, catno) per label, in order
+
+    def catalogue_fields(self) -> dict[str, str]:
+        """The pressing-level fields this release states, normalised to the
+        container's forms, keyed by ``RBIDisc`` field; a field Discogs leaves
+        blank (or cannot be normalised) is absent, never empty (kgr, 2026-11-26:
+        Discogs overwrites MusicBrainz "only where they exist").
+
+        ``label``/``catalog_number`` from the first label, ``country`` as an
+        ISO code (``countries.discogs_country_code``: a region it cannot map is
+        absent), ``barcode`` the first listed value that is a valid GTIN, and
+        ``release_date`` with Discogs' ``-00`` placeholders dropped.
+        """
+        out: dict[str, str] = {}
+        name, catno = self.labels[0] if self.labels else ("", "")
+        if name.strip():
+            out["label"] = name.strip()
+        if catno.strip() and catno.strip().lower() != "none":
+            out["catalog_number"] = catno.strip()
+        code = discogs_country_code(self.country or None)
+        if code:
+            out["country"] = code
+        barcode = next(
+            (b for b in (normalize_barcode(v) for v in self.barcodes) if b), None
+        )
+        if barcode:
+            out["barcode"] = barcode
+        date = _discogs_date(self.released)
+        if date:
+            out["release_date"] = date
+        return out
+
+
+def _discogs_date(released: str) -> str | None:
+    """Discogs ``released`` as ``YYYY``, ``YYYY-MM`` or ``YYYY-MM-DD``; its
+    ``00`` placeholders for an unknown month or day are dropped, and ``0`` or
+    ``0000`` (no date) is ``None``."""
+    parts = (released or "").strip().split("-")
+    kept: list[str] = []
+    for part in parts:
+        if not part.isdigit() or int(part) == 0:
+            break
+        kept.append(part)
+    if not kept or len(kept[0]) != 4:
+        return None
+    return "-".join(kept[:3])
 
 
 def release_details(release_id: int) -> ReleaseDetails | None:
@@ -568,6 +614,7 @@ def release_details(release_id: int) -> ReleaseDetails | None:
             if (i.get("type") or "").lower() != "barcode"
         ),
         notes=(data.get("notes") or "").strip(),
+        labels=tuple((lab.get("name") or "", lab.get("catno") or "") for lab in labels),
     )
 
 

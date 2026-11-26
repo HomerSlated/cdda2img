@@ -76,6 +76,7 @@ _DETAILS = ReleaseDetails(
         ("Matrix / Runout", "CDV 2345 :   NIMBUS ENGLAND", ""),
     ),
     notes="8 Page sleeve\nNo barcode\nManufactured in the UK",
+    labels=(("Virgin", "CDV 2345"),),
 )
 
 
@@ -87,21 +88,31 @@ def _disc(country: str = "GB") -> RBIDisc:
     return disc
 
 
+asked_formats: list[list[str]] = []  # the Discogs formats the fixture was asked for
+
+
 @pytest.fixture
 def discogs(monkeypatch):
     """Fakes for every Discogs and MusicBrainz call the screen makes; records
     which countries the versions were asked for."""
     asked: list[tuple[str, ...]] = []
+    formats: list[str] = []
+    asked_formats.clear()
+    asked_formats.append(formats)
     monkeypatch.setattr("cdda2img.discogs_lookup.is_available", lambda: True)
     monkeypatch.setattr(
         "cdda2img.mb_lookup.discogs_master_of_release_group", lambda _g: _MASTER
     )
-    monkeypatch.setattr(
-        "cdda2img.discogs_lookup.master_countries", lambda _m: (_COUNTRIES, 108)
-    )
 
-    def versions(_m, *, countries=()):
+    def countries(_m, *, fmt="CD"):
+        formats.append(fmt)
+        return _COUNTRIES, 108
+
+    monkeypatch.setattr("cdda2img.discogs_lookup.master_countries", countries)
+
+    def versions(_m, *, countries=(), fmt="CD"):
         asked.append(countries)
+        formats.append(fmt)
         return _UK
 
     monkeypatch.setattr("cdda2img.discogs_lookup.master_versions", versions)
@@ -390,3 +401,82 @@ def test_reset_after_a_pick_records_nothing() -> None:
     prov: dict[str, str] = {}
     _record_discogs_pick(prov, ctl)
     assert prov == {}
+
+
+# ---- a pick overwrites the catalogue fields Discogs states (kgr, 2026-11-26) ------
+
+
+def _mb_pressing_disc() -> RBIDisc:
+    """The disc as the MusicBrainz GB pressing left it before the Discogs pick."""
+    disc = _disc()
+    disc.label = "Virgin Records"
+    disc.catalog_number = "CDV2345"
+    disc.release_date = "1985-02"
+    disc.barcode = "5012981234522"  # MusicBrainz's: the reissue's barcode
+    return disc
+
+
+@pytest.mark.usefixtures("discogs")
+def test_a_pick_overwrites_only_the_fields_discogs_states() -> None:
+    from cdda2img.metadata_menu import _record_discogs_pick
+
+    ctl = _ctl(_mb_pressing_disc())
+    for keys in ("", "1", "2", "a"):
+        _step(ctl, keys)
+    assert ctl.disc.label == "Virgin"
+    assert ctl.disc.catalog_number == "CDV 2345"
+    assert ctl.disc.country == "GB"
+    assert ctl.disc.release_date == "1985"
+    # 5222631 lists no barcode: a blank never erases, so MusicBrainz's stays.
+    assert ctl.disc.barcode == "5012981234522"
+    prov: dict[str, str] = {}
+    _record_discogs_pick(prov, ctl)
+    assert prov["discogs_overwrote"] == "label,catalog_number,country,release_date"
+
+
+@pytest.mark.usefixtures("discogs")
+def test_quit_puts_the_overwritten_fields_back() -> None:
+    ctl = _ctl(_mb_pressing_disc())
+    for keys in ("", "1", "2", "a", "q"):
+        _step(ctl, keys)
+    assert ctl.disc.label == "Virgin Records"
+    assert ctl.disc.release_date == "1985-02"
+    assert ctl.discogs_fields == ()
+
+
+def test_a_pick_with_no_details_changes_only_the_ids(discogs, monkeypatch) -> None:
+    monkeypatch.setattr("cdda2img.discogs_lookup.release_details", lambda _r: None)
+    ctl = _ctl(_mb_pressing_disc())
+    for keys in ("", "1", "2", "a"):
+        _step(ctl, keys)
+    assert ctl.disc.discogs_release_id == 5222631
+    assert ctl.disc.label == "Virgin Records"
+    assert ctl.discogs_fields == ()
+
+
+# ---- digital media lists the master's File versions (kgr, 2026-11-26) --------------
+
+
+@pytest.mark.usefixtures("discogs")
+def test_digital_media_asks_discogs_for_file_versions(capsys) -> None:
+    ctl = _ctl(discogs_fmt="File")
+    _step(ctl, "")
+    out = capsys.readouterr().out
+    assert asked_formats[-1] == ["File", "File"]  # countries, then versions
+    assert "108 File releases" in out
+
+
+@pytest.mark.usefixtures("discogs")
+def test_a_pressed_disc_asks_for_cds() -> None:
+    ctl = _ctl()
+    _step(ctl, "")
+    assert asked_formats[-1] == ["CD", "CD"]
+
+
+@pytest.mark.usefixtures("discogs")
+def test_the_main_menu_entry_keeps_the_format() -> None:
+    ctl = MenuController(_disc(), discogs_fmt="File")
+    _step(ctl, "d")
+    screen = ctl.stack[-1]
+    assert isinstance(screen, DiscogsMasterScreen)
+    assert screen.fmt == "File"

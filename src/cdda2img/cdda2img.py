@@ -26,6 +26,7 @@ if TYPE_CHECKING:
     from cdda2img.ctdb_repair import CtdbRepairResult
     from cdda2img.field_resolver import FieldProposal
     from cdda2img.lookup_result import DiscMeta
+    from cdda2img.match_distance import MatchDistance
     from cdda2img.mb_lookup import MBPrepopResult
     from cdda2img.pxi_reader import OffsetCandidate as PXIOffsetCandidate
     from cdda2img.rbi_format import RipInfo
@@ -2167,7 +2168,9 @@ def _print_ctdb_repair_map(
         print(f"     {note_line}"[:cols])
 
 
-def _store_match_distance(provenance: dict[str, str], disc: RBIDisc) -> None:
+def _store_match_distance(
+    provenance: dict[str, str], disc: RBIDisc, *, show: bool = False
+) -> MatchDistance:
     """Write the container's ``match_confidence`` / ``match_recommendation`` (N6).
 
     Call this **after** the metadata menu has closed, on both the create and the
@@ -2182,9 +2185,10 @@ def _store_match_distance(provenance: dict[str, str], disc: RBIDisc) -> None:
     the N5 alternatives menu carried ``match_confidence=0.550`` beside
     ``release_selection=manual``.
 
-    Nothing reads either key back — they are write-only tree-wide, with the one
-    live consumer being the printed ``summary()`` line, which is pre-menu **by
-    design** and is not this. So moving the write costs nothing and is not
+    Nothing reads either key back — they are write-only tree-wide. Two lines are
+    printed: the pre-menu hint (``build_match_distance``, **by design** the
+    automatic guess) and, since 2026-11-26, this result after an interactive menu
+    (*show*: "Metadata after your review"). So moving the write costs nothing and is not
     load-bearing for any decision; it is a provenance-honesty fix.
     """
     from cdda2img.match_distance import final_match_distance
@@ -2192,6 +2196,12 @@ def _store_match_distance(provenance: dict[str, str], disc: RBIDisc) -> None:
     final = final_match_distance(disc, provenance)
     provenance["match_confidence"] = f"{final.score:.3f}"
     provenance["match_recommendation"] = final.recommendation.value
+    if show:
+        # The line printed before the menu grades the automatic guess (N6); this
+        # one grades what the container ended up believing, so a release the
+        # user confirmed with the disc in hand shows as such (kgr, 2026-11-26).
+        print(f"  Metadata after your review: {final.summary()}")
+    return final
 
 
 def _note_corroboration_target(
@@ -2761,6 +2771,9 @@ def _finalize_import(
     # MusicBrainz's own link settled the release; a single barcode hit is a
     # marked row there, not a decision.
     via = provenance.get("discogs_release_via")
+    # A disc made from a download is matched against the master's digital
+    # releases, never its CDs (kgr, 2026-11-26).
+    discogs_fmt = "File" if digital_media else "CD"
     disc = run_metadata_menu(
         disc,
         source_pcm=pcm_file,
@@ -2769,8 +2782,9 @@ def _finalize_import(
         auto_apply=auto_apply,
         pressing_candidates=pressing_candidates,
         provenance=provenance,
-        discogs_open=archival and not digital_media and via != "mb_link",
+        discogs_open=archival and via != "mb_link",
         discogs_barcode_hit=disc.discogs_release_id if via == "barcode" else None,
+        discogs_fmt=discogs_fmt,
     )
     _note_corroboration_target(provenance, mb_result.selected_release_id, disc)
     disc = _discogs_after_menu(
@@ -2778,9 +2792,12 @@ def _finalize_import(
         provenance,
         mb_result.selected_release_id,
         reopen=_discogs_reopener(
-            archival=archival, auto=auto_apply, tui=tui, provenance=provenance
+            archival=archival,
+            auto=auto_apply,
+            tui=tui,
+            provenance=provenance,
+            fmt=discogs_fmt,
         ),
-        masters=not digital_media,
     )
     _settle_discogs_master(disc)
     _require_discogs_release(provenance, archival=archival)
@@ -2790,7 +2807,7 @@ def _finalize_import(
     # so the position is not load-bearing today, but "everything the menu phase
     # writes has been written" is a cheaper invariant to keep than a per-key
     # audit each time a helper is added here.
-    _store_match_distance(provenance, disc)
+    _store_match_distance(provenance, disc, show=_interactive(auto_apply))
     if ui is not None:
         ui.resume()
 
@@ -4177,7 +4194,6 @@ def _discogs_after_menu(
     provisional: str | None,
     *,
     reopen: Callable[[RBIDisc, int | None], RBIDisc] | None = None,
-    masters: bool = True,
 ) -> RBIDisc:
     """Settle the Discogs release for the pressing the menu settled on
     (trust_model_design.md §12). Returns the disc, which *reopen* may replace.
@@ -4195,9 +4211,9 @@ def _discogs_after_menu(
       MusicBrainz links the release group to is recorded instead of a release
       (``discogs_release=master_only:<id>``, §12 D7).
 
-    *masters* False (``--digital-media``) skips both master paths: a master's CD
-    versions are the wrong media type for a disc made from a download, and kgr's
-    rule is to fetch that media type's own data or abort (2026-11-21).
+    Under ``--digital-media`` the screen lists the master's ``File`` versions,
+    never its CDs (kgr, 2026-11-26: "anything else would be incorrect"); the
+    reopener carries the format.
     """
     if provenance.get("discogs_release_via") == "master_versions":
         return disc
@@ -4211,8 +4227,8 @@ def _discogs_after_menu(
         return disc
     chosen = disc.mb_release_id
     if chosen and chosen != provisional:
-        return _discogs_for_new_pressing(disc, provenance, chosen, reopen, masters)
-    if disc.discogs_release_id is not None or not masters:
+        return _discogs_for_new_pressing(disc, provenance, chosen, reopen)
+    if disc.discogs_release_id is not None:
         return disc
     if reopen is not None:
         # The master screen was open in the menu (§12 D8) and nothing was taken.
@@ -4227,7 +4243,6 @@ def _discogs_for_new_pressing(
     provenance: dict[str, str],
     chosen: str,
     reopen: Callable[[RBIDisc, int | None], RBIDisc] | None,
-    masters: bool = True,
 ) -> RBIDisc:
     """The Discogs release for a pressing the user picked in the menu: its
     MusicBrainz link; or the provisional release, when it was found by the same
@@ -4257,7 +4272,7 @@ def _discogs_for_new_pressing(
     # disc.barcode, which still names the provisional pressing when the chosen
     # one has none.
     hit = _single_barcode_hit(disc, provenance, chosen_barcode)
-    if reopen is not None and masters:
+    if reopen is not None:
         disc = reopen(disc, hit.discogs_release_id if hit else None)
         if provenance.get("discogs_release_via") != "master_versions":
             provenance["discogs_release"] = "not_chosen"
@@ -4267,10 +4282,7 @@ def _discogs_for_new_pressing(
         provenance["discogs_release"] = str(hit.discogs_release_id)
         provenance["discogs_release_via"] = "barcode_after_menu"
         return disc
-    if masters:
-        _record_discogs_master_only(disc, provenance)
-    else:
-        provenance["discogs_release"] = "no_link"
+    _record_discogs_master_only(disc, provenance)
     return disc
 
 
@@ -4323,7 +4335,12 @@ def _settle_discogs_master(disc: RBIDisc) -> None:
 
 
 def _discogs_reopener(
-    *, archival: bool, auto: bool, tui: bool, provenance: dict[str, str]
+    *,
+    archival: bool,
+    auto: bool,
+    tui: bool,
+    provenance: dict[str, str],
+    fmt: str = "CD",
 ) -> Callable[[RBIDisc, int | None], RBIDisc] | None:
     """The post-menu Discogs master screen, for an interactive ``rip`` only:
     ``rip`` is the pipeline that requires a Discogs release, and a screen needs a
@@ -4335,7 +4352,7 @@ def _discogs_reopener(
 
     def reopen(disc: RBIDisc, barcode_hit: int | None) -> RBIDisc:
         return run_discogs_menu(
-            disc, tui=tui, barcode_hit=barcode_hit, provenance=provenance
+            disc, tui=tui, barcode_hit=barcode_hit, provenance=provenance, fmt=fmt
         )
 
     return reopen

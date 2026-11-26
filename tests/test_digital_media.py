@@ -827,27 +827,39 @@ def test_a_release_set_another_way_drops_a_screen_picks_master(monkeypatch) -> N
 
 
 @pytest.mark.usefixtures("_discogs_on")
-def test_digital_media_never_falls_back_to_a_master(monkeypatch) -> None:
-    """kgr 2026-11-21: fetch the data of the disc's own media type, or abort. A
-    master's CD versions are not a download's."""
-    groups = _group_master(monkeypatch)
+def test_digital_media_unattended_records_the_master(monkeypatch) -> None:
+    """kgr 2026-11-26: digital media uses the master too, through its File
+    versions; unattended, the master is recorded as for a pressed disc."""
+    groups = _group_master(monkeypatch, master=51867)
     disc = _njr_disc(mbid=_NJR_DE)
     prov = {"discogs_release": "no_match+no_link"}
-    seen: list = []
-    app._discogs_after_menu(
-        disc, prov, _NJR_DE, reopen=lambda d, h: seen.append(h) or d, masters=False
-    )
-    assert groups == []
-    assert seen == []
-    assert prov["discogs_release"] == "no_match+no_link"
-    with pytest.raises(ra.RipAborted):
-        app._require_discogs_release(prov, archival=True)
+    app._discogs_after_menu(disc, prov, _NJR_DE)
+    assert groups == [_NJR_RG]
+    assert prov["discogs_release"] == "master_only:51867"
 
 
-def test_digital_media_does_not_open_the_master_screen() -> None:
+def test_digital_media_lists_file_versions_on_both_screens() -> None:
     src = inspect.getsource(app._finalize_import)
-    assert "discogs_open=archival and not digital_media and" in src
-    assert "masters=not digital_media" in src
+    assert 'discogs_fmt = "File" if digital_media else "CD"' in src
+    assert "discogs_open=archival and via != " in src  # digital no longer excluded
+    assert "discogs_fmt=discogs_fmt" in src  # the in-menu screen
+    assert "fmt=discogs_fmt" in src  # the post-menu reopener
+
+
+def test_the_reopener_carries_the_format(monkeypatch) -> None:
+    from cdda2img import metadata_menu
+
+    seen: list[str] = []
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    monkeypatch.setattr(
+        metadata_menu, "run_discogs_menu", lambda d, **kw: seen.append(kw["fmt"]) or d
+    )
+    reopen = app._discogs_reopener(
+        archival=True, auto=False, tui=False, provenance={}, fmt="File"
+    )
+    assert reopen is not None
+    reopen(_njr_disc(), None)
+    assert seen == ["File"]
 
 
 @pytest.mark.usefixtures("_discogs_on")

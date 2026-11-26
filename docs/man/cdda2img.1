@@ -256,7 +256,12 @@ from the main menu): the CD releases of the album's Discogs master, narrowed by
 the country printed on your disc (Discogs' own names, with counts) and a year
 (releases Discogs leaves undated are kept unless you drop them), then a list
 whose entries show the barcode or "not listed", the matrix/runout, SPARS codes
-and Discogs' notes. Releases can differ only in print on the label, so
+and Discogs' notes. Taking one also sets the label, catalogue number,
+country, barcode and release date to what that Discogs release states, where it
+states them. For
+.B \-\-digital-media
+the screen lists the master's digital (File) releases instead of its CDs.
+Releases can differ only in print on the label, so
 cdda2img never picks one itself in an interactive rip; leaving without one
 aborts (3). Under
 .B \-\-auto

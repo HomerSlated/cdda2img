@@ -5,11 +5,11 @@
 ### ✅ DONE 2026-11-26 — Discogs release selection by master (kgr)
 
 Built the same day it was decided: `trust_model_design.md` §12, as-built notes §12.5.
-**Open follow-ups**: (1) a Discogs pick changes only the Discogs ids, so the catalogue
-fields keep the MusicBrainz pressing's values (*No Jacket Required*: MusicBrainz's barcode,
-the reissue's, beside Discogs 5222631, which lists none): overwrite, clear, or leave? kgr's
-call. (2) R11 could read `discogs_master_id` directly. (3) `list`, the catalogue and the
-RLOG do not name the master. Live check outstanding: kgr's interactive and `--auto` re-rips
+Ruled the same day: a pick overwrites the catalogue fields Discogs states (never with a
+blank); `--digital-media` lists File versions; a screen pick counts as user confirmation.
+**Open follow-ups**: (1) R11 could read `discogs_master_id` directly. (2) `list`, the
+catalogue and the RLOG do not name the master. (3) kgr to rule whether a run with no
+terminal (and no `--auto`) may settle for a master, as `--auto` may. Live check outstanding: kgr's interactive and `--auto` re-rips
 of *No Jacket Required*.
 
 ### 🔬 LIVE — sector-hammer: find the systematic failure, then try to make it a useful profile (kgr, 2026-11-25)

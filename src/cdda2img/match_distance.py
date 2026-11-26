@@ -111,6 +111,29 @@ def build_match_distance(disc: RBIDisc, prov: dict[str, str]) -> MatchDistance:
     return MatchDistance(score=score, contributors=contributors, recommendation=rec)
 
 
+def _user_confirmed(prov: dict[str, str]) -> bool:
+    """The user, holding the disc, settled which release it is (kgr: "logically
+    that is always the strongest signal").
+
+    Either they picked the pressing on the MusicBrainz pressing screen
+    (``release_selection=manual``), or they picked the Discogs release on the
+    master screen (``discogs_release_via=master_versions``, 2026-11-26) where
+    MusicBrainz had only one pressing to offer (``release_selection=unique``) or
+    pinned none (absent: a fallback identified the album, and the user's Discogs
+    pick is the only pressing identity there is), so nothing about the pressing
+    was left to the automatic tiebreak. A Discogs pick
+    beside an un-reviewed ``auto_tiebreak`` pressing does NOT count: the
+    MusicBrainz release in the container would still be a guess.
+    """
+    selection = prov.get("release_selection")
+    if selection == "manual":
+        return True
+    return prov.get("discogs_release_via") == "master_versions" and selection in (
+        "unique",
+        None,
+    )
+
+
 def final_match_distance(disc: RBIDisc, prov: dict[str, str]) -> MatchDistance:
     """The score to STORE, computed after the metadata menu has closed (N6).
 
@@ -149,7 +172,7 @@ def final_match_distance(disc: RBIDisc, prov: dict[str, str]) -> MatchDistance:
         reads it. kgr's ruling covers ``manual`` and deliberately leaves this
         open: flag it rather than invent a value (TODO N6).
     """
-    if prov.get("release_selection") == "manual":
+    if _user_confirmed(prov):
         return MatchDistance(
             score=1.0,
             contributors={"user_confirmed": 1.0},

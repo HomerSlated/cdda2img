@@ -389,3 +389,55 @@ def test_the_score_is_stored_after_the_menu_on_every_path():
     assert sorted(checked) == ["_finalize_import", "create_image"], (
         f"expected both pipelines to be covered, saw {sorted(checked)}"
     )
+
+
+# ---- user confirmation: the strongest signal (kgr, 2026-11-26) --------------------
+
+
+@pytest.mark.parametrize(
+    ("prov", "confirmed"),
+    [
+        ({"release_selection": "manual"}, True),
+        (
+            {"release_selection": "unique", "discogs_release_via": "master_versions"},
+            True,
+        ),
+        ({"discogs_release_via": "master_versions"}, True),  # no MB pressing pinned
+        # Control: the MusicBrainz pressing is still an automatic guess.
+        (
+            {
+                "release_selection": "auto_tiebreak",
+                "discogs_release_via": "master_versions",
+            },
+            False,
+        ),
+        ({"release_selection": "unique", "discogs_release_via": "mb_link"}, False),
+        ({"release_selection": "auto_tiebreak"}, False),
+    ],
+)
+def test_who_settled_the_release(prov, confirmed) -> None:
+    from cdda2img.match_distance import final_match_distance
+
+    disc = RBIDisc(album="No Jacket Required", artist="Phil Collins")
+    final = final_match_distance(disc, prov)
+    assert (final.score == 1.0 and "user_confirmed" in final.contributors) is confirmed
+
+
+def test_the_final_grade_is_printed_after_an_interactive_menu(capsys) -> None:
+    import inspect
+
+    from cdda2img import cdda2img as app
+
+    src = inspect.getsource(app._finalize_import)
+    assert (
+        "_store_match_distance(provenance, disc, show=_interactive(auto_apply))" in src
+    )
+    disc = RBIDisc(album="No Jacket Required", artist="Phil Collins")
+    prov = {"release_selection": "manual"}
+    app._store_match_distance(prov, disc, show=True)
+    assert "Metadata after your review: strong match, confidence 1.00" in (
+        capsys.readouterr().out
+    )
+    app._store_match_distance(prov, disc)  # unattended: stored, not printed
+    assert capsys.readouterr().out == ""
+    assert prov["match_confidence"] == "1.000"

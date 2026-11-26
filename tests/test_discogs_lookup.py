@@ -11,6 +11,8 @@ from __future__ import annotations
 from unittest.mock import patch
 from urllib.parse import quote_plus
 
+import pytest
+
 from cdda2img import discogs_lookup
 
 
@@ -281,3 +283,71 @@ def test_search_masters_reads_the_first_page() -> None:
     assert hits == [
         discogs_lookup.MasterHit(98041, "Phil Collins - No Jacket Required", "1985")
     ]
+
+
+# ---- catalogue fields a Discogs pick may overwrite (kgr, 2026-11-26) -----------
+
+
+def _details(
+    *,
+    country: str = "",
+    released: str = "",
+    labels: tuple[tuple[str, str], ...] = (),
+    barcodes: tuple[str, ...] = (),
+) -> discogs_lookup.ReleaseDetails:
+    return discogs_lookup.ReleaseDetails(
+        release_id=1,
+        master_id=None,
+        title="",
+        country=country,
+        released=released,
+        label="",
+        catno="",
+        formats=(),
+        barcodes=barcodes,
+        identifiers=(),
+        notes="",
+        labels=labels,
+    )
+
+
+def test_catalogue_fields_takes_what_discogs_states() -> None:
+    d = _details(
+        country="UK",
+        released="1985-03-00",
+        labels=(("Virgin", "CDV 2345"), ("Other", "X1")),
+        barcodes=("5 012981 234522",),
+    )
+    assert d.catalogue_fields() == {
+        "label": "Virgin",
+        "catalog_number": "CDV 2345",
+        "country": "GB",
+        "barcode": "5012981234522",
+        "release_date": "1985-03",
+    }
+
+
+def test_catalogue_fields_leaves_out_what_discogs_leaves_blank() -> None:
+    d = _details(
+        country="Unknown",  # no ISO code: left out, never blanked
+        released="0",
+        labels=(("", "none"),),
+        barcodes=("none",),
+    )
+    assert d.catalogue_fields() == {}
+
+
+@pytest.mark.parametrize(
+    ("released", "expected"),
+    [
+        ("1985", "1985"),
+        ("1985-03-21", "1985-03-21"),
+        ("1985-03-00", "1985-03"),
+        ("1985-00-00", "1985"),
+        ("0", None),
+        ("", None),
+        ("85", None),
+    ],
+)
+def test_discogs_dates_drop_their_placeholders(released, expected) -> None:
+    assert discogs_lookup._discogs_date(released) == expected

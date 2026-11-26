@@ -162,9 +162,7 @@ def replay(
                 )
                 # No menu here, as under --auto: the pressing stays as pinned, and
                 # the unattended post-menu step runs (trust_model_design.md §12 D7).
-                disc = app._discogs_after_menu(
-                    disc, prov, disc.mb_release_id, masters=not digital_media
-                )
+                disc = app._discogs_after_menu(disc, prov, disc.mb_release_id)
                 app._settle_discogs_master(disc)
                 print(f"   disc.discogs_release_id = {disc.discogs_release_id}")
                 print(f"   disc.discogs_master_id = {disc.discogs_master_id}")

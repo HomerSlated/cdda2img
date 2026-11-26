@@ -693,6 +693,7 @@ def run_metadata_menu(
     provenance: dict[str, str] | None = None,
     discogs_open: bool = False,
     discogs_barcode_hit: int | None = None,
+    discogs_fmt: str = "CD",
 ) -> RBIDisc:
     """Display current metadata and run the interactive enrichment/confirmation menu.
 
@@ -710,8 +711,9 @@ def run_metadata_menu(
     candidate's MB free text are written into it after the menu closes.
     *discogs_open* — open the Discogs master screen (trust_model_design.md §12)
     once the pressing is settled; *discogs_barcode_hit* marks the one release the
-    pressing's barcode found (§12 D6). A release picked there is written to
-    *provenance* (:func:`_record_discogs_pick`).
+    pressing's barcode found (§12 D6); *discogs_fmt* is the Discogs format the
+    screen lists ("CD", or "File" for --digital-media). A release picked there is
+    written to *provenance* (:func:`_record_discogs_pick`).
 
     Returns the (possibly updated) RBIDisc. Returns *disc* unchanged when stdin
     is not a TTY (batch/scripted mode).
@@ -733,6 +735,7 @@ def run_metadata_menu(
         pressing_outcome=(provenance or {}).get("release_selection", "unique"),
         discogs_open=discogs_open,
         discogs_barcode_hit=discogs_barcode_hit,
+        discogs_fmt=discogs_fmt,
     )
     disc = ctl.run()
     if provenance is not None:
@@ -747,6 +750,7 @@ def run_discogs_menu(
     tui: bool = True,
     barcode_hit: int | None = None,
     provenance: dict[str, str] | None = None,
+    fmt: str = "CD",
 ) -> RBIDisc:
     """The Discogs master screen on its own, after the metadata menu: the user
     picked another pressing there and nothing settled its Discogs release
@@ -754,7 +758,11 @@ def run_discogs_menu(
     from cdda2img.menu_state import MenuController
 
     ctl = MenuController(
-        disc, tui=tui, discogs_only=True, discogs_barcode_hit=barcode_hit
+        disc,
+        tui=tui,
+        discogs_only=True,
+        discogs_barcode_hit=barcode_hit,
+        discogs_fmt=fmt,
     )
     disc = ctl.run()
     if provenance is not None:
@@ -775,6 +783,8 @@ def _record_discogs_pick(provenance: dict[str, str], ctl) -> None:
     provenance["discogs_release"] = str(picked)
     provenance["discogs_release_via"] = "master_versions"
     provenance["discogs_master"] = filters
+    if ctl.discogs_fields:
+        provenance["discogs_overwrote"] = ",".join(ctl.discogs_fields)
     provenance.pop("discogs_release_barcode", None)
 
 

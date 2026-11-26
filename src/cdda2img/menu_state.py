@@ -261,7 +261,11 @@ class MainScreen(Screen):
         if choice == "s" and len(ctl.pressing_candidates) > 1:
             return Push(PressingScreen(ctl.pressing_candidates, ctl.disc.mb_release_id))
         if choice == "d":
-            return Push(DiscogsMasterScreen(barcode_hit=ctl.discogs_barcode_hit))
+            return Push(
+                DiscogsMasterScreen(
+                    barcode_hit=ctl.discogs_barcode_hit, fmt=ctl.discogs_fmt
+                )
+            )
         if choice == "u":
             ctl.disc = copy.deepcopy(ctl._original_disc)
             ctl.mb_rg_id = None
@@ -1287,8 +1291,12 @@ class DiscogsMasterScreen(Screen):
 
     state = MenuState.DISCOGS_MASTER
 
-    def __init__(self, *, barcode_hit: int | None = None) -> None:
+    def __init__(self, *, barcode_hit: int | None = None, fmt: str = "CD") -> None:
         self.barcode_hit = barcode_hit
+        # Discogs format the versions are filtered to: "CD" for a pressed disc,
+        # "File" for --digital-media (kgr, 2026-11-26: anything else would be
+        # incorrect for a disc made from a download).
+        self.fmt = fmt
         self.loaded = False
         self.available = True
         self.master: int | None = None
@@ -1302,7 +1310,9 @@ class DiscogsMasterScreen(Screen):
         self.keep_undated = True
         self.page = 0
         self.hits: list = []  # discogs_lookup.MasterHit, master phase
-        self._entry: tuple[RBIDisc, tuple[int, str] | None] | None = None
+        self._entry: tuple[RBIDisc, tuple[int, str] | None, tuple[str, ...]] | None = (
+            None
+        )
 
     # -- loading ------------------------------------------------------------
 
@@ -1311,7 +1321,7 @@ class DiscogsMasterScreen(Screen):
         from cdda2img.mb_lookup import discogs_master_of_release_group
 
         self.loaded = True
-        self._entry = (copy.deepcopy(ctl.disc), ctl.discogs_pick)
+        self._entry = (copy.deepcopy(ctl.disc), ctl.discogs_pick, ctl.discogs_fields)
         if not discogs_lookup.is_available():
             self.available = False
             return
@@ -1328,7 +1338,7 @@ class DiscogsMasterScreen(Screen):
 
         self.master = master
         self.phase = "country"
-        found = discogs_lookup.master_countries(master)
+        found = discogs_lookup.master_countries(master, fmt=self.fmt)
         self.countries, self.total = found if found else ((), 0)
         self.marked = _preselected_countries(self.countries, ctl.disc.country)
 
@@ -1355,10 +1365,16 @@ class DiscogsMasterScreen(Screen):
             print(f"  ! {ctl.banner}")
             ctl.banner = ""
 
+    def _noun(self) -> str:
+        return "CDs" if self.fmt == "CD" else f"{self.fmt} releases"
+
     def _title(self) -> str:
         if self.master is None:
             return "Choose the Discogs release"
-        return f"Choose the Discogs release  (master {self.master}: {self.total} CDs)"
+        return (
+            f"Choose the Discogs release  (master {self.master}: "
+            f"{self.total} {self._noun()})"
+        )
 
     def _render_master(self, ctl: MenuController) -> None:
         print("  MusicBrainz links this album to no Discogs master.")
@@ -1386,7 +1402,7 @@ class DiscogsMasterScreen(Screen):
     def _render_year(self) -> None:
         v = self.versions
         where = ", ".join(self.chosen) or "every country"
-        print(f"  {where}: {v.total if v else 0} CDs. Which year?")
+        print(f"  {where}: {v.total if v else 0} {self._noun()}. Which year?")
         print()
         for i, (year, n) in enumerate(v.years if v else (), start=1):
             print(f"  {i:>3}  {year} ({n})")
@@ -1470,7 +1486,7 @@ class DiscogsMasterScreen(Screen):
             return Pop()
         if choice == "q":
             if self._entry is not None:
-                ctl.disc, ctl.discogs_pick = self._entry
+                ctl.disc, ctl.discogs_pick, ctl.discogs_fields = self._entry
             ctl.banner = "Discogs release left as it was."
             return Pop()
         if not self.available:
@@ -1523,7 +1539,9 @@ class DiscogsMasterScreen(Screen):
         from cdda2img import discogs_lookup
 
         print("  Fetching the list from Discogs...")
-        found = discogs_lookup.master_versions(self.master or 0, countries=chosen)
+        found = discogs_lookup.master_versions(
+            self.master or 0, countries=chosen, fmt=self.fmt
+        )
         if found is None:
             ctl.banner = "Discogs did not answer; try again."
             return Stay()
@@ -1631,12 +1649,18 @@ class DiscogsReleaseDetailScreen(Screen):
         master = (
             self.details.master_id if self.details else None
         ) or self.parent.master
+        # kgr, 2026-11-26: the release the user confirmed against the disc in hand
+        # overwrites the MusicBrainz pressing's catalogue fields, but only those
+        # Discogs actually states (a blank never erases a value).
+        fields = self.details.catalogue_fields() if self.details else {}
         ctl.disc = replace(
             ctl.disc,
             discogs_release_id=self.version.release_id,
             discogs_master_id=master,
+            **fields,
         )
         ctl.discogs_pick = (self.version.release_id, self.parent.filters())
+        ctl.discogs_fields = tuple(fields)
         ctl.banner = (
             f"Discogs release set to {self.version.release_id}. "
             "[s] keeps it, [q] discards it."
@@ -1674,6 +1698,7 @@ class MenuController:
         discogs_open: bool = False,
         discogs_barcode_hit: int | None = None,
         discogs_only: bool = False,
+        discogs_fmt: str = "CD",
     ) -> None:
         self.disc: RBIDisc = disc
         self._original_disc: RBIDisc = copy.deepcopy(disc)  # undo savepoint
@@ -1714,19 +1739,24 @@ class MenuController:
         # The id travels with it so a release set afterwards by another route
         # ([u] reset, Fetch -> Discogs) is not credited to the screen.
         self.discogs_pick: tuple[int, str] | None = None
+        # The RBIDisc fields that pick overwrote (PROV `discogs_overwrote`).
+        self.discogs_fields: tuple[str, ...] = ()
         self.discogs_barcode_hit = discogs_barcode_hit
+        self.discogs_fmt = discogs_fmt
         if discogs_only:
             # Post-menu: the pressing changed and nothing settled its Discogs
             # release. The screen is the root, so leaving it ends the run.
             self.stack: list[Screen] = [
-                DiscogsMasterScreen(barcode_hit=discogs_barcode_hit)
+                DiscogsMasterScreen(barcode_hit=discogs_barcode_hit, fmt=discogs_fmt)
             ]
             return
         self.stack = [MainScreen()]
         if discogs_open:
             # §12 D8: below the pressing screen, so it opens once the pressing
             # is settled and pre-selects that pressing's country.
-            self.stack.append(DiscogsMasterScreen(barcode_hit=discogs_barcode_hit))
+            self.stack.append(
+                DiscogsMasterScreen(barcode_hit=discogs_barcode_hit, fmt=discogs_fmt)
+            )
         if len(self.pressing_candidates) > 1:
             # N5: the pressing screen OPENS on a multi-candidate disc — kgr's
             # wording is that no-auto "will activate the alternatives menu",
