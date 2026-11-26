@@ -1257,6 +1257,38 @@ def _discogs_state(disc: RBIDisc) -> str:
     return "none chosen"
 
 
+def _list_page() -> int:
+    """Rows per page in the Discogs screen's lists: the menu's own page size."""
+    from cdda2img.metadata_menu import _PAGE
+
+    return _PAGE
+
+
+def _page_of(items, page: int) -> tuple[int, list, int]:
+    """``(start, rows, pages)`` for page *page* (clamped) of *items*."""
+    size = _list_page()
+    pages = max(1, (len(items) + size - 1) // size)
+    page = max(0, min(page, pages - 1))
+    start = page * size
+    return start, list(items[start : start + size]), pages
+
+
+def _page_keys(page: int, pages: int) -> str:
+    """``[p] prev  [n] next`` as far as they apply; empty on a single page."""
+    keys = []
+    if page > 0:
+        keys.append("[p] prev")
+    if page < pages - 1:
+        keys.append("[n] next")
+    return "  ".join(keys)
+
+
+def _turn(page: int, key: str, items) -> int:
+    """The page after ``[n]`` or ``[p]``, kept within *items*' pages."""
+    _start, _rows, pages = _page_of(items, page)
+    return max(0, min(page + (1 if key == "n" else -1), pages - 1))
+
+
 def _preselected_countries(
     countries: tuple[tuple[str, int], ...], code: str | None
 ) -> tuple[str, ...]:
@@ -1309,6 +1341,12 @@ class DiscogsMasterScreen(Screen):
         self.year: str | None = None
         self.keep_undated = True
         self.page = 0
+        # Pages of the master-search, country and year lists: each can outgrow
+        # the terminal (kgr, 2026-11-26: the first rows of a long country list
+        # scrolled off the top). Numbers stay global across pages.
+        self.mpage = 0
+        self.cpage = 0
+        self.ypage = 0
         self.hits: list = []  # discogs_lookup.MasterHit, master phase
         self._entry: tuple[RBIDisc, tuple[int, str] | None, tuple[str, ...]] | None = (
             None
@@ -1341,6 +1379,12 @@ class DiscogsMasterScreen(Screen):
         found = discogs_lookup.master_countries(master, fmt=self.fmt)
         self.countries, self.total = found if found else ((), 0)
         self.marked = _preselected_countries(self.countries, ctl.disc.country)
+        # Open on the page holding the first marked country.
+        first = next(
+            (i for i, (name, _n) in enumerate(self.countries) if name in self.marked),
+            0,
+        )
+        self.cpage = first // _list_page()
 
     # -- rendering ----------------------------------------------------------
 
@@ -1382,34 +1426,51 @@ class DiscogsMasterScreen(Screen):
             f"  Search Discogs for: {ctl.disc.artist or '?'} - {ctl.disc.album or '?'}"
         )
         print()
-        for i, h in enumerate(self.hits, start=1):
+        start, rows, pages = _page_of(self.hits, self.mpage)
+        self.mpage = min(self.mpage, pages - 1)
+        for i, h in enumerate(rows, start=start + 1):
             print(f"  {i:>3}  {h.master_id:<9}  {h.year or '----'}  {h.title}")
         print()
-        print("  [f] search    1-n choose a master    [s] save and continue")
+        nav = _page_keys(self.mpage, pages)
+        print("  [f] search    1-n choose a master" + (f"    {nav}" if nav else ""))
+        print("  [s] save and continue")
 
     def _render_country(self) -> None:
         print("  Which country does your disc say it was made in? Discogs' own names:")
-        print()
-        for i, (name, n) in enumerate(self.countries, start=1):
+        start, rows, pages = _page_of(self.countries, self.cpage)
+        self.cpage = min(self.cpage, pages - 1)
+        print(f"  [{self.cpage + 1}/{pages}]")
+        for i, (name, n) in enumerate(rows, start=start + 1):
             mark = "*" if name in self.marked else " "
             print(f"  {i:>3}{mark} {name} ({n})")
         print()
         if self.marked:
-            print("  * = your pressing's country, from MusicBrainz")
-        print("  Number(s), e.g. 3 or 3,17.  Enter = the marked one(s).")
+            print(
+                f"  * = your pressing's country, from MusicBrainz: {', '.join(self.marked)}"
+            )
+        nav = _page_keys(self.cpage, pages)
+        print(
+            "  Number(s), e.g. 3 or 3,17.  Enter = the marked one(s)."
+            + (f"  {nav}" if nav else "")
+        )
         print("  [a] every country    [s] save and continue    [q] exit without saving")
 
     def _render_year(self) -> None:
         v = self.versions
         where = ", ".join(self.chosen) or "every country"
         print(f"  {where}: {v.total if v else 0} {self._noun()}. Which year?")
-        print()
-        for i, (year, n) in enumerate(v.years if v else (), start=1):
+        start, rows, pages = _page_of(v.years if v else (), self.ypage)
+        self.ypage = min(self.ypage, pages - 1)
+        print(f"  [{self.ypage + 1}/{pages}]")
+        for i, (year, n) in enumerate(rows, start=start + 1):
             print(f"  {i:>3}  {year} ({n})")
         print(f"       undated: {v.undated if v else 0}")
         print()
         undated = "kept" if self.keep_undated else "dropped"
+        nav = _page_keys(self.ypage, pages)
         print(f"  Number = that year (undated releases {undated}).  Enter = any year.")
+        if nav:
+            print(f"  {nav}")
         print("  [u] keep/drop undated   [c] country")
         print("  [s] save and continue   [q] exit without saving")
 
@@ -1501,11 +1562,15 @@ class DiscogsMasterScreen(Screen):
     def _input_master(self, ctl: MenuController, choice: str) -> Nav:
         from cdda2img import discogs_lookup
 
+        if choice in ("n", "p"):
+            self.mpage = _turn(self.mpage, choice, self.hits)
+            return Stay()
         if choice in ("f", ""):
             print("  Searching Discogs masters...")
             self.hits = discogs_lookup.search_masters(
                 ctl.disc.artist or "", ctl.disc.album or ""
             )
+            self.mpage = 0
             if not self.hits:
                 ctl.banner = "Discogs found no master for that artist and album."
             return Stay()
@@ -1516,6 +1581,9 @@ class DiscogsMasterScreen(Screen):
         return Stay()
 
     def _input_country(self, ctl: MenuController, choice: str) -> Nav:
+        if choice in ("n", "p"):
+            self.cpage = _turn(self.cpage, choice, self.countries)
+            return Stay()
         if choice == "a":
             chosen: tuple[str, ...] = ()
         elif choice == "":
@@ -1546,12 +1614,15 @@ class DiscogsMasterScreen(Screen):
             ctl.banner = "Discogs did not answer; try again."
             return Stay()
         self.chosen, self.versions = chosen, found
-        self.year, self.page = None, 0
+        self.year, self.page, self.ypage = None, 0, 0
         self.phase = "year" if found.years else "list"
         return Stay()
 
     def _input_year(self, ctl: MenuController, choice: str) -> Nav:
         years = self.versions.years if self.versions else ()
+        if choice in ("n", "p"):
+            self.ypage = _turn(self.ypage, choice, years)
+            return Stay()
         if choice == "u":
             self.keep_undated = not self.keep_undated
             return Stay()

@@ -480,3 +480,67 @@ def test_the_main_menu_entry_keeps_the_format() -> None:
     screen = ctl.stack[-1]
     assert isinstance(screen, DiscogsMasterScreen)
     assert screen.fmt == "File"
+
+
+# ---- long lists page (kgr, 2026-11-26: the first rows scrolled off the top) -------
+
+_MANY = (*((f"Country{i:02d}", 40 - i) for i in range(1, 26)), ("UK", 11))
+
+
+def _long_ctl(monkeypatch, country="GB") -> MenuController:
+    monkeypatch.setattr(
+        "cdda2img.discogs_lookup.master_countries", lambda _m, *, fmt="CD": (_MANY, 400)
+    )
+    return _ctl(_disc(country=country))
+
+
+@pytest.mark.usefixtures("discogs")
+def test_a_long_country_list_pages_and_opens_on_the_marked_country(
+    monkeypatch, capsys
+) -> None:
+    ctl = _long_ctl(monkeypatch)
+    ctl.stack[-1].render(ctl)
+    out = capsys.readouterr().out
+    assert "[3/3]" in out  # UK is row 26, on page 3
+    assert " 26* UK (11)" in out
+    assert "Country01" not in out
+    assert all(len(line) <= 80 for line in out.splitlines())
+
+
+@pytest.mark.usefixtures("discogs")
+def test_country_pages_turn_and_numbers_stay_global(monkeypatch, capsys) -> None:
+    ctl = _long_ctl(monkeypatch, country="XW")  # nothing marked: page 1
+    ctl.stack[-1].render(ctl)
+    assert "  1  Country01 (39)" in capsys.readouterr().out
+    _step(ctl, "n")
+    capsys.readouterr()
+    ctl.stack[-1].render(ctl)
+    out = capsys.readouterr().out
+    assert " 11  Country11 (29)" in out
+    assert "Country01" not in out
+    _step(ctl, "p")
+    assert _screen(ctl).cpage == 0
+    _step(ctl, "p")  # already on the first page
+    assert _screen(ctl).cpage == 0
+    _step(ctl, "12")  # a row on another page is still chosen by its number
+    assert _screen(ctl).chosen == ("Country12",)
+
+
+@pytest.mark.usefixtures("discogs")
+def test_a_long_year_list_pages(monkeypatch, capsys) -> None:
+    years = tuple((str(1985 + i), 1) for i in range(15))
+    many = MasterVersions(_UK.versions, 11, years, False)
+    monkeypatch.setattr(
+        "cdda2img.discogs_lookup.master_versions",
+        lambda _m, *, countries=(), fmt="CD": many,
+    )
+    ctl = _ctl()
+    _step(ctl, "")
+    capsys.readouterr()
+    ctl.stack[-1].render(ctl)
+    out = capsys.readouterr().out
+    assert "[1/2]" in out
+    assert "1999" not in out
+    _step(ctl, "n")
+    _step(ctl, "13")  # 1997, on page 2
+    assert _screen(ctl).year == "1997"
