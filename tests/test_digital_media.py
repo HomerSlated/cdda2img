@@ -575,6 +575,161 @@ def test_a_discogs_release_set_in_the_menu_is_the_users(monkeypatch) -> None:
     assert prov["discogs_release_via"] == "menu"
 
 
+# ---- No Jacket Required: a chosen pressing with no MusicBrainz -> Discogs link ----
+#
+# kgr, 2026-11-26: the GB Virgin pressing (MB 0a19729e, barcode 5012981234522)
+# has no Discogs link, and Discogs holds two releases for its barcode (5221810,
+# 19343422) that differ only in label print. The provisional pick was a German
+# WEA pressing whose barcode found 20.
+
+_NJR_GB = "0a19729e"
+_NJR_DE = "d73bd2e7"
+_GB_BARCODE = "5012981234522"
+_DE_BARCODE = "0022925169921"
+
+
+def _njr_disc(discogs=None, mbid=_NJR_GB):
+    return SimpleNamespace(
+        album="No Jacket Required",
+        mb_release_id=mbid,
+        discogs_release_id=discogs,
+        barcode=_DE_BARCODE,  # stale: what phase A wrote for the provisional pick
+    )
+
+
+def _njr_prov():
+    return {
+        "discogs_barcode_outcome": "ambiguous_20",
+        "discogs_release": "ambiguous_20+no_link",
+    }
+
+
+def _discogs_search(monkeypatch, hits):
+    from cdda2img.lookup_result import DiscMeta
+
+    asked: list[str] = []
+
+    def search(code):
+        asked.append(code)
+        return [
+            DiscMeta(album="No Jacket Required", discogs_release_id=i, country="GB")
+            for i in hits
+        ]
+
+    monkeypatch.setattr("cdda2img.discogs_lookup.search_by_barcode", search)
+    return asked
+
+
+@pytest.mark.usefixtures("_discogs_on")
+def test_a_new_pressing_without_a_link_is_searched_by_its_own_barcode(
+    monkeypatch,
+) -> None:
+    _links(monkeypatch, (None, _GB_BARCODE))
+    asked = _discogs_search(monkeypatch, [5221810])
+    disc, prov = _njr_disc(), _njr_prov()
+    app._discogs_after_menu(disc, prov, _NJR_DE)
+    assert asked == [_GB_BARCODE]  # not the provisional pressing's barcode
+    assert disc.discogs_release_id == 5221810
+    assert prov["discogs_release"] == "5221810"
+    assert prov["discogs_release_via"] == "barcode_after_menu"
+    app._require_discogs_release(prov, archival=True)
+
+
+@pytest.mark.usefixtures("_discogs_on")
+def test_two_discogs_releases_are_offered_to_the_user(monkeypatch) -> None:
+    _links(monkeypatch, (None, _GB_BARCODE))
+    _discogs_search(monkeypatch, [19343422, 5221810])
+    offered: list[list[int]] = []
+
+    def choose(hits):
+        offered.append([h.discogs_release_id for h in hits])
+        return hits[1]
+
+    disc, prov = _njr_disc(), _njr_prov()
+    app._discogs_after_menu(disc, prov, _NJR_DE, choose=choose)
+    assert offered == [[19343422, 5221810]]
+    assert disc.discogs_release_id == 5221810
+    assert prov["discogs_release_via"] == "chosen"
+    assert "discogs_release_candidates" not in prov
+
+
+@pytest.mark.usefixtures("_discogs_on")
+@pytest.mark.parametrize("chooser", [None, lambda _h: None])
+def test_unresolved_discogs_candidates_abort_and_are_named(
+    monkeypatch, chooser
+) -> None:
+    """No chooser (headless, --auto) or none picked: nothing guesses between them."""
+    _links(monkeypatch, (None, _GB_BARCODE))
+    _discogs_search(monkeypatch, [19343422, 5221810])
+    disc, prov = _njr_disc(), _njr_prov()
+    app._discogs_after_menu(disc, prov, _NJR_DE, choose=chooser)
+    assert disc.discogs_release_id is None
+    assert prov["discogs_release"] == f"ambiguous_2:{_GB_BARCODE}+no_link"
+    assert prov["discogs_release_candidates"] == "19343422,5221810"
+    with pytest.raises(ra.RipAborted) as exc:
+        app._require_discogs_release(prov, archival=True)
+    assert f"ambiguous_2:{_GB_BARCODE}" in " ".join(_v(exc).details)
+
+
+@pytest.mark.usefixtures("_discogs_on")
+def test_a_chosen_pressing_with_no_barcode_is_not_searched_by_the_stale_one(
+    monkeypatch,
+) -> None:
+    _links(monkeypatch, (None, None))
+    asked = _discogs_search(monkeypatch, [1])
+    disc, prov = _njr_disc(), _njr_prov()
+    app._discogs_after_menu(disc, prov, _NJR_DE)
+    assert asked == []
+    assert prov["discogs_release"] == "no_barcode+no_link"
+
+
+@pytest.mark.usefixtures("_discogs_on")
+def test_an_unchanged_pressing_without_a_release_can_be_chosen(monkeypatch) -> None:
+    _links(monkeypatch, None)  # never asked: the pressing did not change
+    asked = _discogs_search(monkeypatch, [11, 22, 33])
+    disc = _njr_disc(mbid=_NJR_DE)  # unchanged: its barcode is its own
+    prov = _njr_prov()
+    app._discogs_after_menu(disc, prov, _NJR_DE, choose=lambda h: h[2])
+    assert asked == [_DE_BARCODE]
+    assert disc.discogs_release_id == 33
+    assert prov["discogs_release_via"] == "chosen"
+
+
+def test_the_discogs_chooser_returns_the_picked_row() -> None:
+    from cdda2img.lookup_result import DiscMeta
+
+    hits = [
+        DiscMeta(album="X", discogs_release_id=19343422),
+        DiscMeta(album="X", discogs_release_id=5221810),
+    ]
+    notes = {5221810: "Reissue of [r=5222631]. '80s reissue adds a barcode."}
+    answers = iter(["9", "x", "2"])  # out of range and junk are asked again
+    got = app._choose_discogs_release(
+        hits,
+        input_fn=lambda _p: next(answers),
+        fetch=lambda i: DiscMeta(
+            album="X", discogs_release_id=i, annotation=notes.get(i)
+        ),
+    )
+    assert got is not None
+    assert got.discogs_release_id == 5221810
+
+
+@pytest.mark.parametrize("answer", ["", EOFError])
+def test_the_discogs_chooser_declines_on_enter_or_eof(answer) -> None:
+    from cdda2img.lookup_result import DiscMeta
+
+    def ask(_p):
+        if answer is EOFError:
+            raise EOFError
+        return answer
+
+    hits = [DiscMeta(album="X", discogs_release_id=1)]
+    assert (
+        app._choose_discogs_release(hits, input_fn=ask, fetch=lambda _i: None) is None
+    )
+
+
 def test_the_post_menu_gate_is_rip_only() -> None:
     app._require_discogs_release({}, archival=False)
     with pytest.raises(ra.RipAborted):

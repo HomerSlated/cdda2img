@@ -2103,9 +2103,54 @@ def test_rung_key1_barcode_plurality_wins():
     assert sel.winner.mb_release_id in {"a", "b"}  # plurality tier
     assert sel.via == "barcode_plurality"
     # N4: barcode_plurality narrowed to the 2-strong tier; `mbid` then had to
-    # arbitrate between those two. The menu would show exactly that tier.
+    # arbitrate between those two.
     assert sel.tied_after == "barcode_plurality:2"
-    assert {c.mb_release_id for c in sel.menu_candidates} == {"a", "b"}
+    # ...but the MENU shows all three (2026-11-26): plurality counts MusicBrainz
+    # records per barcode, which is not evidence about the disc in the drive.
+    assert {c.mb_release_id for c in sel.menu_candidates} == {"a", "b", "c"}
+
+
+def _no_jacket_required() -> list[DiscMeta]:
+    """The four releases MusicBrainz holds for disc ID
+    DCvSBmF2Sn35OCvgXtnULUypFkw- (Phil Collins, *No Jacket Required*), as fetched
+    2026-11-26: two records of one German WEA pressing, the US Atlantic, and the
+    GB Virgin pressing the disc in the drive actually was."""
+    return [
+        _cand("d73bd2e7", catalog="022925169921", country="XE", date="1985"),
+        _cand("0136fad2", catalog="075678124020", country="US", date="1985-04-17"),
+        _cand("5302ea74", catalog="022925169921", country="XE", date="1985-03-21"),
+        _cand("0a19729e", catalog="5012981234522", country="GB", date="1985"),
+    ]
+
+
+def test_the_pressing_menu_offers_a_pressing_the_barcode_plurality_outvoted():
+    """kgr, 2026-11-26: the menu offered only the two German rows, both wrong;
+    the GB Virgin pressing in the drive never reached it."""
+    disc = RBIDisc(album="A", artist="B")
+    sel = _select_release_lexicographic(_no_jacket_required(), disc, [])
+    assert sel.winner is not None
+    assert sel.winner.country == "XE"  # the automatic guess is unchanged...
+    offered = {c.mb_release_id for c in sel.menu_candidates}
+    assert offered == {
+        "d73bd2e7",
+        "0136fad2",
+        "5302ea74",
+        "0a19729e",
+    }  # ...the menu is not
+
+
+def test_the_old_evidence_rung_filter_would_hide_the_gb_pressing():
+    """Control: the filter this replaced (tied with the winner on the
+    barcode_plurality key) drops exactly the pressing that was in the drive, so
+    the test above can fail."""
+    from collections import Counter
+
+    cands = _no_jacket_required()
+    counts = Counter(c.barcode for c in cands)
+    top = max(counts.values())
+    old_menu = {c.mb_release_id for c in cands if counts[c.barcode] == top}
+    assert "0a19729e" not in old_menu
+    assert old_menu == {"d73bd2e7", "5302ea74"}
 
 
 def test_rung_key2_preferred_country_within_barcode_tier():

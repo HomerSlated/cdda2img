@@ -1503,8 +1503,8 @@ class MBPrepopResult(NamedTuple):
     # it names the first rung that *varies*, so it reads identically whether the
     # ladder determined the winner or merely narrowed to a tie (N4).
     release_tied_after: str | None = None
-    # N5: the album-consistent candidates as they stand after the last *evidence*
-    # rung — the set the alternatives menu offers, and whose size (> 1) triggers
+    # N5: every album-consistent candidate the ladder chose among (no rung
+    # narrows it) — the set the alternatives menu offers, and whose size (> 1) triggers
     # it. Empty when no rung selection ran. A tuple, not a list: this is a
     # shared class-level default, and a mutable one would be corruptible by any
     # caller that appended to it.
@@ -1628,12 +1628,17 @@ class ReleaseSelection(NamedTuple):
     # it did not, and the alphabetically-first MBID won. `<rung>` is `none` when
     # no key above the terminal one varied at all.
     tied_after: str | None
-    # N5: the candidate set as it stands after the last EVIDENCE rung
-    # (`barcode_plurality`) — i.e. before `preferred_country`, `date` and `mbid`,
-    # which are preference/arbitrary and must not narrow a list a human is
-    # looking at. This is the menu's population AND its trigger (len > 1), which
-    # is NOT `tied_after`'s n: a country rung that narrowed 7 to 1 would leave
-    # n == 1 and suppress a menu that should have shown 7.
+    # N5: every candidate the ladder was given: no rung narrows a list a human
+    # is looking at. This is the menu's population AND its trigger (len > 1),
+    # which is NOT `tied_after`'s n: a country rung that narrowed 7 to 1 would
+    # leave n == 1 and suppress a menu that should have shown 7.
+    # Until 2026-11-26 `barcode_plurality` was treated as an evidence rung and
+    # DID narrow the menu. It is not evidence about the disc: it counts how many
+    # MusicBrainz records share a barcode, which is how often a pressing was
+    # catalogued, not which one is in the drive. On Phil Collins' *No Jacket
+    # Required* (disc ID DCvSBmF2Sn35OCvgXtnULUypFkw-) two records of one German
+    # WEA pressing outvoted the GB Virgin and US Atlantic pressings, and the menu
+    # offered only the two German rows to a user holding the GB disc.
     menu_candidates: tuple[DiscMeta, ...]
 
 
@@ -1770,13 +1775,10 @@ def _select_release_lexicographic(
     # *via* is defined, one block up, and exactly why it misleads.)
     tied_after = _tied_after(keys, winning_key, via_names)
 
-    # N5: the set a human should be offered — tied with the winner on the last
-    # EVIDENCE rung only. Preference rungs are excluded by design; see the
-    # ReleaseSelection docstring for why this is a third number and not one of
-    # the two above.
-    menu_candidates = tuple(
-        c for c, k in zip(candidates, keys) if k[0] == winning_key[0]
-    )
+    # N5: the set a human should be offered is every candidate: no rung here is
+    # evidence about the disc in the drive (see the ReleaseSelection docstring,
+    # including why `barcode_plurality` stopped narrowing it on 2026-11-26).
+    menu_candidates = tuple(candidates)
 
     return ReleaseSelection(winner, via, tied_after, menu_candidates)
 

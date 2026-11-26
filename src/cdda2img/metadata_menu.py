@@ -279,9 +279,9 @@ def _render_pressing_page(
 ) -> None:
     """Pure repaint of one page of the N5 alternatives (pressing) picker.
 
-    These candidates all share the disc-ID fingerprint, the album, and (by the
-    ``barcode_plurality`` rung) the barcode. They are the same record pressed
-    differently, so the table shows the fields that CAN differ and the free text
+    These candidates all share the disc-ID fingerprint and the album; the
+    barcode may differ (since 2026-11-26 the menu lists every pressing, not the
+    ``barcode_plurality`` tier). They are the same record pressed differently, so the table shows the fields that CAN differ and the free text
     that describes the physical object; artist and album are constant across the
     list and would be pure noise in every column.
 
@@ -701,8 +701,8 @@ def run_metadata_menu(
     *ar_summary* — pre-rendered AccurateRip report (rip pipeline). When
     provided, it is stored on the controller (for potential future use)
     but no longer causes a separate pause screen before the main menu.
-    *pressing_candidates* — N5: the pressings the §10.3 ladder left tied after
-    its last evidence rung. More than one enables the "choose the pressing"
+    *pressing_candidates* — N5: every album-consistent pressing the §10.3 ladder
+    chose among (no rung narrows it). More than one enables the "choose the pressing"
     screen. *provenance* — when given, the pressing outcome
     (``unique``/``auto_tiebreak``/``manual``/``rejected``) and the chosen
     candidate's MB free text are written into it after the menu closes.

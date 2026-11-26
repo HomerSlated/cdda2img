@@ -1040,10 +1040,12 @@ class PressingScreen(Screen):
     """N5 alternatives menu — choose which *pressing* of the matched release is
     the disc in the drive.
 
-    Reached only when the §10.3 ladder's last EVIDENCE rung left more than one
-    candidate. The list is deliberately NOT the set the ladder narrowed to: the
-    preference rungs (``preferred_country``, ``date``) and the arbitrary terminal
-    ``mbid`` sort do not run here. A preference rung exists to break a tie in the
+    Reached only when the disc ID matched more than one album-consistent
+    candidate. The list is deliberately NOT the set the ladder narrowed to: no
+    rung runs here, neither ``barcode_plurality`` (it counts MusicBrainz records
+    per barcode, which says nothing about the disc in the drive: 2026-11-26, Phil
+    Collins *No Jacket Required*), the preference rungs (``preferred_country``,
+    ``date``) nor the arbitrary terminal ``mbid`` sort. A preference rung exists to break a tie in the
     absence of a human; with a human present it hides options on the basis of a
     config setting rather than evidence about the disc. On the reference disc
     that is the difference between offering seven candidates and offering five —

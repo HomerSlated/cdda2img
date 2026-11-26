@@ -278,6 +278,10 @@ def _parse_full_release(r) -> DiscMeta:
         catalog_number=catalog_number or None,
         source="discogs",
         tracks=_discogs_parse_tracklist(data.get("tracklist") or []),
+        # Discogs' release notes: where two pressings that share a barcode and a
+        # catalogue number are told apart ("black print on label"), so the
+        # post-menu Discogs chooser shows them.
+        annotation=(data.get("notes") or "").strip() or None,
     )
 
 
