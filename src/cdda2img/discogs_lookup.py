@@ -278,10 +278,6 @@ def _parse_full_release(r) -> DiscMeta:
         catalog_number=catalog_number or None,
         source="discogs",
         tracks=_discogs_parse_tracklist(data.get("tracklist") or []),
-        # Discogs' release notes: where two pressings that share a barcode and a
-        # catalogue number are told apart ("black print on label"), so the
-        # post-menu Discogs chooser shows them.
-        annotation=(data.get("notes") or "").strip() or None,
     )
 
 
@@ -339,6 +335,109 @@ def search_releases(
 # realistic disc; 4 pages is 200 candidates against the 68 that the worst disc
 # measured here produces.
 _BARCODE_SEARCH_MAX_PAGES = 4
+
+
+#: Pages of 100 read from a master's versions: a runaway guard, not a cap any
+#: real album reaches (*No Jacket Required*, master 98041, has 11 UK CDs).
+_MASTER_VERSIONS_MAX_PAGES = 5
+
+
+def master_versions(master_id: int, *, fmt: str = "CD") -> list[DiscMeta]:
+    """The releases of Discogs master *master_id* in format *fmt*, as stubs
+    (id, country code, year, label, catalogue number). ``[]`` on error.
+
+    Every pressing of an album on Discogs, barcoded or not: the post-menu chooser
+    draws on it because a barcode search cannot find a release whose disc carries
+    no barcode (Discogs 5222631, the original GB *No Jacket Required*).
+    """
+    client = _get_client()
+    if not client:
+        return []
+    out: list[DiscMeta] = []
+    try:
+        for page in range(1, _MASTER_VERSIONS_MAX_PAGES + 1):
+            data = client._get(
+                f"https://api.discogs.com/masters/{int(master_id)}/versions"
+                f"?format={fmt}&per_page=100&page={page}"
+            )
+            for v in data.get("versions") or []:
+                released = str(v.get("released") or "")[:4]
+                out.append(
+                    DiscMeta(
+                        album=v.get("title") or None,
+                        discogs_release_id=int(v["id"]) if v.get("id") else None,
+                        country=discogs_country_code(v.get("country") or None),
+                        release_date=released if released.strip("0") else None,
+                        label=v.get("label") or None,
+                        catalog_number=v.get("catno") or None,
+                        source="discogs",
+                    )
+                )
+            if page >= int((data.get("pagination") or {}).get("pages") or 1):
+                break
+        else:
+            log.warning(
+                "Discogs master %d has more than %d pages of %s versions; the rest"
+                " are not offered",
+                master_id,
+                _MASTER_VERSIONS_MAX_PAGES,
+                fmt,
+            )
+    except Exception as exc:
+        log.debug("Discogs master versions failed for %d: %s", master_id, exc)
+        return []
+    return out
+
+
+def release_details(release_id: int) -> list[str]:
+    """Lines that tell one pressing of a release from another, for the post-menu
+    chooser: format, barcode (or that there is none), the first matrix/runout,
+    and the notes (whitespace folded, cut at 240 characters). Discogs' own words;
+    ``[]`` on error.
+
+    Several releases of one album can share label, catalogue number and even
+    barcode (*No Jacket Required* GB, CDV 2345: eleven CD releases); what
+    separates them is "No barcode", "black print on label", SPARS codes and the
+    runout, all of which live here.
+    """
+    client = _get_client()
+    if not client:
+        return []
+    try:
+        r = client.release(release_id)
+        r.refresh()
+        data: dict = getattr(r, "data", {}) or {}
+    except Exception as exc:
+        log.debug("Discogs release fetch failed for %d: %s", release_id, exc)
+        return []
+    lines: list[str] = []
+    fmts = [
+        ", ".join([f.get("name") or "", *(f.get("descriptions") or [])]).strip(", ")
+        for f in data.get("formats") or []
+        if isinstance(f, dict)
+    ]
+    idents = [i for i in data.get("identifiers") or [] if isinstance(i, dict)]
+    barcodes = [
+        i.get("value") for i in idents if (i.get("type") or "").lower() == "barcode"
+    ]
+    matrix = [
+        i.get("value")
+        for i in idents
+        if (i.get("type") or "").lower().startswith("matrix")
+    ]
+    # "not listed", never "no barcode": Discogs entries that list none include
+    # discs whose notes say they carry one (master 98041, 23721866).
+    head = [
+        "; ".join(f for f in fmts if f),
+        f"barcode: {barcodes[0]}" if barcodes else "barcode: not listed",
+    ]
+    if matrix:
+        head.append(f"matrix: {matrix[0]}")
+    lines.append(" · ".join(h for h in head if h))
+    notes = " ".join((data.get("notes") or "").split())
+    if notes:
+        lines.append(notes if len(notes) <= 240 else notes[:239] + "…")
+    return lines
 
 
 def search_by_barcode(barcode: str) -> list[DiscMeta]:

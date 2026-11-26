@@ -83,3 +83,93 @@ def test_search_by_barcode_returns_empty_on_error() -> None:
             raise RuntimeError(msg)
 
     assert _search(_Boom()) == []  # type: ignore[arg-type]
+
+
+# ---- master versions and release details (No Jacket Required, 2026-11-26) ----
+
+
+class _FakeClient:
+    """Answers ``_get`` with one versions page per call, and ``release`` with a
+    record whose ``data`` is fixed."""
+
+    def __init__(self, pages=None, release_data=None) -> None:
+        self.pages = pages or []
+        self.urls: list[str] = []
+        self._data = release_data or {}
+
+    def _get(self, url):
+        self.urls.append(url)
+        return self.pages[len(self.urls) - 1]
+
+    def release(self, _rid):
+        data = self._data
+        return type("R", (), {"data": data, "refresh": lambda _s: None})()
+
+
+def _versions_page(ids, page, pages):
+    return {
+        "pagination": {"page": page, "pages": pages},
+        "versions": [
+            {
+                "id": i,
+                "title": "No Jacket Required",
+                "country": "UK",
+                "released": "1985" if i == 5222631 else "0",
+                "label": "Virgin",
+                "catno": "CDV 2345",
+            }
+            for i in ids
+        ],
+    }
+
+
+def test_master_versions_reads_every_page_and_maps_the_country() -> None:
+    client = _FakeClient([
+        _versions_page([5222631, 5221810], 1, 2),
+        _versions_page([19343422], 2, 2),
+    ])
+    with patch.object(discogs_lookup, "_get_client", return_value=client):
+        got = discogs_lookup.master_versions(98041)
+    assert [g.discogs_release_id for g in got] == [5222631, 5221810, 19343422]
+    assert {g.country for g in got} == {"GB"}  # Discogs "UK"
+    assert got[0].release_date == "1985"
+    assert got[1].release_date is None  # Discogs "0" = unknown
+    assert all("format=CD" in u and "/masters/98041/" in u for u in client.urls)
+    assert len(client.urls) == 2
+
+
+def test_master_versions_is_empty_on_error() -> None:
+    client = _FakeClient([])  # IndexError inside _get
+    with patch.object(discogs_lookup, "_get_client", return_value=client):
+        assert discogs_lookup.master_versions(98041) == []
+
+
+def test_release_details_says_what_separates_pressings() -> None:
+    data = {
+        "formats": [{"name": "CD", "descriptions": ["Album"]}],
+        "identifiers": [
+            {"type": "SPARS Code", "value": "AAD"},
+            {"type": "Matrix / Runout", "value": "CDV 2345 :   NIMBUS ENGLAND"},
+        ],
+        "notes": "8 Page sleeve\nNo barcode\n\nManufactured in the UK",
+    }
+    client = _FakeClient(release_data=data)
+    with patch.object(discogs_lookup, "_get_client", return_value=client):
+        lines = discogs_lookup.release_details(5222631)
+    assert lines[0] == (
+        "CD, Album · barcode: not listed · matrix: CDV 2345 :   NIMBUS ENGLAND"
+    )
+    assert lines[1] == "8 Page sleeve No barcode Manufactured in the UK"
+
+
+def test_release_details_names_a_listed_barcode_and_cuts_long_notes() -> None:
+    data = {
+        "formats": [{"name": "CD", "descriptions": ["Album", "Reissue"]}],
+        "identifiers": [{"type": "Barcode", "value": "5012981234522"}],
+        "notes": "x" * 500,
+    }
+    client = _FakeClient(release_data=data)
+    with patch.object(discogs_lookup, "_get_client", return_value=client):
+        lines = discogs_lookup.release_details(5221810)
+    assert lines[0] == "CD, Album, Reissue · barcode: 5012981234522"
+    assert len(lines[1]) == 240

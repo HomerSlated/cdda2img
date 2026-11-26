@@ -600,6 +600,39 @@ def discogs_link_and_barcode(release_id: str) -> tuple[int | None, str | None]:
     return discogs_id, mb_barcode
 
 
+_DISCOGS_MASTER_RE = re.compile(r"/master/(\d+)")
+
+
+def discogs_master_of_release_group(release_group_id: str) -> int | None:
+    """The Discogs master MusicBrainz links a release GROUP to, or ``None``.
+
+    A pressing often has no Discogs link of its own while its release group links
+    the Discogs master (Phil Collins, *No Jacket Required*: release 0a19729e has
+    none, group 86b4651b links master 98041; the MusicBrainz release page shows
+    the group's links in its sidebar, which reads as the release's own). ``None``
+    on no link and on a failed lookup.
+    """
+    _setup_useragent()
+    try:
+        result = query_log.call(
+            "MusicBrainz",
+            musicbrainzngs.get_release_group_by_id,
+            release_group_id,
+            includes=["url-rels"],
+        )
+    except (musicbrainzngs.ResponseError, musicbrainzngs.NetworkError) as exc:
+        log.debug("MusicBrainz group url-rels for %s failed: %s", release_group_id, exc)
+        return None
+    group = result.get("release-group") or {}
+    for rel in group.get("url-relation-list") or []:
+        if (rel.get("type") or "").lower() != "discogs":
+            continue
+        m = _DISCOGS_MASTER_RE.search(rel.get("target") or "")
+        if m:
+            return int(m.group(1))
+    return None
+
+
 class ReleaseIdentity(NamedTuple):
     """What MusicBrainz says a release IS: its media formats and Discogs link."""
 

@@ -2638,3 +2638,48 @@ def test_lookup_isrc_page_cap_warns_when_it_binds(caplog):
         lookup_isrc("GBUM71029604")
 
     assert any("page cap" in r.message for r in caplog.records)
+
+
+# ---------------------------------------------------------------------------
+# discogs_master_of_release_group — the group's Discogs master (2026-11-26)
+# ---------------------------------------------------------------------------
+
+
+def _group_response(url_rels):
+    return {"release-group": {"url-relation-list": url_rels}}
+
+
+def test_discogs_master_of_release_group_reads_the_master_link():
+    """No Jacket Required: group 86b4651b's links, as fetched 2026-11-26."""
+    from cdda2img.mb_lookup import discogs_master_of_release_group
+
+    resp = _group_response([
+        {"type": "allmusic", "target": "https://www.allmusic.com/album/mw0000189543"},
+        {"type": "discogs", "target": "https://www.discogs.com/master/98041"},
+        {"type": "wikidata", "target": "https://www.wikidata.org/wiki/Q682910"},
+    ])
+    with patch("musicbrainzngs.get_release_group_by_id", return_value=resp) as call:
+        assert discogs_master_of_release_group("86b4651b") == 98041
+    assert call.call_args.kwargs["includes"] == ["url-rels"]
+
+
+def test_discogs_master_of_release_group_ignores_a_release_link():
+    from cdda2img.mb_lookup import discogs_master_of_release_group
+
+    resp = _group_response([
+        {"type": "discogs", "target": "https://www.discogs.com/release/5222631"}
+    ])
+    with patch("musicbrainzngs.get_release_group_by_id", return_value=resp):
+        assert discogs_master_of_release_group("rg") is None
+
+
+def test_discogs_master_of_release_group_is_none_on_a_failed_lookup():
+    import musicbrainzngs
+
+    from cdda2img.mb_lookup import discogs_master_of_release_group
+
+    with patch(
+        "musicbrainzngs.get_release_group_by_id",
+        side_effect=musicbrainzngs.NetworkError("down"),
+    ):
+        assert discogs_master_of_release_group("rg") is None
