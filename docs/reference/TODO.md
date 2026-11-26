@@ -2,6 +2,44 @@
 
 ## Open
 
+### 📋 QUEUED — Replace musicbrainzngs with our own MusicBrainz JSON client (kgr, 2026-11-26)
+
+**Not before 2026-12-03** (kgr: wait a week, to let MusicBrainz's search-service changes
+of 2026-11-30 settle). Research: `private/research/incoming/musicbrainzngs-and-mb-api-health.md`
+(option B, §5). **First, on or after 2026-11-30:** re-run `tools/archival_replay.py` over
+the containers on disk, to confirm the search changes did not touch our two text searches
+(the research expects no impact, as an inference).
+
+**Why.** musicbrainzngs is unmaintained: 0.7.1 (2020-01-11) is its last release, its owner
+offered the project away on 2026-01-14 with no taker, and beets (2.6.0, 2026-02-01) and
+Funkwhale have both replaced it with their own `requests` clients. None of the five
+behaviours we measured has an upstream fix: no per-call timeout; eight fixed retries
+(2..14 s sleeps) that never read `Retry-After`, so a 503 saying "retry after 1 s" costs up
+to 56 s; no retry at all on a connect, DNS or TLS failure; a rate-limit lock held for the
+whole request (upstream #204), so one stalled call blocks every other MusicBrainz call in
+the process; and client-side include tables that disagree with the server
+(`InvalidIncludeError`). MusicBrainz's 503s (`x-ratelimit-zone: global`) are server
+overload that MetaBrainz says may recur.
+
+**Shape.**
+- `requests` session with urllib3 `Retry`: a per-call timeout, retries on connect, read
+  and TLS errors and on 429/503, honouring `Retry-After`. A cautious bound to copy:
+  Jellyfin #18095, at most two retries, each wait 1–15 s; add jitter or a floor, since
+  the server now says `retry-after: 1` against a documented 2-second window.
+- Our own 1-request-per-second limiter that is **not** held across the request.
+- `fmt=json`; the server alone judges includes, so a bad one is a plain 400.
+- Paging stays: embedded sub-lists are capped at 25 by design (MBS-8194); browse is not.
+- Every MusicBrainz call keeps going through `query_log`, and the retry notice
+  (`mb_lookup.RetryNotice`, "MusicBrainz busy: try n/8") is rebuilt on the new retries.
+- The main cost: every parser site changes, because JSON field names differ from the
+  dicts musicbrainzngs builds from XML (`release-list`, `label-info-list`, ...).
+
+**Acceptance.** Tests on recorded JSON fixtures, including a 503 carrying `Retry-After`
+and a connect failure, each with a negative control; then `tools/archival_replay.py` over
+every container on disk must give the same identification as before. Keep live testing
+light: MusicBrainz is short of capacity, and a retry test against the real server is load
+on it (the research run sent 8 unthrottled requests while testing; do not repeat that).
+
 ### ✅ DONE 2026-11-26 — Match MusicBrainz and Discogs releases field by field (kgr)
 
 Built: `trust_model_design.md` §13, as-built notes §13.11. **Expect revisions** (kgr: "I'm
