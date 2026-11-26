@@ -1302,7 +1302,7 @@ class DiscogsMasterScreen(Screen):
         self.keep_undated = True
         self.page = 0
         self.hits: list = []  # discogs_lookup.MasterHit, master phase
-        self._entry: tuple[RBIDisc, str | None] | None = None
+        self._entry: tuple[RBIDisc, tuple[int, str] | None] | None = None
 
     # -- loading ------------------------------------------------------------
 
@@ -1636,7 +1636,7 @@ class DiscogsReleaseDetailScreen(Screen):
             discogs_release_id=self.version.release_id,
             discogs_master_id=master,
         )
-        ctl.discogs_pick = self.parent.filters()
+        ctl.discogs_pick = (self.version.release_id, self.parent.filters())
         ctl.banner = (
             f"Discogs release set to {self.version.release_id}. "
             "[s] keeps it, [q] discards it."
@@ -1709,9 +1709,11 @@ class MenuController:
         self.banner: str = ""
         # True once the user accepts at the root; ends run().
         self.done: bool = False
-        # §12: the Discogs release picked on DiscogsMasterScreen, as the PROV
-        # `discogs_master` filter record; None = nothing picked there.
-        self.discogs_pick: str | None = None
+        # §12: the Discogs release picked on DiscogsMasterScreen and the PROV
+        # `discogs_master` filter record it was picked under; None = no pick.
+        # The id travels with it so a release set afterwards by another route
+        # ([u] reset, Fetch -> Discogs) is not credited to the screen.
+        self.discogs_pick: tuple[int, str] | None = None
         self.discogs_barcode_hit = discogs_barcode_hit
         if discogs_only:
             # Post-menu: the pressing changed and nothing settled its Discogs

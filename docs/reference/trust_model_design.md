@@ -1218,5 +1218,15 @@ is no release.
 - **R11 is unchanged**: it still reads the master through `discogs_release_id`, and
   runs before the menu, when an unattended master is not yet known. Reading
   `discogs_master_id` directly is a follow-up.
+- **`--digital-media` never uses a master**: its Discogs release comes from the digital
+  release's own link, or the rip aborts as before. A master's CD versions are the wrong
+  media type for a disc made from a download (kgr, 2026-11-21: fetch that media type's
+  data or abort). Offering `format=File` versions there instead is open with kgr.
+- **A pick is credited only while the disc still carries it**: a release applied
+  afterwards from Fetch → Discogs, or a `[u]` reset, is not recorded as
+  `master_versions`, and a master the pick left behind is cleared.
+- **`tools/archival_replay.py`** now runs the unattended post-menu step too. Replayed
+  2026-11-26: ABBA *Gold* (master 12249), Tracy Chapman (105802), Eliminator (48605)
+  and Toca under `--digital-media` (51867) all pass, each with its release.
 - **Renderers**: `discogs_master_id` is a PROV key; `list`, the catalogue and the RLOG
   were not changed to name it.

@@ -765,11 +765,16 @@ def run_discogs_menu(
 def _record_discogs_pick(provenance: dict[str, str], ctl) -> None:
     """A Discogs release picked on the master screen, and the filters it was
     picked under (rbi_spec.md ``discogs_master``)."""
-    if ctl.discogs_pick is None or ctl.disc.discogs_release_id is None:
+    if ctl.discogs_pick is None:
         return
-    provenance["discogs_release"] = str(ctl.disc.discogs_release_id)
+    picked, filters = ctl.discogs_pick
+    if ctl.disc.discogs_release_id != picked:
+        # Replaced after the pick ([u] reset, or Fetch -> Discogs applied another
+        # release): the screen did not choose what the disc now carries.
+        return
+    provenance["discogs_release"] = str(picked)
     provenance["discogs_release_via"] = "master_versions"
-    provenance["discogs_master"] = ctl.discogs_pick
+    provenance["discogs_master"] = filters
     provenance.pop("discogs_release_barcode", None)
 
 

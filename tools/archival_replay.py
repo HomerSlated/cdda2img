@@ -156,12 +156,19 @@ def replay(
             # gate that passed while both release ids were missing is how the
             # --digital-media identity gap went unseen (2026-11-21).
             print(f"   disc.mb_release_id = {disc.mb_release_id}")
-            print(f"   disc.discogs_release_id = {disc.discogs_release_id}")
             try:
                 app._archival_gates(
                     disc, pcm, prov, None, archival=True, digital_media=digital_media
                 )
-                # No menu here, as under --auto: the pressing stays as pinned.
+                # No menu here, as under --auto: the pressing stays as pinned, and
+                # the unattended post-menu step runs (trust_model_design.md §12 D7).
+                disc = app._discogs_after_menu(
+                    disc, prov, disc.mb_release_id, masters=not digital_media
+                )
+                app._settle_discogs_master(disc)
+                print(f"   disc.discogs_release_id = {disc.discogs_release_id}")
+                print(f"   disc.discogs_master_id = {disc.discogs_master_id}")
+                print(f"   discogs_release = {prov.get('discogs_release')}")
                 app._require_discogs_release(prov, archival=True)
             except RipAborted as e:
                 print(f"   WOULD ABORT (exit {e.code}): {e.reason}")

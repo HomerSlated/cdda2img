@@ -2769,7 +2769,7 @@ def _finalize_import(
         auto_apply=auto_apply,
         pressing_candidates=pressing_candidates,
         provenance=provenance,
-        discogs_open=archival and via != "mb_link",
+        discogs_open=archival and not digital_media and via != "mb_link",
         discogs_barcode_hit=disc.discogs_release_id if via == "barcode" else None,
     )
     _note_corroboration_target(provenance, mb_result.selected_release_id, disc)
@@ -2780,6 +2780,7 @@ def _finalize_import(
         reopen=_discogs_reopener(
             archival=archival, auto=auto_apply, tui=tui, provenance=provenance
         ),
+        masters=not digital_media,
     )
     _settle_discogs_master(disc)
     _require_discogs_release(provenance, archival=archival)
@@ -4176,6 +4177,7 @@ def _discogs_after_menu(
     provisional: str | None,
     *,
     reopen: Callable[[RBIDisc, int | None], RBIDisc] | None = None,
+    masters: bool = True,
 ) -> RBIDisc:
     """Settle the Discogs release for the pressing the menu settled on
     (trust_model_design.md §12). Returns the disc, which *reopen* may replace.
@@ -4192,6 +4194,10 @@ def _discogs_after_menu(
       that hit settles it (``barcode_after_menu``) and, failing that, the master
       MusicBrainz links the release group to is recorded instead of a release
       (``discogs_release=master_only:<id>``, §12 D7).
+
+    *masters* False (``--digital-media``) skips both master paths: a master's CD
+    versions are the wrong media type for a disc made from a download, and kgr's
+    rule is to fetch that media type's own data or abort (2026-11-21).
     """
     if provenance.get("discogs_release_via") == "master_versions":
         return disc
@@ -4199,11 +4205,14 @@ def _discogs_after_menu(
     if disc.discogs_release_id is not None and auto != str(disc.discogs_release_id):
         provenance["discogs_release"] = str(disc.discogs_release_id)
         provenance["discogs_release_via"] = "menu"
+        # Set by another route than the master screen: any master a screen pick
+        # left behind belongs to that pick; _settle_discogs_master refills it.
+        disc.discogs_master_id = None
         return disc
     chosen = disc.mb_release_id
     if chosen and chosen != provisional:
-        return _discogs_for_new_pressing(disc, provenance, chosen, reopen)
-    if disc.discogs_release_id is not None:
+        return _discogs_for_new_pressing(disc, provenance, chosen, reopen, masters)
+    if disc.discogs_release_id is not None or not masters:
         return disc
     if reopen is not None:
         # The master screen was open in the menu (§12 D8) and nothing was taken.
@@ -4218,6 +4227,7 @@ def _discogs_for_new_pressing(
     provenance: dict[str, str],
     chosen: str,
     reopen: Callable[[RBIDisc, int | None], RBIDisc] | None,
+    masters: bool = True,
 ) -> RBIDisc:
     """The Discogs release for a pressing the user picked in the menu: its
     MusicBrainz link; or the provisional release, when it was found by the same
@@ -4247,7 +4257,7 @@ def _discogs_for_new_pressing(
     # disc.barcode, which still names the provisional pressing when the chosen
     # one has none.
     hit = _single_barcode_hit(disc, provenance, chosen_barcode)
-    if reopen is not None:
+    if reopen is not None and masters:
         disc = reopen(disc, hit.discogs_release_id if hit else None)
         if provenance.get("discogs_release_via") != "master_versions":
             provenance["discogs_release"] = "not_chosen"
@@ -4257,7 +4267,10 @@ def _discogs_for_new_pressing(
         provenance["discogs_release"] = str(hit.discogs_release_id)
         provenance["discogs_release_via"] = "barcode_after_menu"
         return disc
-    _record_discogs_master_only(disc, provenance)
+    if masters:
+        _record_discogs_master_only(disc, provenance)
+    else:
+        provenance["discogs_release"] = "no_link"
     return disc
 
 

@@ -175,7 +175,7 @@ def test_the_disc_in_the_drive_is_reached_from_the_master(capsys) -> None:
     assert "https://www.discogs.com/release/5222631" in out
     assert ctl.disc.discogs_release_id == 5222631
     assert ctl.disc.discogs_master_id == _MASTER
-    assert ctl.discogs_pick == f"{_MASTER}:11/108@UK,1985+undated"
+    assert ctl.discogs_pick == (5222631, f"{_MASTER}:11/108@UK,1985+undated")
     _step(ctl, "s")
     assert not ctl.stack  # the screen was the root: the run ends
 
@@ -326,7 +326,7 @@ def test_a_pick_is_recorded_in_provenance() -> None:
 
     ctl = _ctl()
     ctl.disc.discogs_release_id = 5222631
-    ctl.discogs_pick = f"{_MASTER}:11/108@UK,1985+undated"
+    ctl.discogs_pick = (5222631, f"{_MASTER}:11/108@UK,1985+undated")
     prov = {"discogs_release": "ambiguous_20+no_link", "discogs_release_barcode": "x"}
     _record_discogs_pick(prov, ctl)
     assert prov["discogs_release"] == "5222631"
@@ -361,3 +361,32 @@ def test_every_phase_fits_80_columns(capsys) -> None:
     ctl.stack[-1].render(ctl)
     long = [line for line in capsys.readouterr().out.splitlines() if len(line) > 80]
     assert long == []
+
+
+@pytest.mark.parametrize("now", [5221810, None])
+def test_a_pick_replaced_afterwards_is_not_credited_to_the_screen(now) -> None:
+    """Fetch -> Discogs applied another release (5221810), or [u] reset the disc
+    (None): the screen did not choose what the disc now carries."""
+    from cdda2img.metadata_menu import _record_discogs_pick
+
+    ctl = _ctl()
+    ctl.discogs_pick = (5222631, f"{_MASTER}:11/108@UK,1985+undated")
+    ctl.disc.discogs_release_id = now
+    prov = {"discogs_release": "ambiguous_20+no_link"}
+    _record_discogs_pick(prov, ctl)
+    assert prov == {"discogs_release": "ambiguous_20+no_link"}
+
+
+@pytest.mark.usefixtures("discogs")
+def test_reset_after_a_pick_records_nothing() -> None:
+    from cdda2img.metadata_menu import _record_discogs_pick
+
+    ctl = MenuController(_disc(), discogs_open=True)
+    for keys in ("", "", "2", "a", "s"):
+        _step(ctl, keys)
+    assert ctl.state is MenuState.MAIN
+    assert ctl.disc.discogs_release_id == 5222631
+    _step(ctl, "u")  # reset to original
+    prov: dict[str, str] = {}
+    _record_discogs_pick(prov, ctl)
+    assert prov == {}

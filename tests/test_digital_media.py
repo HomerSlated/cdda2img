@@ -814,6 +814,80 @@ def test_the_master_id_is_written_to_provenance() -> None:
     assert "discogs_release_id" not in prov
 
 
+def test_a_release_set_another_way_drops_a_screen_picks_master(monkeypatch) -> None:
+    """Fetch -> Discogs applied a release after a screen pick: the master the pick
+    left behind is cleared, to be refilled from the release itself."""
+    _links(monkeypatch, None)
+    disc = _njr_disc(discogs=5221810)
+    disc.discogs_master_id = 12345
+    prov = {"discogs_release": "ambiguous_20+no_link"}
+    app._discogs_after_menu(disc, prov, _NJR_GB)
+    assert prov["discogs_release_via"] == "menu"
+    assert disc.discogs_master_id is None
+
+
+@pytest.mark.usefixtures("_discogs_on")
+def test_digital_media_never_falls_back_to_a_master(monkeypatch) -> None:
+    """kgr 2026-11-21: fetch the data of the disc's own media type, or abort. A
+    master's CD versions are not a download's."""
+    groups = _group_master(monkeypatch)
+    disc = _njr_disc(mbid=_NJR_DE)
+    prov = {"discogs_release": "no_match+no_link"}
+    seen: list = []
+    app._discogs_after_menu(
+        disc, prov, _NJR_DE, reopen=lambda d, h: seen.append(h) or d, masters=False
+    )
+    assert groups == []
+    assert seen == []
+    assert prov["discogs_release"] == "no_match+no_link"
+    with pytest.raises(ra.RipAborted):
+        app._require_discogs_release(prov, archival=True)
+
+
+def test_digital_media_does_not_open_the_master_screen() -> None:
+    src = inspect.getsource(app._finalize_import)
+    assert "discogs_open=archival and not digital_media and" in src
+    assert "masters=not digital_media" in src
+
+
+@pytest.mark.usefixtures("_discogs_on")
+def test_unattended_master_reaches_the_written_provenance(monkeypatch) -> None:
+    """The post-menu sequence as _finalize_import runs it, on a real RBIDisc:
+    nothing between the fallback and the PROV write may lose the master."""
+    from cdda2img.rbi_format import RBIDisc
+
+    _links(monkeypatch, None)
+    _group_master(monkeypatch)
+    monkeypatch.setattr(
+        "cdda2img.discogs_lookup.fetch_release",
+        lambda _r: pytest.fail("no release to fetch a master from"),
+    )
+    disc = RBIDisc(album="No Jacket Required", artist="Phil Collins")
+    disc.mb_release_id = _NJR_DE
+    disc.mb_release_group_id = _NJR_RG
+    prov = _njr_prov()
+    disc = app._discogs_after_menu(disc, prov, _NJR_DE)
+    app._settle_discogs_master(disc)
+    app._require_discogs_release(prov, archival=True)
+    app._add_release_provenance(prov, disc)
+    assert prov["discogs_master_id"] == str(_MASTER)
+    assert prov["discogs_release"] == f"master_only:{_MASTER}"
+    assert "discogs_release_id" not in prov
+
+
+def test_the_post_menu_steps_run_in_order_before_the_provenance_write() -> None:
+    src = inspect.getsource(app._finalize_import)
+    order = [
+        "disc = _discogs_after_menu(",
+        "_settle_discogs_master(disc)",
+        "_require_discogs_release(",
+        "_add_release_provenance(provenance, disc)",
+    ]
+    at = [src.find(s) for s in order]
+    assert -1 not in at, dict(zip(order, at, strict=True))
+    assert at == sorted(at)
+
+
 def test_the_post_menu_gate_is_rip_only() -> None:
     app._require_discogs_release({}, archival=False)
     with pytest.raises(ra.RipAborted):
