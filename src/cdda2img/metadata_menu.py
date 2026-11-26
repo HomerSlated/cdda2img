@@ -707,7 +707,7 @@ def run_metadata_menu(
     *pressing_candidates* — N5: every album-consistent pressing the §10.3 ladder
     chose among (no rung narrows it). More than one enables the "choose the pressing"
     screen. *provenance* — when given, the pressing outcome
-    (``unique``/``auto_tiebreak``/``manual``/``rejected``) and the chosen
+    (``unique``/``auto_tiebreak``/``manual``/``accepted``/``rejected``) and the chosen
     candidate's MB free text are written into it after the menu closes.
     *discogs_open* — open the Discogs master screen (trust_model_design.md §12)
     once the pressing is settled; *discogs_barcode_hit* marks the one release the

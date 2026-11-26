@@ -7,9 +7,9 @@
 Built: `trust_model_design.md` §13, as-built notes §13.11. **Expect revisions** (kgr: "I'm
 sure we'll discover some discs that don't fit the formula"): the sufficiency rule may need
 fallbacks (album title, track count, artist), and `--auto` now aborts on most
-multi-pressing discs for want of the disc's own year. Open: whether an interactive rip that
-leaves the pressing as pinned (Discogs via MusicBrainz's link) should also become
-`release_group_only`.
+multi-pressing discs for want of the disc's own year. Ruled the same day: leaving the marked
+pressing in place is `accepted` (a yes, with "none of these" on offer), and "none of these"
+records the album only.
 
 ### ✅ DONE 2026-11-26 — Discogs release selection by master (kgr)
 

@@ -1141,12 +1141,16 @@ class PressingScreen(Screen):
         """The three ways out. They differ only in what they claim about the disc.
 
         ``s`` keeps whatever is currently applied; ``q`` puts back what was there
-        on entry; ``x`` records that none of the candidates is the disc. ``b`` is
+        on entry; ``x`` records that none of the candidates is the disc. Leaving
+        by ``s`` or ``q`` with the automatic pick in place accepts it
+        (``accepted``, :meth:`_accept_default`); ``x`` drops it (the rip records
+        the album only, ``cdda2img._settle_identity_after_menu``). ``b`` is
         an undocumented alias for ``s`` — it was the only exit for as long as this
         screen has existed, and silently repurposing a familiar key is worse than
         retiring it quietly.
         """
         if choice in ("s", "b"):
+            self._accept_default(ctl)
             return Pop()
 
         if choice == "q":
@@ -1156,6 +1160,7 @@ class PressingScreen(Screen):
             # the label would name an action the screen cannot perform.
             if self._entry is not None:
                 ctl.disc, ctl.pressing_outcome, ctl.pressing_selected = self._entry
+            self._accept_default(ctl)
             ctl.banner = "Left unchanged — the automatic pick stands."
             return Pop()
 
@@ -1175,10 +1180,21 @@ class PressingScreen(Screen):
             return Stay()
         ctl.pressing_outcome = "rejected"
         ctl.banner = (
-            "Recorded: none of the listed pressings match. The automatic "
-            "pick is kept, but flagged as unconfirmed."
+            "Recorded: none of the listed pressings match. The album is "
+            "recorded without a pressing; you will pick its Discogs release."
         )
         return Pop()
+
+    def _accept_default(self, ctl: MenuController) -> None:
+        """Leaving the marked pressing in place is a yes (kgr, 2026-11-26: "if the
+        opportunity is there, and the user doesn't take that option, it is
+        reasonable to take that as acceptance"), because [x] "none of these" was
+        on offer. Only for the automatic pick, and only when it is one of the rows
+        shown: the post-menu screen lists the pressings that fit a Discogs pick,
+        which may not include it, and then nothing was offered to accept."""
+        shown = {c.mb_release_id for c in self.candidates}
+        if ctl.pressing_outcome == "auto_tiebreak" and self.pinned_id in shown:
+            ctl.pressing_outcome = "accepted"
 
 
 class PressingDetailScreen(Screen):

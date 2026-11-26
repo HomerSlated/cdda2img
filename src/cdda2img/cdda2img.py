@@ -4407,6 +4407,8 @@ def _settle_identity_after_menu(
     if archival and len(candidates) > 1:
         if reopen is None:
             disc = _pair_unattended(disc, provenance, candidates, discogs_fmt)
+        elif provenance.get("release_selection") == "rejected":
+            disc = _after_rejection(disc, provenance, candidates, reopen)
         else:
             disc = _pair_after_pick(disc, provenance, candidates, tui=tui)
     _settle_discogs_master(disc)
@@ -4594,7 +4596,7 @@ def _pair_after_pick(
         return disc
     details = discogs_lookup.release_details(discogs_id)
     record = rm.record_from_details(details) if details else None
-    if provenance.get("release_selection") == "manual":
+    if provenance.get("release_selection") in ("manual", "accepted"):
         pressing = _candidate(candidates, disc.mb_release_id)
         if pressing is not None and record is not None:
             c = rm.compare(rm.record_from_meta(pressing), record)
@@ -4630,12 +4632,47 @@ def _pair_after_pick(
         if record is None or rm.compare(rm.record_from_meta(c), record).compatible
     ] or candidates
     disc = run_pressing_menu(disc, compatible, tui=tui, provenance=provenance)
-    if provenance.get("release_selection") == "manual":
+    if provenance.get("release_selection") in ("manual", "accepted"):
         return _apply_pressing_under_discogs(disc, None, details)
     stated = frozenset(details.catalogue_fields()) if details else frozenset()
     return _release_group_only(
         disc, provenance, candidates, master=disc.discogs_master_id, keep=stated
     )
+
+
+def _after_rejection(
+    disc: RBIDisc,
+    provenance: dict[str, str],
+    candidates: list[DiscMeta],
+    reopen: Callable[[RBIDisc, int | None], RBIDisc],
+) -> RBIDisc:
+    """The user answered "none of these" on the pressing screen (kgr, 2026-11-26:
+    the negative answer must be on offer, and taken when given). The album is
+    recorded without a pressing; no pressing is derived from a Discogs pick, since
+    the user has said none of MusicBrainz's is theirs. A Discogs release the user
+    picked on the master screen stands; one that came from the rejected
+    pressing's link does not, and the master screen reopens for the user to pick
+    (leaving it without one aborts, ``not_chosen``). ``release_selection`` stays
+    ``rejected``."""
+    picked = provenance.get("discogs_release_via") == "master_versions"
+    stated: frozenset[str] = frozenset()
+    if picked and disc.discogs_release_id is not None:
+        from cdda2img import discogs_lookup
+
+        details = discogs_lookup.release_details(disc.discogs_release_id)
+        stated = frozenset(details.catalogue_fields()) if details else frozenset()
+    disc = _release_group_only(
+        disc, provenance, candidates, master=disc.discogs_master_id, keep=stated
+    )
+    provenance["release_selection"] = "rejected"
+    if picked:
+        return disc
+    disc.discogs_release_id = None
+    provenance.pop("discogs_release_via", None)
+    disc = reopen(disc, None)
+    if provenance.get("discogs_release_via") != "master_versions":
+        provenance["discogs_release"] = "not_chosen"
+    return disc
 
 
 def _apply_pressing_under_discogs(

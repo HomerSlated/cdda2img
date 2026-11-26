@@ -557,3 +557,72 @@ def test_the_reopened_discogs_screen_gets_the_candidates(monkeypatch) -> None:
     assert built[0]["pressing_candidates"] == BIA
     assert built[0]["discogs_only"] is True
     assert metadata_menu.run_discogs_menu  # the real entry point was used
+
+
+# ---- accepted and rejected (kgr, 2026-11-26) ------------------------------------------
+
+
+def test_an_accepted_pressing_is_only_checked_against_the_discogs_pick(
+    services,
+) -> None:
+    disc, prov = _picked({"release_selection": "accepted"}, mbid="5a5330cd")
+    app._pair_after_pick(disc, prov, BIA, tui=False)
+    assert disc.mb_release_id == "5a5330cd"
+    assert prov["release_pair"].startswith("5a5330cd|2750309:agreed:")
+    assert services.pressing_menu == []
+
+
+def test_a_rejected_pressing_drops_its_linked_discogs_release_and_reopens(
+    services,
+) -> None:
+    """None of these: the album only, and the Discogs release that came from the
+    rejected pressing's link goes with it; the user picks one on the master screen."""
+    disc = _disc()
+    disc.discogs_release_id = 2750309
+    prov = {
+        "release_selection": "rejected",
+        "discogs_release_via": "mb_link",
+        "release_disambiguation": "PMDC",
+    }
+    seen: list = []
+
+    def reopen(d, hit):
+        seen.append((d.discogs_release_id, hit))
+        d.discogs_release_id = 5555
+        prov["discogs_release"] = "5555"
+        prov["discogs_release_via"] = "master_versions"
+        return d
+
+    disc = app._after_rejection(disc, prov, BIA, reopen)
+    assert seen == [(None, None)]
+    assert disc.mb_release_id is None
+    assert disc.discogs_release_id == 5555
+    assert prov["release_selection"] == "rejected"
+    assert "release_disambiguation" not in prov
+
+
+def test_a_rejection_without_a_discogs_pick_aborts(services) -> None:
+    disc = _disc()
+    disc.discogs_release_id = 2750309
+    prov = {"release_selection": "rejected", "discogs_release_via": "mb_link"}
+    app._after_rejection(disc, prov, BIA, lambda d, _h: d)
+    assert prov["discogs_release"] == "not_chosen"
+    with pytest.raises(ra.RipAborted):
+        app._require_discogs_release(prov, archival=True)
+
+
+def test_a_rejection_keeps_a_discogs_release_the_user_picked(services) -> None:
+    """No pressing is derived from it: the user said none of MusicBrainz's is theirs."""
+    services.reverse = {2750309: ["584fc120"]}
+    disc, prov = _picked({"release_selection": "rejected"})
+    disc = app._after_rejection(disc, prov, BIA, lambda d, _h: pytest.fail("reopened"))
+    assert disc.mb_release_id is None
+    assert disc.discogs_release_id == 2750309
+    assert disc.barcode == "042282449924"  # stated by the user's Discogs pick
+
+
+def test_the_settlement_routes_a_rejection_away_from_derivation() -> None:
+    import inspect
+
+    src = inspect.getsource(app._settle_identity_after_menu)
+    assert src.index('== "rejected"') < src.index("_pair_after_pick(")

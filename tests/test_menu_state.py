@@ -1378,13 +1378,35 @@ def test_pressing_screen_none_of_these_is_its_own_outcome() -> None:
     assert ctl.disc.mb_release_id == "65e67d39"
 
 
-def test_pressing_screen_back_leaves_the_outcome_untouched() -> None:
-    """Backing out is not a decision. The recorded claim must stay
-    `auto_tiebreak`, not silently become a manual confirmation."""
+@pytest.mark.parametrize("key", ["s", "b", "q"])
+def test_leaving_the_marked_pressing_in_place_accepts_it(key) -> None:
+    """kgr, 2026-11-26 (reversing the earlier "backing out is not a decision"): with
+    [x] "none of these" on offer, leaving the default is a yes, `accepted`."""
     ctl = _pressing_ctl()
-    _step_with(ctl, "b")
+    _step_with(ctl, key)
     assert ctl.state is MenuState.MAIN
+    assert ctl.pressing_outcome == "accepted"
+
+
+def test_nothing_is_accepted_when_the_pinned_pressing_is_not_listed() -> None:
+    """The post-menu screen lists only the pressings that fit a Discogs pick; when
+    the pinned one is not among them, nothing was offered to accept."""
+    disc = _disc()
+    disc.mb_release_id = "65e67d39"
+    ctl = MenuController(
+        disc,
+        pressing_candidates=_seven_pressings()[1:3],
+        pressing_outcome="auto_tiebreak",
+        pressing_only=True,
+    )
+    _step_with(ctl, "s")
     assert ctl.pressing_outcome == "auto_tiebreak"
+
+
+def test_none_of_these_is_still_a_no() -> None:
+    ctl = _pressing_ctl()
+    _step_with(ctl, "x")
+    assert ctl.pressing_outcome == "rejected"
 
 
 def test_pressing_selection_opens_detail_and_applies() -> None:

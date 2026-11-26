@@ -128,11 +128,18 @@ def _user_confirmed(prov: dict[str, str]) -> bool:
     selection = prov.get("release_selection")
     # `derived` (§13.6): the user picked the Discogs release and the pressing
     # follows from it uniquely, by MusicBrainz's link or a field match.
-    if selection in ("manual", "derived"):
+    # `accepted` (kgr, 2026-11-26): the user left the marked pressing in place
+    # with "none of these" on offer, which is a yes.
+    if selection in ("manual", "derived", "accepted"):
         return True
+    # A Discogs release picked on the master screen is the only pressing identity
+    # when MusicBrainz offered one pressing, none, or the user rejected or
+    # declined every one it offered.
     return prov.get("discogs_release_via") == "master_versions" and selection in (
         "unique",
         None,
+        "rejected",
+        "release_group_only",
     )
 
 
@@ -157,22 +164,20 @@ def final_match_distance(disc: RBIDisc, prov: dict[str, str]) -> MatchDistance:
     than adding to it: the "how MB found it" axis never runs on a manual pick, so
     a user-confirmed duration match cannot read 0.20.
 
-    ``release_selection`` takes four values and only two are handled here:
+    ``release_selection`` and what it scores here (see :func:`_user_confirmed`):
 
-    ``manual``
-        1.000. The user held the disc and picked.
-    ``unique`` / ``auto_tiebreak`` / absent
-        Fall through to :func:`build_match_distance` unchanged.
-    ``rejected``
-        **Also falls through, and this is a known gap, not an oversight.** The
-        user said none of the listed pressings match; ``PressingScreen`` keeps the
-        automatic pick anyway ("The automatic pick is kept, but flagged as
-        unconfirmed") and does *not* clear ``mb_release_id``. So a rejected disc
-        still scores ``mb_disc_id_multi`` at 0.30 — identical to an *un-reviewed*
-        ``auto_tiebreak``, which loses the fact that a human looked and said no.
-        ``rejected`` is negative evidence about the candidate *list* and nothing
-        reads it. kgr's ruling covers ``manual`` and deliberately leaves this
-        open: flag it rather than invent a value (TODO N6).
+    ``manual`` / ``derived`` / ``accepted``
+        1.000. The user held the disc and picked, or picked the Discogs release the
+        pressing follows from, or left the marked pressing in place with "none of
+        these" on offer (kgr, 2026-11-26: that is a yes).
+    ``rejected`` / ``release_group_only`` / ``unique`` / absent
+        1.000 when the user picked the Discogs release on the master screen (the
+        only pressing identity there is); otherwise falls through to
+        :func:`build_match_distance`. ``rejected`` no longer keeps the automatic
+        pick: the rip records the album only (2026-11-26), which closes the gap
+        this docstring used to flag (TODO N6).
+    ``auto_tiebreak`` / ``paired``
+        Fall through: the pressing was settled without a human.
     """
     if _user_confirmed(prov):
         return MatchDistance(

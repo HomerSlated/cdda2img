@@ -398,6 +398,12 @@ def test_the_score_is_stored_after_the_menu_on_every_path():
     ("prov", "confirmed"),
     [
         ({"release_selection": "manual"}, True),
+        ({"release_selection": "accepted"}, True),  # the default left, "none" offered
+        (
+            {"release_selection": "rejected", "discogs_release_via": "master_versions"},
+            True,
+        ),
+        ({"release_selection": "rejected"}, False),
         (
             {"release_selection": "unique", "discogs_release_via": "master_versions"},
             True,

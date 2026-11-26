@@ -1416,6 +1416,12 @@ aborts is OPEN (§13.9 Q2).
   made from the digital release, with no pre-gaps, whose tracks run about 0.7 s longer
   each than MusicBrainz's file lengths (11 s over 15 tracks against 5.25 s), so the
   search supplies its original (*Toca*, 2000).
-- **Not done here:** an interactive rip that leaves the pressing as pinned and gets its
-  Discogs release from MusicBrainz's own link still records `auto_tiebreak`; whether that
-  should also become `release_group_only` is for kgr.
+- **A default left in place is a yes; "none of these" is a no** (kgr, 2026-11-26: *"If the
+  user is presented a question, and leaves the answer at the default, we shouldn't second
+  guess their reason, but should take their acceptance (or lack of rejection) as a
+  positive response. This does however depend on us also offering the option 'My disc is
+  none of the above'"*). Leaving the pressing screen with the marked pressing in place
+  records `release_selection=accepted` (scored as user-confirmed), provided the marked one
+  is a listed row. `[x]` now records the album only: the pressing, its fields and the
+  Discogs release linked from it are dropped, no pressing is derived from a Discogs pick,
+  and the master screen reopens for the user's Discogs pick.
