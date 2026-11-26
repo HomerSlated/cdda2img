@@ -1340,6 +1340,8 @@ class DiscogsMasterScreen(Screen):
         self.versions = None  # discogs_lookup.MasterVersions
         self.year: str | None = None
         self.keep_undated = True
+        self.anchor = None  # release_match.ReleaseRecord of the pinned pressing
+        self.show_all = False  # [m]: also list versions contradicting it
         self.page = 0
         # Pages of the master-search, country and year lists: each can outgrow
         # the terminal (kgr, 2026-11-26: the first rows of a long country list
@@ -1360,6 +1362,21 @@ class DiscogsMasterScreen(Screen):
 
         self.loaded = True
         self._entry = (copy.deepcopy(ctl.disc), ctl.discogs_pick, ctl.discogs_fields)
+        # §13.6: the pressing the Discogs list is matched against, as MusicBrainz
+        # describes it (not the disc, which a Discogs pick may already have
+        # overwritten). None when no candidate pressing is pinned.
+        pressing = next(
+            (
+                c
+                for c in ctl.pressing_candidates
+                if c.mb_release_id and c.mb_release_id == ctl.disc.mb_release_id
+            ),
+            None,
+        )
+        if pressing is not None:
+            from cdda2img.release_match import record_from_meta
+
+            self.anchor = record_from_meta(pressing)
         if not discogs_lookup.is_available():
             self.available = False
             return
@@ -1474,8 +1491,8 @@ class DiscogsMasterScreen(Screen):
         print("  [u] keep/drop undated   [c] country")
         print("  [s] save and continue   [q] exit without saving")
 
-    def shown(self) -> list:
-        """The versions the list offers under the current filters."""
+    def _dated(self) -> list:
+        """The versions under the country and year filters."""
         if self.versions is None:
             return []
         return [
@@ -1486,6 +1503,20 @@ class DiscogsMasterScreen(Screen):
             or (v.year is None and self.keep_undated)
         ]
 
+    def shown(self) -> list:
+        """The versions the list offers: under the country and year filters, and,
+        beneath a pinned pressing, only those not contradicting it, most agreeing
+        fields first (§13.6) unless [m] shows them all."""
+        rows = self._dated()
+        if self.anchor is None or self.show_all:
+            return rows
+        from cdda2img import release_match as rm
+
+        scored = [(v, rm.compare(self.anchor, rm.record_from_version(v))) for v in rows]
+        kept = [(v, c) for v, c in scored if c.compatible]
+        kept.sort(key=lambda vc: -len(vc[1].agreed))
+        return [v for v, _c in kept]
+
     def filters(self) -> str:
         """PROV ``discogs_master``: ``<id>:<shown>/<total>[@<countries>][,<year>
         [+undated]]`` (rbi_spec.md)."""
@@ -1494,6 +1525,8 @@ class DiscogsMasterScreen(Screen):
             text += "@" + "|".join(self.chosen)
         if self.year is not None:
             text += f",{self.year}" + ("+undated" if self.keep_undated else "")
+        if self.anchor is not None and self.show_all:
+            text += ",unmatched"  # contradicting versions were listed too
         return text
 
     def _render_list(self, ctl: MenuController) -> None:
@@ -1509,6 +1542,13 @@ class DiscogsMasterScreen(Screen):
         print(f"  {where}, {year}: {len(rows)} releases   [{self.page + 1}/{pages}]")
         if self.versions is not None and self.versions.truncated:
             print("  ! Discogs has more than could be listed; narrow the country.")
+        hidden = len(self._dated()) - len(rows)
+        if hidden:
+            print(f"  {hidden} hidden: they contradict your pressing.  [m] shows them.")
+        elif self.anchor is not None and self.show_all:
+            print(
+                "  Listing every release, matching or not.  [m] hides contradictions."
+            )
         print()
         print(
             f"  {'#':>3}  {'Discogs':<9} {'Country':<10} {'Year':<4}  "
@@ -1653,6 +1693,9 @@ class DiscogsMasterScreen(Screen):
         if choice == "y":
             self.phase = "year" if self.versions and self.versions.years else "list"
             return Stay()
+        if choice == "m" and self.anchor is not None:
+            self.show_all, self.page = not self.show_all, 0
+            return Stay()
         if choice.isdigit() and 1 <= int(choice) <= len(rows):
             return Push(DiscogsReleaseDetailScreen(rows[int(choice) - 1], self))
         ctl.banner = "Invalid selection."
@@ -1770,6 +1813,7 @@ class MenuController:
         discogs_barcode_hit: int | None = None,
         discogs_only: bool = False,
         discogs_fmt: str = "CD",
+        pressing_only: bool = False,
     ) -> None:
         self.disc: RBIDisc = disc
         self._original_disc: RBIDisc = copy.deepcopy(disc)  # undo savepoint
@@ -1814,6 +1858,12 @@ class MenuController:
         self.discogs_fields: tuple[str, ...] = ()
         self.discogs_barcode_hit = discogs_barcode_hit
         self.discogs_fmt = discogs_fmt
+        if pressing_only:
+            # Post-menu (§13.6): the Discogs release the user picked fits several
+            # pressings and nothing linked or matched one. The pressing screen is
+            # the root, so leaving it ends the run.
+            self.stack = [PressingScreen(self.pressing_candidates, disc.mb_release_id)]
+            return
         if discogs_only:
             # Post-menu: the pressing changed and nothing settled its Discogs
             # release. The screen is the root, so leaving it ends the run.

@@ -2,12 +2,14 @@
 
 ## Open
 
-### 🔬 LIVE — Match MusicBrainz and Discogs releases field by field (kgr, 2026-11-26)
+### ✅ DONE 2026-11-26 — Match MusicBrainz and Discogs releases field by field (kgr)
 
-Decided, not built: `trust_model_design.md` §13. A contradiction rejects, absence is
-silent, one-sided values are adopted when barcode or catalogue number agree; `--auto`
-without a unique pair records the release group only (no `mb_release_id`); a rip without a
-complete original release aborts. Two questions open (§13.9).
+Built: `trust_model_design.md` §13, as-built notes §13.11. **Expect revisions** (kgr: "I'm
+sure we'll discover some discs that don't fit the formula"): the sufficiency rule may need
+fallbacks (album title, track count, artist), and `--auto` now aborts on most
+multi-pressing discs for want of the disc's own year. Open: whether an interactive rip that
+leaves the pressing as pinned (Discogs via MusicBrainz's link) should also become
+`release_group_only`.
 
 ### ✅ DONE 2026-11-26 — Discogs release selection by master (kgr)
 

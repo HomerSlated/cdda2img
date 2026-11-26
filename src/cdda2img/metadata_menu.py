@@ -770,6 +770,33 @@ def run_discogs_menu(
     return disc
 
 
+def run_pressing_menu(
+    disc: RBIDisc,
+    candidates: Sequence[DiscMeta],
+    *,
+    tui: bool = True,
+    provenance: dict[str, str] | None = None,
+) -> RBIDisc:
+    """The pressing screen on its own, after the metadata menu, offering only
+    *candidates*: the pressings the user's Discogs pick fits when nothing linked or
+    matched exactly one (trust_model_design.md §13.6). Leaving it ends it; a pick is
+    recorded as ``release_selection=manual``."""
+    from cdda2img.menu_state import MenuController
+
+    outcome = (provenance or {}).get("release_selection", "auto_tiebreak")
+    ctl = MenuController(
+        disc,
+        tui=tui,
+        pressing_candidates=candidates,
+        pressing_outcome=outcome,
+        pressing_only=True,
+    )
+    disc = ctl.run()
+    if provenance is not None:
+        _record_pressing_outcome(provenance, ctl)
+    return disc
+
+
 def _record_discogs_pick(provenance: dict[str, str], ctl) -> None:
     """A Discogs release picked on the master screen, and the filters it was
     picked under (rbi_spec.md ``discogs_master``)."""

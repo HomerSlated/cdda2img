@@ -2683,3 +2683,49 @@ def test_discogs_master_of_release_group_is_none_on_a_failed_lookup():
         side_effect=musicbrainzngs.NetworkError("down"),
     ):
         assert discogs_master_of_release_group("rg") is None
+
+
+# ---------------------------------------------------------------------------
+# mb_releases_linking_discogs — the reverse of a Discogs link (§13.4 b)
+# ---------------------------------------------------------------------------
+
+
+def test_the_reverse_link_names_the_linking_releases():
+    from cdda2img.mb_lookup import mb_releases_linking_discogs
+
+    resp = {
+        "url": {
+            "release-relation-list": [
+                {
+                    "type": "discogs",
+                    "release": {"id": "584fc120-881f-4711-b3fe-e1cb097e40a4"},
+                },
+                {"type": "other", "release": {"id": "ignored"}},
+            ]
+        }
+    }
+    with patch("musicbrainzngs.browse_urls", return_value=resp) as call:
+        got = mb_releases_linking_discogs(2750309)
+    assert got == ["584fc120-881f-4711-b3fe-e1cb097e40a4"]
+    assert (
+        call.call_args.kwargs["resource"] == "https://www.discogs.com/release/2750309"
+    )
+    assert call.call_args.kwargs["includes"] == ["release-rels"]
+
+
+def test_the_reverse_link_404_is_an_answer_and_a_failure_is_not():
+    import urllib.error
+
+    import musicbrainzngs
+
+    from cdda2img.mb_lookup import mb_releases_linking_discogs
+
+    not_found = musicbrainzngs.ResponseError(
+        cause=urllib.error.HTTPError("u", 404, "Not Found", {}, None)  # type: ignore[arg-type]
+    )
+    with patch("musicbrainzngs.browse_urls", side_effect=not_found):
+        assert mb_releases_linking_discogs(5222631) == []
+    with patch(
+        "musicbrainzngs.browse_urls", side_effect=musicbrainzngs.NetworkError("x")
+    ):
+        assert mb_releases_linking_discogs(5222631) is None

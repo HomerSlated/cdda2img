@@ -889,13 +889,23 @@ def test_unattended_master_reaches_the_written_provenance(monkeypatch) -> None:
 
 def test_the_post_menu_steps_run_in_order_before_the_provenance_write() -> None:
     src = inspect.getsource(app._finalize_import)
+    at = [
+        src.find("disc = _settle_identity_after_menu("),
+        src.find("_add_release_provenance(provenance, disc)"),
+    ]
+    assert -1 not in at
+    assert at == sorted(at)
+    inner = inspect.getsource(app._settle_identity_after_menu)
     order = [
         "disc = _discogs_after_menu(",
+        "_pair_unattended(",
+        "_pair_after_pick(",
         "_settle_discogs_master(disc)",
         "_require_discogs_release(",
-        "_add_release_provenance(provenance, disc)",
+        "_settle_release_year(",
+        "_require_identity_complete(",
     ]
-    at = [src.find(s) for s in order]
+    at = [inner.find(x) for x in order]
     assert -1 not in at, dict(zip(order, at, strict=True))
     assert at == sorted(at)
 
@@ -1030,8 +1040,7 @@ def test_the_discogs_release_is_settled_after_the_menu_and_before_writing() -> N
     src = inspect.getsource(app._finalize_import)
     order = [
         "run_metadata_menu(",
-        "_discogs_after_menu(",
-        "_require_discogs_release(",
+        "_settle_identity_after_menu(",
         "build_container(",
     ]
     at = [src.find(s) for s in order]

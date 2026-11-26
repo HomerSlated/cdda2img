@@ -271,6 +271,17 @@ recorded as
 .B discogs_master_id
 with no release.
 .PP
+When several pressings share the disc ID, the two services are matched field by
+field (barcode, catalogue number, country, year): a pressing and a Discogs
+release that disagree on any of them are different products. Choosing a
+Discogs release selects the pressing it matches, or asks you among those that
+fit. Under
+.B \-\-auto
+a single matching pair is taken; otherwise only the album (the MusicBrainz
+release group and the Discogs master) is recorded. If neither service gives the
+disc's own release year you are asked for it, and a rip without that year, or
+without the album's original release, writes nothing.
+.PP
 .BI "cdda2img rip " "[options]"
 .TP
 .BI \-\-device " DEVICE"

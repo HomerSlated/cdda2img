@@ -126,7 +126,9 @@ def _user_confirmed(prov: dict[str, str]) -> bool:
     MusicBrainz release in the container would still be a guess.
     """
     selection = prov.get("release_selection")
-    if selection == "manual":
+    # `derived` (§13.6): the user picked the Discogs release and the pressing
+    # follows from it uniquely, by MusicBrainz's link or a field match.
+    if selection in ("manual", "derived"):
         return True
     return prov.get("discogs_release_via") == "master_versions" and selection in (
         "unique",

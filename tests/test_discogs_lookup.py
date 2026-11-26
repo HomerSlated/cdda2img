@@ -351,3 +351,14 @@ def test_catalogue_fields_leaves_out_what_discogs_leaves_blank() -> None:
 )
 def test_discogs_dates_drop_their_placeholders(released, expected) -> None:
     assert discogs_lookup._discogs_date(released) == expected
+
+
+def test_master_original_reads_title_and_year() -> None:
+    client = _FakeClient([
+        {"title": "Brothers In Arms", "year": 1985},
+        {"title": "X", "year": 0},
+    ])
+    with _with(client):
+        assert discogs_lookup.master_original(23684) == ("Brothers In Arms", 1985)
+        assert discogs_lookup.master_original(1) is None  # Discogs' 0 = no year
+    assert client.urls[0] == "https://api.discogs.com/masters/23684"

@@ -787,7 +787,13 @@ def _finalize_identifiers(provenance: dict, disc: RBIDisc) -> None:
         provenance["barcode"] = disc.barcode
     if disc.catalog:
         provenance["mcn_source"] = "disc"
-    elif disc.barcode:
+    elif disc.barcode and provenance.get("barcode_source") not in (
+        "adopted",
+        "unanimous",
+    ):
+        # §13.7 (kgr, 2026-11-26): a barcode adopted from the partner release, or
+        # kept only because every candidate pressing states it, is not a confirmed
+        # pressing's own, and the TOC's MCN is burned to every copy.
         synth = normalize_barcode(disc.barcode, require_check_digit=False)
         if synth:
             disc.catalog = synth  # synthesise a burnable archival MCN from the barcode
@@ -2725,7 +2731,7 @@ def _finalize_import(
     _ui_status(ui, "Identifying original release…")
     # P1: thread the disc-ID prepop meta so the RG verify reuses it instead of
     # re-fetching the disc's own MB release (saves one round-trip at 1 req/s).
-    populate_original_release(disc, verify_meta=mb_result.meta)
+    populate_original_release(disc, verify_meta=mb_result.meta, provenance=provenance)
     # Trace the canonical result (DEBUG: the menu summary already shows it; keep
     # the normal UI clean). Same string as the menu/list/catalogue surfaces.
     log.debug("%s", format_original(disc))
@@ -2787,20 +2793,15 @@ def _finalize_import(
         discogs_fmt=discogs_fmt,
     )
     _note_corroboration_target(provenance, mb_result.selected_release_id, disc)
-    disc = _discogs_after_menu(
+    disc = _settle_identity_after_menu(
         disc,
         provenance,
-        mb_result.selected_release_id,
-        reopen=_discogs_reopener(
-            archival=archival,
-            auto=auto_apply,
-            tui=tui,
-            provenance=provenance,
-            fmt=discogs_fmt,
-        ),
+        mb_result,
+        archival=archival,
+        auto_apply=auto_apply,
+        tui=tui,
+        discogs_fmt=discogs_fmt,
     )
-    _settle_discogs_master(disc)
-    _require_discogs_release(provenance, archival=archival)
     # N6: NOW store the score, against the post-menu disc and provenance. Sited
     # after `_note_corroboration_target` rather than straight after the menu —
     # that helper writes only `corroborated_release`, which is not a contributor,
@@ -4356,6 +4357,344 @@ def _discogs_reopener(
         )
 
     return reopen
+
+
+#: Pressings beyond which unattended pairing does not ask MusicBrainz for each one's
+#: Discogs link (one request apiece, at its 1 a second). Pairing is then incomplete,
+#: and an incomplete search cannot claim a unique pair.
+_PAIR_LINK_MAX = 10
+
+
+def _settle_identity_after_menu(
+    disc: RBIDisc,
+    provenance: dict[str, str],
+    mb_result: MBPrepopResult,
+    *,
+    archival: bool,
+    auto_apply: bool,
+    tui: bool,
+    discogs_fmt: str,
+) -> RBIDisc:
+    """Everything §12 and §13 of trust_model_design.md settle after the metadata
+    menu, in order: the Discogs release (:func:`_discogs_after_menu`), then for a
+    rip with several candidate pressings the pressing itself (unattended:
+    :func:`_pair_unattended`; interactive: :func:`_pair_after_pick`), the Discogs
+    master, the single-release gate, the disc's own year (asked for when nothing
+    gives it, kgr 2026-11-26) and the identity gate. Returns the disc, which a
+    reopened screen may replace."""
+    reopen = _discogs_reopener(
+        archival=archival,
+        auto=auto_apply,
+        tui=tui,
+        provenance=provenance,
+        fmt=discogs_fmt,
+    )
+    disc = _discogs_after_menu(
+        disc, provenance, mb_result.selected_release_id, reopen=reopen
+    )
+    candidates = list(mb_result.menu_candidates)
+    if archival and len(candidates) > 1:
+        if reopen is None:
+            disc = _pair_unattended(disc, provenance, candidates, discogs_fmt)
+        else:
+            disc = _pair_after_pick(disc, provenance, candidates, tui=tui)
+    _settle_discogs_master(disc)
+    _require_discogs_release(provenance, archival=archival)
+    if archival:
+        disc = _settle_release_year(disc, provenance, ask=reopen is not None)
+        _require_identity_complete(disc, provenance)
+    return disc
+
+
+def _candidate(candidates: list[DiscMeta], mbid: str | None) -> DiscMeta | None:
+    return next((c for c in candidates if mbid and c.mb_release_id == mbid), None)
+
+
+def _pair_unattended(
+    disc: RBIDisc,
+    provenance: dict[str, str],
+    candidates: list[DiscMeta],
+    fmt: str,
+) -> RBIDisc:
+    """§13.5, unattended with several candidate pressings: exactly one
+    MusicBrainz/Discogs pair (a pressing's own Discogs link, or a sufficient field
+    match against the master's versions) is taken; anything else records the
+    release group only (kgr: "we have no way of corroborating the truth").
+    PROV ``release_pairs`` counts the pairs found (``+`` = the search was cut
+    short, so a single pair is not unique)."""
+    from cdda2img import discogs_lookup
+    from cdda2img import release_match as rm
+    from cdda2img.mb_lookup import (
+        discogs_link_and_barcode,
+        discogs_master_of_release_group,
+    )
+
+    metas = {c.mb_release_id: c for c in candidates if c.mb_release_id}
+    pairs: dict[tuple[str, int], str] = {}
+    complete = len(metas) <= _PAIR_LINK_MAX
+    if complete:
+        for mbid in metas:
+            linked, _barcode = discogs_link_and_barcode(mbid)
+            if linked is not None:
+                pairs[(mbid, linked)] = "mb_link"
+    group = disc.mb_release_group_id
+    master = disc.discogs_master_id or (
+        discogs_master_of_release_group(group) if group else None
+    )
+    versions = discogs_lookup.master_versions(master, fmt=fmt) if master else None
+    if master is not None and (versions is None or versions.truncated):
+        complete = False
+    if versions is not None:
+        right = [rm.record_from_version(v) for v in versions.versions]
+        left = [rm.record_from_meta(m) for m in metas.values()]
+        for a, b, c in rm.matching_pairs(left, right):
+            pairs.setdefault((a.ident, int(b.ident)), c.describe())
+    provenance["release_pairs"] = f"{len(pairs)}{'' if complete else '+'}"
+    if len(pairs) == 1 and complete:
+        (mbid, discogs_id), evidence = next(iter(pairs.items()))
+        return _take_pair(disc, provenance, metas[mbid], discogs_id, evidence)
+    return _release_group_only(disc, provenance, candidates, master=master)
+
+
+def _take_pair(
+    disc: RBIDisc,
+    provenance: dict[str, str],
+    meta: DiscMeta,
+    discogs_id: int,
+    evidence: str,
+) -> RBIDisc:
+    """Record a unique pair: the pressing, the Discogs release, and each Discogs
+    field the pressing lacks (§13.7; a field both state cannot differ, or the pair
+    would not match). A barcode adopted this way never becomes the MCN."""
+    from cdda2img import discogs_lookup
+    from cdda2img.resolver_adapter import apply_menu_selection
+
+    if meta.mb_release_id != disc.mb_release_id:
+        disc = apply_menu_selection(disc, meta, overwrite=True)
+    details = discogs_lookup.release_details(discogs_id)
+    disc.discogs_release_id = discogs_id
+    disc.discogs_master_id = details.master_id if details else None
+    adopted = []
+    for name, value in (details.catalogue_fields() if details else {}).items():
+        if not getattr(disc, name):
+            setattr(disc, name, value)
+            adopted.append(name)
+    provenance["release_selection"] = "paired"
+    provenance["release_pair"] = f"{meta.mb_release_id}|{discogs_id}:{evidence}"
+    provenance["discogs_release"] = str(discogs_id)
+    provenance["discogs_release_via"] = "paired"
+    if adopted:
+        provenance["release_adopted"] = ",".join(f"{n}:discogs" for n in adopted)
+    if "barcode" in adopted:
+        provenance["barcode_source"] = "adopted"
+    return disc
+
+
+#: The pressing-level fields a release-group-only record keeps only when every
+#: candidate pressing states them alike (§13.5), with the key they are compared by.
+def _pressing_field_keys() -> dict[str, Callable[[str], object]]:
+    from cdda2img import release_match as rm
+
+    return {
+        "catalog_number": lambda v: rm.norm_catnos([v]),
+        "label": lambda v: rm.norm_labels([v]),
+        "country": rm.norm_country,
+        "barcode": lambda v: rm.norm_barcodes([v]),
+        "release_date": rm.norm_year,
+    }
+
+
+def _release_group_only(
+    disc: RBIDisc,
+    provenance: dict[str, str],
+    candidates: list[DiscMeta],
+    *,
+    master: int | None,
+    keep: frozenset[str] = frozenset(),
+) -> RBIDisc:
+    """No pressing could be settled: drop ``mb_release_id``, and every
+    pressing-level field not stated alike by all candidates, except those in
+    *keep* (fields a release the user picked stated). Without *keep* the Discogs
+    side is the master only (§12 D7)."""
+    from cdda2img import release_match as rm
+
+    disc.mb_release_id = None
+    for name, key in _pressing_field_keys().items():
+        if name in keep:
+            continue
+        value = rm.unanimous(
+            [getattr(c, name) for c in candidates], key, require_all=True
+        )
+        if name == "release_date" and value:
+            value = rm.norm_year(value)  # the pressings agree on the year only
+        setattr(disc, name, value)
+    provenance["release_selection"] = "release_group_only"
+    if not keep:
+        disc.discogs_release_id = None
+        disc.discogs_master_id = master
+        provenance["discogs_release"] = (
+            f"master_only:{master}" if master else "no_master"
+        )
+        provenance.pop("discogs_release_via", None)
+    if disc.barcode and "barcode" not in keep:
+        provenance["barcode_source"] = "unanimous"
+    return disc
+
+
+def _pair_after_pick(
+    disc: RBIDisc,
+    provenance: dict[str, str],
+    candidates: list[DiscMeta],
+    *,
+    tui: bool,
+) -> RBIDisc:
+    """§13.6, interactive: when the user picked the Discogs release on the master
+    screen, settle the pressing from it. A pressing the user also picked is only
+    checked against it (PROV ``release_pair``; a contradiction is printed). Else
+    the reverse link (MusicBrainz releases linking that Discogs release), then a
+    unique sufficient field match, derive it (``release_selection=derived``); else
+    the user is asked among the pressings that do not contradict it, and a user
+    who picks none gets the release group only, keeping the Discogs release."""
+    from cdda2img import discogs_lookup
+    from cdda2img import release_match as rm
+    from cdda2img.mb_lookup import mb_releases_linking_discogs
+    from cdda2img.metadata_menu import run_pressing_menu
+
+    discogs_id = disc.discogs_release_id
+    if provenance.get("discogs_release_via") != "master_versions" or discogs_id is None:
+        return disc
+    details = discogs_lookup.release_details(discogs_id)
+    record = rm.record_from_details(details) if details else None
+    if provenance.get("release_selection") == "manual":
+        pressing = _candidate(candidates, disc.mb_release_id)
+        if pressing is not None and record is not None:
+            c = rm.compare(rm.record_from_meta(pressing), record)
+            provenance["release_pair"] = (
+                f"{pressing.mb_release_id}|{discogs_id}:{c.describe()}"
+            )
+            if c.contradicted:
+                print(
+                    f"   ! The pressing and the Discogs release you picked disagree"
+                    f" on {', '.join(c.contradicted)}."
+                )
+        return disc
+    ids = {c.mb_release_id for c in candidates}
+    hits = [m for m in (mb_releases_linking_discogs(discogs_id) or []) if m in ids]
+    evidence = "reverse_link"
+    if len(hits) != 1 and record is not None:
+        hits = [
+            c.mb_release_id
+            for c in candidates
+            if c.mb_release_id and rm.compare(rm.record_from_meta(c), record).sufficient
+        ]
+        evidence = "fields"
+    if len(hits) == 1:
+        meta = _candidate(candidates, hits[0])
+        disc = _apply_pressing_under_discogs(disc, meta, details)
+        provenance["release_selection"] = "derived"
+        provenance["release_pair"] = f"{hits[0]}|{discogs_id}:{evidence}"
+        return disc
+    compatible = [
+        c
+        for c in candidates
+        if record is None or rm.compare(rm.record_from_meta(c), record).compatible
+    ] or candidates
+    disc = run_pressing_menu(disc, compatible, tui=tui, provenance=provenance)
+    if provenance.get("release_selection") == "manual":
+        return _apply_pressing_under_discogs(disc, None, details)
+    stated = frozenset(details.catalogue_fields()) if details else frozenset()
+    return _release_group_only(
+        disc, provenance, candidates, master=disc.discogs_master_id, keep=stated
+    )
+
+
+def _apply_pressing_under_discogs(
+    disc: RBIDisc, meta: DiscMeta | None, details: object
+) -> RBIDisc:
+    """Apply pressing *meta* (when given), then lay the Discogs release the user
+    picked back on top: its stated fields win (§12.5)."""
+    from cdda2img.resolver_adapter import apply_menu_selection
+
+    discogs_id, master = disc.discogs_release_id, disc.discogs_master_id
+    if meta is not None:
+        disc = apply_menu_selection(disc, meta, overwrite=True)
+    fields = details.catalogue_fields() if details is not None else {}  # type: ignore[attr-defined]
+    return replace(
+        disc, discogs_release_id=discogs_id, discogs_master_id=master, **fields
+    )
+
+
+def _settle_release_year(
+    disc: RBIDisc,
+    provenance: dict[str, str],
+    *,
+    ask: bool,
+    input_fn: Callable[[str], str] = input,
+) -> RBIDisc:
+    """The disc's own release year, when neither service gave one: the user is
+    asked (kgr, 2026-11-26). Unattended there is nobody to ask, and
+    :func:`_require_identity_complete` aborts. PROV ``release_date_source=user``."""
+    import datetime
+
+    from cdda2img.rbi_format import year_of
+
+    if year_of(disc.release_date) is not None or not ask:
+        return disc
+    latest = datetime.date.today().year + 1
+    print("   Neither MusicBrainz nor Discogs gives this disc's own release year.")
+    while True:
+        try:
+            answer = input_fn(
+                "   The year on the disc or its packaging (YYYY), Enter to abort: "
+            ).strip()
+        except EOFError:
+            return disc
+        if not answer:
+            return disc
+        if answer.isdigit() and len(answer) == 4 and 1982 <= int(answer) <= latest:
+            provenance["release_date_source"] = "user"
+            return replace(disc, release_date=answer)
+        print(f"   A CD's year is between 1982 and {latest}.")
+
+
+def _require_identity_complete(disc: RBIDisc, provenance: dict[str, str]) -> None:
+    """A rip writes nothing without the disc's own year and a complete original
+    release, title and year (kgr, 2026-11-26: "abort rather than have the
+    'original' PROV blank or incomplete")."""
+    from cdda2img import query_log
+    from cdda2img.rbi_format import year_of
+
+    details = []
+    year_missing = year_of(disc.release_date) is None
+    if year_missing:
+        details.append(
+            "Neither MusicBrainz nor Discogs gives this disc's own release year, and"
+            " it was not entered (an unattended run cannot ask for it)."
+        )
+    if not (
+        disc.original_release_found
+        and disc.original_release_title
+        and disc.original_release_year
+    ):
+        why = provenance.get("original_release_rejected")
+        details.append(
+            "The original release could not be determined"
+            + (f" (MusicBrainz's answer was rejected: {why})" if why else "")
+            + "; the menu's [r] can set it."
+        )
+    if not details:
+        return
+    # Only a missing original release can be an outage (its lookups failed); a
+    # missing year is the data, and re-running unchanged will not supply it.
+    outage = not year_missing and (
+        query_log.errored("MusicBrainz") or query_log.errored("Discogs")
+    )
+    raise RipAborted(
+        EXIT_RETRY_LATER if outage else EXIT_INVESTIGATE,
+        "the release's identity is incomplete",
+        details,
+        provenance,
+    )
 
 
 def _require_discogs_release(provenance: dict[str, str], *, archival: bool) -> None:

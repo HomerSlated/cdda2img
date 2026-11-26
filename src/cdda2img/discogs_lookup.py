@@ -626,6 +626,27 @@ def release_details(release_id: int) -> ReleaseDetails | None:
     )
 
 
+def master_original(master_id: int) -> tuple[str, int] | None:
+    """``(title, year)`` of Discogs master *master_id*: Discogs' own answer to "when
+    was this album first released", a fallback source for the original release
+    when MusicBrainz gives none (trust_model_design.md §13.8). ``None`` when the
+    master has no year (Discogs writes 0) or on error."""
+    client = _get_client()
+    if not client:
+        return None
+    try:
+        data = client._get(f"https://api.discogs.com/masters/{int(master_id)}")
+    except Exception as exc:
+        log.debug("Discogs master %d fetch failed: %s", master_id, exc)
+        return None
+    try:
+        year = int(data.get("year") or 0)
+    except (TypeError, ValueError):
+        return None
+    title = (data.get("title") or "").strip()
+    return (title, year) if year > 0 and title else None
+
+
 @dataclass(frozen=True)
 class MasterHit:
     """A Discogs master from a search (§12.2: no master linked)."""

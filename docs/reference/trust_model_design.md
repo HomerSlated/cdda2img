@@ -1245,7 +1245,7 @@ is no release.
 - **Renderers**: `discogs_master_id` is a PROV key; `list`, the catalogue and the RLOG
   were not changed to name it.
 
-## 13. Matching MusicBrainz and Discogs releases field by field (DECIDED 2026-11-26, not yet built)
+## 13. Matching MusicBrainz and Discogs releases field by field (DECIDED and BUILT 2026-11-26)
 
 kgr, 2026-11-26: *"The problem we're dealing with here is sloppy submissions, with little
 to no auditing. So now we're forced to grab missing data from multiple sources, and try
@@ -1287,7 +1287,7 @@ other.
 |---|---|---|
 | barcode | GTIN-13 (`barcode.normalize_barcode`) | both present and different |
 | catalogue number | case folded; spaces, hyphens, dots, slashes removed (`824 499-2` = `8244992`) | both present and different |
-| label | case folded; trailing "Records", "Ltd", "Inc", "GmbH" and punctuation folded | both present and no shared label (either side may list several) |
+| label | case folded; trailing "Records", "Ltd", "Inc", "GmbH" and punctuation folded | **never** (supporting only, as built 2026-11-26): the disc-ID response keeps MusicBrainz's first label of several (*Brothers in Arms* 5a5330cd: Phonogram and Vertigo, kept as Phonogram), and both services put label, imprint or distributor there interchangeably |
 | country | MusicBrainz code against Discogs name, by **compatibility**, not equality: XE is compatible with any European country and with "Europe" and the joint regions containing it; XW and Discogs "Unknown" are absent | the two name places that cannot contain each other (GB against US) |
 | year | compared at the precision both have | both present and different |
 | format | CD (or File under `--digital-media`, §12) | different |
@@ -1361,14 +1361,13 @@ an answer that an exact replay accepted, and nothing recorded which gate fired.
 Whether a disc whose own year is still unknown, after both sources are combined, also
 aborts is OPEN (§13.9 Q2).
 
-### 13.9 Open with kgr
+### 13.9 Ruled by kgr, 2026-11-26
 
-- **Q1.** `--auto` and no Discogs master: abort (today), or write the container with
-  MusicBrainz only?
-- **Q2.** The original release found (title and year) but this disc's own year unknown on
-  both sides: abort too, or write it, with the "Original" line saying the comparison
-  cannot be made? The PROV keys `original_release_*` are complete in that case; only the
-  "is this disc the original" answer is unknown.
+- **Q1.** `--auto` and no Discogs master: **abort** (as before).
+- **Q2.** This disc's own year unknown after both services: **the user is asked for it**,
+  after the release selection. Unattended there is nobody to ask, so the rip aborts
+  (consistent with "abort rather than incomplete"). kgr: *"We can always revisit some of
+  these decisions later after testing."*
 
 ### 13.10 Build sequence
 
@@ -1383,3 +1382,40 @@ aborts is OPEN (§13.9 Q2).
 5. The original-release gate and the R3 reason.
 6. `tools/archival_replay.py` over every container on disk before shipping, since the
    `--auto` change alters what multi-pressing rips record.
+
+### 13.11 As built (2026-11-26)
+
+- **Code.** `release_match.py` (pure: normalisers, `compare`, `matching_pairs`,
+  `rank_compatible`, `unanimous`, record converters); `mb_lookup.mb_releases_linking_discogs`
+  (MusicBrainz's `browse_urls`, 404 = no link); `discogs_lookup.master_original`;
+  `cdda2img._settle_identity_after_menu`, which runs `_discogs_after_menu`, then
+  `_pair_unattended` or `_pair_after_pick`, `_settle_discogs_master`,
+  `_require_discogs_release`, `_settle_release_year` and `_require_identity_complete`;
+  `metadata_menu.run_pressing_menu`; the Discogs screen's compatibility filter (`[m]`).
+- **Label never contradicts** (§13.2, changed while building): the disc-ID response keeps
+  MusicBrainz's first label of several, so *Brothers in Arms* 5a5330cd (Phonogram and
+  Vertigo) looked contradicted by a Discogs "Vertigo" and a pressing was wrongly derived as
+  unique. Label is supporting evidence only.
+- **Release-group-only keeps a pressing field only when every candidate states it alike**
+  (`unanimous(..., require_all=True)`): one dated pressing of seven (Tracy Chapman) does
+  not date the album's disc.
+- **The R3 duration gate was wrong for every disc with real pre-gaps.** MusicBrainz measures
+  a track INDEX 01 to INDEX 01, so its length includes the next track's pre-gap; the gate
+  summed TOC durations without them. On Tracy Chapman 17 s of gaps read as a mismatch
+  against 3.85 s of tolerance, and the disc's own release was refused on Tracy, Eliminator,
+  Toca and, very probably, *Brothers in Arms*; the fallback search hid it, until a
+  MusicBrainz 503 did not. Fixed, with a regression test.
+- **The on-disc MCN never enters the match** (kgr: a disc in his collection has an MCN
+  unlike its barcode), and is never replaced by a barcode.
+- **Replay, unattended** (`tools/archival_replay.py`, which now runs the original-release
+  lookup and `_settle_identity_after_menu` with the config's `preferred_country`): ABBA
+  *Gold* passes as release group only (every pressing 1992); Tracy Chapman and Eliminator
+  abort for the disc's year, as ruled, but now take their original release from the
+  release group (1988, 1983) instead of the fallback search; Toca (`--digital-media`)
+  passes with its release. Toca is still refused on `durations`, and rightly: it is a CD-R
+  made from the digital release, with no pre-gaps, whose tracks run about 0.7 s longer
+  each than MusicBrainz's file lengths (11 s over 15 tracks against 5.25 s), so the
+  search supplies its original (*Toca*, 2000).
+- **Not done here:** an interactive rip that leaves the pressing as pinned and gets its
+  Discogs release from MusicBrainz's own link still records `auto_tiebreak`; whether that
+  should also become `release_group_only` is for kgr.

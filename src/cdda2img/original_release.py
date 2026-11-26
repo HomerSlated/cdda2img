@@ -97,6 +97,13 @@ def _parse_year(date_str: str | None) -> int | None:
 def _verify_release_matches_disc(
     meta: DiscMeta, disc: RBIDisc, *, check_durations: bool = True
 ) -> bool:
+    """True when :func:`_r3_reject_reason` finds nothing (see there)."""
+    return _r3_reject_reason(meta, disc, check_durations=check_durations) is None
+
+
+def _r3_reject_reason(
+    meta: DiscMeta, disc: RBIDisc, *, check_durations: bool = True
+) -> str | None:
     """R3: conjunctive verifier — does *meta* plausibly describe *disc*?
 
     Four gates, all skip-on-no-evidence (innocent until proven guilty):
@@ -123,7 +130,10 @@ def _verify_release_matches_disc(
       tracks where both sides have titles. Skip when either side has no
       titles or no overlap.
 
-    Returns True iff no gate produces positive evidence of a mismatch.
+    Returns ``None`` when no gate produces positive evidence of a mismatch, else the
+    gate that did: ``track_count``, ``durations``, ``isrc`` or ``title_fuzz``
+    (recorded as PROV ``original_release_rejected``, 2026-11-26: on *Brothers in Arms*
+    a rip rejected an answer an exact replay accepted, and nothing said which gate).
     "Confidence over coverage": when in doubt, accept (the upstream
     identification was probably right). When we have a hard contradiction,
     reject.
@@ -138,12 +148,22 @@ def _verify_release_matches_disc(
             len(meta.tracks),
             meta.mb_release_id or "<no MBID>",
         )
-        return False
+        return "track_count"
 
     # Gate 2: sum-of-durations within a track-count-scaled tolerance. Frame_to_ms
     # via 1000/75 ≈ 13.33. Pressing-specific — skipped for a cross-pressing candidate.
+    # MusicBrainz measures a track from its INDEX 01 to the next one's, so its
+    # length includes the NEXT track's pre-gap; the TOC's duration does not. The
+    # disc's sum is therefore taken from track 1's INDEX 01 to the lead-out: each
+    # track's duration plus every later track's pre-gap. Until 2026-11-26 the
+    # pre-gaps were left out, and on any disc with real gaps this gate rejected the
+    # disc's own release (Tracy Chapman: 17 s of gaps against 3.85 s tolerance;
+    # also Eliminator, Toca, Brothers in Arms), leaving the fallback search to find
+    # the original release, or a MusicBrainz 503 to lose it.
     disc_sum_ms = sum(
-        int(t.duration_frames * 1000 / 75) for t in disc.tracks if t.duration_frames
+        int((t.duration_frames + (t.pregap_frames if i else 0)) * 1000 / 75)
+        for i, t in enumerate(disc.tracks)
+        if t.duration_frames
     )
     meta_sum_ms = sum(t.duration_ms or 0 for t in meta.tracks if t.duration_ms)
     if check_durations and disc_sum_ms > 0 and meta_sum_ms > 0:
@@ -157,7 +177,7 @@ def _verify_release_matches_disc(
                 tol / 1000,
                 meta.mb_release_id or "<no MBID>",
             )
-            return False
+            return "durations"
 
     # Gate 3: ISRC overlap. Use R1's helper. Score == 0 means either side
     # had no ISRCs, or none agreed — only reject when we have ISRCs on
@@ -174,7 +194,7 @@ def _verify_release_matches_disc(
                 meta_isrc_count,
                 meta.mb_release_id or "<no MBID>",
             )
-            return False
+            return "isrc"
 
     # Gate 4: aggregate title fuzzy ≥ _R3_TITLE_FUZZ_CUTOFF. Skip when either
     # side has no titles for ≥2 tracks (need at least some overlap to score).
@@ -186,9 +206,9 @@ def _verify_release_matches_disc(
             _R3_TITLE_FUZZ_CUTOFF,
             meta.mb_release_id or "<no MBID>",
         )
-        return False
+        return "title_fuzz"
 
-    return True
+    return None
 
 
 def _aggregate_title_fuzz_score(meta: DiscMeta, disc: RBIDisc) -> int | None:
@@ -216,6 +236,13 @@ def _aggregate_title_fuzz_score(meta: DiscMeta, disc: RBIDisc) -> int | None:
 def _verify_rg_path_for_disc(
     disc: RBIDisc, verify_meta: DiscMeta | None = None
 ) -> bool:
+    """True when :func:`_rg_path_reject_reason` finds nothing (see there)."""
+    return _rg_path_reject_reason(disc, verify_meta) is None
+
+
+def _rg_path_reject_reason(
+    disc: RBIDisc, verify_meta: DiscMeta | None = None
+) -> str | None:
     """R3 gate for the RG-primary path.
 
     Fast path: verify the disc's own MB release MBID (set by MB disc-ID
@@ -234,7 +261,7 @@ def _verify_rg_path_for_disc(
     so correctness never depends on the caller threading it.
     """
     if disc.mb_release_id is None:
-        return True
+        return None
     if verify_meta is not None and verify_meta.mb_release_id == disc.mb_release_id:
         meta: DiscMeta | None = verify_meta
     else:
@@ -242,8 +269,8 @@ def _verify_rg_path_for_disc(
 
         meta = lookup_release(disc.mb_release_id, disc_number=disc.disc_number)
     if meta is None:
-        return True
-    return _verify_release_matches_disc(meta, disc)
+        return None
+    return _r3_reject_reason(meta, disc)
 
 
 def _fetch_release_group(rg_id: str):  # type: ignore[no-untyped-def]
@@ -343,17 +370,28 @@ def _find_original_release_via_rg(
     different disc with similar TOC matched the same MB disc-ID); fall through
     to fuzzy.
     """
+    found, title, year, _why = _original_via_rg_explained(disc, verify_meta)
+    return (found, title, year)
+
+
+def _original_via_rg_explained(
+    disc: RBIDisc, verify_meta: DiscMeta | None = None
+) -> tuple[bool, str | None, int | None, str | None]:
+    """:func:`_find_original_release_via_rg`, plus why it gave no answer:
+    ``no_release_group``, ``release_group`` (unusable: no date, R14, a failed
+    fetch), or the R3 gate that rejected it."""
     rg_id = disc.mb_release_group_id
     if not rg_id:
-        return (False, None, None)
+        return (False, None, None, "no_release_group")
     resolved = _resolve_rg_original(rg_id, disc, is_own_rg=True)
     if resolved is None:
-        return (False, None, None)
+        return (False, None, None, "release_group")
     # R3: gate the RG identification against the disc tracklist.
-    if not _verify_rg_path_for_disc(disc, verify_meta):
-        return (False, None, None)
+    why = _rg_path_reject_reason(disc, verify_meta)
+    if why is not None:
+        return (False, None, None, why)
     title, year = resolved
-    return (True, title, year)
+    return (True, title, year, None)
 
 
 def find_original_release(
@@ -385,7 +423,9 @@ def find_original_release(
 
 
 def populate_original_release(
-    disc: RBIDisc, verify_meta: DiscMeta | None = None
+    disc: RBIDisc,
+    verify_meta: DiscMeta | None = None,
+    provenance: dict[str, str] | None = None,
 ) -> None:
     """Convenience wrapper: call :func:`find_original_release` and assign to disc.
 
@@ -398,11 +438,48 @@ def populate_original_release(
     """
     if disc.original_release_found:
         return
-    found, title, year = find_original_release(disc, verify_meta)
+    found, title, year, why = _original_via_rg_explained(disc, verify_meta)
+    source = "mb_release_group"
+    if not found:
+        found, title, year = find_original_release_fuzzy(disc)
+        source = "mb_search"
+    if not found:
+        # §13.8 (kgr, 2026-11-26): the Discogs master's year is a source too, not
+        # only a corroboration (R11), so a MusicBrainz miss need not leave the
+        # original release blank.
+        found, title, year = _original_from_discogs_master(disc)
+        source = "discogs_master"
+    if provenance is not None:
+        if why is not None:
+            provenance["original_release_rejected"] = why
+        if found:
+            provenance["original_release_source"] = source
     if found:
         disc.original_release_found = True
         disc.original_release_title = title
         disc.original_release_year = year
+
+
+def _original_from_discogs_master(
+    disc: RBIDisc,
+) -> tuple[bool, str | None, int | None]:
+    """The original release from the Discogs master: the disc's own master when
+    known, else the one MusicBrainz links the release group to."""
+    from cdda2img import discogs_lookup
+
+    if not discogs_lookup.is_available():
+        return (False, None, None)
+    master = disc.discogs_master_id
+    if master is None and disc.mb_release_group_id:
+        from cdda2img.mb_lookup import discogs_master_of_release_group
+
+        master = discogs_master_of_release_group(disc.mb_release_group_id)
+    if master is None:
+        return (False, None, None)
+    found = discogs_lookup.master_original(master)
+    if found is None:
+        return (False, None, None)
+    return (True, found[0], found[1])
 
 
 # ---------------------------------------------------------------------------

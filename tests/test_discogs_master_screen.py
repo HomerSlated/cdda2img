@@ -544,3 +544,79 @@ def test_a_long_year_list_pages(monkeypatch, capsys) -> None:
     _step(ctl, "n")
     _step(ctl, "13")  # 1997, on page 2
     assert _screen(ctl).year == "1997"
+
+
+# ---- beneath a pinned pressing, contradicting versions are hidden (§13.6) ----------
+
+
+def _gb_pressing():
+    from cdda2img.lookup_result import DiscMeta
+
+    return DiscMeta(
+        mb_release_id="0a19729e",
+        barcode="5012981234522",
+        catalog_number="CDV 2345",
+        label="Virgin",
+        country="GB",
+        release_date="1985",
+    )
+
+
+def _mixed_versions():
+    return MasterVersions(
+        versions=(
+            _v(2118370, None, "Album, Reissue"),  # undated: compatible, agrees on less
+            _v(5222631, "1985"),
+            DiscogsVersion(
+                1923531, "No Jacket Required", "UK", "1985", "WEA", "251 699-2", "Album"
+            ),
+            DiscogsVersion(
+                7777777,
+                "No Jacket Required",
+                "UK",
+                "1990",
+                "Virgin",
+                "CDV 2345",
+                "Album",
+            ),
+        ),
+        total=4,
+        years=(("1985", 2), ("1990", 1)),
+        truncated=False,
+    )
+
+
+@pytest.mark.usefixtures("discogs")
+def test_versions_contradicting_the_pressing_are_hidden_and_ranked(
+    monkeypatch, capsys
+) -> None:
+    monkeypatch.setattr(
+        "cdda2img.discogs_lookup.master_versions",
+        lambda _m, *, countries=(), fmt="CD": _mixed_versions(),
+    )
+    ctl = MenuController(
+        _disc(), discogs_only=True, pressing_candidates=[_gb_pressing()]
+    )
+    _step(ctl, "")
+    _step(ctl, "")  # any year
+    screen = _screen(ctl)
+    # 1923531: catalogue number contradicts; 7777777: year (1990) contradicts.
+    assert [v.release_id for v in screen.shown()] == [5222631, 2118370]
+    capsys.readouterr()
+    ctl.stack[-1].render(ctl)
+    assert "2 hidden: they contradict your pressing" in capsys.readouterr().out
+    _step(ctl, "m")
+    assert len(screen.shown()) == 4
+    assert screen.filters().endswith(",unmatched")
+
+
+@pytest.mark.usefixtures("discogs")
+def test_without_a_pinned_pressing_nothing_is_hidden(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "cdda2img.discogs_lookup.master_versions",
+        lambda _m, *, countries=(), fmt="CD": _mixed_versions(),
+    )
+    ctl = _ctl()
+    _step(ctl, "")
+    _step(ctl, "")
+    assert len(_screen(ctl).shown()) == 4

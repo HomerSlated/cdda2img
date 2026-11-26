@@ -92,6 +92,10 @@ def replay(
     from cdda2img.toc_parser import parse_toc
 
     mb_lookup._setup_useragent()  # the pipeline does this; a lookup without it fails
+    from cdda2img.config import load_config
+
+    # The ranking a real rip uses: the pressing the ladder pins depends on it.
+    preferred_country = load_config(strict=False).preferred_country
     header = read_header(rbi)
     toc_e, pcm_e = header.find_block(BLOCK_TYPE_TOC), header.find_block(BLOCK_TYPE_PCM)
     if toc_e is None or pcm_e is None:
@@ -124,7 +128,7 @@ def replay(
                 lba = t.start_frame + t.pregap_frames + t.duration_frames
             query_log.start()
             prov: dict[str, str] = {}
-            disc, _mb = app._run_metadata_lookups(
+            disc, mb_result = app._run_metadata_lookups(
                 disc,
                 pcm,
                 prov,
@@ -134,7 +138,7 @@ def replay(
                 cddb_server=None,
                 cddb_verbose=False,
                 mb_verbose=False,
-                preferred_country=[],
+                preferred_country=preferred_country,
                 ui=None,
                 digital_media=digital_media,
             )
@@ -160,14 +164,41 @@ def replay(
                 app._archival_gates(
                     disc, pcm, prov, None, archival=True, digital_media=digital_media
                 )
-                # No menu here, as under --auto: the pressing stays as pinned, and
-                # the unattended post-menu step runs (trust_model_design.md §12 D7).
-                disc = app._discogs_after_menu(disc, prov, disc.mb_release_id)
-                app._settle_discogs_master(disc)
-                print(f"   disc.discogs_release_id = {disc.discogs_release_id}")
-                print(f"   disc.discogs_master_id = {disc.discogs_master_id}")
-                print(f"   discogs_release = {prov.get('discogs_release')}")
-                app._require_discogs_release(prov, archival=True)
+                # No menu here, as under --auto: the original release, then the
+                # unattended post-menu settlement (trust_model_design.md §12, §13).
+                from cdda2img.original_release import populate_original_release
+
+                populate_original_release(
+                    disc, verify_meta=mb_result.meta, provenance=prov
+                )
+                try:
+                    disc = app._settle_identity_after_menu(
+                        disc,
+                        prov,
+                        mb_result,
+                        archival=True,
+                        auto_apply=True,
+                        tui=False,
+                        discogs_fmt="File" if digital_media else "CD",
+                    )
+                finally:
+                    for k in (
+                        "release_selection",
+                        "release_pairs",
+                        "release_pair",
+                        "discogs_release",
+                        "original_release_source",
+                        "original_release_rejected",
+                    ):
+                        print(f"   {k} = {prov.get(k)}")
+                    print(f"   disc.mb_release_id = {disc.mb_release_id}")
+                    print(f"   disc.discogs_release_id = {disc.discogs_release_id}")
+                    print(f"   disc.discogs_master_id = {disc.discogs_master_id}")
+                    print(f"   disc.release_date = {disc.release_date}")
+                    print(
+                        f"   original = {disc.original_release_title}"
+                        f" ({disc.original_release_year})"
+                    )
             except RipAborted as e:
                 print(f"   WOULD ABORT (exit {e.code}): {e.reason}")
                 for d in e.details:

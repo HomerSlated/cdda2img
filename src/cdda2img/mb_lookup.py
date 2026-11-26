@@ -603,6 +603,40 @@ def discogs_link_and_barcode(release_id: str) -> tuple[int | None, str | None]:
 _DISCOGS_MASTER_RE = re.compile(r"/master/(\d+)")
 
 
+def mb_releases_linking_discogs(discogs_release_id: int) -> list[str] | None:
+    """The MusicBrainz releases that link Discogs release *discogs_release_id*: the
+    reverse of a release's Discogs link (trust_model_design.md §13.4 b).
+
+    ``[]`` when MusicBrainz knows no such link (its URL lookup answers 404, measured
+    on Discogs 5222631); ``None`` when it could not be asked. Measured: Discogs
+    2750309 (*Brothers in Arms*) names 584fc120.
+    """
+    _setup_useragent()
+    url = f"https://www.discogs.com/release/{int(discogs_release_id)}"
+    try:
+        result = query_log.call(
+            "MusicBrainz",
+            musicbrainzngs.browse_urls,
+            resource=url,
+            includes=["release-rels"],
+        )
+    except musicbrainzngs.ResponseError as exc:
+        if getattr(getattr(exc, "cause", None), "code", None) == 404:
+            return []
+        log.debug("MusicBrainz URL lookup for %s failed: %s", url, exc)
+        return None
+    except musicbrainzngs.NetworkError as exc:
+        log.debug("MusicBrainz URL lookup for %s failed: %s", url, exc)
+        return None
+    rels = (result.get("url") or {}).get("release-relation-list") or []
+    return [
+        r["release"]["id"]
+        for r in rels
+        if (r.get("type") or "").lower() == "discogs"
+        and (r.get("release") or {}).get("id")
+    ]
+
+
 def discogs_master_of_release_group(release_group_id: str) -> int | None:
     """The Discogs master MusicBrainz links a release GROUP to, or ``None``.
 
