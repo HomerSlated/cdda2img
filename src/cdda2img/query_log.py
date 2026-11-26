@@ -131,6 +131,23 @@ def errored(service: str) -> bool:
         return any(r.service == service and _unanswered(r.outcome) for r in _RECORDS)
 
 
+def mark() -> int:
+    """A position in the log, for :func:`errored_since`."""
+    with _LOCK:
+        return len(_RECORDS)
+
+
+def errored_since(service: str, position: int) -> bool:
+    """Whether a query to *service* recorded after *position* went unanswered: for
+    a caller whose own lookups return the same empty value on an error as on a
+    genuine "none" (``mb_lookup.discogs_link_and_barcode``), and which must not
+    read an earlier failure of the run as its own."""
+    with _LOCK:
+        return any(
+            r.service == service and _unanswered(r.outcome) for r in _RECORDS[position:]
+        )
+
+
 #: An HTTP status that means "not now", not "nothing found": rate limited, or a
 #: server error. Measured 2026-11-21: Discogs answers a burst of lookups with
 #: ``429 You are making requests too quickly``, and its client then returns an

@@ -457,3 +457,103 @@ def test_an_original_release_lost_to_an_outage_is_retry_later() -> None:
     with pytest.raises(ra.RipAborted) as exc:
         app._require_identity_complete(_disc(date="1985"), {})
     assert _aborted(exc).code == ra.EXIT_RETRY_LATER
+
+
+# ---- review follow-ups -----------------------------------------------------------------
+
+
+def test_the_description_follows_the_recorded_pressing(services) -> None:
+    """A pinned pressing's description must not outlive it."""
+    services.links = {}
+    services.versions = [_v(7, catno="9 25264-2", label="Warner Bros.", country="US")]
+    us = _p("4c618c14", barcode="075992526425", catno="9 25264-2", country="US")
+    us.disambiguation = "Columbia House club edition"
+    prov = {"release_disambiguation": "Made in France by PMDC"}
+    app._pair_unattended(_disc(), prov, [us, BIA[1]], "CD")
+    assert prov["release_disambiguation"] == "Columbia House club edition"
+    prov = {"release_disambiguation": "Made in France by PMDC"}
+    services.links = {"5a5330cd": 1, "584fc120": 2}
+    app._pair_unattended(_disc(), prov, BIA, "CD")
+    assert prov["release_selection"] == "release_group_only"
+    assert "release_disambiguation" not in prov
+
+
+def test_a_failed_link_lookup_leaves_the_search_incomplete(
+    services, monkeypatch
+) -> None:
+    """MusicBrainz 503s were frequent on 2026-11-26: a link lost to one must not let
+    the remaining evidence look unique."""
+    from cdda2img import query_log
+
+    query_log.start()
+
+    def links(mbid):
+        if mbid == "5a5330cd":
+            query_log.record(
+                "MusicBrainz",
+                f"get_release_by_id({mbid!r})",
+                "error: NetworkError: HTTP 503",
+            )
+        return (None, None)
+
+    monkeypatch.setattr("cdda2img.mb_lookup.discogs_link_and_barcode", links)
+    services.versions = [_v(7, catno="9 25264-2", label="Warner Bros.", country="US")]
+    prov: dict[str, str] = {}
+    disc = app._pair_unattended(_disc(), prov, [BIA[0], BIA[1]], "CD")
+    assert prov["release_pairs"] == "1+"
+    assert prov["release_selection"] == "release_group_only"
+    assert disc.mb_release_id is None
+
+
+def test_an_earlier_failure_of_the_run_is_not_the_pairings(
+    services, monkeypatch
+) -> None:
+    """Control: a 503 before the pairing started does not make it incomplete."""
+    from cdda2img import query_log
+
+    query_log.start()
+    query_log.record(
+        "MusicBrainz", "search_releases(...)", "error: NetworkError: HTTP 503"
+    )
+    services.links = {}
+    services.versions = [_v(7, catno="9 25264-2", label="Warner Bros.", country="US")]
+    prov: dict[str, str] = {}
+    app._pair_unattended(_disc(), prov, [BIA[0], BIA[1]], "CD")
+    assert prov["release_pairs"] == "1"
+    assert prov["release_selection"] == "paired"
+
+
+def test_corroboration_is_noted_after_the_settlement() -> None:
+    import inspect
+
+    src = inspect.getsource(app._finalize_import)
+    assert src.index("disc = _settle_identity_after_menu(") < src.index(
+        "_note_corroboration_target(provenance, mb_result.selected_release_id, disc)"
+    )
+
+
+def test_the_reopened_discogs_screen_gets_the_candidates(monkeypatch) -> None:
+    """The Brothers in Arms path: the reopened screen must be able to hide
+    versions contradicting the pressing picked."""
+    from cdda2img import menu_state, metadata_menu
+
+    built: list[dict] = []
+
+    class _Ctl:
+        def __init__(self, disc, **kw):
+            built.append(kw)
+            self.disc, self.discogs_pick = disc, None
+
+        def run(self):
+            return self.disc
+
+    monkeypatch.setattr(menu_state, "MenuController", _Ctl)
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    reopen = app._discogs_reopener(
+        archival=True, auto=False, tui=False, provenance={}, candidates=BIA
+    )
+    assert reopen is not None
+    reopen(_disc(), None)
+    assert built[0]["pressing_candidates"] == BIA
+    assert built[0]["discogs_only"] is True
+    assert metadata_menu.run_discogs_menu  # the real entry point was used

@@ -751,6 +751,7 @@ def run_discogs_menu(
     barcode_hit: int | None = None,
     provenance: dict[str, str] | None = None,
     fmt: str = "CD",
+    candidates: Sequence[DiscMeta] = (),
 ) -> RBIDisc:
     """The Discogs master screen on its own, after the metadata menu: the user
     picked another pressing there and nothing settled its Discogs release
@@ -763,6 +764,7 @@ def run_discogs_menu(
         discogs_only=True,
         discogs_barcode_hit=barcode_hit,
         discogs_fmt=fmt,
+        pressing_candidates=candidates,
     )
     disc = ctl.run()
     if provenance is not None:

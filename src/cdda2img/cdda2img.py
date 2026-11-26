@@ -10,7 +10,7 @@ import re
 import sys
 import textwrap
 import threading
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Sequence
 from concurrent.futures import Future
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -2792,7 +2792,6 @@ def _finalize_import(
         discogs_barcode_hit=disc.discogs_release_id if via == "barcode" else None,
         discogs_fmt=discogs_fmt,
     )
-    _note_corroboration_target(provenance, mb_result.selected_release_id, disc)
     disc = _settle_identity_after_menu(
         disc,
         provenance,
@@ -2802,6 +2801,9 @@ def _finalize_import(
         tui=tui,
         discogs_fmt=discogs_fmt,
     )
+    # After the settlement, which may pair, derive or drop the pressing: the
+    # corroboration keys were taken against the one the ladder pinned.
+    _note_corroboration_target(provenance, mb_result.selected_release_id, disc)
     # N6: NOW store the score, against the post-menu disc and provenance. Sited
     # after `_note_corroboration_target` rather than straight after the menu —
     # that helper writes only `corroborated_release`, which is not a contributor,
@@ -4342,6 +4344,7 @@ def _discogs_reopener(
     tui: bool,
     provenance: dict[str, str],
     fmt: str = "CD",
+    candidates: Sequence[DiscMeta] = (),
 ) -> Callable[[RBIDisc, int | None], RBIDisc] | None:
     """The post-menu Discogs master screen, for an interactive ``rip`` only:
     ``rip`` is the pipeline that requires a Discogs release, and a screen needs a
@@ -4352,8 +4355,15 @@ def _discogs_reopener(
     from cdda2img.metadata_menu import run_discogs_menu
 
     def reopen(disc: RBIDisc, barcode_hit: int | None) -> RBIDisc:
+        # The candidates let the screen hide versions that contradict the
+        # pressing the user picked (§13.6): the Brothers in Arms path.
         return run_discogs_menu(
-            disc, tui=tui, barcode_hit=barcode_hit, provenance=provenance, fmt=fmt
+            disc,
+            tui=tui,
+            barcode_hit=barcode_hit,
+            provenance=provenance,
+            fmt=fmt,
+            candidates=candidates,
         )
 
     return reopen
@@ -4382,17 +4392,18 @@ def _settle_identity_after_menu(
     master, the single-release gate, the disc's own year (asked for when nothing
     gives it, kgr 2026-11-26) and the identity gate. Returns the disc, which a
     reopened screen may replace."""
+    candidates = list(mb_result.menu_candidates)
     reopen = _discogs_reopener(
         archival=archival,
         auto=auto_apply,
         tui=tui,
         provenance=provenance,
         fmt=discogs_fmt,
+        candidates=candidates,
     )
     disc = _discogs_after_menu(
         disc, provenance, mb_result.selected_release_id, reopen=reopen
     )
-    candidates = list(mb_result.menu_candidates)
     if archival and len(candidates) > 1:
         if reopen is None:
             disc = _pair_unattended(disc, provenance, candidates, discogs_fmt)
@@ -4410,6 +4421,15 @@ def _candidate(candidates: list[DiscMeta], mbid: str | None) -> DiscMeta | None:
     return next((c for c in candidates if mbid and c.mb_release_id == mbid), None)
 
 
+def _describe_pressing(provenance: dict[str, str], meta: DiscMeta | None) -> None:
+    """``release_disambiguation`` for the pressing the container now claims: its
+    own MusicBrainz description, or none (the pinned pressing's would mislead)."""
+    if meta is not None and meta.disambiguation:
+        provenance["release_disambiguation"] = meta.disambiguation
+    else:
+        provenance.pop("release_disambiguation", None)
+
+
 def _pair_unattended(
     disc: RBIDisc,
     provenance: dict[str, str],
@@ -4422,7 +4442,7 @@ def _pair_unattended(
     release group only (kgr: "we have no way of corroborating the truth").
     PROV ``release_pairs`` counts the pairs found (``+`` = the search was cut
     short, so a single pair is not unique)."""
-    from cdda2img import discogs_lookup
+    from cdda2img import discogs_lookup, query_log
     from cdda2img import release_match as rm
     from cdda2img.mb_lookup import (
         discogs_link_and_barcode,
@@ -4433,10 +4453,16 @@ def _pair_unattended(
     pairs: dict[tuple[str, int], str] = {}
     complete = len(metas) <= _PAIR_LINK_MAX
     if complete:
+        start = query_log.mark()
         for mbid in metas:
             linked, _barcode = discogs_link_and_barcode(mbid)
             if linked is not None:
                 pairs[(mbid, linked)] = "mb_link"
+        # A failed lookup returns (None, None), the same as "no link": one lost to
+        # a MusicBrainz 503 could hide the second pair that makes the first not
+        # unique, so any failure here leaves the search incomplete.
+        if query_log.errored_since("MusicBrainz", start):
+            complete = False
     group = disc.mb_release_group_id
     master = disc.discogs_master_id or (
         discogs_master_of_release_group(group) if group else None
@@ -4480,6 +4506,7 @@ def _take_pair(
             setattr(disc, name, value)
             adopted.append(name)
     provenance["release_selection"] = "paired"
+    _describe_pressing(provenance, meta)
     provenance["release_pair"] = f"{meta.mb_release_id}|{discogs_id}:{evidence}"
     provenance["discogs_release"] = str(discogs_id)
     provenance["discogs_release_via"] = "paired"
@@ -4519,6 +4546,8 @@ def _release_group_only(
     from cdda2img import release_match as rm
 
     disc.mb_release_id = None
+    # The description was the pinned pressing's; the container claims none now.
+    provenance.pop("release_disambiguation", None)
     for name, key in _pressing_field_keys().items():
         if name in keep:
             continue
@@ -4592,6 +4621,7 @@ def _pair_after_pick(
         meta = _candidate(candidates, hits[0])
         disc = _apply_pressing_under_discogs(disc, meta, details)
         provenance["release_selection"] = "derived"
+        _describe_pressing(provenance, meta)
         provenance["release_pair"] = f"{hits[0]}|{discogs_id}:{evidence}"
         return disc
     compatible = [
