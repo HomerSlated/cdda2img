@@ -8,8 +8,8 @@ Built the same day it was decided: `trust_model_design.md` §12, as-built notes 
 Ruled the same day: a pick overwrites the catalogue fields Discogs states (never with a
 blank); `--digital-media` lists File versions; a screen pick counts as user confirmation.
 **Open follow-ups**: (1) R11 could read `discogs_master_id` directly. (2) `list`, the
-catalogue and the RLOG do not name the master. (3) kgr to rule whether a run with no
-terminal (and no `--auto`) may settle for a master, as `--auto` may. Live check outstanding: kgr's interactive and `--auto` re-rips
+catalogue and the RLOG do not name the master. (A run with no terminal settles like
+`--auto`: kgr confirmed 2026-11-26.) Live check outstanding: kgr's interactive and `--auto` re-rips
 of *No Jacket Required*.
 
 ### 🔬 LIVE — sector-hammer: find the systematic failure, then try to make it a useful profile (kgr, 2026-11-25)

@@ -1199,6 +1199,8 @@ is no release.
 
 - **Unattended** means `--auto` **or** no terminal: the rule is "no human can be
   asked", which is what D7 is about. The screens never run without a terminal.
+  Confirmed by kgr, 2026-11-26: running without a terminal is a deliberate act, so it
+  gets the same outcome as an explicit `--auto`.
 - **Leaving without a pick.** The screen has `[s]` (keep what is set) and `[q]` (put
   back what was there on entry); there is no separate `[x]`. An interactive rip that
   leaves with no release records `discogs_release=not_chosen` and aborts. The screen is
