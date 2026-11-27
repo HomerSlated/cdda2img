@@ -16,8 +16,10 @@ the notice silently going quiet or counting to the wrong number.
 from __future__ import annotations
 
 import inspect
+import io
 import logging
 import socket
+import sys
 import threading
 
 import musicbrainzngs.musicbrainz as mbz  # type: ignore[import-untyped]
@@ -171,3 +173,41 @@ def test_the_entry_point_shows_the_notice_and_keeps_the_chatter_off_the_terminal
     captured = capsys.readouterr()
     assert captured.out == "   MusicBrainz slow: try 2/8\n"
     assert captured.err == ""
+
+
+class _Tty(io.StringIO):
+    def isatty(self) -> bool:
+        return True
+
+
+def _retries(h: mb_lookup.RetryNotice, *nums: int) -> None:
+    h.handle(_rec("HTTP error 503"))
+    for n in nums:
+        h.handle(_rec(f"retrying after delay (#{n})"))
+
+
+def test_on_a_terminal_one_request_keeps_one_line(monkeypatch) -> None:
+    """kgr, 2026-11-27: create printed 26 lines for six stalled requests."""
+    monkeypatch.setattr(terminal_ui, "_ACTIVE", None)
+    out = _Tty()
+    monkeypatch.setattr(sys, "stdout", out)
+    h = mb_lookup.RetryNotice()
+    _retries(h, 1, 2, 3)  # one request: 2/8, 3/8, 4/8 on one line
+    _retries(h, 1)  # the next request: a line of its own
+    up = "\x1b[1A\r\x1b[K"
+    assert out.getvalue() == (
+        "   MusicBrainz busy: try 2/8\n"
+        f"{up}   MusicBrainz busy: try 3/8\n"
+        f"{up}   MusicBrainz busy: try 4/8\n"
+        "   MusicBrainz busy: try 2/8\n"
+    )
+
+
+def test_off_a_terminal_every_retry_is_a_line(monkeypatch, capsys) -> None:
+    """The control: a log file or pipe gets no cursor movement."""
+    monkeypatch.setattr(terminal_ui, "_ACTIVE", None)
+    h = mb_lookup.RetryNotice()
+    _retries(h, 1, 2)
+    assert capsys.readouterr().out == (
+        "   MusicBrainz busy: try 2/8\n   MusicBrainz busy: try 3/8\n"
+    )

@@ -26,6 +26,7 @@ import importlib.metadata
 import logging
 import math
 import re
+import sys
 import threading
 from collections import Counter
 from collections.abc import Callable
@@ -107,11 +108,27 @@ class RetryNotice(logging.Handler):
     line, keeping the bar's progress; otherwise it is printed on its own line.
     The notice stays until the next phase sets its own status: the library logs
     nothing when a retry finally succeeds, so there is no signal to clear it on.
+
+    On a terminal without a TUI (``create``), the retries of one request share
+    one line, rewritten in place (kgr, 2026-11-27: a busy MusicBrainz printed 26
+    lines for six requests). Only a retry that directly follows the previous
+    retry of the same request on the same thread rewrites: the library blocks
+    that thread through its sleeps, so nothing else of the caller's printed in
+    between. Anything else, a new request included, starts a new line.
     """
 
     def __init__(self) -> None:
         super().__init__(logging.INFO)
         self._busy = threading.local()
+        self._last_line: tuple[int, int] | None = None  # (thread, retry) printed
+
+    def _print_line(self, text: str, retry: int) -> None:
+        here = (threading.get_ident(), retry)
+        follows = self._last_line == (here[0], retry - 1)
+        if follows and sys.stdout.isatty():
+            sys.stdout.write("\x1b[1A\r\x1b[K")  # up one line, erase it
+        print(f"   {text}", flush=True)
+        self._last_line = here
 
     def emit(self, record: logging.LogRecord) -> None:
         try:
@@ -130,8 +147,9 @@ class RetryNotice(logging.Handler):
             ui = active_ui()
             if ui is not None and not ui.is_paused():
                 ui.set_status_text(text)
+                self._last_line = None
             else:
-                print(f"   {text}", flush=True)
+                self._print_line(text, int(m.group(1)))
         except Exception:
             self.handleError(record)
 
