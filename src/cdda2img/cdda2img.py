@@ -2122,21 +2122,54 @@ def _gather_tagged(
 
 
 #: Candidate releases fetched in full per batch (one MusicBrainz request each).
-_FILE_MATCH_MAX_FETCH = 12
+#: Ordered so the album's own releases come first (_order_pool); when the cap
+#: binds it is recorded (``file_match_fetched``), and the set is incomplete.
+_FILE_MATCH_MAX_FETCH = 25
+
+#: Formats a CD-sized folder is most likely made from; others rank after them.
+_FIRST_FORMATS = frozenset({"CD", "Digital Media", "Enhanced CD", "HDCD", ""})
 
 
-def _release_ids_by_recordings(folder: file_match.FolderEvidence) -> list[str]:
+def _order_pool(pool: dict[str, dict], preferred_country: Sequence[str]) -> list[str]:
+    """Release ids from a browse, the album's own first: the release group most of
+    them belong to, then those in both sampled pools, then CD or digital media
+    before vinyl and cassette (ranked lower, never dropped: files can be a vinyl
+    rip), then the preferred country, then the track count closest to the
+    folder's. Without this the cap took the first ids alphabetically and left out
+    the pressings the tags named (live, Night and Day, 2026-11-27)."""
+    groups: dict[str, int] = {}
+    for info in pool.values():
+        groups[info["rg"]] = groups.get(info["rg"], 0) + 1
+    pref = [c.upper() for c in preferred_country]
+
+    def key(rid: str) -> tuple:
+        info = pool[rid]
+        fmts = info["formats"] or [""]
+        return (
+            -groups[info["rg"]],
+            -info["hits"],
+            0 if all(f in _FIRST_FORMATS for f in fmts) else 1,
+            pref.index(info["country"]) if info["country"] in pref else len(pref),
+            -info["fit"],
+            rid,
+        )
+
+    return sorted(pool, key=key)
+
+
+def _release_ids_by_recordings(
+    folder: file_match.FolderEvidence, preferred_country: Sequence[str] = ()
+) -> list[str]:
     """Releases holding the recordings of the two LEAST AMBIGUOUS files, with a
     medium no longer than the folder (a release with more tracks than files cannot
-    have them all in the folder, §14.4).
+    have them all in the folder, §14.4), in :func:`_order_pool`'s order.
 
     Least ambiguous, not first and middle: AcoustID returns every recording a
     fingerprint matches, duplicates and demos included, best score first, and the
     first is not always the right song (live, *Night and Day*, 2026-11-27: track 2's
     top hit was "Target (demo)", track 5 matched ten recordings, and the album held
     neither file's first). A file with one recording, or a ``musicbrainz_trackid``
-    tag, names its song without doubt. Releases in both pools rank first, then the
-    track count closest to the folder's; neither pool is required, since one
+    tag, names its song without doubt. Neither pool is required, since one
     sample's recording may be a duplicate the album does not use."""
     from cdda2img import acoustid_lookup
 
@@ -2148,20 +2181,29 @@ def _release_ids_by_recordings(folder: file_match.FolderEvidence) -> list[str]:
         key=lambda f: (ambiguity(f), f.position),
     )
     n = len(folder.files)
-    fit: dict[str, int] = {}
-    hits: dict[str, int] = {}
+    pool: dict[str, dict] = {}
     for f in with_rec[:2]:
         rec = f.tag_recording or f.fp_best or ""
         print(f"  MusicBrainz: releases of {f.name}")
         for r in acoustid_lookup.releases_for_recording(rec):
-            counts = [
-                int(m.get("track-count") or 0) for m in r.get("medium-list") or []
-            ]
+            media = r.get("medium-list") or []
+            counts = [int(m.get("track-count") or 0) for m in media]
             usable = [c for c in counts if 0 < c <= n]
-            if r.get("id") and usable:
-                fit[r["id"]] = max(usable)
-                hits[r["id"]] = hits.get(r["id"], 0) + 1
-    return sorted(fit, key=lambda rid: (-hits[rid], -fit[rid], rid))
+            rid = r.get("id")
+            if not rid or not usable:
+                continue
+            info = pool.setdefault(
+                rid,
+                {
+                    "rg": (r.get("release-group") or {}).get("id") or "",
+                    "formats": [m.get("format") or "" for m in media],
+                    "country": (r.get("country") or "").upper(),
+                    "fit": max(usable),
+                    "hits": 0,
+                },
+            )
+            info["hits"] += 1
+    return _order_pool(pool, preferred_country)
 
 
 def _release_ids_by_search(folder: file_match.FolderEvidence) -> list[str]:
@@ -2182,31 +2224,51 @@ def _release_ids_by_search(folder: file_match.FolderEvidence) -> list[str]:
     return [s.mb_release_id for s in stubs if s.mb_release_id]
 
 
+class Gathered(NamedTuple):
+    """Steps 2 and 3's candidates, and whether the set is complete."""
+
+    metas: list[DiscMeta]
+    formats: dict[str, tuple[str, ...]]
+    found: int  # release ids the browse or search named
+    fetched: int  # of them, fetched in full
+    errored: bool  # a MusicBrainz request went unanswered meanwhile
+
+
 def _gather_candidates(
-    folder: file_match.FolderEvidence, have: set[str]
-) -> tuple[list[DiscMeta], dict[str, tuple[str, ...]], str | None]:
-    """Steps 2 and 3: releases from the recordings, else from a text search;
-    every medium of each, fetched (capped). Returns the media, their formats, and
-    how they were found (``mb_identified_via``'s detail)."""
+    folder: file_match.FolderEvidence,
+    have: set[str],
+    preferred_country: Sequence[str] = (),
+) -> Gathered:
+    """Steps 2 and 3: releases from the recordings, else from a text search; every
+    medium of each, fetched (capped). The browse, the search and the fetch all
+    return nothing on an error, so the run's query log says whether "nothing" was
+    an answer (``query_log.errored_since``)."""
+    from cdda2img import query_log
     from cdda2img.mb_lookup import release_media
 
-    ids = _release_ids_by_recordings(folder)
-    via = "recordings" if ids else None
+    mark = query_log.mark()
+    ids = _release_ids_by_recordings(folder, preferred_country)
     if not ids:
         ids = _release_ids_by_search(folder)
-        via = "search" if ids else None
     ids = [rid for rid in dict.fromkeys(ids) if rid not in have]
+    found = len(ids)
     ids = ids[:_FILE_MATCH_MAX_FETCH]
     metas: list[DiscMeta] = []
     formats: dict[str, tuple[str, ...]] = {}
+    fetched = 0
     for k, rid in enumerate(ids, start=1):
         print(f"  MusicBrainz: release {k}/{len(ids)} ({rid[:8]})")
-        fetched = release_media(rid)
-        if fetched is None:
+        got = release_media(rid)
+        if got is None:
             continue
-        metas += fetched[0]
-        formats[rid] = fetched[1]
-    return metas, formats, via
+        fetched += 1
+        metas += got[0]
+        formats[rid] = got[1]
+    if fetched < found:
+        print(f"  MusicBrainz: {fetched} of {found} releases compared")
+    return Gathered(
+        metas, formats, found, fetched, query_log.errored_since("MusicBrainz", mark)
+    )
 
 
 def _choose_file_release(
@@ -2278,13 +2340,20 @@ def _file_match_notes(c: file_match.Classified) -> list[str]:
     return lines
 
 
-def _group_only_meta(group: tuple[file_match.Classified, ...]) -> DiscMeta:
-    """The album, with only the pressing fields every candidate states alike."""
+def _group_only_meta(
+    group: tuple[file_match.Classified, ...], *, complete: bool = True
+) -> DiscMeta:
+    """The album, with only the pressing fields every candidate states alike; none
+    at all when the candidate set is incomplete (a value every COMPARED pressing
+    states may not be the uncompared ones')."""
     from cdda2img import release_match as rm
 
     metas = [c.meta for c in group]
     meta = replace(metas[0], mb_release_id=None, discogs_release_id=None)
     for name, key in _pressing_field_keys().items():
+        if not complete:
+            setattr(meta, name, None)
+            continue
         value = rm.unanimous([getattr(m, name) for m in metas], key, require_all=True)
         if name == "release_date" and value:
             value = rm.norm_year(value)
@@ -2329,6 +2398,49 @@ def _record_file_match(
     provenance["release_selection"] = selection or "unique"
 
 
+def _rank_candidates(
+    folder: file_match.FolderEvidence,
+    metas: list[DiscMeta],
+    formats: dict[str, tuple[str, ...]],
+    provenance: dict[str, str],
+    preferred_country: Sequence[str],
+) -> tuple[file_match.Ranked, bool]:
+    """Rank the tagged release; when it is not tier A, look further (§14.2 steps
+    2 and 3), keeping it a candidate. Returns the ranking and whether the
+    candidate set is incomplete (capped, or a MusicBrainz request unanswered).
+    *metas* and *formats* are extended in place."""
+    ranked = file_match.rank(folder, metas, preferred_country)
+    if any(
+        c.tier == "A" and c.meta.mb_release_id == folder.tagged_release
+        for c in ranked.candidates
+    ):
+        return ranked, False
+    g = _gather_candidates(
+        folder, {m.mb_release_id or "" for m in metas}, preferred_country
+    )
+    metas += g.metas
+    formats.update(g.formats)
+    provenance["file_match_fetched"] = f"{g.fetched}/{g.found}"
+    incomplete = g.errored or g.fetched < g.found
+    if incomplete:
+        provenance["file_match_incomplete"] = "errors" if g.errored else "capped"
+    return file_match.rank(folder, metas, preferred_country), incomplete
+
+
+def _record_nothing_found(
+    ranked: file_match.Ranked, provenance: dict[str, str]
+) -> None:
+    if ranked.rejected:
+        provenance["file_match_rejected"] = "missing_tracks"
+    elif (
+        provenance.get("file_tag_release_check") == "unanswered"
+        or provenance.get("file_match_incomplete") == "errors"
+    ):
+        provenance["file_match_rejected"] = "unanswered"
+    else:
+        provenance["file_match_rejected"] = "no_candidates"
+
+
 def _identify_files(
     batch: list[Path],
     trans_wavs: list[Path],
@@ -2346,32 +2458,26 @@ def _identify_files(
     fingerprints = _fingerprint_files(trans_wavs, order, provenance)
     folder, order = _folder_evidence(batch, trans_wavs, fingerprints)
     metas, formats = _gather_tagged(batch, provenance)
-    ranked = file_match.rank(folder, metas, preferred_country)
-    tagged_a = any(
-        c.tier == "A" and c.meta.mb_release_id == folder.tagged_release
-        for c in ranked.candidates
+    ranked, incomplete = _rank_candidates(
+        folder, metas, formats, provenance, preferred_country
     )
-    if not tagged_a:
-        # The tags name no release, or one the files contradict: look further
-        # (§14.2 steps 2 and 3). The tagged release stays a candidate.
-        more, more_formats, _via = _gather_candidates(
-            folder, {m.mb_release_id or "" for m in metas}
-        )
-        metas += more
-        formats.update(more_formats)
-        ranked = file_match.rank(folder, metas, preferred_country)
     _note_contradicted(ranked, provenance)
     if not ranked.candidates:
-        if ranked.rejected:
-            provenance["file_match_rejected"] = "missing_tracks"
-        elif provenance.get("file_tag_release_check") == "unanswered":
-            provenance["file_match_rejected"] = "unanswered"
-        else:
-            provenance["file_match_rejected"] = "no_candidates"
+        _record_nothing_found(ranked, provenance)
         return FileIdentity(None, order)
     chosen, selection, group = _choose_file_release(
         ranked, folder, interactive=interactive, tui=tui
     )
+    if (
+        incomplete
+        and selection == "unique"
+        and chosen is not None
+        and chosen.meta.mb_release_id != folder.tagged_release
+    ):
+        # One tier-A release among those compared is not one among all that
+        # exist: with the set capped or a request unanswered, the files cannot
+        # claim the pressing (the C2 shape). The album only.
+        selection, group = "release_group_only", (chosen,)
     if chosen is None:
         if selection == "rejected":
             provenance["release_selection"] = "rejected"
@@ -2389,9 +2495,12 @@ def _identify_files(
     fmt = "File" if digital else "CD"
     fp = chosen.evidence.get("fingerprint", "absent")
     if selection == "release_group_only":
-        return FileIdentity(
-            _group_only_meta(group), keep, fmt, group_only=True, fingerprint=fp
-        )
+        meta = _group_only_meta(group, complete=not incomplete)
+        if meta.barcode:
+            # Kept because every candidate states it, not a pressing's own: never
+            # the TOC's MCN (§13.7, `_finalize_identifiers`).
+            provenance["barcode_source"] = "unanimous"
+        return FileIdentity(meta, keep, fmt, group_only=True, fingerprint=fp)
     return FileIdentity(chosen.meta, keep, fmt, fingerprint=fp)
 
 

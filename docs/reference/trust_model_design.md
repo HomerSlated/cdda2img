@@ -1666,8 +1666,18 @@ silently capped at 25 (N3), and a short list reads exactly like a genuine miss.
   `musicbrainz_trackid` tag or a single recording names its song without doubt. Releases
   in both sampled pools rank first (neither is required), then the medium track count
   closest to the folder's; a medium longer than the folder is skipped before fetching;
-  at most `_FILE_MATCH_MAX_FETCH` = 12 releases are fetched. Without recordings, a text
-  search by the tags' album and artist (`_release_ids_by_search`).
+  at most `_FILE_MATCH_MAX_FETCH` = 25 releases are fetched, in `_order_pool`'s order: the
+  release group most of them belong to, then both pools, then CD and digital media before
+  vinyl and cassette (ranked lower, not dropped: files can be a vinyl rip), then preferred
+  country. A first cut of 12 in MBID order fetched four vinyl and compilation releases and
+  left out both DE pressings the tags named (advisor review, 2026-11-27). Without
+  recordings, a text search by the tags' album and artist (`_release_ids_by_search`).
+- **An incomplete candidate set never names a pressing**: when the cap binds or a
+  MusicBrainz request goes unanswered while gathering (`query_log.errored_since`), PROV
+  `file_match_fetched` / `file_match_incomplete`, and a single tier-A release becomes the
+  album only, with no pressing field (a value every compared pressing states may not be
+  the others'). An outage that leaves nothing is `unanswered`, not `no_candidates`. A
+  release-group-only barcode is `barcode_source=unanimous`, so never the TOC's MCN.
 - **`--auto` with tier-A releases in more than one release group** takes the group most of
   them belong to when one strictly outnumbers the rest (the rip's plurality rule); a tie
   applies nothing (`ambiguous_album`). Found live: one medium of the ZA "2 for 1: Night and

@@ -6,6 +6,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 from pathlib import Path
+from unittest.mock import patch
 
 import av
 import pytest
@@ -146,7 +147,9 @@ def _wire(
     monkeypatch.setattr(cli, "_folder_evidence", lambda *a: (folder, order))
     monkeypatch.setattr(cli, "_fingerprint_files", lambda *a: {})
     monkeypatch.setattr(cli, "_gather_tagged", lambda b, p: (metas, formats or {}))
-    monkeypatch.setattr(cli, "_gather_candidates", lambda *a: ([], {}, None))
+    monkeypatch.setattr(
+        cli, "_gather_candidates", lambda *a: cli.Gathered([], {}, 0, 0, False)
+    )
 
 
 def _identify(prov: dict[str, str], *, interactive: bool = False) -> cli.FileIdentity:
@@ -366,9 +369,10 @@ def test_without_recordings_the_tags_are_searched(
         return [DiscMeta(mb_release_id=rid)], ("CD",)
 
     monkeypatch.setattr("cdda2img.mb_lookup.release_media", media)
-    _metas, formats, via = cli._gather_candidates(folder, set())
+    g = cli._gather_candidates(folder, set())
     assert fetched == ["three"]  # nine tracks cannot all be in three files
-    assert via == "search" and formats == {"three": ("CD",)}
+    assert g.formats == {"three": ("CD",)}
+    assert (g.found, g.fetched) == (1, 1)
 
 
 def test_a_tagged_release_in_tier_a_ends_the_search(
@@ -377,7 +381,9 @@ def test_a_tagged_release_in_tier_a_ends_the_search(
     _wire(monkeypatch, _folder(), [0, 1, 2], [_release()])
     called = []
     monkeypatch.setattr(
-        cli, "_gather_candidates", lambda *a: called.append(1) or ([], {}, None)
+        cli,
+        "_gather_candidates",
+        lambda *a: called.append(1) or cli.Gathered([], {}, 0, 0, False),
     )
     _identify({})
     assert called == []
@@ -394,7 +400,7 @@ def test_a_contradicted_tagged_release_looks_further(
     good = _release("6000d000-0000-4000-8000-000000000000")
     _wire(monkeypatch, folder, [0, 1, 2], [bad])
     monkeypatch.setattr(
-        cli, "_gather_candidates", lambda *a: ([good], {}, "recordings")
+        cli, "_gather_candidates", lambda *a: cli.Gathered([good], {}, 1, 1, False)
     )
     prov: dict[str, str] = {}
     ident = _identify(prov)
@@ -444,3 +450,122 @@ def test_finding_nothing_is_recorded(monkeypatch: pytest.MonkeyPatch) -> None:
     prov: dict[str, str] = {}
     assert _identify(prov).meta is None
     assert prov["file_match_rejected"] == "no_candidates"
+
+
+def test_the_album_s_cd_pressings_are_fetched_first() -> None:
+    """Live, Night and Day: the cap took ids alphabetically and left out the
+    pressings the tags named; vinyl took their places."""
+    pool = {
+        "0vinyl": {
+            "rg": "album",
+            "formats": ['12" Vinyl'],
+            "country": "US",
+            "fit": 9,
+            "hits": 2,
+        },
+        "1other": {
+            "rg": "2for1",
+            "formats": ["CD"],
+            "country": "ZA",
+            "fit": 9,
+            "hits": 2,
+        },
+        "9cd-gb": {
+            "rg": "album",
+            "formats": ["CD"],
+            "country": "GB",
+            "fit": 9,
+            "hits": 2,
+        },
+        "5cd-de": {
+            "rg": "album",
+            "formats": ["CD"],
+            "country": "DE",
+            "fit": 9,
+            "hits": 2,
+        },
+    }
+    assert cli._order_pool(pool, ["GB"]) == ["9cd-gb", "5cd-de", "0vinyl", "1other"]
+
+
+def _gathered(monkeypatch, g, metas):
+    _wire(monkeypatch, _folder(tagged=None), [0, 1, 2], metas)
+    monkeypatch.setattr(cli, "_gather_candidates", lambda *a: g)
+
+
+def test_one_release_of_a_capped_set_is_not_a_pressing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One tier-A release among those compared is not one among all that exist."""
+    only = replace(_release(), barcode="0082839490627")
+    _gathered(monkeypatch, cli.Gathered([only], {}, 30, 25, False), [])
+    prov: dict[str, str] = {}
+    ident = _identify(prov)
+    assert ident.group_only and ident.meta is not None
+    assert ident.meta.mb_release_id is None
+    assert ident.meta.barcode is None and ident.meta.label is None
+    assert prov["file_match_incomplete"] == "capped"
+    assert prov["file_match_fetched"] == "25/30"
+    assert prov["release_selection"] == "release_group_only"
+
+
+def test_one_release_of_a_complete_set_is_the_pressing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The control."""
+    _gathered(monkeypatch, cli.Gathered([_release()], {}, 1, 1, False), [])
+    prov: dict[str, str] = {}
+    ident = _identify(prov)
+    assert ident.meta is not None and ident.meta.mb_release_id == RID
+    assert prov["release_selection"] == "unique"
+
+
+def test_an_outage_while_gathering_is_not_nothing_found(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _gathered(monkeypatch, cli.Gathered([], {}, 0, 0, True), [])
+    prov: dict[str, str] = {}
+    assert _identify(prov).meta is None
+    assert prov["file_match_rejected"] == "unanswered"
+
+
+def test_a_unanimous_barcode_never_becomes_the_mcn(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """§13.7: kept because every candidate states it, not a pressing's own."""
+    a = replace(
+        _release("a0000000-0000-4000-8000-000000000000"), barcode="0082839490627"
+    )
+    b = replace(
+        _release("b0000000-0000-4000-8000-000000000000"), barcode="0082839490627"
+    )
+    _gathered(monkeypatch, cli.Gathered([a, b], {}, 2, 2, False), [])
+    prov: dict[str, str] = {}
+    ident = _identify(prov)
+    assert ident.meta is not None and ident.meta.barcode == "0082839490627"
+    assert prov["barcode_source"] == "unanimous"
+    disc = cli.RBIDisc(album="A", artist="B", barcode=ident.meta.barcode)
+    cli._finalize_identifiers(prov, disc)
+    assert disc.catalog is None and "mcn_source" not in prov
+
+
+def test_the_real_release_screen(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The menu loop itself, not a stub: open row 2 and take it; leave the mark in
+    place; answer none of these."""
+    a = _release("a0000000-0000-4000-8000-000000000000")
+    b = _release("b0000000-0000-4000-8000-000000000000")
+    folder = _folder(tagged=None)
+    ranked = fm.rank(folder, [a, b])
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    # Opening a row fetches its annotation; never from a test.
+    monkeypatch.setattr("cdda2img.mb_lookup.fetch_annotation", lambda rid: "")
+
+    def run(*keys: str):
+        with patch("cdda2img.metadata_menu._prompt", side_effect=list(keys)):
+            return cli._choose_file_release(ranked, folder, interactive=True, tui=False)
+
+    chosen, selection, _ = run("2", "a", "s")
+    assert selection == "manual" and chosen.meta.mb_release_id == b.mb_release_id
+    chosen, selection, _ = run("s")
+    assert selection == "accepted" and chosen.meta.mb_release_id == a.mb_release_id
+    assert run("x") == (None, "rejected", ())
