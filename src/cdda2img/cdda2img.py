@@ -996,15 +996,15 @@ def create_image(
                 tui=tui,
                 auto_apply=auto_apply,
                 discogs_fmt=discogs_fmt,
+                provenance=provenance,
+                record_pressing=False,
             )
             # N6, and deliberately symmetric with `_finalize_import` rather than
-            # skipped. `create` passes no `provenance=` to the menu, so
-            # `_record_pressing_outcome` never runs and `release_selection` is
-            # never written here — the recompute is therefore a no-op today
-            # unless the menu changed `disc.mb_release_id`, in which case the
-            # stored score follows it, which is the point. Keeping the two call
-            # sites the same shape is worth more than saving one call: they have
-            # drifted before.
+            # skipped. The menu records only a Discogs pick here
+            # (`record_pressing=False`): `release_selection` is the file match's
+            # (§14.4). The recompute follows any change the menu made to
+            # `disc.mb_release_id`. Keeping the two call sites the same shape is
+            # worth more than saving one call: they have drifted before.
             _store_match_distance(provenance, disc)
             album_art = to_album_art(_art_raw) if _art_raw is not None else None
 

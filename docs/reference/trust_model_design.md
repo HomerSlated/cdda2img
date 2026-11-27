@@ -1627,8 +1627,8 @@ silently capped at 25 (N3), and a short list reads exactly like a genuine miss.
   recordings, or a runtime off by more than trimming could explain, against one that is
   merely imprecise. kgr: to be tweaked during testing.
 - **Discogs.** `create` asks no Discogs lookup (`lookup_status_discogs=disabled`); the
-  menu's `[d]` master screen is the only route, and its pick is not yet recorded in PROV
-  (`create` passes the menu no provenance).
+  menu's `[d]` master screen is the only route. Its pick is recorded in PROV since
+  2026-11-27 (`run_metadata_menu(record_pressing=False)`).
 
 ### 14.9 Build sequence
 

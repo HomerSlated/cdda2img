@@ -715,6 +715,7 @@ def run_metadata_menu(
     discogs_open: bool = False,
     discogs_barcode_hit: int | None = None,
     discogs_fmt: str = "CD",
+    record_pressing: bool = True,
 ) -> RBIDisc:
     """Display current metadata and run the interactive enrichment/confirmation menu.
 
@@ -760,7 +761,11 @@ def run_metadata_menu(
     )
     disc = ctl.run()
     if provenance is not None:
-        _record_pressing_outcome(provenance, ctl)
+        # *record_pressing* False: create, whose release_selection the file match
+        # already wrote (trust_model_design.md §14.4) and this menu has no
+        # pressing screen to change; only the Discogs pick is recorded.
+        if record_pressing:
+            _record_pressing_outcome(provenance, ctl)
         _record_discogs_pick(provenance, ctl)
     return disc
 

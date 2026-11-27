@@ -1409,3 +1409,28 @@ def test_no_release_disambiguation_when_mb_describes_nothing():
     prov: dict[str, str] = {}
     _emit_mb_provenance(prov, result, [])
     assert "release_disambiguation" not in prov
+
+
+def test_create_records_the_discogs_pick_but_not_a_pressing(monkeypatch) -> None:
+    """create's release_selection is the file match's (trust_model_design.md
+    §14.4); its menu records only the Discogs pick."""
+    from cdda2img import metadata_menu
+    from cdda2img.menu_state import MenuController
+    from cdda2img.rbi_format import RBIDisc
+
+    def run(self):
+        self.discogs_pick = (5222631, "UK,1985")
+        self.disc.discogs_release_id = 5222631
+        return self.disc
+
+    monkeypatch.setattr(MenuController, "run", run)
+    # No file match chose a release; a pressing record would claim `unique`.
+    prov: dict[str, str] = {}
+    disc = RBIDisc(album="A", artist="B", mb_release_id="x")
+    metadata_menu.run_metadata_menu(disc, provenance=prov, record_pressing=False)
+    assert "release_selection" not in prov
+    assert prov["discogs_release"] == "5222631"
+    # The control: the rip's recording writes it.
+    prov = {}
+    metadata_menu.run_metadata_menu(disc, provenance=prov)
+    assert prov["release_selection"] == "unique"
