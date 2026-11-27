@@ -1491,9 +1491,10 @@ name one.
    holding the same recordings. The survivors' release group is the album, which then
    supplies album, artist and titles, and §14.3 scores the candidates as in step 2.
 
-Steps 2 and 3 combine where both apply: a step-2 candidate that the fingerprints
-contradict (a track's recording absent from that release, or at another position) is
-rejected.
+**The steps nominate; they do not decide (kgr, 2026-11-27, §14.8).** Every release any
+step finds is a candidate, and §14.4 sorts them all. Step 3's "at that track's position"
+and "the files' track count" are no longer filters: a release holding every track at
+other positions, or with tracks the files lack, is a candidate in tier B.
 
 ### 14.3 Scoring
 
@@ -1513,25 +1514,53 @@ Runtimes are measured from the transcoded files **before** our own `--silence tr
 our trimming never moves them; a source trimmed before it reached us is why runtimes
 support but do not reject. The thresholds are starting values, to be set by kgr's tests.
 
-### 14.4 The pressing (ruled by kgr, 2026-11-27: "Yes to both")
+### 14.4 Candidates in tiers, and the pressing (ruled by kgr, 2026-11-27)
 
-- **Interactive:** the album's releases go to the pressing screen rips use
-  (`menu_state.PressingScreen`, N5), every candidate shown, the best-scoring one marked
-  (ties broken by §10.3's ladder: `preferred_country`, `date`, `discogs_link`, `mbid`).
-  Leaving the mark in place accepts it (`release_selection=accepted`, §13); `[x]`
-  records the album only (`rejected`).
-- **`--auto`, or no terminal: the release group only** (as §13.5), whenever the album has
-  more than one candidate release. The files cannot choose, so "closest" would be the
-  tie-break's choice. `mb_release_id` is not written, `mb_release_group_id` is, and the
-  pressing fields are kept only where every candidate states them alike
-  (`_release_group_only`). A single candidate release is kept (`unique`).
-- **Step 1 (tags) is the exception**: the tagged release is the pressing, trusted
-  (principle 2).
+kgr, on §14.8: *"start with a release that does include all the tracks, irrespective of
+any other contradicting data, then work back through the process of trying to match all
+the other data. As with the previous ruling, missing data does not count as
+falsification, but irreconcilably contradicting data does. Then present the options in
+the disambiguation menu, including releases that are a close/perfect match but only if
+the extraneous tracks are omitted, and releases that match all the tracks but which
+contradict other data (fingerprints, year, etc.)."*
 
-### 14.5 When nothing matches fully (ruled by kgr, 2026-11-27)
+**The starting set** is every release that **includes every track of the files**,
+whatever else it says. A file's track is included in a release when the release holds
+its recording, known from the fingerprint or from the file's own `musicbrainz_trackid`
+tag (the recording id beets and Picard write), or, with neither, when a release track's
+title matches (§14.3's title class, runtimes supporting). Then each candidate is checked
+against every other class of §14.3, absent data silent, and sorted into a tier:
 
-A file set for which no release contains every track in position (a mix tape, a home
-compilation, a partial album):
+| Tier | The release | Shown as |
+|---|---|---|
+| **A, match** | the files' tracks, no others, in the files' order; nothing contradicts | the match, the best-scoring one marked |
+| **B, match without its extra tracks** | every file's track, plus tracks the files lack (a deluxe or bonus-track edition), or the same tracks in another order; nothing else contradicts | "matches if tracks 10–12 are left out" / "same tracks, other order" |
+| **C, every track but contradicted** | every file's track, and some other class contradicts: a fingerprint against a tag, the year, a title, a runtime | what contradicts, per class |
+
+Within a tier, more matching classes rank first, then §10.3's ladder (`preferred_country`,
+`date`, `discogs_link`, `mbid`). Releases holding only some of the files' tracks are not
+in this set: they are §14.5's partial matches.
+
+- **Interactive:** all three tiers go to the pressing screen rips use
+  (`menu_state.PressingScreen`, N5), labelled by tier; tier A's best is marked (B's when
+  A is empty; nothing is marked from C). Leaving the mark in place accepts it
+  (`release_selection=accepted`, §13); `[x]` records the album only (`rejected`).
+- **`--auto`, or no terminal: tier A only.** One tier-A release is kept (`unique`).
+  Several, all of one release group: **the release group only** (as §13.5; kgr, "yes"):
+  the files cannot choose between pressings, so "closest" would be the tie-break's
+  choice. `mb_release_id` is not written, `mb_release_group_id` is, and the pressing
+  fields are kept only where every candidate states them alike (`_release_group_only`).
+  Tier A empty: nothing is applied (§14.5), whatever B and C hold.
+- **The tagged release (step 1)** is a candidate like any other, and as built on
+  2026-11-27 it is applied after R3 alone. Under this ruling it is the pressing when it
+  is in tier A; a tagged release the fingerprints contradict is in tier C, shown with the
+  contradiction, never applied by `--auto`. Principle 2's "matching metadata" means
+  metadata nothing contradicts.
+
+### 14.5 When no release holds every track (ruled by kgr, 2026-11-27)
+
+A file set for which no release includes every track (a mix tape, a home compilation,
+a partial album, a file the services do not know):
 
 - **`--auto` / no terminal:** nothing is applied; the reason is recorded.
 - **Interactive:** the closest candidates are offered, each marked as a partial match
@@ -1553,15 +1582,19 @@ silently capped at 25 (N3), and a short list reads exactly like a genuine miss.
   `file_tags` (step 1).
 - `create` writes `release_selection` (§14.4's values); rbi_spec.md's "absent on the
   `create` pipeline" changes, and `mb_release_id`'s absent-when list gains `create`.
-- `file_match=<class>:<result>,…` records §14.3's evidence for the chosen release;
+- `file_match=<class>:<result>,…` records §14.3's evidence for the chosen release, and
+  `file_match_tier=A|B|C` its tier (§14.4);
   `file_match_rejected=<reason>` for §14.5's automatic refusal.
 - rbi_spec.md first, as always.
 
 ### 14.8 Open
 
-- **The double check failing.** Tags name a release and the fingerprints contradict it
-  (a track's recording absent from it). Proposed: reject the tagged release and fall to
-  step 3, recording both. Not yet ruled.
+- **The double check failing: RULED 2026-11-27**, see §14.4 (start from every release
+  holding all the tracks; contradicted ones are shown as tier C, never taken by
+  `--auto`).
+- **What "irreconcilable" means per class**, beyond §14.3's table: a year earlier than the
+  recordings, or a runtime off by more than trimming could explain, against one that is
+  merely imprecise. Set by kgr's tests.
 - **Discogs.** `create` asks no Discogs lookup (`lookup_status_discogs=disabled`); the
   menu's `[d]` master screen is the only route, and its pick is not yet recorded in PROV
   (`create` passes the menu no provenance).
@@ -1569,6 +1602,8 @@ silently capped at 25 (N3), and a short list reads exactly like a genuine miss.
 ### 14.9 Build sequence
 
 1. rbi_spec.md: §14.7's keys.
+   Then: read `musicbrainz_trackid` beside `musicbrainz_albumid` (§14.4's inclusion
+   test), and move step 1 onto the tiers.
 2. Pass `create`'s provenance and candidates to the menu (the pressing screen, the
    Discogs pick's PROV), with `release_selection` recorded.
 3. Step 2: search, fetch, score (§14.3), pressing (§14.4), refusal (§14.5).
