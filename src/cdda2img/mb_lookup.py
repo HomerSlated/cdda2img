@@ -592,6 +592,27 @@ def lookup_release_with_formats(
     return _parse_release(release, _disc_number=disc_number), formats
 
 
+def release_media(release_id: str) -> tuple[list[DiscMeta], tuple[str, ...]] | None:
+    """Every medium of a release as its own ``DiscMeta`` (``disc_number`` set),
+    plus every medium's format, from one fetch.
+
+    ``create``'s file match compares a folder against one medium at a time
+    (trust_model_design.md §14.4): flattening a 2-CD release would make disc 1's
+    folder lack disc 2's tracks and reject the right release. Returns None on
+    network/response error.
+    """
+    release = _fetch_release_raw(release_id)
+    if not release:
+        return None
+    media = release.get("medium-list") or []
+    formats = tuple((m.get("format") or "") for m in media)
+    if len(media) <= 1:
+        return [_parse_release(release)], formats
+    return [
+        _parse_release(release, _disc_number=n) for n in range(1, len(media) + 1)
+    ], formats
+
+
 _DISCOGS_RELEASE_RE = re.compile(r"/release/(\d+)")
 
 

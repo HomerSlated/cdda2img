@@ -36,7 +36,7 @@ if TYPE_CHECKING:
     from cdda2img.terminal_ui import TerminalUI
     from cdda2img.track_preview import TrackPreview
 
-from cdda2img import drive_work
+from cdda2img import drive_work, file_match
 from cdda2img.concat import concat_wav
 from cdda2img.container import (
     TempFiles,
@@ -863,6 +863,7 @@ def create_image(
     duplicate_policy: str | None = None,
     auto: bool = False,
     network_preflight: str | None = None,
+    preferred_country: Sequence[str] = (),
 ) -> None:
     files = sorted(
         p for p in input_dir.iterdir() if p.is_file() and not p.name.startswith(".")
@@ -886,11 +887,13 @@ def create_image(
         temp = TempFiles(temp_base)
         try:
             source_wavs: list[Path] = []
+            trans_wavs: list[Path] = []
 
             for i, track in enumerate(batch, start=1):
                 print(f"  Transcoding   {i:2}: {track.stem}")
                 trans = temp.temp_track(i, "_trans.wav")
                 transcode_audio(track, trans)
+                trans_wavs.append(trans)
 
                 if silence_mode == "trim":
                     print(f"  Trimming      {i:2}: {track.stem}")
@@ -906,17 +909,6 @@ def create_image(
                     print(f"  Skipping silence trim (--silence notrim): {track.stem}")
                     source_wavs.append(trans)
 
-            print("  Concatenating tracks")
-            concat_wav(source_wavs, temp.pcm_pre)
-            wav_to_raw_pcm(temp.pcm_pre, temp.pcm_file)
-
-            durations, total_frames = track_frame_durations(source_wavs)
-            pad_pcm_to_declared_frames(temp.pcm_file, total_frames)
-            disc = RBIDisc(
-                album=album, artist=artist, disc_number=disc_num, disc_total=disc_total
-            )
-            disc.tracks = build_toc_entries(batch, durations, disc)
-
             provenance: dict[str, str] = {
                 "mode": "create",
                 "source": str(input_dir.resolve()),
@@ -927,11 +919,35 @@ def create_image(
             }
             if network_preflight is not None:
                 provenance["network_preflight"] = network_preflight
-            # Before AcoustID: its gate reads disc.mb_release_id as the selected
-            # release, and the tags are where create gets one.
-            disc, tag_meta, discogs_fmt = _apply_file_tag_release(
-                disc, batch, provenance, check_durations=silence_mode != "trim"
+
+            # Identify before building (trust_model_design.md §14.4): the chosen
+            # release decides which files the archive holds, and in what order.
+            ident = _identify_files(
+                batch,
+                trans_wavs,
+                provenance,
+                interactive=_interactive(auto),
+                tui=tui,
+                preferred_country=preferred_country,
             )
+            batch = [batch[i] for i in ident.keep]
+            source_wavs = [source_wavs[i] for i in ident.keep]
+            tag_meta = ident.meta
+            discogs_fmt = ident.discogs_fmt
+
+            disc = _build_create_disc(
+                batch,
+                source_wavs,
+                temp,
+                ident,
+                RBIDisc(
+                    album=album,
+                    artist=artist,
+                    disc_number=disc_num,
+                    disc_total=disc_total,
+                ),
+            )
+            # After the release is applied: AcoustID's gate reads disc.mb_release_id.
             disc = _r6_acoustid_corroborate_wavs(disc, source_wavs, provenance)
 
             # Identify the original release before the menu so the user
@@ -988,7 +1004,14 @@ def create_image(
             _store_match_distance(provenance, disc)
             album_art = to_album_art(_art_raw) if _art_raw is not None else None
 
-            raw_titles = [re.sub(r"^\d{1,2}[-. ]+", "", p.stem) for p in batch]
+            # The files' names are the raw titles only when no release supplied
+            # the titles: otherwise the TOC would archive a file name as the
+            # Unicode original of a MusicBrainz title.
+            raw_titles = (
+                [re.sub(r"^\d{1,2}[-. ]+", "", p.stem) for p in batch]
+                if tag_meta is None
+                else None
+            )
 
             # Loudness first, so disc.low_dynamic_range is set before PROV is built.
             rg_block: bytes | None = None
@@ -1949,51 +1972,275 @@ def _r6_acoustid_corroborate(
     )
 
 
-def _apply_file_tag_release(
-    disc: RBIDisc,
+class FileIdentity(NamedTuple):
+    """What ``create``'s file match settled for one batch (trust_model_design.md
+    §14): the release to apply (``None``: none), the batch indices to build the
+    disc from, in the archive's order, and the Discogs format for ``[d]``."""
+
+    meta: DiscMeta | None
+    keep: list[int]
+    discogs_fmt: str = "CD"
+    group_only: bool = False
+
+
+def _build_create_disc(
     batch: list[Path],
-    provenance: dict[str, str],
-    *,
-    check_durations: bool,
-) -> tuple[RBIDisc, DiscMeta | None, str]:
-    """``create``: identify the release the source files' tags name (kgr,
-    2026-11-27; rbi_spec.md ``file_tag_release``).
+    source_wavs: list[Path],
+    temp: TempFiles,
+    ident: FileIdentity,
+    disc: RBIDisc,
+) -> RBIDisc:
+    """Concatenate the kept files (already in the archive's order) into the PCM and
+    lay out the disc, then apply the file match's release."""
+    print("  Concatenating tracks")
+    concat_wav(source_wavs, temp.pcm_pre)
+    wav_to_raw_pcm(temp.pcm_pre, temp.pcm_file)
+    durations, total_frames = track_frame_durations(source_wavs)
+    pad_pcm_to_declared_frames(temp.pcm_file, total_frames)
+    disc.tracks = build_toc_entries(batch, durations, disc)
+    if ident.meta is None:
+        return disc
+    from cdda2img.mb_lookup import _overwrite_disc
 
-    Reads only the MBID from the tags, fetches the release, checks it against
-    the disc as built with R3 and, when it passes, overwrites the disc with it
-    (titles included: ``create``'s titles are filename stems until then). The
-    track geometry is never touched. *check_durations* is False under
-    ``--silence trim``, which replaces every gap, so the durations are ours.
+    # The release's track k is batch[k]: the kept files are in the release's
+    # order, so the overwrite by track number lines up.
+    disc = _overwrite_disc(ident.meta, disc)
+    if ident.group_only:
+        disc.mb_release_id = None
+    return disc
 
-    Returns the disc, the fetched release (for the original-release lookup's
-    verify, or None) and the Discogs format the menu's master screen lists:
-    ``File`` when MusicBrainz calls every medium ``Digital Media``, else ``CD``.
-    """
-    from cdda2img.mb_lookup import _overwrite_disc, lookup_release_with_formats
+
+def _wav_ms(path: Path) -> int | None:
+    import wave
+
+    try:
+        with wave.open(str(path), "rb") as w:
+            return round(w.getnframes() * 1000 / w.getframerate())
+    except (OSError, EOFError, wave.Error):
+        return None
+
+
+def _folder_evidence(
+    batch: list[Path], trans_wavs: list[Path]
+) -> tuple[file_match.FolderEvidence, list[int]]:
+    """The folder as the matcher sees it, and the files' own order (indices into
+    *batch*). Runtimes come from the transcodes BEFORE our silence trim, so our
+    own trimming never moves them (§14.3)."""
+    from cdda2img import release_match as rm
+    from cdda2img.metadata import files_order, read_file_tag_release, read_file_tracks
+
+    tags, album = read_file_tracks(batch)
+    order = files_order(tags)
+    files = tuple(
+        file_match.FileTrack(
+            position=pos,
+            name=batch[i].name,
+            title=tags[i].title,
+            duration_ms=_wav_ms(trans_wavs[i]),
+            tag_recording=tags[i].recording_id,
+        )
+        for pos, i in enumerate(order)
+    )
+    record = rm.ReleaseRecord(
+        "tags",
+        "",
+        barcodes=tuple(v for v in (album.barcode,) if v),
+        catnos=tuple(v for v in (album.catalognumber,) if v),
+        labels=tuple(v for v in (album.label,) if v),
+        country=album.country,
+    )
+    tagged = read_file_tag_release(batch)
+    folder = file_match.FolderEvidence(files, record, album.date, tagged.release_id)
+    return folder, order
+
+
+def _gather_tagged(
+    batch: list[Path], provenance: dict[str, str]
+) -> tuple[list[DiscMeta], dict[str, tuple[str, ...]]]:
+    """Step 1 (§14.2): the release the tags name, every medium of it."""
+    from cdda2img.mb_lookup import release_media
     from cdda2img.metadata import read_file_tag_release
-    from cdda2img.original_release import _r3_reject_reason
 
     tagged = read_file_tag_release(batch)
     if tagged.state is None:
-        return disc, None, "CD"
+        return [], {}
     provenance["file_tag_release"] = tagged.state
     if tagged.release_id is None:
-        return disc, None, "CD"
-    fetched = lookup_release_with_formats(tagged.release_id, tagged.disc_number)
+        return [], {}
+    print(f"  MusicBrainz: release {tagged.release_id[:8]} named by the tags")
+    fetched = release_media(tagged.release_id)
     if fetched is None:
         provenance["file_tag_release_check"] = "unanswered"
-        return disc, None, "CD"
-    meta, formats = fetched
-    why = _r3_reject_reason(meta, disc, check_durations=check_durations)
-    if why is not None:
-        provenance["file_tag_release_check"] = f"rejected:{why}"
-        return disc, None, "CD"
-    provenance["file_tag_release_check"] = (
-        "applied" if check_durations else "applied:no_durations"
+        return [], {}
+    provenance["file_tag_release_check"] = "fetched"
+    media, formats = fetched
+    return media, {tagged.release_id: formats}
+
+
+def _choose_file_release(
+    ranked: file_match.Ranked,
+    folder: file_match.FolderEvidence,
+    *,
+    interactive: bool,
+    tui: bool,
+) -> tuple[file_match.Classified | None, str | None, tuple[file_match.Classified, ...]]:
+    """(chosen, release_selection, group) per §14.4; chosen None = no release."""
+    from cdda2img.menu_state import MenuController
+
+    cands = ranked.candidates
+    if not interactive:
+        d = file_match.decide_unattended(ranked, folder.tagged_release)
+        if d.outcome == "rejected":
+            return None, None, ()
+        return d.chosen, d.outcome, d.group
+    if len(cands) == 1 and cands[0].tier == "A":
+        return cands[0], "unique", ()
+    # The marked row: the tagged release when it is not contradicted, else the
+    # best of tiers A and B; never a tier-C release.
+    pinned = next(
+        (
+            c
+            for c in cands
+            if c.tier != "C" and c.meta.mb_release_id == folder.tagged_release
+        ),
+        next((c for c in cands if c.tier != "C"), None),
     )
-    provenance["mb_identified_via"] = "file_tags"
-    digital = bool(formats) and all(f == "Digital Media" for f in formats)
-    return _overwrite_disc(meta, disc), meta, "File" if digital else "CD"
+    notes = {c.meta.mb_release_id or "": _file_match_notes(c) for c in cands}
+    provisional = RBIDisc(
+        album=cands[0].meta.album or "",
+        artist=cands[0].meta.artist or "",
+        mb_release_id=pinned.meta.mb_release_id if pinned else None,
+    )
+    # `auto_tiebreak` with a mark: leaving it in place accepts it (§13). With no
+    # mark (only tier C) there is nothing to accept, and leaving chooses nothing.
+    ctl = MenuController(
+        provisional,
+        tui=tui,
+        pressing_candidates=[c.meta for c in cands],
+        pressing_outcome="auto_tiebreak" if pinned else "none",
+        pressing_only=True,
+        pressing_notes=notes,
+    )
+    ctl.run()
+    outcome = ctl.pressing_outcome
+    if outcome == "manual" and ctl.pressing_selected is not None:
+        rid = ctl.pressing_selected.mb_release_id
+        return next(c for c in cands if c.meta.mb_release_id == rid), "manual", ()
+    if outcome == "accepted" and pinned is not None:
+        return pinned, "accepted", ()
+    if outcome == "rejected":
+        return None, "rejected", ()
+    return None, None, ()  # left with nothing marked and nothing chosen
+
+
+def _file_match_notes(c: file_match.Classified) -> list[str]:
+    lines = [file_match.note(c)]
+    if c.excluded:
+        lines.append("Not on this release, so left out of the archive:")
+        lines += [f"  {name}" for name in c.excluded]
+    if c.order == "release":
+        lines.append("The archive will take the release's track order.")
+    if c.contradicted:
+        lines.append("Contradicted by: " + ", ".join(c.contradicted))
+    lines.append("Evidence: " + c.describe())
+    return lines
+
+
+def _group_only_meta(group: tuple[file_match.Classified, ...]) -> DiscMeta:
+    """The album, with only the pressing fields every candidate states alike."""
+    from cdda2img import release_match as rm
+
+    metas = [c.meta for c in group]
+    meta = replace(metas[0], mb_release_id=None, discogs_release_id=None)
+    for name, key in _pressing_field_keys().items():
+        value = rm.unanimous([getattr(m, name) for m in metas], key, require_all=True)
+        if name == "release_date" and value:
+            value = rm.norm_year(value)
+        setattr(meta, name, value)
+    return meta
+
+
+def _note_contradicted(ranked: file_match.Ranked, provenance: dict[str, str]) -> None:
+    """The releases in the files' order a contradiction held back: kgr's analysis
+    cases for tuning the "irreconcilable" thresholds (§14.4, §14.8)."""
+    if not ranked.contradicted:
+        return
+    provenance["file_match_contradicted"] = ";".join(
+        f"{c.meta.mb_release_id}:{'+'.join(c.contradicted)}"
+        for c in ranked.contradicted
+    )
+    for c in ranked.contradicted:
+        print(
+            f"  Held back for analysis: {(c.meta.mb_release_id or '')[:8]} "
+            f"is in your files' order but {', '.join(c.contradicted)} contradicts"
+        )
+
+
+def _record_file_match(
+    provenance: dict[str, str],
+    chosen: file_match.Classified,
+    folder: file_match.FolderEvidence,
+    selection: str | None,
+) -> None:
+    rid = chosen.meta.mb_release_id or ""
+    provenance["file_match"] = chosen.describe()
+    provenance["file_match_tier"] = chosen.tier
+    provenance["file_match_order"] = chosen.order
+    if chosen.excluded:
+        provenance["file_match_excluded"] = ",".join(chosen.excluded)
+        print("  Not on the chosen release, so left out of the archive:")
+        for name in chosen.excluded:
+            print(f"    {name}")
+    provenance["mb_identified_via"] = (
+        "file_tags" if rid and rid == folder.tagged_release else "file_match"
+    )
+    provenance["release_selection"] = selection or "unique"
+
+
+def _identify_files(
+    batch: list[Path],
+    trans_wavs: list[Path],
+    provenance: dict[str, str],
+    *,
+    interactive: bool,
+    tui: bool,
+    preferred_country: Sequence[str] = (),
+) -> FileIdentity:
+    """``create``: identify the release a folder of files is (trust_model_design.md
+    §14), and which files, in which order, the archive is built from."""
+    folder, order = _folder_evidence(batch, trans_wavs)
+    metas, formats = _gather_tagged(batch, provenance)
+    ranked = file_match.rank(folder, metas, preferred_country)
+    _note_contradicted(ranked, provenance)
+    if not ranked.candidates:
+        if metas or ranked.rejected:
+            provenance["file_match_rejected"] = (
+                "missing_tracks" if ranked.rejected else "no_candidates"
+            )
+        elif provenance.get("file_tag_release_check") == "unanswered":
+            provenance["file_match_rejected"] = "unanswered"
+        return FileIdentity(None, order)
+    chosen, selection, group = _choose_file_release(
+        ranked, folder, interactive=interactive, tui=tui
+    )
+    if chosen is None:
+        if selection == "rejected":
+            provenance["release_selection"] = "rejected"
+        else:
+            d = file_match.decide_unattended(ranked, folder.tagged_release)
+            provenance["file_match_rejected"] = (
+                d.reason if not interactive and d.reason else "not_chosen"
+            )
+        return FileIdentity(None, order)
+    keep = [order[p] for p in chosen.mapping]
+    rid = chosen.meta.mb_release_id or ""
+    _record_file_match(provenance, chosen, folder, selection)
+    fmts = formats.get(rid, ())
+    digital = bool(fmts) and all(f == "Digital Media" for f in fmts)
+    fmt = "File" if digital else "CD"
+    if selection == "release_group_only":
+        return FileIdentity(_group_only_meta(group), keep, fmt, group_only=True)
+    return FileIdentity(chosen.meta, keep, fmt)
 
 
 def _r6_acoustid_corroborate_wavs(
@@ -8021,6 +8268,7 @@ def _dispatch(args: argparse.Namespace) -> int:
             duplicate_policy=args.duplicate,
             auto=auto,
             network_preflight=preflight,
+            preferred_country=cfg.preferred_country,
         )
     elif args.cmd == "rip":
         from cdda2img.config import load_config

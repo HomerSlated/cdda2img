@@ -1068,13 +1068,28 @@ class PressingScreen(Screen):
 
     state = MenuState.PRESSING
 
-    def __init__(self, candidates: list[DiscMeta], pinned_id: str | None) -> None:
+    def __init__(
+        self,
+        candidates: list[DiscMeta],
+        pinned_id: str | None,
+        notes: dict[str, list[str]] | None = None,
+    ) -> None:
         # Sorted by release id, not left in MusicBrainz's match order: that order
         # is not documented as stable, and a row number is what the user acts on.
         # Two runs against the same disc should present the same list in the same
         # order — otherwise "I picked number 5" is not reproducible, and the
         # provenance this screen exists to produce is weaker for it.
-        self.candidates = sorted(candidates, key=lambda c: c.mb_release_id or "~")
+        #
+        # *notes* (create's file match, trust_model_design.md §14.4): the list
+        # arrives ranked by the matcher, which is deterministic, so it is kept in
+        # that order; each release's tier and warnings are shown beside it; and a
+        # pick only SELECTS a release (``ctl.pressing_selected``): the caller lays
+        # out the files for it, since tier B leaves files out or reorders them.
+        self.notes = notes
+        if notes is None:
+            self.candidates = sorted(candidates, key=lambda c: c.mb_release_id or "~")
+        else:
+            self.candidates = list(candidates)
         self.pinned_id = pinned_id
         self.page = 0
         # Snapshot for [q]. Taken on first paint rather than in __init__ because
@@ -1105,6 +1120,7 @@ class PressingScreen(Screen):
             self.page,
             self.pinned_id,
             chosen_id=self._chosen_id(ctl),
+            notes=self.notes,
         )
         if ctl.banner:
             print()
@@ -1135,7 +1151,16 @@ class PressingScreen(Screen):
         if not 0 <= idx < total:
             ctl.banner = "Invalid selection."
             return Stay()
-        return Push(PressingDetailScreen(self.candidates[idx]))
+        chosen = self.candidates[idx]
+        if self.notes is None:
+            return Push(PressingDetailScreen(chosen))
+        return Push(
+            PressingDetailScreen(
+                chosen,
+                notes=self.notes.get(chosen.mb_release_id or "", []),
+                apply=False,
+            )
+        )
 
     def _exit(self, ctl: MenuController, choice: str) -> Nav:
         """The three ways out. They differ only in what they claim about the disc.
@@ -1180,7 +1205,9 @@ class PressingScreen(Screen):
             return Stay()
         ctl.pressing_outcome = "rejected"
         ctl.banner = (
-            "Recorded: none of the listed pressings match. The album is "
+            "Recorded: none of the listed releases match. No release is recorded."
+            if self.notes is not None
+            else "Recorded: none of the listed pressings match. The album is "
             "recorded without a pressing; you will pick its Discogs release."
         )
         return Pop()
@@ -1210,9 +1237,15 @@ class PressingDetailScreen(Screen):
 
     state = MenuState.PRESSING_DETAIL
 
-    def __init__(self, candidate: DiscMeta) -> None:
+    def __init__(
+        self, candidate: DiscMeta, *, notes: list[str] | None = None, apply: bool = True
+    ) -> None:
         self.candidate = candidate
         self._fetched = False
+        # create's file match (§14.4): the tier and warnings to show, and select
+        # only (the caller lays out the files for the release).
+        self.notes = notes
+        self.apply = apply
 
     def render(self, ctl: MenuController) -> None:
         from cdda2img.metadata_menu import _render_pressing_detail
@@ -1230,7 +1263,9 @@ class PressingDetailScreen(Screen):
                 self.candidate.annotation = fetch_annotation(
                     self.candidate.mb_release_id
                 )
-        _render_pressing_detail(self.candidate, self.candidate.annotation)
+        _render_pressing_detail(
+            self.candidate, self.candidate.annotation, notes=self.notes
+        )
 
     def handle_input(self, ctl: MenuController) -> Nav:
         from cdda2img.metadata_menu import _prompt
@@ -1240,6 +1275,14 @@ class PressingDetailScreen(Screen):
         if choice != "a":
             return Pop()
         selected = self.candidate
+        if not self.apply:
+            ctl.pressing_outcome = "manual"
+            ctl.pressing_selected = selected
+            ctl.banner = (
+                f"Release set to {(selected.mb_release_id or '')[:8]}. "
+                "[s] keeps it, [q] discards it."
+            )
+            return Pop()
         if selected.mb_release_id:
             from cdda2img.mb_lookup import lookup_release
 
@@ -1869,6 +1912,7 @@ class MenuController:
         discogs_only: bool = False,
         discogs_fmt: str = "CD",
         pressing_only: bool = False,
+        pressing_notes: dict[str, list[str]] | None = None,
     ) -> None:
         self.disc: RBIDisc = disc
         self._original_disc: RBIDisc = copy.deepcopy(disc)  # undo savepoint
@@ -1917,7 +1961,11 @@ class MenuController:
             # Post-menu (§13.6): the Discogs release the user picked fits several
             # pressings and nothing linked or matched one. The pressing screen is
             # the root, so leaving it ends the run.
-            self.stack = [PressingScreen(self.pressing_candidates, disc.mb_release_id)]
+            self.stack = [
+                PressingScreen(
+                    self.pressing_candidates, disc.mb_release_id, pressing_notes
+                )
+            ]
             return
         if discogs_only:
             # Post-menu: the pressing changed and nothing settled its Discogs

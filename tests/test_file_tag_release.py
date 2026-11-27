@@ -1,19 +1,22 @@
-"""`create` reads the MusicBrainz release id from the source files' tags (kgr,
-2026-11-27; rbi_spec.md ``file_tag_release`` / ``file_tag_release_check``)."""
+"""`create`: the release the files' tags name, and the file match that settles
+which release, which files and which order the archive takes (kgr, 2026-11-27;
+trust_model_design.md §14; rbi_spec.md ``file_tag_release``, ``file_match*``)."""
 
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 
 import av
 import pytest
 from mutagen.flac import FLAC
 
+from cdda2img import cdda2img as cli
+from cdda2img import file_match as fm
 from cdda2img import metadata
-from cdda2img.cdda2img import _apply_file_tag_release
+from cdda2img import release_match as rm
 from cdda2img.lookup_result import DiscMeta, TrackMeta
-from cdda2img.metadata import FileTagRelease, read_file_tag_release
-from cdda2img.rbi_format import RBIDisc, RBITocEntry
+from cdda2img.metadata import read_file_tag_release
 
 RID = "e7ec55d9-cf2c-3d46-925f-a0bad61e8a06"
 OTHER = "0a19729e-0000-4000-8000-000000000000"
@@ -92,151 +95,205 @@ def test_a_real_flac_tagged_by_picard(tmp_path: Path) -> None:
     assert read_file_tag_release([path]) == (RID, RID, 1)
 
 
-# ── _apply_file_tag_release ─────────────────────────────────────────────────
+# ── _identify_files (§14.4) ─────────────────────────────────────────────────
+
+TITLES = ["Another World", "Chinatown", "T.V. Age"]
+RG = "0c55d762-c505-33fc-865b-5ac66cb90391"
 
 
-def _disc(n: int = 3, frames: int = 18000) -> RBIDisc:
-    disc = RBIDisc(album="Night and Day", artist="Joe Jackson")
-    disc.tracks = [
-        RBITocEntry(
-            track_number=i,
-            title=f"0{i} Song {i}",
-            performer="Joe Jackson",
-            start_frame=(i - 1) * frames,
-            duration_frames=frames,
-        )
-        for i in range(1, n + 1)
-    ]
-    return disc
+def _rec(i: int) -> str:
+    return f"00000000-0000-4000-8000-{i:012d}"
 
 
-def _release(n: int = 3, ms: int = 240_000, *, title: str = "Song") -> DiscMeta:
+def _folder(n: int = 3, *, tagged: str | None = RID) -> fm.FolderEvidence:
+    titles = TITLES + [f"Bonus {k}" for k in range(n - len(TITLES))]
+    return fm.FolderEvidence(
+        tuple(
+            fm.FileTrack(
+                position=i,
+                name=f"{i + 1:02d} {t}.flac",
+                title=t,
+                duration_ms=240_000,
+                tag_recording=_rec(i + 1),
+            )
+            for i, t in enumerate(titles[:n])
+        ),
+        tagged_release=tagged,
+    )
+
+
+def _release(rid: str = RID, order: tuple[int, ...] = (1, 2, 3)) -> DiscMeta:
     return DiscMeta(
         album="Night and Day",
         artist="Joe Jackson",
-        mb_release_id=RID,
-        mb_release_group_id="0c55d762-c505-33fc-865b-5ac66cb90391",
-        barcode="082839490627",
-        catalog_number="394 906-2",
+        mb_release_id=rid,
+        mb_release_group_id=RG,
         label="A&M Records",
-        country="DE",
         tracks=[
-            TrackMeta(number=i, title=f"{title} {i}", duration_ms=ms)
-            for i in range(1, n + 1)
+            TrackMeta(number=k, title=TITLES[s - 1], recording_id=_rec(s))
+            for k, s in enumerate(order, start=1)
         ],
     )
 
 
 def _wire(
     monkeypatch: pytest.MonkeyPatch,
-    tagged: tuple,
-    fetched: tuple[DiscMeta, tuple[str, ...]] | None,
-) -> list[tuple]:
-    calls: list[tuple] = []
-
-    def fetch(rid: str, disc_number: int | None = None):
-        calls.append((rid, disc_number))
-        return fetched
-
-    monkeypatch.setattr(
-        metadata, "read_file_tag_release", lambda _b: FileTagRelease(*tagged)
-    )
-    monkeypatch.setattr("cdda2img.mb_lookup.lookup_release_with_formats", fetch)
-    return calls
+    folder: fm.FolderEvidence,
+    order: list[int],
+    metas: list[DiscMeta],
+    formats: dict | None = None,
+) -> None:
+    monkeypatch.setattr(cli, "_folder_evidence", lambda b, t: (folder, order))
+    monkeypatch.setattr(cli, "_gather_tagged", lambda b, p: (metas, formats or {}))
 
 
-def test_a_release_that_fits_is_applied(monkeypatch: pytest.MonkeyPatch) -> None:
-    calls = _wire(monkeypatch, (RID, RID, 1), (_release(), ("CD",)))
-    disc = _disc()
+def _identify(prov: dict[str, str], *, interactive: bool = False) -> cli.FileIdentity:
+    return cli._identify_files([], [], prov, interactive=interactive, tui=False)
+
+
+def test_the_tagged_release_in_tier_a_is_the_pressing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    other = _release("ede0869d-0000-4000-8000-000000000000")
+    _wire(monkeypatch, _folder(), [2, 0, 1], [other, _release()])
     prov: dict[str, str] = {}
+    ident = _identify(prov)
+    assert ident.meta is not None and ident.meta.mb_release_id == RID
+    assert ident.keep == [2, 0, 1]  # the files' order, as batch indices
+    assert prov["mb_identified_via"] == "file_tags"
+    assert prov["release_selection"] == "unique"
+    assert (prov["file_match_tier"], prov["file_match_order"]) == ("A", "files")
 
-    out, meta, fmt = _apply_file_tag_release(disc, [], prov, check_durations=True)
 
-    assert calls == [(RID, 1)]
-    assert meta is not None and fmt == "CD"
-    assert prov == {
-        "file_tag_release": RID,
-        "file_tag_release_check": "applied",
-        "mb_identified_via": "file_tags",
-    }
-    assert out.mb_release_id == RID
-    assert (out.label, out.catalog_number, out.country) == (
-        "A&M Records",
-        "394 906-2",
-        "DE",
-    )
-    # Overwrite, not fill-blank: the filename stems give way to MusicBrainz's titles.
-    assert [t.title for t in out.tracks] == ["Song 1", "Song 2", "Song 3"]
-    # The geometry is the files', never the release's.
-    assert [(t.start_frame, t.duration_frames) for t in out.tracks] == [
-        (t.start_frame, t.duration_frames) for t in disc.tracks
-    ]
+def test_several_untagged_pressings_record_the_album_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """kgr (§14.4): the files cannot choose between pressings under --auto."""
+    a = _release("a0000000-0000-4000-8000-000000000000")
+    b = _release("b0000000-0000-4000-8000-000000000000")
+    _wire(monkeypatch, _folder(tagged=None), [0, 1, 2], [a, b])
+    prov: dict[str, str] = {}
+    ident = _identify(prov)
+    assert ident.group_only and ident.meta is not None
+    assert ident.meta.mb_release_id is None
+    assert ident.meta.label == "A&M Records"  # stated alike by every candidate
+    assert prov["release_selection"] == "release_group_only"
+
+
+def test_unattended_never_takes_tier_b(monkeypatch: pytest.MonkeyPatch) -> None:
+    _wire(monkeypatch, _folder(4), [0, 1, 2, 3], [_release()])  # a bonus file
+    prov: dict[str, str] = {}
+    ident = _identify(prov)
+    assert ident.meta is None and ident.keep == [0, 1, 2, 3]
+    assert prov["file_match_rejected"] == "no_tier_a"
+
+
+def test_a_release_missing_a_folder_track_is_rejected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _wire(monkeypatch, _folder(2), [0, 1], [_release()])  # the folder lacks track 3
+    prov: dict[str, str] = {}
+    assert _identify(prov).meta is None
+    assert prov["file_match_rejected"] == "missing_tracks"
+
+
+def test_a_chosen_release_lays_out_its_files(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Tier B: a bonus file left out, the release's order taken; the archive is
+    built from the kept files in the release's order."""
+    swapped = _release(order=(2, 1, 3))
+    _wire(monkeypatch, _folder(4), [0, 1, 2, 3], [swapped])
+
+    def pick(ranked, folder, *, interactive, tui):
+        (c,) = ranked.candidates
+        return c, "manual", ()
+
+    monkeypatch.setattr(cli, "_choose_file_release", pick)
+    prov: dict[str, str] = {}
+    ident = _identify(prov, interactive=True)
+    assert ident.keep == [1, 0, 2]
+    assert prov["file_match_excluded"] == "04 Bonus 0.flac"
+    assert (prov["file_match_tier"], prov["file_match_order"]) == ("B", "release")
+    assert prov["release_selection"] == "manual"
 
 
 def test_a_digital_release_lists_file_versions(monkeypatch: pytest.MonkeyPatch) -> None:
-    _wire(monkeypatch, (RID, RID, None), (_release(), ("Digital Media",)))
-    _, _, fmt = _apply_file_tag_release(_disc(), [], {}, check_durations=True)
-    assert fmt == "File"
+    _wire(monkeypatch, _folder(), [0, 1, 2], [_release()], {RID: ("Digital Media",)})
+    assert _identify({}).discogs_fmt == "File"
 
 
-def test_a_mixed_release_lists_cd_versions(monkeypatch: pytest.MonkeyPatch) -> None:
-    _wire(monkeypatch, (RID, RID, None), (_release(), ("Digital Media", "CD")))
-    _, _, fmt = _apply_file_tag_release(_disc(), [], {}, check_durations=True)
-    assert fmt == "CD"
-
-
-def test_a_wrong_track_count_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
-    _wire(monkeypatch, (RID, RID, None), (_release(n=4), ("CD",)))
-    disc = _disc()
-    prov: dict[str, str] = {}
-
-    out, meta, _ = _apply_file_tag_release(disc, [], prov, check_durations=True)
-
-    assert out is disc and meta is None
-    assert prov == {
-        "file_tag_release": RID,
-        "file_tag_release_check": "rejected:track_count",
-    }
-
-
-def test_trim_skips_only_the_duration_gate(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Under --silence trim the durations are ours, so the gate is skipped; the
-    control is the same release refused on durations when the gate runs."""
-    far = _release(ms=200_000)  # 3 x 40 s short of the disc
-    _wire(monkeypatch, (RID, RID, None), (far, ("CD",)))
-    prov: dict[str, str] = {}
-    _apply_file_tag_release(_disc(), [], prov, check_durations=True)
-    assert prov["file_tag_release_check"] == "rejected:durations"
-
-    prov = {}
-    out, _, _ = _apply_file_tag_release(_disc(), [], prov, check_durations=False)
-    assert prov["file_tag_release_check"] == "applied:no_durations"
-    assert out.mb_release_id == RID
-
-
-def test_no_answer_applies_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
-    _wire(monkeypatch, (RID, RID, None), None)
-    disc = _disc()
-    prov: dict[str, str] = {}
-    out, meta, fmt = _apply_file_tag_release(disc, [], prov, check_durations=True)
-    assert (out, meta, fmt) == (disc, None, "CD")
-    assert prov == {"file_tag_release": RID, "file_tag_release_check": "unanswered"}
-
-
-@pytest.mark.parametrize("state", ["mixed", "invalid"])
-def test_an_unusable_tag_is_recorded_and_not_fetched(
-    monkeypatch: pytest.MonkeyPatch, state: str
+def test_create_builds_the_disc_from_the_kept_files_in_order(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    calls = _wire(monkeypatch, (None, state, None), (_release(), ("CD",)))
-    prov: dict[str, str] = {}
-    _apply_file_tag_release(_disc(), [], prov, check_durations=True)
-    assert calls == []
-    assert prov == {"file_tag_release": state}
+    """The restructure: concat, durations and the TOC see only the kept files, in
+    the chosen release's order."""
+    names = ["01 a.flac", "02 b.flac", "03 c.flac"]
+    for n in names:
+        (tmp_path / n).write_bytes(b"x")
+    paths = [tmp_path / n for n in names]
+    seen: dict[str, list[str]] = {}
+
+    class Stop(Exception):
+        pass
+
+    def concat(wavs, _out):
+        seen["concat"] = [w.name for w in wavs]
+
+    def toc_entries(batch, _durations, _disc):
+        seen["toc"] = [p.name for p in batch]
+        raise Stop
+
+    monkeypatch.setattr(cli, "select_batches", lambda *a, **k: [paths])
+    monkeypatch.setattr(cli, "_check_batch_limits", lambda *a, **k: None)
+    monkeypatch.setattr(
+        cli, "derive_album_info", lambda f: {"album": "A", "artist": "B"}
+    )
+    monkeypatch.setattr(cli, "transcode_audio", lambda src, dst: None)
+    monkeypatch.setattr(
+        cli,
+        "_identify_files",
+        lambda *a, **k: cli.FileIdentity(None, [2, 0]),
+    )
+    monkeypatch.setattr(cli, "concat_wav", concat)
+    monkeypatch.setattr(cli, "wav_to_raw_pcm", lambda *a: None)
+    monkeypatch.setattr(cli, "track_frame_durations", lambda w: ([1] * len(w), len(w)))
+    monkeypatch.setattr(cli, "pad_pcm_to_declared_frames", lambda *a: None)
+    monkeypatch.setattr(cli, "build_toc_entries", toc_entries)
+    with pytest.raises(Stop):
+        cli.create_image(tmp_path, silence_mode="notrim")
+    assert seen["toc"] == ["03 c.flac", "01 a.flac"]
+    assert seen["concat"] == ["temp_track_3_trans.wav", "temp_track_1_trans.wav"]
 
 
-def test_untagged_files_leave_no_trace(monkeypatch: pytest.MonkeyPatch) -> None:
-    calls = _wire(monkeypatch, (None, None, None), (_release(), ("CD",)))
-    prov: dict[str, str] = {}
-    disc = _disc()
-    out, meta, fmt = _apply_file_tag_release(disc, [], prov, check_durations=True)
-    assert (out, meta, fmt, prov, calls) == (disc, None, "CD", {}, [])
+def test_leaving_a_screen_of_contradicted_releases_chooses_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Nothing is marked from tier C, so leaving accepts nothing (§14.4)."""
+    tags = rm.ReleaseRecord("tags", "", barcodes=("082839490627",))
+    contradicted = replace(_release(), barcode="0075021490628")
+    folder = replace(_folder(), tags=tags)
+    ranked = fm.rank(folder, [contradicted])
+    assert [c.tier for c in ranked.candidates] == ["C"]
+    seen = {}
+
+    def run(self):
+        seen["marked"] = self.disc.mb_release_id
+        seen["outcome"] = self.pressing_outcome
+        return self.disc
+
+    monkeypatch.setattr("cdda2img.menu_state.MenuController.run", run)
+    out = cli._choose_file_release(ranked, folder, interactive=True, tui=False)
+    assert out == (None, None, ())
+    assert seen == {"marked": None, "outcome": "none"}
+
+
+def test_one_tier_a_release_needs_no_screen(monkeypatch: pytest.MonkeyPatch) -> None:
+    def never(self):
+        msg = "the screen opened"
+        raise AssertionError(msg)
+
+    monkeypatch.setattr("cdda2img.menu_state.MenuController.run", never)
+    ranked = fm.rank(_folder(), [_release()])
+    chosen, selection, _ = cli._choose_file_release(
+        ranked, _folder(), interactive=True, tui=False
+    )
+    assert chosen is not None and selection == "unique"

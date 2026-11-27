@@ -10,6 +10,7 @@ patched out to keep test output readable.
 
 from __future__ import annotations
 
+import copy
 from pathlib import Path
 from unittest.mock import patch
 
@@ -1619,3 +1620,59 @@ def test_rejecting_after_choosing_is_refused_rather_than_silently_winning(capsys
     assert isinstance(nav, Stay)
     assert ctl.pressing_outcome == "manual", "the choice must not be overwritten"
     assert "already chosen" in ctl.banner
+
+
+# ── create's file match on the pressing screen (trust_model_design.md §14.4) ──
+
+
+def _fm_ctl(notes):
+    from cdda2img.lookup_result import DiscMeta
+    from cdda2img.rbi_format import RBIDisc
+
+    cands = [
+        DiscMeta(mb_release_id="zzzz9999", album="A", source="mb"),
+        DiscMeta(mb_release_id="aaaa1111", album="A", source="mb"),
+    ]
+    disc = RBIDisc(album="A", artist="B", mb_release_id="zzzz9999")
+    ctl = MenuController(
+        disc,
+        pressing_candidates=cands,
+        pressing_outcome="auto_tiebreak",
+        pressing_only=True,
+        pressing_notes=notes,
+    )
+    return ctl, cands
+
+
+def test_the_file_match_keeps_its_ranking_and_shows_the_tiers(capsys) -> None:
+    notes = {"zzzz9999": ["A: match"], "aaaa1111": ["B: match, leaves out 1 file(s)"]}
+    ctl, _ = _fm_ctl(notes)
+    ctl.stack[-1].render(ctl)
+    out = capsys.readouterr().out
+    assert "Choose the release" in out
+    # Ranked order kept: the rip's screen would sort aaaa1111 first.
+    assert out.index("zzzz9999") < out.index("aaaa1111")
+    assert "B: match, leaves out 1 file(s)" in out
+
+
+def test_the_rip_screen_still_sorts_by_release_id(capsys) -> None:
+    """The control: without notes the order is the rip's (by MBID)."""
+    ctl, _ = _fm_ctl(None)
+    ctl.stack[-1].render(ctl)
+    out = capsys.readouterr().out
+    assert "Choose the pressing" in out
+    assert out.index("aaaa1111") < out.index("zzzz9999")
+
+
+def test_a_file_match_pick_selects_without_touching_the_disc() -> None:
+    """The caller lays the files out for the release (tier B may leave files out or
+    reorder them), so the screen only records the choice."""
+    ctl, cands = _fm_ctl({"zzzz9999": ["A"], "aaaa1111": ["B"]})
+    before = copy.deepcopy(ctl.disc)
+    _step_with(ctl, "2")  # open aaaa1111
+    with patch("cdda2img.mb_lookup.lookup_release") as fetch:
+        _step_with(ctl, "a")
+    fetch.assert_not_called()
+    assert ctl.pressing_outcome == "manual"
+    assert ctl.pressing_selected is cands[1]
+    assert ctl.disc == before

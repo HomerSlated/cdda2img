@@ -276,6 +276,7 @@ def _render_pressing_page(
     pinned_id: str | None,
     *,
     chosen_id: str | None = None,
+    notes: dict[str, list[str]] | None = None,
 ) -> None:
     """Pure repaint of one page of the N5 alternatives (pressing) picker.
 
@@ -296,10 +297,20 @@ def _render_pressing_page(
     start = page * _PAGE
     page_items = candidates[start : start + _PAGE]
 
-    _header(f"Choose the pressing  [{page + 1}/{total_pages}]  ({total} candidates)")
-    print("  MusicBrainz matched this disc's TOC to several pressings of the same")
-    print("  release. What separates them is print on the disc and inlay — read")
-    print("  yours and pick the match, or decline if none of them fit.")
+    if notes is None:
+        _header(
+            f"Choose the pressing  [{page + 1}/{total_pages}]  ({total} candidates)"
+        )
+        print("  MusicBrainz matched this disc's TOC to several pressings of the same")
+        print("  release. What separates them is print on the disc and inlay — read")
+        print("  yours and pick the match, or decline if none of them fit.")
+    else:
+        # create's file match (trust_model_design.md §14.4).
+        _header(f"Choose the release  [{page + 1}/{total_pages}]  ({total} candidates)")
+        print("  These releases hold every track they list among your files, best")
+        print("  first. A: a match. B: a match once files are left out or the")
+        print("  release's order is taken. C: something contradicts. Open one for")
+        print("  details, pick it, or decline if none of them fit.")
     print()
     print(
         f"  {'#':>3}  {'MBID':<8}  {'Cty':<3}  {'Year':<4}  {'Cat #':<14}  Description"
@@ -315,6 +326,9 @@ def _render_pressing_page(
         # told what is currently chosen so they can confirm or contradict it.
         mark = "*" if m.mb_release_id and m.mb_release_id == marked else " "
         desc = _pressing_description(m) or "(no description)"
+        if notes is not None:
+            first = (notes.get(m.mb_release_id or "") or [""])[0]
+            desc = f"{first} · {desc}" if first else desc
         print(
             f"  {i:>2}{mark}  {(m.mb_release_id or '')[:8]:<8}"
             f"  {(m.country or '')[:3]:<3}  {(m.release_date or '')[:4]:<4}"
@@ -342,9 +356,16 @@ def _render_pressing_page(
     print("  " + "  ".join(nav))
 
 
-def _render_pressing_detail(m: DiscMeta, annotation: str | None) -> None:
-    """Full detail for one pressing, including the fetched annotation."""
-    _header("Pressing detail")
+def _render_pressing_detail(
+    m: DiscMeta, annotation: str | None, *, notes: list[str] | None = None
+) -> None:
+    """Full detail for one pressing, including the fetched annotation. *notes*:
+    create's file match, its tier and warnings (trust_model_design.md §14.4)."""
+    _header("Pressing detail" if notes is None else "Release detail")
+    for line in notes or []:
+        print(f"  {line}")
+    if notes:
+        print()
     print(f"  Release   : {m.mb_release_id or '(none)'}")
     print(f"  Album     : {m.album or '—'}")
     print(f"  Country   : {m.country or '—'}     Date: {m.release_date or '—'}")
