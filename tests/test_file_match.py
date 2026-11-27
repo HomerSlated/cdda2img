@@ -191,7 +191,11 @@ def test_unattended_decisions() -> None:
     d = _ranked(a, b, tagged="b")
     assert (d.outcome, d.chosen and d.chosen.meta.mb_release_id) == ("unique", "b")
     other_album = _release(rid="c", rg="another-group")
-    assert _ranked(a, other_album).reason == "ambiguous_album"
+    assert _ranked(a, other_album).reason == "ambiguous_album"  # a tie
+    # A plurality decides: two of the album against one "2 for 1" medium.
+    d = _ranked(a, b, other_album)
+    assert d.outcome == "release_group_only"
+    assert {c.meta.mb_release_id for c in d.group} == {"a", "b"}
     assert _ranked(_release([1, 2, 3, 4, 5])).reason == "missing_tracks"
     assert _ranked().reason == "no_candidates"
     swapped = _release([2, 1, 3, 4], rid="swapped")

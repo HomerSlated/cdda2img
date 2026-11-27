@@ -143,8 +143,10 @@ def _wire(
     metas: list[DiscMeta],
     formats: dict | None = None,
 ) -> None:
-    monkeypatch.setattr(cli, "_folder_evidence", lambda b, t: (folder, order))
+    monkeypatch.setattr(cli, "_folder_evidence", lambda *a: (folder, order))
+    monkeypatch.setattr(cli, "_fingerprint_files", lambda *a: {})
     monkeypatch.setattr(cli, "_gather_tagged", lambda b, p: (metas, formats or {}))
+    monkeypatch.setattr(cli, "_gather_candidates", lambda *a: ([], {}, None))
 
 
 def _identify(prov: dict[str, str], *, interactive: bool = False) -> cli.FileIdentity:
@@ -297,3 +299,148 @@ def test_one_tier_a_release_needs_no_screen(monkeypatch: pytest.MonkeyPatch) -> 
         ranked, _folder(), interactive=True, tui=False
     )
     assert chosen is not None and selection == "unique"
+
+
+# ── gathering candidates (§14.2 steps 2 and 3) ──────────────────────────────
+
+
+def _rel(rid: str, *counts: int) -> dict:
+    return {"id": rid, "medium-list": [{"track-count": str(c)} for c in counts]}
+
+
+def test_releases_holding_both_sampled_recordings(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    by_rec = {
+        _rec(1): [_rel("album", 3), _rel("single", 1), _rel("box", 20)],
+        _rec(2): [_rel("album", 3), _rel("other", 3)],
+    }
+    monkeypatch.setattr(
+        "cdda2img.acoustid_lookup.releases_for_recording", lambda r: by_rec.get(r, [])
+    )
+    # Every file has a tag recording (equally unambiguous): files 1 and 2 sampled.
+    ids = cli._release_ids_by_recordings(_folder(tagged=None))
+    # "album" is in both pools; the 20-track box set cannot fit; the rest follow.
+    assert ids == ["album", "other", "single"]
+
+
+def test_the_least_ambiguous_files_are_sampled(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Live, Night and Day: track 2's first AcoustID hit was another song's demo;
+    a file with one recording names its song without doubt."""
+    files = (
+        fm.FileTrack(0, "01.flac", fp_recordings=frozenset({"x", "y"}), fp_best="x"),
+        fm.FileTrack(
+            1, "02.flac", fp_recordings=frozenset({"demo", "z"}), fp_best="demo"
+        ),
+        fm.FileTrack(2, "03.flac", fp_recordings=frozenset({"tv"}), fp_best="tv"),
+        fm.FileTrack(
+            3, "04.flac", fp_recordings=frozenset({"target"}), fp_best="target"
+        ),
+    )
+    browsed: list[str] = []
+    monkeypatch.setattr(
+        "cdda2img.acoustid_lookup.releases_for_recording",
+        lambda r: browsed.append(r) or [],
+    )
+    cli._release_ids_by_recordings(fm.FolderEvidence(files))
+    assert browsed == ["tv", "target"]
+
+
+def test_without_recordings_the_tags_are_searched(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    folder = fm.FolderEvidence(
+        tuple(fm.FileTrack(position=i, name=f"{i}.flac") for i in range(3)),
+        album="Night and Day",
+        artist="Joe Jackson",
+    )
+    stubs = [
+        DiscMeta(mb_release_id="nine", track_count=9),
+        DiscMeta(mb_release_id="three", track_count=3),
+    ]
+    monkeypatch.setattr("cdda2img.mb_lookup.search_releases", lambda q: stubs)
+    fetched: list[str] = []
+
+    def media(rid: str):
+        fetched.append(rid)
+        return [DiscMeta(mb_release_id=rid)], ("CD",)
+
+    monkeypatch.setattr("cdda2img.mb_lookup.release_media", media)
+    _metas, formats, via = cli._gather_candidates(folder, set())
+    assert fetched == ["three"]  # nine tracks cannot all be in three files
+    assert via == "search" and formats == {"three": ("CD",)}
+
+
+def test_a_tagged_release_in_tier_a_ends_the_search(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _wire(monkeypatch, _folder(), [0, 1, 2], [_release()])
+    called = []
+    monkeypatch.setattr(
+        cli, "_gather_candidates", lambda *a: called.append(1) or ([], {}, None)
+    )
+    _identify({})
+    assert called == []
+
+
+def test_a_contradicted_tagged_release_looks_further(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The control: the tags name a release the files contradict, so the search
+    goes on, and the release it finds is taken."""
+    tags = rm.ReleaseRecord("tags", "", barcodes=("082839490627",))
+    folder = replace(_folder(), tags=tags)
+    bad = replace(_release(), barcode="0075021490628")
+    good = _release("6000d000-0000-4000-8000-000000000000")
+    _wire(monkeypatch, folder, [0, 1, 2], [bad])
+    monkeypatch.setattr(
+        cli, "_gather_candidates", lambda *a: ([good], {}, "recordings")
+    )
+    prov: dict[str, str] = {}
+    ident = _identify(prov)
+    assert ident.meta is not None and ident.meta.mb_release_id == good.mb_release_id
+    assert prov["mb_identified_via"] == "file_match"
+
+
+def test_every_file_is_fingerprinted(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[str] = []
+
+    def fp(wav: Path):
+        calls.append(wav.name)
+        return None if wav.name == "b" else [(_rec(1), "Another World")]
+
+    monkeypatch.setattr("cdda2img.acoustid_lookup.is_available", lambda: True)
+    monkeypatch.setattr("cdda2img.acoustid_lookup.fingerprint_recordings", fp)
+    prov: dict[str, str] = {}
+    out = cli._fingerprint_files([Path("a"), Path("b"), Path("c")], [2, 0, 1], prov)
+    assert calls == ["c", "a", "b"]  # every file, in the files' order
+    assert set(out) == {0, 2}
+    assert prov["lookup_status_acoustid"] == "down"
+
+
+def test_the_release_browse_sets_the_user_agent_first(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """On an untagged create the browse is the run's first MusicBrainz request;
+    musicbrainzngs refuses it without a user agent, and the refusal read as "no
+    releases" (live, 2026-11-27)."""
+    from cdda2img import acoustid_lookup
+
+    order: list[str] = []
+    monkeypatch.setattr(
+        "cdda2img.mb_lookup._setup_useragent", lambda: order.append("agent")
+    )
+    monkeypatch.setattr(
+        acoustid_lookup,
+        "_browse_releases_for_recording",
+        lambda r: order.append("browse") or [],
+    )
+    acoustid_lookup.releases_for_recording(_rec(1))
+    assert order == ["agent", "browse"]
+
+
+def test_finding_nothing_is_recorded(monkeypatch: pytest.MonkeyPatch) -> None:
+    _wire(monkeypatch, _folder(tagged=None), [0, 1, 2], [])
+    prov: dict[str, str] = {}
+    assert _identify(prov).meta is None
+    assert prov["file_match_rejected"] == "no_candidates"

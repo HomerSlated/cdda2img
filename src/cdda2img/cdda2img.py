@@ -947,8 +947,12 @@ def create_image(
                     disc_total=disc_total,
                 ),
             )
-            # After the release is applied: AcoustID's gate reads disc.mb_release_id.
-            disc = _r6_acoustid_corroborate_wavs(disc, source_wavs, provenance)
+            # Every track was fingerprinted by the file match; its verdict on the
+            # chosen release is AcoustID's corroboration (match_distance reads it).
+            if ident.fingerprint in ("match", "contradict"):
+                provenance["acoustid_corroborates"] = (
+                    "YES" if ident.fingerprint == "match" else "NO"
+                )
 
             # Identify the original release before the menu so the user
             # sees "Original: <title> (<year>)" in the initial summary.
@@ -1033,7 +1037,7 @@ def create_image(
             toc_data = generate_toc(disc, raw_titles=raw_titles)
 
             disc_suffix = "" if disc_total == 1 else f"_disc{disc_num}"
-            output_file = _resolve_output_path(output, album, disc_suffix)
+            output_file = _resolve_output_path(output, disc.album or album, disc_suffix)
             container_flags = FLAG_MASTER_MODE if silence_mode == "notrim" else 0
             build_container(
                 temp.pcm_file,
@@ -1981,6 +1985,8 @@ class FileIdentity(NamedTuple):
     keep: list[int]
     discogs_fmt: str = "CD"
     group_only: bool = False
+    #: The chosen release against the fingerprints: match | contradict | absent.
+    fingerprint: str = "absent"
 
 
 def _build_create_disc(
@@ -2020,8 +2026,35 @@ def _wav_ms(path: Path) -> int | None:
         return None
 
 
+def _fingerprint_files(
+    trans_wavs: list[Path], order: list[int], provenance: dict[str, str]
+) -> dict[int, list[tuple[str, str]]]:
+    """Every file's recordings by AcoustID (§14.2 step 3: every track, not two),
+    keyed by batch index. AcoustID only; finding releases is the caller's."""
+    from cdda2img import acoustid_lookup
+
+    if not acoustid_lookup.is_available():
+        provenance["lookup_status_acoustid"] = "disabled"
+        return {}
+    out: dict[int, list[tuple[str, str]]] = {}
+    errored = False
+    for n, i in enumerate(order, start=1):
+        print(f"  AcoustID: fingerprinting track {n}/{len(order)}")
+        hits = acoustid_lookup.fingerprint_recordings(trans_wavs[i])
+        if hits is None:
+            errored = True
+            continue
+        out[i] = hits
+    provenance["lookup_status_acoustid"] = _r12_status(
+        attempted=True, has_data=any(out.values()), errored=errored
+    )
+    return out
+
+
 def _folder_evidence(
-    batch: list[Path], trans_wavs: list[Path]
+    batch: list[Path],
+    trans_wavs: list[Path],
+    fingerprints: dict[int, list[tuple[str, str]]] | None = None,
 ) -> tuple[file_match.FolderEvidence, list[int]]:
     """The folder as the matcher sees it, and the files' own order (indices into
     *batch*). Runtimes come from the transcodes BEFORE our silence trim, so our
@@ -2031,6 +2064,7 @@ def _folder_evidence(
 
     tags, album = read_file_tracks(batch)
     order = files_order(tags)
+    fps = fingerprints or {}
     files = tuple(
         file_match.FileTrack(
             position=pos,
@@ -2038,6 +2072,9 @@ def _folder_evidence(
             title=tags[i].title,
             duration_ms=_wav_ms(trans_wavs[i]),
             tag_recording=tags[i].recording_id,
+            fp_recordings=frozenset(r for r, _ in fps.get(i, [])),
+            fp_titles=tuple(t for _, t in fps.get(i, []) if t),
+            fp_best=fps[i][0][0] if fps.get(i) else None,
         )
         for pos, i in enumerate(order)
     )
@@ -2050,7 +2087,14 @@ def _folder_evidence(
         country=album.country,
     )
     tagged = read_file_tag_release(batch)
-    folder = file_match.FolderEvidence(files, record, album.date, tagged.release_id)
+    folder = file_match.FolderEvidence(
+        files,
+        record,
+        album.date,
+        tagged.release_id,
+        album=album.album,
+        artist=album.artist,
+    )
     return folder, order
 
 
@@ -2075,6 +2119,94 @@ def _gather_tagged(
     provenance["file_tag_release_check"] = "fetched"
     media, formats = fetched
     return media, {tagged.release_id: formats}
+
+
+#: Candidate releases fetched in full per batch (one MusicBrainz request each).
+_FILE_MATCH_MAX_FETCH = 12
+
+
+def _release_ids_by_recordings(folder: file_match.FolderEvidence) -> list[str]:
+    """Releases holding the recordings of the two LEAST AMBIGUOUS files, with a
+    medium no longer than the folder (a release with more tracks than files cannot
+    have them all in the folder, §14.4).
+
+    Least ambiguous, not first and middle: AcoustID returns every recording a
+    fingerprint matches, duplicates and demos included, best score first, and the
+    first is not always the right song (live, *Night and Day*, 2026-11-27: track 2's
+    top hit was "Target (demo)", track 5 matched ten recordings, and the album held
+    neither file's first). A file with one recording, or a ``musicbrainz_trackid``
+    tag, names its song without doubt. Releases in both pools rank first, then the
+    track count closest to the folder's; neither pool is required, since one
+    sample's recording may be a duplicate the album does not use."""
+    from cdda2img import acoustid_lookup
+
+    def ambiguity(f: file_match.FileTrack) -> int:
+        return 1 if f.tag_recording else len(f.fp_recordings)
+
+    with_rec = sorted(
+        (f for f in folder.files if f.tag_recording or f.fp_best),
+        key=lambda f: (ambiguity(f), f.position),
+    )
+    n = len(folder.files)
+    fit: dict[str, int] = {}
+    hits: dict[str, int] = {}
+    for f in with_rec[:2]:
+        rec = f.tag_recording or f.fp_best or ""
+        print(f"  MusicBrainz: releases of {f.name}")
+        for r in acoustid_lookup.releases_for_recording(rec):
+            counts = [
+                int(m.get("track-count") or 0) for m in r.get("medium-list") or []
+            ]
+            usable = [c for c in counts if 0 < c <= n]
+            if r.get("id") and usable:
+                fit[r["id"]] = max(usable)
+                hits[r["id"]] = hits.get(r["id"], 0) + 1
+    return sorted(fit, key=lambda rid: (-hits[rid], -fit[rid], rid))
+
+
+def _release_ids_by_search(folder: file_match.FolderEvidence) -> list[str]:
+    """Step 2 (§14.2): a MusicBrainz text search by the tags' album and artist."""
+    from cdda2img.mb_lookup import build_mb_search_query, search_releases
+
+    query = build_mb_search_query(folder.artist, folder.album)
+    if not query:
+        return []
+    print(f"  MusicBrainz: searching for {folder.artist} / {folder.album}")
+    n = len(folder.files)
+    stubs = [
+        s
+        for s in search_releases(query)
+        if s.mb_release_id and (s.track_count or 0) <= n
+    ]
+    stubs.sort(key=lambda s: -(s.track_count or 0))
+    return [s.mb_release_id for s in stubs if s.mb_release_id]
+
+
+def _gather_candidates(
+    folder: file_match.FolderEvidence, have: set[str]
+) -> tuple[list[DiscMeta], dict[str, tuple[str, ...]], str | None]:
+    """Steps 2 and 3: releases from the recordings, else from a text search;
+    every medium of each, fetched (capped). Returns the media, their formats, and
+    how they were found (``mb_identified_via``'s detail)."""
+    from cdda2img.mb_lookup import release_media
+
+    ids = _release_ids_by_recordings(folder)
+    via = "recordings" if ids else None
+    if not ids:
+        ids = _release_ids_by_search(folder)
+        via = "search" if ids else None
+    ids = [rid for rid in dict.fromkeys(ids) if rid not in have]
+    ids = ids[:_FILE_MATCH_MAX_FETCH]
+    metas: list[DiscMeta] = []
+    formats: dict[str, tuple[str, ...]] = {}
+    for k, rid in enumerate(ids, start=1):
+        print(f"  MusicBrainz: release {k}/{len(ids)} ({rid[:8]})")
+        fetched = release_media(rid)
+        if fetched is None:
+            continue
+        metas += fetched[0]
+        formats[rid] = fetched[1]
+    return metas, formats, via
 
 
 def _choose_file_release(
@@ -2208,17 +2340,34 @@ def _identify_files(
 ) -> FileIdentity:
     """``create``: identify the release a folder of files is (trust_model_design.md
     §14), and which files, in which order, the archive is built from."""
-    folder, order = _folder_evidence(batch, trans_wavs)
+    from cdda2img.metadata import files_order, read_file_tracks
+
+    order = files_order(read_file_tracks(batch)[0])
+    fingerprints = _fingerprint_files(trans_wavs, order, provenance)
+    folder, order = _folder_evidence(batch, trans_wavs, fingerprints)
     metas, formats = _gather_tagged(batch, provenance)
     ranked = file_match.rank(folder, metas, preferred_country)
+    tagged_a = any(
+        c.tier == "A" and c.meta.mb_release_id == folder.tagged_release
+        for c in ranked.candidates
+    )
+    if not tagged_a:
+        # The tags name no release, or one the files contradict: look further
+        # (§14.2 steps 2 and 3). The tagged release stays a candidate.
+        more, more_formats, _via = _gather_candidates(
+            folder, {m.mb_release_id or "" for m in metas}
+        )
+        metas += more
+        formats.update(more_formats)
+        ranked = file_match.rank(folder, metas, preferred_country)
     _note_contradicted(ranked, provenance)
     if not ranked.candidates:
-        if metas or ranked.rejected:
-            provenance["file_match_rejected"] = (
-                "missing_tracks" if ranked.rejected else "no_candidates"
-            )
+        if ranked.rejected:
+            provenance["file_match_rejected"] = "missing_tracks"
         elif provenance.get("file_tag_release_check") == "unanswered":
             provenance["file_match_rejected"] = "unanswered"
+        else:
+            provenance["file_match_rejected"] = "no_candidates"
         return FileIdentity(None, order)
     chosen, selection, group = _choose_file_release(
         ranked, folder, interactive=interactive, tui=tui
@@ -2238,9 +2387,12 @@ def _identify_files(
     fmts = formats.get(rid, ())
     digital = bool(fmts) and all(f == "Digital Media" for f in fmts)
     fmt = "File" if digital else "CD"
+    fp = chosen.evidence.get("fingerprint", "absent")
     if selection == "release_group_only":
-        return FileIdentity(_group_only_meta(group), keep, fmt, group_only=True)
-    return FileIdentity(chosen.meta, keep, fmt)
+        return FileIdentity(
+            _group_only_meta(group), keep, fmt, group_only=True, fingerprint=fp
+        )
+    return FileIdentity(chosen.meta, keep, fmt, fingerprint=fp)
 
 
 def _r6_acoustid_corroborate_wavs(

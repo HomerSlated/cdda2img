@@ -350,3 +350,49 @@ def fingerprint_and_lookup(wav_path: Path, *, verbose: bool = False) -> list[Dis
         return []
 
     return _chain_to_mb(top, verbose=verbose)
+
+
+def fingerprint_recordings(wav_path: Path) -> list[tuple[str, str]] | None:
+    """The recordings AcoustID matches *wav_path* to, as ``(recording id, title)``,
+    best first, above the score threshold. AcoustID only: no MusicBrainz request.
+
+    For ``create``'s file match (trust_model_design.md §14), which needs every
+    track's recording but finds releases itself. ``None`` when the fingerprint or
+    the lookup failed, ``[]`` when AcoustID knows no recording for it.
+    """
+    if not is_available():
+        return None
+    api_key = os.environ.get("ACOUSTID_API_KEY", "")
+    try:
+        import acoustid  # type: ignore[import-untyped]
+
+        raw = list(acoustid.match(api_key, str(wav_path), timeout=NETWORK_TIMEOUT))
+    except Exception as exc:
+        query_log.record("AcoustID", _acoustid_query(wav_path), f"error: {exc}")
+        log.debug("AcoustID fingerprint failed for %s: %s", wav_path, exc)
+        return None
+    query_log.record(
+        "AcoustID",
+        _acoustid_query(wav_path),
+        f"{len(raw)} candidate(s)" if raw else "no match",
+        "\n".join(repr(m) for m in raw),
+    )
+    out: list[tuple[str, str]] = []
+    for score, recording_id, title, _artist in sorted(raw, key=lambda m: -m[0]):
+        fresh = all(recording_id != r for r, _ in out)
+        if score >= _SCORE_THRESHOLD and recording_id and fresh:
+            out.append((recording_id, title or ""))
+    return out
+
+
+def releases_for_recording(recording_id: str) -> list[dict]:
+    """Every release carrying *recording_id* (paged MusicBrainz browse, media and
+    release group embedded). Public wrapper for ``create``'s candidate gathering.
+
+    Sets MusicBrainz's user agent first: on an untagged ``create`` this is the
+    first MusicBrainz request of the run, and without it musicbrainzngs refuses
+    the call, which the browse swallows as "no releases" (2026-11-27)."""
+    from cdda2img.mb_lookup import _setup_useragent
+
+    _setup_useragent()
+    return _browse_releases_for_recording(recording_id)

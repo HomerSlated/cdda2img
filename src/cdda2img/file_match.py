@@ -54,6 +54,8 @@ class FileTrack:
     #: Recordings the fingerprint matched, and their titles (AcoustID's).
     fp_recordings: frozenset[str] = frozenset()
     fp_titles: tuple[str, ...] = ()
+    #: AcoustID's best recording, the one candidate releases are gathered from.
+    fp_best: str | None = None
 
 
 @dataclass(frozen=True)
@@ -64,6 +66,8 @@ class FolderEvidence:
     tags: rm.ReleaseRecord | None = None  # barcode, catno, label, country
     tag_year: str | None = None
     tagged_release: str | None = None
+    album: str | None = None  # the tags' album and artist, for a text search
+    artist: str | None = None
 
 
 @dataclass
@@ -314,8 +318,9 @@ class Decision:
 
 def decide_unattended(ranked: Ranked, tagged_release: str | None) -> Decision:
     """Tier A only. The release the tags name, in tier A, is the pressing; one
-    tier-A release is kept; several of one album record the album only (the files
-    cannot choose between pressings); none, or several albums, apply nothing."""
+    tier-A release is kept; several record the album only (the files cannot choose
+    between pressings), the album being the release group most of them belong to;
+    none, or a tie between albums, apply nothing."""
     tier_a = [c for c in ranked.candidates if c.tier == "A"]
     if not ranked.candidates:
         reason = "missing_tracks" if ranked.rejected else "no_candidates"
@@ -327,10 +332,22 @@ def decide_unattended(ranked: Ranked, tagged_release: str | None) -> Decision:
             return Decision("unique", chosen=c)
     if len(tier_a) == 1:
         return Decision("unique", chosen=tier_a[0])
-    groups = {c.meta.mb_release_group_id for c in tier_a}
-    if len(groups) == 1 and None not in groups:
-        return Decision("release_group_only", chosen=tier_a[0], group=tuple(tier_a))
-    return Decision("rejected", reason="ambiguous_album")
+    # The album is the release group most tier-A releases belong to, when one
+    # strictly outnumbers the rest (the rip's plurality rule): a medium of a
+    # "2 for 1" set holding the same nine tracks must not make the album
+    # undecidable (live, Night and Day, 2026-11-27). A tie applies nothing.
+    counts: dict[str | None, int] = {}
+    for c in tier_a:
+        counts[c.meta.mb_release_group_id] = (
+            counts.get(c.meta.mb_release_group_id, 0) + 1
+        )
+    top = sorted(counts.items(), key=lambda kv: -kv[1])
+    if top[0][0] is None or (len(top) > 1 and top[1][1] == top[0][1]):
+        return Decision("rejected", reason="ambiguous_album")
+    album = [c for c in tier_a if c.meta.mb_release_group_id == top[0][0]]
+    if len(album) == 1:
+        return Decision("unique", chosen=album[0])
+    return Decision("release_group_only", chosen=album[0], group=tuple(album))
 
 
 def note(c: Classified) -> str:

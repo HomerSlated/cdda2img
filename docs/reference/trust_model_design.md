@@ -1426,7 +1426,7 @@ aborts is OPEN (§13.9 Q2).
   Discogs release linked from it are dropped, no pressing is derived from a Discogs pick,
   and the master screen reopens for the user's Discogs pick.
 
-## 14. Identifying an album from loose files (DECIDED 2026-11-27, not yet built)
+## 14. Identifying an album from loose files (DECIDED and BUILT 2026-11-27)
 
 kgr, 2026-11-27: *"For loose media files, we're going to need to use a different method
 to match on MB. If there's matching metadata, just trust it and use it. If not, we'll need
@@ -1647,3 +1647,39 @@ silently capped at 25 (N3), and a short list reads exactly like a genuine miss.
 6. Tests per class, each with a negative control; FLOOR.
 7. kgr's runs: *Night and Day* (step 1), a tagged album without ids (step 2), the
    untagged folder (step 3), and a digital release (File versions on `[d]`).
+
+### 14.10 As built (2026-11-27)
+
+- **Order of work in `create`**: transcode every file, fingerprint every file
+  (`acoustid_lookup.fingerprint_recordings`, AcoustID only), read the tags
+  (`metadata.read_file_tracks`, `files_order`), fetch the release the tags name
+  (`mb_lookup.release_media`, every medium), classify (`file_match.py`), and only when
+  that release is not in tier A gather more (`cdda2img._gather_candidates`); then choose,
+  then build the PCM and TOC from the kept files in the release's order
+  (`_build_create_disc`). The old R6 sample (tracks 1 and ceil(N/2) through
+  `_chain_to_mb`) no longer runs in `create`; `acoustid_corroborates` is the chosen
+  release's `fingerprint` class.
+- **Gathering by recordings samples the two LEAST AMBIGUOUS files**, not the first and the
+  middle. Measured on *Night and Day* with its tags hidden: track 2's top AcoustID hit was
+  "Target (demo)", a different song; *Steppin' Out* matched ten recordings and the album
+  held neither file's first; tracks 3, 4 and 7 matched exactly one. A file with a
+  `musicbrainz_trackid` tag or a single recording names its song without doubt. Releases
+  in both sampled pools rank first (neither is required), then the medium track count
+  closest to the folder's; a medium longer than the folder is skipped before fetching;
+  at most `_FILE_MATCH_MAX_FETCH` = 12 releases are fetched. Without recordings, a text
+  search by the tags' album and artist (`_release_ids_by_search`).
+- **`--auto` with tier-A releases in more than one release group** takes the group most of
+  them belong to when one strictly outnumbers the rest (the rip's plurality rule); a tie
+  applies nothing (`ambiguous_album`). Found live: one medium of the ZA "2 for 1: Night and
+  Day / Body and Soul" set (another release group) holds the same nine tracks. This
+  extends kgr's "several pressings of one album record the album only", which did not
+  cover several albums; flagged for his review.
+- **A defect the live run found**: the release browse was the untagged run's first
+  MusicBrainz request, musicbrainzngs refuses a request before a user agent is set, and
+  the browse swallowed the refusal as "no releases". `releases_for_recording` sets it.
+- **Result, *Night and Day* untagged** (`--auto`): album, artist, every title, release
+  group `0c55d762` and original 1982-06 identified from fingerprints alone;
+  `release_selection=release_group_only` (14 releases of the album, which the files cannot
+  tell apart). Tagged: `e7ec55d9`, tier A, every class that the tags state agreeing.
+- **Not done**: §14.6's measurement of AcoustID's `meta=releases` as a replacement for the
+  MusicBrainz browse (the browse is two paged requests per run, acceptable for now).
