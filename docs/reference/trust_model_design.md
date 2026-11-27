@@ -1544,12 +1544,29 @@ other class of §14.3, absent data silent, and sorted into a tier:
 | Tier | The release | Shown as |
 |---|---|---|
 | **A, match** | exactly the folder's files, in the files' order; nothing contradicts | the match, the best-scoring one marked |
-| **B, match after leaving files out, or reordering** | its tracks are all in the folder, and the folder holds files it does not list, or the same tracks sit in another order; nothing else contradicts | "files X, Y are not on this release and will be left out of the archive" / "the files will be put in the release's order" |
+| **B, match after leaving files out, or reordering** | its tracks are all in the folder, and the folder holds files it does not list, or (only when no release in the files' order exists) the tracks sit in another order; nothing else contradicts | "files X, Y are not on this release and will be left out of the archive" / "the files will be put in the release's order" |
 | **C, every track but contradicted** | its tracks are all in the folder, and some other class contradicts: a fingerprint against a tag, the year, a title, a runtime | what contradicts, per class (and tier B's warnings where they apply) |
 
-The archive follows the chosen release: its tracks, in its order (the reordering is this
-document's reading, not yet confirmed by kgr). Within a tier, more matching classes rank
-first, then §10.3's ladder (`preferred_country`, `date`, `discogs_link`, `mbid`).
+**Track order (kgr, 2026-11-27).** *"If no release exists with tracks in the same order
+as the files' names/metadata, then present the closest match that still includes all the
+files in whatever other order, and use the release's ordering. If there is a release with
+tracks in the same order as the files, but there is other contradicting data blocking the
+selection, that needs to go into the 'irreconcilable contradiction' category for analysis
+during testing."* So:
+
+- The files' order is their track-number tags, else their file names' leading numbers,
+  else the name order `create` sorts them in today.
+- **A release in another order is a candidate only when no release holds the tracks in
+  the files' order**, in any tier. It is then offered as tier B, the closest marked, and
+  the archive takes **the release's order**.
+- **A release in the files' order that something else contradicts** stays tier C and is
+  **flagged for analysis** (`file_match_contradicted`, §14.7, and a line on screen naming
+  the release and the classes that blocked it); while it exists, no reordered release is
+  offered. These are the cases the "irreconcilable" thresholds (§14.8) will be tuned on.
+
+Within a tier, more matching classes rank first, then §10.3's ladder
+(`preferred_country`, `date`, `discogs_link`, `mbid`). The archive holds the chosen
+release's tracks only, in the release's order.
 
 - **Interactive:** all three tiers go to the pressing screen rips use
   (`menu_state.PressingScreen`, N5), labelled by tier; tier A's best is marked (B's when
@@ -1595,7 +1612,9 @@ silently capped at 25 (N3), and a short list reads exactly like a genuine miss.
 - `create` writes `release_selection` (§14.4's values); rbi_spec.md's "absent on the
   `create` pipeline" changes, and `mb_release_id`'s absent-when list gains `create`.
 - `file_match=<class>:<result>,…` records §14.3's evidence for the chosen release, and
-  `file_match_tier=A|B|C` its tier (§14.4);
+  `file_match_tier=A|B|C` its tier (§14.4), `file_match_order=files|release` whose order
+  the archive took, and `file_match_contradicted=<mbid>:<class>,…` for every release in
+  the files' order that a contradiction held back (§14.4's analysis cases);
   `file_match_rejected=<reason>` for §14.5's automatic refusal.
 - rbi_spec.md first, as always.
 
