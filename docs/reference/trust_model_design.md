@@ -1493,8 +1493,9 @@ name one.
 
 **The steps nominate; they do not decide (kgr, 2026-11-27, §14.8).** Every release any
 step finds is a candidate, and §14.4 sorts them all. Step 3's "at that track's position"
-and "the files' track count" are no longer filters: a release holding every track at
-other positions, or with tracks the files lack, is a candidate in tier B.
+and "the files' track count" are no longer filters: a release whose tracks are all in the
+folder but at other positions, or alongside files it does not list, is a candidate in
+tier B. A release listing a track the folder lacks is rejected (§14.4).
 
 ### 14.3 Scoring
 
@@ -1524,22 +1525,31 @@ the disambiguation menu, including releases that are a close/perfect match but o
 the extraneous tracks are omitted, and releases that match all the tracks but which
 contradict other data (fingerprints, year, etc.)."*
 
-**The starting set** is every release that **includes every track of the files**,
-whatever else it says. A file's track is included in a release when the release holds
-its recording, known from the fingerprint or from the file's own `musicbrainz_trackid`
-tag (the recording id beets and Picard write), or, with neither, when a release track's
-title matches (§14.3's title class, runtimes supporting). Then each candidate is checked
-against every other class of §14.3, absent data silent, and sorted into a tier:
+**Extraneous tracks, both directions (kgr, 2026-11-27):**
+
+- **The release lists a track the folder lacks: rejected, never shown.** kgr: *"there's
+  no way to build the archive with missing audio."*
+- **The folder holds a file the release does not list: offered, with a warning.** The
+  user is told which files are not on the release and **will be excluded from the
+  archive**, kgr: *"as otherwise the archive would be a false record."* Taking such a
+  release builds the container from the release's tracks only.
+
+**The starting set** is therefore every release **all of whose tracks are in the
+folder**, whatever else it says. A release track is in the folder when a file holds its
+recording, known from the file's fingerprint or its own `musicbrainz_trackid` tag (the
+recording id beets and Picard write), or, with neither, when a file's title matches
+(§14.3's title class, runtimes supporting). Then each candidate is checked against every
+other class of §14.3, absent data silent, and sorted into a tier:
 
 | Tier | The release | Shown as |
 |---|---|---|
-| **A, match** | the files' tracks, no others, in the files' order; nothing contradicts | the match, the best-scoring one marked |
-| **B, match without its extra tracks** | every file's track, plus tracks the files lack (a deluxe or bonus-track edition), or the same tracks in another order; nothing else contradicts | "matches if tracks 10–12 are left out" / "same tracks, other order" |
-| **C, every track but contradicted** | every file's track, and some other class contradicts: a fingerprint against a tag, the year, a title, a runtime | what contradicts, per class |
+| **A, match** | exactly the folder's files, in the files' order; nothing contradicts | the match, the best-scoring one marked |
+| **B, match after leaving files out, or reordering** | its tracks are all in the folder, and the folder holds files it does not list, or the same tracks sit in another order; nothing else contradicts | "files X, Y are not on this release and will be left out of the archive" / "the files will be put in the release's order" |
+| **C, every track but contradicted** | its tracks are all in the folder, and some other class contradicts: a fingerprint against a tag, the year, a title, a runtime | what contradicts, per class (and tier B's warnings where they apply) |
 
-Within a tier, more matching classes rank first, then §10.3's ladder (`preferred_country`,
-`date`, `discogs_link`, `mbid`). Releases holding only some of the files' tracks are not
-in this set: they are §14.5's partial matches.
+The archive follows the chosen release: its tracks, in its order (the reordering is this
+document's reading, not yet confirmed by kgr). Within a tier, more matching classes rank
+first, then §10.3's ladder (`preferred_country`, `date`, `discogs_link`, `mbid`).
 
 - **Interactive:** all three tiers go to the pressing screen rips use
   (`menu_state.PressingScreen`, N5), labelled by tier; tier A's best is marked (B's when
@@ -1557,14 +1567,16 @@ in this set: they are §14.5's partial matches.
   contradiction, never applied by `--auto`. Principle 2's "matching metadata" means
   metadata nothing contradicts.
 
-### 14.5 When no release holds every track (ruled by kgr, 2026-11-27)
+### 14.5 When no release fits (ruled by kgr, 2026-11-27)
 
-A file set for which no release includes every track (a mix tape, a home compilation,
-a partial album, a file the services do not know):
+A folder for which every candidate lists a track the folder lacks, or none was found (a
+mix tape, a home compilation, a partial album, files the services do not know):
 
-- **`--auto` / no terminal:** nothing is applied; the reason is recorded.
-- **Interactive:** the closest candidates are offered, each marked as a partial match
-  with what failed, for the user to take or refuse.
+- **Nothing is applied and nothing is offered**, in either mode: every candidate would
+  need audio the folder does not have (§14.4). This replaces the earlier "offer the
+  closest as partial matches", which kgr's extraneous-tracks ruling rules out. The
+  reason is recorded (`file_match_rejected`), and the run continues as `create` does
+  today, with the metadata the menu is given.
 
 ### 14.6 Cost
 
@@ -1594,7 +1606,7 @@ silently capped at 25 (N3), and a short list reads exactly like a genuine miss.
   `--auto`).
 - **What "irreconcilable" means per class**, beyond §14.3's table: a year earlier than the
   recordings, or a runtime off by more than trimming could explain, against one that is
-  merely imprecise. Set by kgr's tests.
+  merely imprecise. kgr: to be tweaked during testing.
 - **Discogs.** `create` asks no Discogs lookup (`lookup_status_discogs=disabled`); the
   menu's `[d]` master screen is the only route, and its pick is not yet recorded in PROV
   (`create` passes the menu no provenance).
@@ -1604,6 +1616,10 @@ silently capped at 25 (N3), and a short list reads exactly like a genuine miss.
 1. rbi_spec.md: §14.7's keys.
    Then: read `musicbrainz_trackid` beside `musicbrainz_albumid` (§14.4's inclusion
    test), and move step 1 onto the tiers.
+   **Ordering consequence:** today `create` transcodes and concatenates every file before
+   anything is identified. Leaving files out and reordering (tier B) means identification
+   must come before the container's PCM and TOC are built, or they are rebuilt from the
+   kept files after the menu.
 2. Pass `create`'s provenance and candidates to the menu (the pressing screen, the
    Discogs pick's PROV), with `release_selection` recorded.
 3. Step 2: search, fetch, score (§14.3), pressing (§14.4), refusal (§14.5).
