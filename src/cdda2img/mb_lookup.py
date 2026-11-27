@@ -556,6 +556,23 @@ def lookup_release(release_id: str, disc_number: int | None = None) -> DiscMeta 
     return _parse_release(release, _disc_number=disc_number)
 
 
+def lookup_release_with_formats(
+    release_id: str, disc_number: int | None = None
+) -> tuple[DiscMeta, tuple[str, ...]] | None:
+    """:func:`lookup_release`, plus every medium's format (``"Digital Media"``,
+    ``"CD"``, ``""`` where MusicBrainz records none) from the same fetch.
+
+    For ``create`` with a release named by the files' tags: a release whose every
+    medium is digital takes the Discogs master's ``File`` versions, not its CDs.
+    Returns None on network/response error.
+    """
+    release = _fetch_release_raw(release_id)
+    if not release:
+        return None
+    formats = tuple((m.get("format") or "") for m in release.get("medium-list") or [])
+    return _parse_release(release, _disc_number=disc_number), formats
+
+
 _DISCOGS_RELEASE_RE = re.compile(r"/release/(\d+)")
 
 

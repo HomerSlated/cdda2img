@@ -927,13 +927,18 @@ def create_image(
             }
             if network_preflight is not None:
                 provenance["network_preflight"] = network_preflight
+            # Before AcoustID: its gate reads disc.mb_release_id as the selected
+            # release, and the tags are where create gets one.
+            disc, tag_meta, discogs_fmt = _apply_file_tag_release(
+                disc, batch, provenance, check_durations=silence_mode != "trim"
+            )
             disc = _r6_acoustid_corroborate_wavs(disc, source_wavs, provenance)
 
             # Identify the original release before the menu so the user
             # sees "Original: <title> (<year>)" in the initial summary.
             from cdda2img.original_release import populate_original_release
 
-            populate_original_release(disc)
+            populate_original_release(disc, verify_meta=tag_meta, provenance=provenance)
 
             import sys
 
@@ -966,7 +971,11 @@ def create_image(
             else:
                 print(f"   Metadata: {match_dist.summary()}")
             disc = run_metadata_menu(
-                disc, source_wavs=source_wavs, tui=tui, auto_apply=auto_apply
+                disc,
+                source_wavs=source_wavs,
+                tui=tui,
+                auto_apply=auto_apply,
+                discogs_fmt=discogs_fmt,
             )
             # N6, and deliberately symmetric with `_finalize_import` rather than
             # skipped. `create` passes no `provenance=` to the menu, so
@@ -1938,6 +1947,53 @@ def _r6_acoustid_corroborate(
     return _r6_tally_and_merge(
         per_track_hits, disc, provenance, selected_release_id=selected_release_id
     )
+
+
+def _apply_file_tag_release(
+    disc: RBIDisc,
+    batch: list[Path],
+    provenance: dict[str, str],
+    *,
+    check_durations: bool,
+) -> tuple[RBIDisc, DiscMeta | None, str]:
+    """``create``: identify the release the source files' tags name (kgr,
+    2026-11-27; rbi_spec.md ``file_tag_release``).
+
+    Reads only the MBID from the tags, fetches the release, checks it against
+    the disc as built with R3 and, when it passes, overwrites the disc with it
+    (titles included: ``create``'s titles are filename stems until then). The
+    track geometry is never touched. *check_durations* is False under
+    ``--silence trim``, which replaces every gap, so the durations are ours.
+
+    Returns the disc, the fetched release (for the original-release lookup's
+    verify, or None) and the Discogs format the menu's master screen lists:
+    ``File`` when MusicBrainz calls every medium ``Digital Media``, else ``CD``.
+    """
+    from cdda2img.mb_lookup import _overwrite_disc, lookup_release_with_formats
+    from cdda2img.metadata import read_file_tag_release
+    from cdda2img.original_release import _r3_reject_reason
+
+    tagged = read_file_tag_release(batch)
+    if tagged.state is None:
+        return disc, None, "CD"
+    provenance["file_tag_release"] = tagged.state
+    if tagged.release_id is None:
+        return disc, None, "CD"
+    fetched = lookup_release_with_formats(tagged.release_id, tagged.disc_number)
+    if fetched is None:
+        provenance["file_tag_release_check"] = "unanswered"
+        return disc, None, "CD"
+    meta, formats = fetched
+    why = _r3_reject_reason(meta, disc, check_durations=check_durations)
+    if why is not None:
+        provenance["file_tag_release_check"] = f"rejected:{why}"
+        return disc, None, "CD"
+    provenance["file_tag_release_check"] = (
+        "applied" if check_durations else "applied:no_durations"
+    )
+    provenance["mb_identified_via"] = "file_tags"
+    digital = bool(formats) and all(f == "Digital Media" for f in formats)
+    return _overwrite_disc(meta, disc), meta, "File" if digital else "CD"
 
 
 def _r6_acoustid_corroborate_wavs(

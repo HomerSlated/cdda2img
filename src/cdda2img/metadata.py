@@ -2,7 +2,9 @@
 metadata.py — Derive album and artist metadata from audio files or a tracklist.
 """
 
+import re
 from pathlib import Path
+from typing import NamedTuple
 
 from mutagen import File  # type: ignore[import-untyped]  # LINT-004
 
@@ -89,3 +91,65 @@ def _confirm(prompt: str, default: str) -> str:
         if response == "e":
             return input(f"Enter {prompt}: ").strip()
         print("Please enter 'a' to accept or 'e' to edit.")
+
+
+_MBID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
+
+
+class FileTagRelease(NamedTuple):
+    """The MusicBrainz release the source files' tags name (rbi_spec.md
+    ``file_tag_release``).
+
+    *state* is ``None`` when no file carries the tag, ``"mixed"`` when the files
+    disagree (or only some carry it), ``"invalid"`` when the one value is not a
+    UUID, else the MBID itself, which is then also *release_id*. *disc_number* is
+    the files' common ``DISCNUMBER``, or ``None`` when they do not share one.
+    """
+
+    release_id: str | None
+    state: str | None
+    disc_number: int | None
+
+
+def _first_tag(audio, key: str) -> str | None:
+    value = audio.get(key) if audio else None
+    if not value:
+        return None
+    text = (value[0] if isinstance(value, list) else str(value)).strip()
+    return text or None
+
+
+def _disc_number(text: str | None) -> int | None:
+    m = re.match(r"\s*(\d+)", text or "")
+    return int(m.group(1)) if m else None
+
+
+def read_file_tag_release(tracks: list[Path]) -> FileTagRelease:
+    """Read the MusicBrainz release id (``musicbrainz_albumid``) from every file.
+
+    Only the id is read: the release is fetched from MusicBrainz, so a tagger's
+    copies of the barcode, label and the rest never reach the container. The id
+    counts only when **every** file names the same one: a batch whose files name
+    different releases, or where some name none, is not one release's tracks.
+    mutagen's easy interface maps the name onto Vorbis comments, ID3 ``TXXX`` and
+    MP4 freeform atoms alike.
+    """
+    ids: list[str | None] = []
+    discs: list[int | None] = []
+    for track in tracks:
+        try:
+            audio = File(str(track), easy=True)
+        except Exception:
+            audio = None
+        mbid = _first_tag(audio, "musicbrainz_albumid")
+        ids.append(mbid.lower() if mbid else None)
+        discs.append(_disc_number(_first_tag(audio, "discnumber")))
+    if not any(ids):
+        return FileTagRelease(None, None, None)
+    if len(set(ids)) != 1:
+        return FileTagRelease(None, "mixed", None)
+    mbid = ids[0] or ""  # never empty: any(ids) and one distinct value
+    if not _MBID_RE.match(mbid):
+        return FileTagRelease(None, "invalid", None)
+    disc = discs[0] if len(set(discs)) == 1 else None
+    return FileTagRelease(mbid, mbid, disc)

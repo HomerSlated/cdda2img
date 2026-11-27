@@ -436,6 +436,16 @@ Files are grouped into CD\-sized batches (up to 99 tracks, up to 80 minutes)
 according to the chosen batching strategy.
 Each track is transcoded to Red Book PCM (44100\~Hz, 16\-bit, stereo) via PyAV.
 .PP
+When every file of a disc names the same MusicBrainz release in its tags
+(\fBMUSICBRAINZ_ALBUMID\fR, as MusicBrainz Picard writes it), that release
+is fetched from MusicBrainz, checked against the files (track count, total
+duration, titles; the duration check is skipped under
+\fB\-\-silence trim\fR, which replaces every gap) and, if it fits, applied:
+titles, ISRCs, barcode, label, catalogue number, country and dates come from
+MusicBrainz, never from the other tags.
+A release MusicBrainz calls \fIDigital Media\fR makes the menu's Discogs
+screen list the master's File versions instead of its CDs.
+.PP
 .BI "cdda2img create " "[options] INPUT_DIR"
 .TP
 .BI \-\-silence " {trim|notrim}"
