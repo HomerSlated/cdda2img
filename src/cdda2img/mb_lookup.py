@@ -410,6 +410,7 @@ def _parse_release(
                     isrc=isrcs[0] if isrcs else None,
                     duration_ms=int(length) if length else None,
                     isrcs=isrcs,
+                    recording_id=recording.get("id") or None,
                 )
             )
 

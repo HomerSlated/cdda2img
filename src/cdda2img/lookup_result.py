@@ -21,6 +21,9 @@ class TrackMeta:
     # Queen": five), so a disc ISRC agrees when it is ANY of them. Comparing
     # against ``isrc`` alone rejected a burned copy of our own archive.
     isrcs: tuple[str, ...] = ()
+    # The MusicBrainz recording id: what a fingerprint or a file's
+    # musicbrainz_trackid tag names (create's file match, trust_model_design §14).
+    recording_id: str | None = None
 
 
 @dataclass

@@ -3,6 +3,7 @@ metadata.py — Derive album and artist metadata from audio files or a tracklist
 """
 
 import re
+from dataclasses import dataclass
 from pathlib import Path
 from typing import NamedTuple
 
@@ -153,3 +154,105 @@ def read_file_tag_release(tracks: list[Path]) -> FileTagRelease:
         return FileTagRelease(None, "invalid", None)
     disc = discs[0] if len(set(discs)) == 1 else None
     return FileTagRelease(mbid, mbid, disc)
+
+
+# ── create's file match (trust_model_design.md §14) ────────────────────────────
+
+#: A leading track number in a file name ("01 Another World", "1-Track", "03_x").
+#: The same shape ``create`` strips from its raw titles.
+LEADING_NUMBER = re.compile(r"^(\d{1,3})[-. _]+")
+
+
+@dataclass(frozen=True)
+class FileTags:
+    """One file as the file match sees it, from its tags and its name."""
+
+    path: Path
+    title: str | None  # the title tag, else the name without its leading number
+    tracknumber: int | None  # the track-number tag
+    name_number: int | None  # the file name's leading number
+    recording_id: str | None  # musicbrainz_trackid (the recording, despite the name)
+
+
+@dataclass(frozen=True)
+class AlbumTags:
+    """Album-level tags every file that carries them agrees on (else ``None``)."""
+
+    album: str | None = None
+    artist: str | None = None
+    date: str | None = None
+    originaldate: str | None = None
+    barcode: str | None = None
+    catalognumber: str | None = None
+    label: str | None = None
+    country: str | None = None
+
+
+_ALBUM_TAG_KEYS: dict[str, tuple[str, ...]] = {
+    "album": ("album",),
+    "artist": ("albumartist", "album artist", "album_artist", "artist"),
+    "date": ("date", "year"),
+    "originaldate": ("originaldate",),
+    "barcode": ("barcode",),
+    "catalognumber": ("catalognumber",),
+    "label": ("label", "publisher", "organization"),
+    "country": ("releasecountry",),
+}
+
+
+def _any_tag(audio, keys: tuple[str, ...]) -> str | None:
+    for key in keys:
+        value = _first_tag(audio, key)
+        if value:
+            return value
+    return None
+
+
+def read_file_tracks(tracks: list[Path]) -> tuple[list[FileTags], AlbumTags]:
+    """Every file's own tags, and the album-level tags they agree on.
+
+    An album-level value counts only when no two files that state it disagree:
+    one file's stray date is not the album's.
+    """
+    files: list[FileTags] = []
+    album_values: dict[str, set[str]] = {k: set() for k in _ALBUM_TAG_KEYS}
+    for track in tracks:
+        try:
+            audio = File(str(track), easy=True)
+        except Exception:
+            audio = None
+        stem = track.stem
+        m = LEADING_NUMBER.match(stem)
+        name_number = int(m.group(1)) if m else None
+        stem_title = (LEADING_NUMBER.sub("", stem).strip() if m else stem) or None
+        rec = _first_tag(audio, "musicbrainz_trackid")
+        rec = rec.lower() if rec and _MBID_RE.match(rec.lower()) else None
+        files.append(
+            FileTags(
+                path=track,
+                title=_first_tag(audio, "title") or stem_title,
+                tracknumber=_disc_number(_first_tag(audio, "tracknumber")),
+                name_number=name_number,
+                recording_id=rec,
+            )
+        )
+        for name, keys in _ALBUM_TAG_KEYS.items():
+            value = _any_tag(audio, keys)
+            if value:
+                album_values[name].add(value)
+    album = AlbumTags(**{
+        k: next(iter(v)) if len(v) == 1 else None for k, v in album_values.items()
+    })
+    return files, album
+
+
+def files_order(files: list[FileTags]) -> list[int]:
+    """The files' own order, as indices into *files* (trust_model_design.md §14.4):
+    their track-number tags when every file has a distinct one, else their names'
+    leading numbers on the same terms, else the order given (``create`` sorts by
+    name). Never the batch position alone: a batching strategy may reorder files."""
+    for key in ("tracknumber", "name_number"):
+        numbers = [getattr(f, key) for f in files]
+        if all(n is not None for n in numbers) and len(set(numbers)) == len(numbers):
+            return sorted(range(len(files)), key=lambda i: numbers[i])
+    return list(range(len(files)))
