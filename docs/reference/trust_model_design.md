@@ -1425,3 +1425,155 @@ aborts is OPEN (§13.9 Q2).
   is a listed row. `[x]` now records the album only: the pressing, its fields and the
   Discogs release linked from it are dropped, no pressing is derived from a Discogs pick,
   and the master screen reopens for the user's Discogs pick.
+
+## 14. Identifying an album from loose files (DECIDED 2026-11-27, not yet built)
+
+kgr, 2026-11-27: *"For loose media files, we're going to need to use a different method
+to match on MB. If there's matching metadata, just trust it and use it. If not, we'll need
+to use things like album title, artist name, track names, track and total runtimes
+(bearing in mind the files may have been trimmed of silence), etc. Maybe combine both
+(metadata and media info) if available, as a double verification. Then pick the closest
+match, or present the same disambiguation screen we use for rips, so the user can
+choose."* This section is `create`'s identification. A rip identifies a *disc* (§10, §12,
+§13); `create` identifies an *album* from files, and a pressing only when the files' tags
+name one.
+
+### 14.0 The cases that forced it
+
+- **Joe Jackson, *Night and Day*** (2026-11-27). FLACs tagged by beets from MusicBrainz
+  release `e7ec55d9` (DE 1985, barcode `082839490627`, `394 906-2`). `create` read only
+  album and artist from the tags, so the release was unknown and the summary read
+  "Original: Unknown, unknown release (unknown year)". Reading the release id from the
+  tags (built the same evening: PROV `file_tag_release`, `file_tag_release_check`) fixed
+  it. The files are sector-aligned (every track a whole number of 588-sample sectors),
+  so a TOC was rebuilt from them and hashed into a disc ID; MusicBrainz has no such disc
+  ID. Compared track by track, one of the release's own 8 TOCs (`ozjYbefR…`) is the same
+  disc read differently: track 1 145 sectors longer, five boundaries one sector apart, the
+  span from track 2 to the lead-out identical (171345 sectors). The fuzzy TOC lookup
+  returned 15 releases of the album's group. **Rebuilding a TOC from files is abandoned**
+  (§14.1, principle 1).
+- **A folder with no tags and meaningless file names** (kgr's next test): nothing to
+  search with until the audio itself is identified, by AcoustID.
+
+### 14.1 Principles (kgr, 2026-11-27)
+
+1. **No TOC from loose files.** A rebuilt TOC rests on assumptions about how the files
+   were ripped (track 1 at LBA 0, every gap appended to the track before it, no data
+   track) that nothing in the files can verify. kgr: *"without a detailed rip log, there's
+   no way to be sure about things like pre-gaps and the LBA start position"*, and with
+   such a log the disc ID would be stored, not computed. So no disc ID, exact or fuzzy, is
+   computed or looked up for `create`.
+2. **Matching metadata is trusted.** A release the tags name, checked against the files
+   (track count, titles, total runtime: R3), is used, pressing included (§14.2 step 1).
+3. **Otherwise identify from what the files are**: album, artist, track titles, per-track
+   and total runtimes, fingerprints.
+4. **Both, where both exist**: tags and fingerprints as a double check.
+5. **The files cannot tell pressings apart.** Only the tags can name a pressing. Every
+   other path identifies the album (release group) and leaves the pressing to the user
+   (§14.4).
+6. §13.1's rules carry over: a contradiction between present, normalised values
+   rejects; absence is silent.
+
+### 14.2 The cascade, per disc (batch)
+
+1. **The tags name a MusicBrainz release** (`musicbrainz_albumid`, every file the same;
+   BUILT 2026-11-27). Fetch it, check it with R3 (the duration gate off under
+   `--silence trim`), apply it. AcoustID, where it runs, corroborates (§10.4's
+   `acoustid_corroborates`, which reads the release this step set).
+2. **The tags carry album, artist or titles, but no release id.** Search MusicBrainz by
+   album and artist; keep candidates with the files' track count; fetch them in full
+   (capped, like stage 7's `_DURATION_MATCH_MAX_FETCH`) and score each by §14.3.
+   The best-scoring **release group** is the album.
+3. **No usable tags.** Fingerprint **every** track (today `create` fingerprints tracks 1
+   and ceil(N/2), to corroborate only). Each track gives a set of candidate releases;
+   keep those that contain **every** track's recording **at that track's position**, with
+   the files' track count. Position is what separates the album from a compilation
+   holding the same recordings. The survivors' release group is the album, which then
+   supplies album, artist and titles, and §14.3 scores the candidates as in step 2.
+
+Steps 2 and 3 combine where both apply: a step-2 candidate that the fingerprints
+contradict (a track's recording absent from that release, or at another position) is
+rejected.
+
+### 14.3 Scoring
+
+Evidence classes, each recorded in PROV when it matched or contradicted, so a miss shows
+which one to tune (§13.3's rule: a list of classes and one threshold, not a formula).
+
+| Class | Matches when | Contradicts when |
+|---|---|---|
+| track count | equal | different (hard reject) |
+| recording at position (fingerprints) | every track | any fingerprinted track's recording absent, or at another position |
+| track titles | aggregate fuzzy ≥ 80 (R3's cutoff) | below it |
+| per-track runtimes | each within ±3 s | any beyond ±10 s (supporting only when the files may have been trimmed before they reached us: never a contradiction alone) |
+| total runtime | within R3's track-count-scaled tolerance | beyond 15 s (stage 7's tolerance) |
+| album, artist | fuzzy ≥ 88 (`reference_original_release_research`: rapidfuzz @ 88) | supporting only |
+
+Runtimes are measured from the transcoded files **before** our own `--silence trim`, so
+our trimming never moves them; a source trimmed before it reached us is why runtimes
+support but do not reject. The thresholds are starting values, to be set by kgr's tests.
+
+### 14.4 The pressing (ruled by kgr, 2026-11-27: "Yes to both")
+
+- **Interactive:** the album's releases go to the pressing screen rips use
+  (`menu_state.PressingScreen`, N5), every candidate shown, the best-scoring one marked
+  (ties broken by §10.3's ladder: `preferred_country`, `date`, `discogs_link`, `mbid`).
+  Leaving the mark in place accepts it (`release_selection=accepted`, §13); `[x]`
+  records the album only (`rejected`).
+- **`--auto`, or no terminal: the release group only** (as §13.5), whenever the album has
+  more than one candidate release. The files cannot choose, so "closest" would be the
+  tie-break's choice. `mb_release_id` is not written, `mb_release_group_id` is, and the
+  pressing fields are kept only where every candidate states them alike
+  (`_release_group_only`). A single candidate release is kept (`unique`).
+- **Step 1 (tags) is the exception**: the tagged release is the pressing, trusted
+  (principle 2).
+
+### 14.5 When nothing matches fully (ruled by kgr, 2026-11-27)
+
+A file set for which no release contains every track in position (a mix tape, a home
+compilation, a partial album):
+
+- **`--auto` / no terminal:** nothing is applied; the reason is recorded.
+- **Interactive:** the closest candidates are offered, each marked as a partial match
+  with what failed, for the user to take or refuse.
+
+### 14.6 Cost
+
+AcoustID allows 3 requests a second; MusicBrainz 1, and on 2026-11-25..27 it turned away
+about a third of them (`reference_mb_global_503`). Step 3's MusicBrainz cost is the
+per-recording release browse (`acoustid_lookup._browse_releases_for_recording`, paged):
+30 or more requests for a 12-track album. AcoustID can return each recording's releases
+and track positions itself (`meta=releases+tracks`), which would remove that cost.
+**Measure its completeness first**: the MusicBrainz embedded list it would replace was
+silently capped at 25 (N3), and a short list reads exactly like a genuine miss.
+
+### 14.7 Container and PROV
+
+- `mb_identified_via` gains `file_search` (step 2) and `fingerprints` (step 3), beside
+  `file_tags` (step 1).
+- `create` writes `release_selection` (§14.4's values); rbi_spec.md's "absent on the
+  `create` pipeline" changes, and `mb_release_id`'s absent-when list gains `create`.
+- `file_match=<class>:<result>,…` records §14.3's evidence for the chosen release;
+  `file_match_rejected=<reason>` for §14.5's automatic refusal.
+- rbi_spec.md first, as always.
+
+### 14.8 Open
+
+- **The double check failing.** Tags name a release and the fingerprints contradict it
+  (a track's recording absent from it). Proposed: reject the tagged release and fall to
+  step 3, recording both. Not yet ruled.
+- **Discogs.** `create` asks no Discogs lookup (`lookup_status_discogs=disabled`); the
+  menu's `[d]` master screen is the only route, and its pick is not yet recorded in PROV
+  (`create` passes the menu no provenance).
+
+### 14.9 Build sequence
+
+1. rbi_spec.md: §14.7's keys.
+2. Pass `create`'s provenance and candidates to the menu (the pressing screen, the
+   Discogs pick's PROV), with `release_selection` recorded.
+3. Step 2: search, fetch, score (§14.3), pressing (§14.4), refusal (§14.5).
+4. Measure AcoustID's `meta=releases` completeness against the MusicBrainz browse.
+5. Step 3: fingerprint every track, positions, then step 2's scoring.
+6. Tests per class, each with a negative control; FLOOR.
+7. kgr's runs: *Night and Day* (step 1), a tagged album without ids (step 2), the
+   untagged folder (step 3), and a digital release (File versions on `[d]`).

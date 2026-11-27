@@ -2,6 +2,16 @@
 
 ## Open
 
+### 🔨 NEXT — `create`: identify an album from loose files (kgr, 2026-11-27)
+
+Design: `trust_model_design.md` §14 (DECIDED, not built). Step 1 (the release the tags
+name) is BUILT; steps 2 (search by album, artist, titles and runtimes) and 3 (no tags:
+fingerprint every track, then match recordings by position) are the work, with the
+pressing settled by the rip's pressing screen interactively and the release group only
+under `--auto`. No TOC or disc ID is ever rebuilt from loose files (§14.1). Build sequence
+§14.9; open question §14.8 (tags contradicted by fingerprints). kgr's next test is a
+folder with no tags and meaningless file names.
+
 ### 📋 QUEUED — Replace musicbrainzngs with our own MusicBrainz JSON client (kgr, 2026-11-26)
 
 **Not before 2026-12-03** (kgr: wait a week, to let MusicBrainz's search-service changes
