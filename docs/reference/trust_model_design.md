@@ -1782,3 +1782,14 @@ refused by `_check_batch_limits` rather than split. Live: Platinum identified as
 by album (per-batch identification is gone). **`--strategy` (kgr, same night):** kept, but
 with no release its containers are the user's own compilations, not archives of a release,
 so formal identification there is pointless; to be redesigned (TODO).
+
+**The album is the release's title, always (kgr, 2026-11-28, option 1 of three).** The
+Platinum run then archived disc 1 as "The Best of David Bowie 1969/1974": MusicBrainz
+titles each medium, and `_parse_release` had made a medium's own title the album, with
+the release title as `set_title`. Now the medium title is the disc's (`disc_title`, PROV
+and menu) and the album is the release's, for `rip` as for `create`. The cost, accepted:
+a box of whole albums (ZZ Top's *The Complete Studio Albums*) archives each disc under the
+box's title, with the album it holds as the disc title. The same run named a container
+"…1969/1974_disc1.rbi", a path into a missing directory; derived output names now replace
+a path separator with "-". And `create`'s confidence line named its evidence `mb_disc_id`
+though no disc ID was looked up: it is `file_match` now.

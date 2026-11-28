@@ -383,6 +383,9 @@ class RBIDisc:
     set_title: str | None = (
         None  # box set / release title when medium has its own album title
     )
+    # The disc's own title (a medium title differing from the release title;
+    # kgr, 2026-11-28: the album is the release title, always). PROV only.
+    disc_title: str | None = None
     # R14: aggregate disc-level pre-emphasis flag. True = at least one track
     # has the CONTROL bit set. None = not captured (pre-R14 containers,
     # parsers that don't propagate it). Used as a year upper-bound (≤ 1986)

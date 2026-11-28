@@ -468,3 +468,19 @@ def test_the_metadata_lines_start_in_the_rip_headers_column(capsys) -> None:
     out = capsys.readouterr().out
     assert out.startswith(indent + "Metadata after your review")
     assert not out.startswith(indent + " ")
+
+
+def test_create_s_file_match_is_named_as_such() -> None:
+    """kgr's run, 2026-11-28: create looks up no disc ID, yet the confidence line
+    read "(mb_disc_id + acoustid)"."""
+    from cdda2img.match_distance import build_match_distance
+    from cdda2img.rbi_format import RBIDisc
+
+    disc = RBIDisc(album="A", artist="B", mb_release_id="x")
+    md = build_match_distance(
+        disc, {"mb_identified_via": "file_match", "acoustid_corroborates": "YES"}
+    )
+    assert set(md.contributors) == {"file_match", "acoustid"}
+    assert md.score == 0.75
+    # The control: a rip's unique disc-ID match keeps its name.
+    assert "mb_disc_id" in build_match_distance(disc, {}).contributors

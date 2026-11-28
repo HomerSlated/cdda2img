@@ -1043,6 +1043,8 @@ def _print_provenance(provenance: dict[str, str]) -> None:
         print(f"Drive:     {drive_name}  (offset {offset_str})")
     if set_title := provenance.get("set_title"):
         print(f"Set:       {set_title}")
+    if disc_title := provenance.get("disc_title"):
+        print(f"Disc:      {disc_title}")
     if ldr := provenance.get("low_dynamic_range"):
         print(f"Low DR:    {ldr}")
     if line := _release_intelligence_line(provenance):

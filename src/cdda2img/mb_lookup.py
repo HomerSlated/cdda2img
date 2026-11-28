@@ -301,7 +301,7 @@ def _resolve_matched_mediums(
     disc_id: str | None,
     disc_number_hint: int | None,
 ) -> tuple[list[dict], int | None, str | None, str | None]:
-    """Return (mediums, disc_number, album_title, set_title) for the best-matching medium.
+    """Return (mediums, disc_number, album_title, disc_title) for the best-matching medium.
 
     Selects by disc-id when available, then by position hint, then falls back to
     returning all mediums flat (single-disc releases or stub results).
@@ -319,11 +319,13 @@ def _resolve_matched_mediums(
     pos = int(matched.get("position") or 0)
     disc_number = pos or None
     medium_title = matched.get("title") or ""
-    set_title: str | None = None
-    if medium_title and medium_title != album_title:
-        set_title = album_title
-        album_title = medium_title
-    return [matched], disc_number, album_title, set_title
+    # kgr, 2026-11-28: the album is the RELEASE's title, always; a medium's own
+    # title is that disc's title (returned in the fourth slot, ``disc_title``).
+    # Until then the medium title became the album and the release title the
+    # "set", so The Platinum Collection's disc 1 was archived as "The Best of
+    # David Bowie 1969/1974".
+    disc_title = medium_title if medium_title and medium_title != album_title else None
+    return [matched], disc_number, album_title, disc_title
 
 
 def _parse_track_number(track: dict) -> int | None:
@@ -375,7 +377,7 @@ def _parse_release(
     total = int(release.get("medium-count") or 0)
     disc_total: int | None = total or None
     album_title: str | None = release.get("title") or None
-    matched_mediums, disc_number, album_title, set_title = _resolve_matched_mediums(
+    matched_mediums, disc_number, album_title, disc_title = _resolve_matched_mediums(
         medium_list, album_title, _disc_id, _disc_number
     )
 
@@ -448,7 +450,7 @@ def _parse_release(
         ),
         disc_number=disc_number,
         disc_total=disc_total,
-        set_title=set_title,
+        disc_title=disc_title,
         source="musicbrainz",
         # N5: pressing-identifying free text. `disambiguation` needs no include;
         # `annotation` arrives as {"text": ...} and only when the caller asked
@@ -1254,6 +1256,7 @@ def _merge_into_disc(meta: DiscMeta, disc: RBIDisc) -> RBIDisc:
         or None,
         discogs_release_id=disc.discogs_release_id or meta.discogs_release_id,
         set_title=disc.set_title or meta.set_title,
+        disc_title=disc.disc_title or meta.disc_title,
     )
 
 
@@ -1319,6 +1322,7 @@ def _overwrite_disc(meta: DiscMeta, disc: RBIDisc) -> RBIDisc:
         or None,
         discogs_release_id=meta.discogs_release_id or disc.discogs_release_id,
         set_title=meta.set_title or disc.set_title,
+        disc_title=meta.disc_title or disc.disc_title,
     )
 
 

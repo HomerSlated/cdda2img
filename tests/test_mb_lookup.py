@@ -523,10 +523,15 @@ _MOCK_BOXSET_RELEASE = {
 
 
 def test_parse_release_multi_disc_matching():
-    """disc-list match sets disc_number, disc_total, set_title, and filters tracks."""
+    """disc-list match sets disc_number, disc_total, disc_title, and filters tracks.
+
+    kgr, 2026-11-28: the album is the release's title, always; the medium's own
+    title is the disc's (it was the album, with the release as the "set", until
+    The Platinum Collection's disc 1 was archived as one of its compilations)."""
     meta = _parse_release(_MOCK_BOXSET_RELEASE, _disc_id="TARGET_DISC_ID")
-    assert meta.album == "Eliminator"
-    assert meta.set_title == "The Complete Studio Albums"
+    assert meta.album == "The Complete Studio Albums"
+    assert meta.disc_title == "Eliminator"
+    assert meta.set_title is None
     assert meta.disc_number == 8
     assert meta.disc_total == 10
     assert len(meta.tracks) == 1
@@ -539,7 +544,7 @@ def test_parse_release_multi_disc_no_match_falls_back():
     meta = _parse_release(_MOCK_BOXSET_RELEASE, _disc_id="NONEXISTENT_ID")
     assert meta.disc_number is None
     assert meta.disc_total == 10  # medium-count always populated
-    assert meta.set_title is None
+    assert meta.set_title is None and meta.disc_title is None
     assert meta.album == "The Complete Studio Albums"
     assert len(meta.tracks) == 2  # both mediums flattened
 
@@ -632,8 +637,8 @@ def test_lookup_disc_id_populates_disc_position():
         results = lookup_disc_id(disc)
     assert len(results) == 1
     r = results[0]
-    assert r.album == "Eliminator"
-    assert r.set_title == "The Complete Studio Albums"
+    assert r.album == "The Complete Studio Albums"  # kgr, 2026-11-28
+    assert r.disc_title == "Eliminator"
     assert r.disc_number == 8
     assert r.disc_total == 10
 
@@ -2729,3 +2734,28 @@ def test_the_reverse_link_404_is_an_answer_and_a_failure_is_not():
         "musicbrainzngs.browse_urls", side_effect=musicbrainzngs.NetworkError("x")
     ):
         assert mb_releases_linking_discogs(5222631) is None
+
+
+def test_a_medium_title_is_the_disc_s_not_the_album_s() -> None:
+    """The Platinum Collection, 2026-11-28: disc 1 is titled "The Best of David
+    Bowie 1969/1974" in MusicBrainz, and was archived under that as the album."""
+    release = {
+        "title": "The Platinum Collection",
+        "medium-count": 3,
+        "medium-list": [
+            {
+                "position": "1",
+                "title": "The Best of David Bowie 1969/1974",
+                "track-list": [],
+            },
+            {"position": "2", "title": "", "track-list": []},
+        ],
+    }
+    one = _parse_release(release, _disc_number=1)
+    assert (one.album, one.disc_title, one.set_title) == (
+        "The Platinum Collection",
+        "The Best of David Bowie 1969/1974",
+        None,
+    )
+    two = _parse_release(release, _disc_number=2)  # an untitled medium
+    assert (two.album, two.disc_title) == ("The Platinum Collection", None)

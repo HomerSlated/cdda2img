@@ -752,6 +752,8 @@ def _add_release_provenance(provenance: dict, disc: RBIDisc) -> None:  # noqa: C
         provenance["discogs_master_id"] = str(disc.discogs_master_id)
     if disc.set_title:
         provenance["set_title"] = disc.set_title
+    if disc.disc_title:
+        provenance["disc_title"] = disc.disc_title
     # R14: aggregate pre-emphasis flag (cdrdao path populates; other parsers
     # leave None and the key is omitted).
     if disc.pre_emphasis is not None:

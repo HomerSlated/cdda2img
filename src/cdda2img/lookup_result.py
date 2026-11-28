@@ -49,6 +49,10 @@ class DiscMeta:
         None  # 1-based position in a multi-disc set; None = unknown
     )
     disc_total: int | None = None  # total discs in set; None = unknown
+    #: A medium's own title, when MusicBrainz gives it one that differs from the
+    #: release's (kgr, 2026-11-28: the album is the release title; this is the
+    #: disc's). Replaces ``set_title`` for new lookups.
+    disc_title: str | None = None
     set_title: str | None = (
         None  # box set / release title when disc has its own album title
     )

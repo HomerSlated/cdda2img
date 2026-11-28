@@ -282,8 +282,7 @@ def combine(media: Sequence[DiscMeta]) -> DiscMeta:
     return replace(
         media[0],
         tracks=[replace(t, number=k) for k, t in enumerate(tracks, start=1)],
-        album=media[0].set_title or media[0].album,
-        set_title=None,
+        disc_title=None,
         disc_number=None,
         disc_total=len(media),
     )

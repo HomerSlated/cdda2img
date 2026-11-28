@@ -135,6 +135,8 @@ def _print_disc_summary(disc: RBIDisc, *, reserve: int = 15) -> None:
     ]
     if disc.set_title:
         header.append(f"  {'Set:':<15}{disc.set_title}")
+    if disc.disc_title:
+        header.append(f"  {'Disc title:':<15}{disc.disc_title}")
     if disc.disc_total > 1 or disc.disc_number != 1:
         header.append(f"  {'Disc:':<15}{disc.disc_number} of {disc.disc_total}")
     if disc.low_dynamic_range is not None:
@@ -181,6 +183,8 @@ def _print_meta_summary(meta: DiscMeta) -> None:
     print(f"  Album:         {meta.album or '(none)'}")
     if meta.set_title:
         print(f"  Set:           {meta.set_title}")
+    if meta.disc_title:
+        print(f"  Disc title:    {meta.disc_title}")
     if meta.disc_total is not None:
         disc_pos = f"{meta.disc_number}" if meta.disc_number is not None else "?"
         print(f"  Disc:          {disc_pos} of {meta.disc_total}")

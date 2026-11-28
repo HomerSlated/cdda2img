@@ -57,12 +57,39 @@ class MatchDistance:
         return f"{self.recommendation.value} match, confidence {self.score:.2f} ({sources})"
 
 
+def _release_contributor(
+    disc: RBIDisc, prov: dict[str, str]
+) -> tuple[str, float] | None:
+    """How the release was identified, and its weight; None without a release."""
+    if not disc.mb_release_id:
+        return None
+    if prov.get("mb_identified_via") in ("file_tags", "file_match"):
+        # create's file match (trust_model_design.md §14): a tier-A release every
+        # file was found on. No disc ID was looked up, and naming it mb_disc_id
+        # said one was (kgr's run, 2026-11-28). Same weight.
+        return "file_match", 0.50
+    if "duration_match_release" in prov:
+        # Came from text+duration fuzzy — lowest-confidence MB path
+        return "mb_duration_match", 0.20
+    if prov.get("release_selected_via"):
+        # §10.3: the disc-ID fingerprint matched MB but several pressings
+        # tied; the lexicographic rung picked one by preference/date. The
+        # album/master is identified, but the *specific pressing* is a best
+        # guess — so this must NOT reach STRONG auto-apply on its own; the
+        # user should see the menu to confirm the pressing. Weaker than a
+        # unique disc-ID hit (0.50), stronger than a duration fuzzy (0.20).
+        return "mb_disc_id_multi", 0.30
+    # Came from a unique disc-ID fingerprint — deterministic, strong
+    return "mb_disc_id", 0.50
+
+
 def build_match_distance(disc: RBIDisc, prov: dict[str, str]) -> MatchDistance:
     """Compute a confidence score from the post-lookup disc and provenance.
 
     Contributors (additive, then clamped to [0, 1]):
 
     +0.50  mb_disc_id          — MB release_id from a unique disc-ID fingerprint (strong)
+    +0.50  file_match          — create: the release the file match chose (§14)
     +0.30  mb_disc_id_multi    — disc-ID matched several pressings; rung pinned one (§10.3)
     +0.20  mb_duration_match   — MB release_id from text+duration fuzzy (weaker signal)
     +0.25  acoustid            — AcoustID corroborates the MB release (R6)
@@ -70,22 +97,9 @@ def build_match_distance(disc: RBIDisc, prov: dict[str, str]) -> MatchDistance:
     -0.10  cddb_mb_disagreement — CDDB and MB disagree on album / artist (R9)
     """
     contributors: dict[str, float] = {}
-
-    if disc.mb_release_id:
-        if "duration_match_release" in prov:
-            # Came from text+duration fuzzy — lowest-confidence MB path
-            contributors["mb_duration_match"] = 0.20
-        elif prov.get("release_selected_via"):
-            # §10.3: the disc-ID fingerprint matched MB but several pressings
-            # tied; the lexicographic rung picked one by preference/date. The
-            # album/master is identified, but the *specific pressing* is a best
-            # guess — so this must NOT reach STRONG auto-apply on its own; the
-            # user should see the menu to confirm the pressing. Weaker than a
-            # unique disc-ID hit (0.50), stronger than a duration fuzzy (0.20).
-            contributors["mb_disc_id_multi"] = 0.30
-        else:
-            # Came from a unique disc-ID fingerprint — deterministic, strong
-            contributors["mb_disc_id"] = 0.50
+    release = _release_contributor(disc, prov)
+    if release is not None:
+        contributors[release[0]] = release[1]
 
     if prov.get("acoustid_corroborates") == "YES":
         contributors["acoustid"] = 0.25
