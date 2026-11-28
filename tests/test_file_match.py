@@ -207,16 +207,17 @@ def test_unattended_decisions() -> None:
 
 
 def _ft(name: str, tracknumber: int | None, name_number: int | None) -> FileTags:
-    return FileTags(Path(name), name, tracknumber, name_number, None)
+    return FileTags(Path(name), name, tracknumber, None, name_number=name_number)
 
 
-def test_files_order_takes_track_numbers_then_names() -> None:
+def test_files_order_takes_track_number_tags_only() -> None:
     by_tag = [_ft("a", 2, 1), _ft("b", 1, 2)]
-    assert files_order(by_tag) == [1, 0]
+    assert files_order(by_tag) == ([1, 0], True)
+    # Names never give an order (kgr, 2026-11-28): unknown.
     by_name = [_ft("a", None, 2), _ft("b", None, 1)]
-    assert files_order(by_name) == [1, 0]
+    assert files_order(by_name) == ([0, 1], False)
     clash = [_ft("a", 1, None), _ft("b", 1, None)]
-    assert files_order(clash) == [0, 1]
+    assert files_order(clash) == ([0, 1], False)
 
 
 def test_read_file_tracks(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -237,7 +238,8 @@ def test_read_file_tracks(monkeypatch: pytest.MonkeyPatch) -> None:
     ])
     assert files[0].recording_id == "21511631-0d17-4490-9ab6-04ae95202a89"
     assert (files[0].tracknumber, files[1].name_number) == (1, 2)
-    assert files[1].title == "chinatown"  # the name without its leading number
+    assert files[1].title is None  # no title tag; the name is never a title
+    assert files[1].name_title == "chinatown"  # kept apart, for corroboration
     assert album.barcode == "082839490627"
     assert album.date is None  # two files disagree: not the album's
 
@@ -293,23 +295,40 @@ def test_the_whole_set_in_the_input_is_a_match() -> None:
     assert [(c.meta.disc_number, c.tier) for c in ranked.candidates] == [(1, "A")]
 
 
-def test_a_file_name_title_never_contradicts() -> None:
-    """Live, 2026-11-28: twelve files named 01..12 untagged; their names stood in
-    for titles and "contradicted" every release, so --auto found no tier A."""
-    files = tuple(
-        replace(f, title=f"{f.position + 1:02d} junk", title_from_tag=False)
-        for f in _files().files
+def _named(numbers, titles):
+    return tuple(
+        replace(f, title=None, fp_recordings=frozenset(), name_number=n, name_title=t)
+        for f, n, t in zip(_files(fp=False).files, numbers, titles)
     )
-    c = fm.classify(fm.FolderEvidence(files), _release())
-    assert c is not None
-    assert (c.evidence["titles"], c.tier) == ("absent", "A")
 
 
-def test_a_title_tag_still_contradicts() -> None:
-    """The control: the same titles from tags do contradict."""
-    files = tuple(
-        replace(f, title=f"{f.position + 1:02d} junk") for f in _files().files
+def test_file_names_never_find_a_release() -> None:
+    """kgr, 2026-11-28: names are ignored until every other piece of evidence is
+    in. With no tags and no fingerprints, names alone find no track."""
+    files = _named([1, 2, 3, 4], TITLES)
+    assert fm.classify(fm.FolderEvidence(files), _release()) is None
+
+
+def test_file_names_corroborate_last_and_never_contradict() -> None:
+    folder = _files()  # found by fingerprints
+    agree = tuple(
+        replace(f, name_number=f.position + 1, name_title=None) for f in folder.files
     )
-    c = fm.classify(fm.FolderEvidence(files), _release())
-    assert c is not None
-    assert (c.evidence["titles"], c.tier) == ("contradict", "C")
+    junk = tuple(
+        replace(f, name_number=9 - f.position, name_title="junk") for f in folder.files
+    )
+    c_agree = fm.classify(fm.FolderEvidence(agree), _release())
+    c_junk = fm.classify(fm.FolderEvidence(junk), _release())
+    assert c_agree is not None and c_agree.evidence["names"] == "match"
+    # The control: names that say nothing useful are absent, never a contradiction.
+    assert c_junk is not None and c_junk.evidence["names"] == "absent"
+    assert c_junk.tier == "A"
+
+
+def test_without_track_number_tags_the_order_is_the_release_s() -> None:
+    """Untagged files have no order of their own (names do not give one): a
+    release in any order is a match, and the archive takes the release's order."""
+    swapped = _release([2, 1, 3, 4], rid="swapped")
+    folder = replace(_files(), order_known=False)
+    c = fm.classify(folder, swapped)
+    assert c is not None and (c.tier, c.order) == ("A", "release")

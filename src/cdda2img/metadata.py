@@ -165,16 +165,21 @@ LEADING_NUMBER = re.compile(r"^(\d{1,3})[-. _]+")
 
 @dataclass(frozen=True)
 class FileTags:
-    """One file as the file match sees it, from its tags and its name."""
+    """One file as the file match sees it: its tags, and, apart, its name.
+
+    kgr, 2026-11-28: file names are ignored until every other piece of evidence
+    has been gathered, and then used only as corroboration that may support a
+    match and is never required. So nothing here falls back to the name:
+    ``title`` and ``tracknumber`` are tags only, and the name's number and text
+    are kept separately for that last, optional check.
+    """
 
     path: Path
-    title: str | None  # the title tag, else the name without its leading number
+    title: str | None  # the title tag
     tracknumber: int | None  # the track-number tag
-    name_number: int | None  # the file name's leading number
     recording_id: str | None  # musicbrainz_trackid (the recording, despite the name)
-    #: The title is the file's title tag, not its name. A name may mean nothing
-    #: ("01.flac"), so a title from a name can support a match, never refute one.
-    title_from_tag: bool = True
+    name_number: int | None = None  # the file name's leading number
+    name_title: str | None = None  # the file name without its leading number
 
 
 @dataclass(frozen=True)
@@ -224,25 +229,20 @@ def read_file_tracks(tracks: list[Path]) -> tuple[list[FileTags], AlbumTags]:
             audio = File(str(track), easy=True)
         except Exception:
             audio = None
-        stem = track.stem
-        m = LEADING_NUMBER.match(stem)
+        stem = track.stem.strip()
+        m = LEADING_NUMBER.match(stem) or re.fullmatch(r"(\d{1,3})", stem)
         name_number = int(m.group(1)) if m else None
-        stem_title = (LEADING_NUMBER.sub("", stem).strip() if m else stem) or None
-        if stem.strip().isdigit():
-            # "01.flac": a number, not a title (live, 2026-11-28: twelve files
-            # named 01..12 had their "titles" contradict every release).
-            name_number, stem_title = int(stem), None
+        name_title = (stem[m.end() :] if m else stem).strip() or None
         rec = _first_tag(audio, "musicbrainz_trackid")
         rec = rec.lower() if rec and _MBID_RE.match(rec.lower()) else None
-        tag_title = _first_tag(audio, "title")
         files.append(
             FileTags(
                 path=track,
-                title=tag_title or stem_title,
+                title=_first_tag(audio, "title"),
                 tracknumber=_disc_number(_first_tag(audio, "tracknumber")),
-                name_number=name_number,
                 recording_id=rec,
-                title_from_tag=tag_title is not None,
+                name_number=name_number,
+                name_title=name_title,
             )
         )
         for name, keys in _ALBUM_TAG_KEYS.items():
@@ -255,13 +255,14 @@ def read_file_tracks(tracks: list[Path]) -> tuple[list[FileTags], AlbumTags]:
     return files, album
 
 
-def files_order(files: list[FileTags]) -> list[int]:
-    """The files' own order, as indices into *files* (trust_model_design.md §14.4):
-    their track-number tags when every file has a distinct one, else their names'
-    leading numbers on the same terms, else the order given (``create`` sorts by
-    name). Never the batch position alone: a batching strategy may reorder files."""
-    for key in ("tracknumber", "name_number"):
-        numbers = [getattr(f, key) for f in files]
-        if all(n is not None for n in numbers) and len(set(numbers)) == len(numbers):
-            return sorted(range(len(files)), key=lambda i: numbers[i])
-    return list(range(len(files)))
+def files_order(files: list[FileTags]) -> tuple[list[int], bool]:
+    """The files' own order, as indices into *files*, and whether it is KNOWN
+    (trust_model_design.md §14.4): their track-number tags when every file has a
+    distinct one. Never their names (kgr, 2026-11-28: names are corroboration
+    only, after everything else) and never the batch position. Without the tags
+    the order is unknown: the indices are the order given, and the archive takes
+    the chosen release's order."""
+    numbers = [f.tracknumber for f in files]
+    if all(n is not None for n in numbers) and len(set(numbers)) == len(numbers):
+        return sorted(range(len(files)), key=lambda i: numbers[i] or 0), True
+    return list(range(len(files))), False

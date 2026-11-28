@@ -2081,12 +2081,13 @@ def _file_track(
         position=pos,
         name=path.name,
         title=tags.title,
-        title_from_tag=tags.title_from_tag,
         duration_ms=duration_ms,
         tag_recording=tags.recording_id,
         fp_recordings=frozenset(r for r, _ in hits),
         fp_titles=tuple(t for _, t in hits if t),
         fp_best=hits[0][0] if hits else None,
+        name_number=tags.name_number,
+        name_title=tags.name_title,
     )
 
 
@@ -2094,10 +2095,11 @@ def _input_evidence(files: list[Path]) -> InputEvidence:
     from cdda2img.metadata import files_order, read_file_tracks
 
     tags, album = read_file_tracks(files)
-    order = files_order(tags)
+    order, known = files_order(tags)
     fps, status = _fingerprint_files([files[i] for i in order])
     whole = file_match.FolderEvidence(
-        tuple(_file_track(p, files[i], tags[i], fps) for p, i in enumerate(order))
+        tuple(_file_track(p, files[i], tags[i], fps) for p, i in enumerate(order)),
+        order_known=known,
     )
     return InputEvidence(fps, status, album.album, album.artist, whole)
 
@@ -2114,7 +2116,7 @@ def _folder_evidence(
     from cdda2img.metadata import files_order, read_file_tag_release, read_file_tracks
 
     tags, album = read_file_tracks(batch)
-    order = files_order(tags)
+    order, known = files_order(tags)
     fps = fingerprints or {}
     files = tuple(
         _file_track(pos, batch[i], tags[i], fps, _wav_ms(trans_wavs[i]))
@@ -2136,6 +2138,7 @@ def _folder_evidence(
         tagged.release_id,
         album=album.album,
         artist=album.artist,
+        order_known=known,
     )
     return folder, order
 

@@ -650,18 +650,13 @@ def test_vinyl_never_enters_the_pool(monkeypatch: pytest.MonkeyPatch) -> None:
     assert cli._release_ids_by_recordings(_folder(tagged=None)) == ["cd"]
 
 
-def test_a_bare_number_is_not_a_title(monkeypatch: pytest.MonkeyPatch) -> None:
-    paths = _stub_tags(monkeypatch, [{}, {"title": ["Real Title"]}])
-    named = [p.with_name(n) for p, n in zip(paths, ["01.flac", "02.flac"])]
-    monkeypatch.setattr(
-        metadata,
-        "File",
-        lambda name, easy=True: {} if "01" in name else {"title": ["Real Title"]},
-    )
-    files, _ = metadata.read_file_tracks(named)
-    assert (files[0].title, files[0].name_number, files[0].title_from_tag) == (
+def test_a_bare_number_is_a_name_number_not_a_title(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(metadata, "File", lambda name, easy=True: {})
+    files, _ = metadata.read_file_tracks([Path("/u/01.flac")])
+    assert (files[0].title, files[0].name_number, files[0].name_title) == (
         None,
         1,
-        False,
+        None,
     )
-    assert (files[1].title, files[1].title_from_tag) == ("Real Title", True)

@@ -63,10 +63,7 @@ class FileTrack:
 
     position: int
     name: str
-    title: str | None = None
-    #: False when the title is the file's name: it may then support a match but
-    #: never contradict one (a name can mean nothing: "01.flac").
-    title_from_tag: bool = True
+    title: str | None = None  # the title TAG; never the file name
     duration_ms: int | None = None
     tag_recording: str | None = None
     #: Recordings the fingerprint matched, and their titles (AcoustID's).
@@ -74,6 +71,10 @@ class FileTrack:
     fp_titles: tuple[str, ...] = ()
     #: AcoustID's best recording, the one candidate releases are gathered from.
     fp_best: str | None = None
+    #: The file name's number and text: corroboration only, checked last, never
+    #: required and never a contradiction (kgr, 2026-11-28).
+    name_number: int | None = None
+    name_title: str | None = None
 
 
 @dataclass(frozen=True)
@@ -86,6 +87,9 @@ class FolderEvidence:
     tagged_release: str | None = None
     album: str | None = None  # the tags' album and artist, for a text search
     artist: str | None = None
+    #: Whether ``files`` is in an order the files themselves state (track-number
+    #: tags). When not, order is no evidence and the release's order is taken.
+    order_known: bool = True
 
 
 @dataclass
@@ -184,21 +188,36 @@ def _fingerprints(meta: DiscMeta, mapping: Sequence[int], files) -> str:
 
 
 def _titles(meta: DiscMeta, mapping: Sequence[int], files) -> str:
-    """Titles agree on average, or contradict; only TAG titles can contradict. A
-    title taken from a file name is weak: absent when it disagrees (live,
-    2026-11-28: files named 01..12 "contradicted" every release of the album)."""
-    pairs = [
-        (r, files[p].title_from_tag)
+    """The title TAGS against the release's titles."""
+    scores = [
+        r
         for t, p in zip(meta.tracks, mapping)
         if (r := _ratio(t.title, files[p].title)) is not None
     ]
-    if len(pairs) < 2:
+    if len(scores) < 2:
         return "absent"
-    if sum(r for r, _ in pairs) / len(pairs) >= TITLES_AGREE:
+    return "match" if sum(scores) / len(scores) >= TITLES_AGREE else "contradict"
+
+
+def _names(meta: DiscMeta, mapping: Sequence[int], files) -> str:
+    """The file names, checked last (kgr, 2026-11-28): corroboration only. Their
+    numbers all equal the release's positions, or their text matches the titles:
+    ``match``; anything else is ``absent``, never a contradiction, since a name
+    can mean nothing ("01.flac" against *Smells Like Teen Spirit*, live)."""
+    numbered = [
+        (k, files[p].name_number)
+        for k, p in enumerate(mapping, start=1)
+        if files[p].name_number is not None
+    ]
+    if len(numbered) >= 2 and all(k == n for k, n in numbered):
         return "match"
-    tagged = [r for r, from_tag in pairs if from_tag]
-    if len(tagged) >= 2 and sum(tagged) / len(tagged) < TITLES_AGREE:
-        return "contradict"
+    scores = [
+        r
+        for t, p in zip(meta.tracks, mapping)
+        if (r := _ratio(t.title, files[p].name_title)) is not None
+    ]
+    if len(scores) >= 2 and sum(scores) / len(scores) >= TITLES_AGREE:
+        return "match"
     return "absent"
 
 
@@ -245,7 +264,8 @@ def classify(folder: FolderEvidence, meta: DiscMeta) -> Classified | None:
     by_pos = {f.position: f for f in files}
     used = set(mapping)
     excluded = tuple(f.name for f in files if f.position not in used)
-    order = "files" if list(mapping) == sorted(mapping) else "release"
+    in_order = folder.order_known and list(mapping) == sorted(mapping)
+    order = "files" if in_order else "release"
     strong = [_strong(t.recording_id, by_pos[p]) for t, p in zip(meta.tracks, mapping)]
     evidence = {
         "tracks": "recording"
@@ -267,9 +287,10 @@ def classify(folder: FolderEvidence, meta: DiscMeta) -> Classified | None:
         if folder.tagged_release and meta.mb_release_id == folder.tagged_release
         else "absent"
     )
+    evidence["names"] = _names(meta, mapping, by_pos)  # last: corroboration only
     if any(v == "contradict" for v in evidence.values()):
         tier = "C"
-    elif excluded or order == "release":
+    elif excluded or (order == "release" and folder.order_known):
         tier = "B"
     else:
         tier = "A"
@@ -331,7 +352,7 @@ def rank(
             rejected += 1
         else:
             classified.append(c)
-    if any(c.order == "files" for c in classified):
+    if folder.order_known and any(c.order == "files" for c in classified):
         classified = [c for c in classified if c.order == "files"]
     preferred = [p.upper() for p in preferred_country]
 

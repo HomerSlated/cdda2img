@@ -1716,10 +1716,16 @@ silently capped at 25 (N3), and a short list reads exactly like a genuine miss.
    (`_ask_album`), searches MusicBrainz for the answer and offers any release the files
    match, else keeps the user's words. PROV `album_source=release|tags|user`. The output
    file is named after the album found, else the input directory.
-4. **Found by kgr's untagged test (2026-11-28): a file name is not a title.** Twelve
-   files named `01.flac`..`12.flac` (*Nevermind*) had their names stand in for titles, and
-   "01" against "Smells Like Teen Spirit" contradicted every release holding the files in
-   their order; `--auto` found no tier A and aborted, though the fingerprints matched. A
-   name that is only a number now gives no title, and a title taken from a file name can
-   support a match but never contradict one (`FileTrack.title_from_tag`): a meaningless
-   name is missing data, never evidence against (§14.1, principle 6).
+4. **File names are ignored until all other evidence is in (kgr, 2026-11-28).** Found by
+   his untagged test: twelve files named `01.flac`..`12.flac` (*Nevermind*) had their names
+   stand in for titles, and "01" against "Smells Like Teen Spirit" contradicted every
+   release holding the files in their order; `--auto` found no tier A and aborted though the
+   fingerprints matched. A first fix special-cased numeric names; kgr ruled instead:
+   *"ignore filenames completely until all other evidence has been gathered, then only use
+   filenames as potential (but not essential) corroboration."* So a name is never a title,
+   never an order and never a way to find a track: `FileTags.title` and `tracknumber` are
+   tags only, the files' order is known only from track-number tags (`files_order` returns
+   whether it is; without it the archive takes the release's order and order is no
+   evidence), and the name's number and text are checked last as the `names` class, which
+   can be `match` and never `contradict`. *"Same goes for any other single data point"*:
+   asked of kgr what that covers before building it.
