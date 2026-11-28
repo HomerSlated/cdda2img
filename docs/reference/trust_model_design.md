@@ -1693,3 +1693,26 @@ silently capped at 25 (N3), and a short list reads exactly like a genuine miss.
   tell apart). Tagged: `e7ec55d9`, tier A, every class that the tags state agreeing.
 - **Not done**: §14.6's measurement of AcoustID's `meta=releases` as a replacement for the
   MusicBrainz browse (the browse is two paged requests per run, acceptable for now).
+
+### 14.11 Ruled by kgr, 2026-11-28 (BUILT the same night)
+
+1. **A multi-disc release of which the input holds one disc is not a match**, *"because we
+   can't build an archive with missing files"*: the same rule as a missing track. A medium
+   of a multi-disc release is a candidate only when every other medium is found whole among
+   all the input's files (`file_match.rank(whole=…)`), so every input file is now
+   fingerprinted once, before batching (`cdda2img._input_evidence`, AcoustID reading the
+   source files directly). This replaces §14.10's plurality extension as the answer to the
+   "2 for 1" case: that set's second disc is not in the folder, so it is never a candidate.
+   The plurality rule stays for genuine splits between release groups.
+2. **CD and digital media releases only. Never vinyl or cassette**
+   (`file_match.is_cd_or_digital`): filtered from the browse pool, from fetched releases and
+   from the tagged release (`file_tag_release_check=not_cd_or_digital`). A medium with no
+   recorded format is absent data and kept; a hybrid SACD has a CD layer; SACD, VCD,
+   CD-ROM and similar are not CD audio.
+3. **Nothing is asked up front.** `create` no longer asks to confirm the album and artist
+   before anything is identified (`derive_album_info` is no longer called). They come from
+   the chosen release, else from the tags. When neither names them: `--auto` (or no
+   terminal) aborts, exit 3, nothing written; an interactive run asks at the end
+   (`_ask_album`), searches MusicBrainz for the answer and offers any release the files
+   match, else keeps the user's words. PROV `album_source=release|tags|user`. The output
+   file is named after the album found, else the input directory.

@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -239,3 +240,54 @@ def test_read_file_tracks(monkeypatch: pytest.MonkeyPatch) -> None:
     assert files[1].title == "chinatown"  # the name without its leading number
     assert album.barcode == "082839490627"
     assert album.date is None  # two files disagree: not the album's
+
+
+@pytest.mark.parametrize(
+    ("fmt", "ok"),
+    [
+        ("CD", True),
+        ("Enhanced CD", True),
+        ("HDCD", True),
+        ("Hybrid SACD (CD layer)", True),
+        ("Digital Media", True),
+        ("", True),  # unrecorded: absent, not a contradiction
+        ('12" Vinyl', False),
+        ("Cassette", False),
+        ("SACD", False),
+        ("VCD", False),
+        ("DVD-Audio", False),
+    ],
+)
+def test_cd_and_digital_media_only(fmt: str, ok: bool) -> None:
+    assert fm.is_cd_or_digital(fmt) is ok
+
+
+def _two_disc(rid: str = "set") -> list[DiscMeta]:
+    disc1 = replace(_release(rid=rid), disc_number=1)
+    disc2 = replace(
+        _release([1, 2], rid=rid, recs={1: _rec(51), 2: _rec(52)}), disc_number=2
+    )
+    disc2.tracks = [replace(t, title=f"Disc Two {t.number}") for t in disc2.tracks]
+    return [disc1, disc2]
+
+
+def test_one_disc_of_a_two_disc_set_is_not_a_match() -> None:
+    """kgr, 2026-11-28: the archive cannot be built with missing files."""
+    ranked = fm.rank(_files(), _two_disc(), whole=_files())
+    assert ranked.candidates == [] and ranked.rejected == 2
+
+
+def test_the_whole_set_in_the_input_is_a_match() -> None:
+    """The control: disc 2's tracks are elsewhere in the input (another batch)."""
+    extra = tuple(
+        fm.FileTrack(
+            position=10 + k,
+            name=f"2-{k}.flac",
+            title=f"Disc Two {k}",
+            fp_recordings=frozenset({_rec(50 + k)}),
+        )
+        for k in (1, 2)
+    )
+    whole = fm.FolderEvidence(_files().files + extra)
+    ranked = fm.rank(_files(), _two_disc(), whole=whole)
+    assert [(c.meta.disc_number, c.tier) for c in ranked.candidates] == [(1, "A")]

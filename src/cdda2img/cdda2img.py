@@ -53,7 +53,6 @@ from cdda2img.input_selector import (
     get_audio_duration_minutes,
     select_batches,
 )
-from cdda2img.metadata import derive_album_info
 from cdda2img.rbi_format import (
     CD_FRAMES_PER_SECOND,
     FLAG_MASTER_MODE,
@@ -875,9 +874,11 @@ def create_image(
 
     _check_batch_limits(batches, capacity_minutes=capacity)
 
-    meta = derive_album_info(files)
-    album = meta["album"]
-    artist = meta["artist"]
+    # Nothing is asked up front (kgr, 2026-11-28): the user may never know the
+    # album; it is deduced from tags, fingerprints and MusicBrainz, and asked for
+    # at the end only when they fail (`_identify_files`). Every file is
+    # fingerprinted once, here, so a multi-disc release can be checked whole.
+    evidence = _input_evidence(files)
     disc_total = len(batches)
 
     temp_base = resolve_temp_dir()
@@ -926,6 +927,7 @@ def create_image(
                 batch,
                 trans_wavs,
                 provenance,
+                evidence=evidence,
                 interactive=_interactive(auto),
                 tui=tui,
                 preferred_country=preferred_country,
@@ -941,8 +943,8 @@ def create_image(
                 temp,
                 ident,
                 RBIDisc(
-                    album=album,
-                    artist=artist,
+                    album=ident.album or "",
+                    artist=ident.artist or "",
                     disc_number=disc_num,
                     disc_total=disc_total,
                 ),
@@ -1037,7 +1039,9 @@ def create_image(
             toc_data = generate_toc(disc, raw_titles=raw_titles)
 
             disc_suffix = "" if disc_total == 1 else f"_disc{disc_num}"
-            output_file = _resolve_output_path(output, disc.album or album, disc_suffix)
+            output_file = _resolve_output_path(
+                output, disc.album or input_dir.name, disc_suffix
+            )
             container_flags = FLAG_MASTER_MODE if silence_mode == "notrim" else 0
             build_container(
                 temp.pcm_file,
@@ -1987,6 +1991,9 @@ class FileIdentity(NamedTuple):
     group_only: bool = False
     #: The chosen release against the fingerprints: match | contradict | absent.
     fingerprint: str = "absent"
+    #: Album and artist when no release supplied them (the tags', or the user's).
+    album: str | None = None
+    artist: str | None = None
 
 
 def _build_create_disc(
@@ -2026,35 +2033,78 @@ def _wav_ms(path: Path) -> int | None:
         return None
 
 
+class InputEvidence(NamedTuple):
+    """What ``create`` learns about every input file once, before batching: each
+    file's AcoustID recordings (by path), AcoustID's status, the album-level tags,
+    and the whole input as the matcher sees it (a multi-disc release must be found
+    whole in it, kgr 2026-11-28)."""
+
+    fingerprints: dict[Path, list[tuple[str, str]]]
+    acoustid_status: str
+    album: str | None
+    artist: str | None
+    whole: file_match.FolderEvidence
+
+
 def _fingerprint_files(
-    trans_wavs: list[Path], order: list[int], provenance: dict[str, str]
-) -> dict[int, list[tuple[str, str]]]:
+    paths: list[Path],
+) -> tuple[dict[Path, list[tuple[str, str]]], str]:
     """Every file's recordings by AcoustID (§14.2 step 3: every track, not two),
-    keyed by batch index. AcoustID only; finding releases is the caller's."""
+    from the source files themselves. AcoustID only; finding releases is the
+    caller's. Returns the recordings by path and ``lookup_status_acoustid``."""
     from cdda2img import acoustid_lookup
 
     if not acoustid_lookup.is_available():
-        provenance["lookup_status_acoustid"] = "disabled"
-        return {}
-    out: dict[int, list[tuple[str, str]]] = {}
+        return {}, "disabled"
+    out: dict[Path, list[tuple[str, str]]] = {}
     errored = False
-    for n, i in enumerate(order, start=1):
-        print(f"  AcoustID: fingerprinting track {n}/{len(order)}")
-        hits = acoustid_lookup.fingerprint_recordings(trans_wavs[i])
+    for n, path in enumerate(paths, start=1):
+        print(f"  AcoustID: fingerprinting {n}/{len(paths)}: {path.name}")
+        hits = acoustid_lookup.fingerprint_recordings(path)
         if hits is None:
             errored = True
             continue
-        out[i] = hits
-    provenance["lookup_status_acoustid"] = _r12_status(
-        attempted=True, has_data=any(out.values()), errored=errored
+        out[path] = hits
+    status = _r12_status(attempted=True, has_data=any(out.values()), errored=errored)
+    return out, status
+
+
+def _file_track(
+    pos: int,
+    path: Path,
+    tags,
+    fps: dict[Path, list[tuple[str, str]]],
+    duration_ms: int | None = None,
+) -> file_match.FileTrack:
+    hits = fps.get(path, [])
+    return file_match.FileTrack(
+        position=pos,
+        name=path.name,
+        title=tags.title,
+        duration_ms=duration_ms,
+        tag_recording=tags.recording_id,
+        fp_recordings=frozenset(r for r, _ in hits),
+        fp_titles=tuple(t for _, t in hits if t),
+        fp_best=hits[0][0] if hits else None,
     )
-    return out
+
+
+def _input_evidence(files: list[Path]) -> InputEvidence:
+    from cdda2img.metadata import files_order, read_file_tracks
+
+    tags, album = read_file_tracks(files)
+    order = files_order(tags)
+    fps, status = _fingerprint_files([files[i] for i in order])
+    whole = file_match.FolderEvidence(
+        tuple(_file_track(p, files[i], tags[i], fps) for p, i in enumerate(order))
+    )
+    return InputEvidence(fps, status, album.album, album.artist, whole)
 
 
 def _folder_evidence(
     batch: list[Path],
     trans_wavs: list[Path],
-    fingerprints: dict[int, list[tuple[str, str]]] | None = None,
+    fingerprints: dict[Path, list[tuple[str, str]]] | None = None,
 ) -> tuple[file_match.FolderEvidence, list[int]]:
     """The folder as the matcher sees it, and the files' own order (indices into
     *batch*). Runtimes come from the transcodes BEFORE our silence trim, so our
@@ -2066,16 +2116,7 @@ def _folder_evidence(
     order = files_order(tags)
     fps = fingerprints or {}
     files = tuple(
-        file_match.FileTrack(
-            position=pos,
-            name=batch[i].name,
-            title=tags[i].title,
-            duration_ms=_wav_ms(trans_wavs[i]),
-            tag_recording=tags[i].recording_id,
-            fp_recordings=frozenset(r for r, _ in fps.get(i, [])),
-            fp_titles=tuple(t for _, t in fps.get(i, []) if t),
-            fp_best=fps[i][0][0] if fps.get(i) else None,
-        )
+        _file_track(pos, batch[i], tags[i], fps, _wav_ms(trans_wavs[i]))
         for pos, i in enumerate(order)
     )
     record = rm.ReleaseRecord(
@@ -2116,8 +2157,12 @@ def _gather_tagged(
     if fetched is None:
         provenance["file_tag_release_check"] = "unanswered"
         return [], {}
-    provenance["file_tag_release_check"] = "fetched"
     media, formats = fetched
+    if not all(file_match.is_cd_or_digital(f) for f in formats):
+        # kgr, 2026-11-28: CD and digital media releases only.
+        provenance["file_tag_release_check"] = "not_cd_or_digital"
+        return [], {}
+    provenance["file_tag_release_check"] = "fetched"
     return media, {tagged.release_id: formats}
 
 
@@ -2126,17 +2171,14 @@ def _gather_tagged(
 #: binds it is recorded (``file_match_fetched``), and the set is incomplete.
 _FILE_MATCH_MAX_FETCH = 25
 
-#: Formats a CD-sized folder is most likely made from; others rank after them.
-_FIRST_FORMATS = frozenset({"CD", "Digital Media", "Enhanced CD", "HDCD", ""})
-
 
 def _order_pool(pool: dict[str, dict], preferred_country: Sequence[str]) -> list[str]:
     """Release ids from a browse, the album's own first: the release group most of
-    them belong to, then those in both sampled pools, then CD or digital media
-    before vinyl and cassette (ranked lower, never dropped: files can be a vinyl
-    rip), then the preferred country, then the track count closest to the
-    folder's. Without this the cap took the first ids alphabetically and left out
-    the pressings the tags named (live, Night and Day, 2026-11-27)."""
+    them belong to, then those in both sampled pools, then the preferred country,
+    then the track count closest to the folder's. Without this the cap took the
+    first ids alphabetically and left out the pressings the tags named (live,
+    Night and Day, 2026-11-27). Vinyl and cassette never reach it: CD and digital
+    media releases only (kgr, 2026-11-28)."""
     groups: dict[str, int] = {}
     for info in pool.values():
         groups[info["rg"]] = groups.get(info["rg"], 0) + 1
@@ -2144,11 +2186,9 @@ def _order_pool(pool: dict[str, dict], preferred_country: Sequence[str]) -> list
 
     def key(rid: str) -> tuple:
         info = pool[rid]
-        fmts = info["formats"] or [""]
         return (
             -groups[info["rg"]],
             -info["hits"],
-            0 if all(f in _FIRST_FORMATS for f in fmts) else 1,
             pref.index(info["country"]) if info["country"] in pref else len(pref),
             -info["fit"],
             rid,
@@ -2190,8 +2230,11 @@ def _release_ids_by_recordings(
             counts = [int(m.get("track-count") or 0) for m in media]
             usable = [c for c in counts if 0 < c <= n]
             rid = r.get("id")
+            fmts = [m.get("format") or "" for m in media]
             if not rid or not usable:
                 continue
+            if not all(file_match.is_cd_or_digital(f) for f in fmts):
+                continue  # CD and digital media releases only (kgr, 2026-11-28)
             info = pool.setdefault(
                 rid,
                 {
@@ -2238,6 +2281,8 @@ def _gather_candidates(
     folder: file_match.FolderEvidence,
     have: set[str],
     preferred_country: Sequence[str] = (),
+    *,
+    search_only: bool = False,
 ) -> Gathered:
     """Steps 2 and 3: releases from the recordings, else from a text search; every
     medium of each, fetched (capped). The browse, the search and the fetch all
@@ -2247,7 +2292,7 @@ def _gather_candidates(
     from cdda2img.mb_lookup import release_media
 
     mark = query_log.mark()
-    ids = _release_ids_by_recordings(folder, preferred_country)
+    ids = [] if search_only else _release_ids_by_recordings(folder, preferred_country)
     if not ids:
         ids = _release_ids_by_search(folder)
     ids = [rid for rid in dict.fromkeys(ids) if rid not in have]
@@ -2262,6 +2307,8 @@ def _gather_candidates(
         if got is None:
             continue
         fetched += 1
+        if not all(file_match.is_cd_or_digital(f) for f in got[1]):
+            continue  # a text-search stub carries no format; the fetch does
         metas += got[0]
         formats[rid] = got[1]
     if fetched < found:
@@ -2404,12 +2451,13 @@ def _rank_candidates(
     formats: dict[str, tuple[str, ...]],
     provenance: dict[str, str],
     preferred_country: Sequence[str],
+    whole: file_match.FolderEvidence | None = None,
 ) -> tuple[file_match.Ranked, bool]:
     """Rank the tagged release; when it is not tier A, look further (§14.2 steps
     2 and 3), keeping it a candidate. Returns the ranking and whether the
     candidate set is incomplete (capped, or a MusicBrainz request unanswered).
     *metas* and *formats* are extended in place."""
-    ranked = file_match.rank(folder, metas, preferred_country)
+    ranked = file_match.rank(folder, metas, preferred_country, whole)
     if any(
         c.tier == "A" and c.meta.mb_release_id == folder.tagged_release
         for c in ranked.candidates
@@ -2424,7 +2472,7 @@ def _rank_candidates(
     incomplete = g.errored or g.fetched < g.found
     if incomplete:
         provenance["file_match_incomplete"] = "errors" if g.errored else "capped"
-    return file_match.rank(folder, metas, preferred_country), incomplete
+    return file_match.rank(folder, metas, preferred_country, whole), incomplete
 
 
 def _record_nothing_found(
@@ -2441,26 +2489,18 @@ def _record_nothing_found(
         provenance["file_match_rejected"] = "no_candidates"
 
 
-def _identify_files(
-    batch: list[Path],
-    trans_wavs: list[Path],
+def _settle_files(
+    ranked: file_match.Ranked,
+    folder: file_match.FolderEvidence,
+    order: list[int],
+    formats: dict[str, tuple[str, ...]],
     provenance: dict[str, str],
     *,
+    incomplete: bool,
     interactive: bool,
     tui: bool,
-    preferred_country: Sequence[str] = (),
 ) -> FileIdentity:
-    """``create``: identify the release a folder of files is (trust_model_design.md
-    §14), and which files, in which order, the archive is built from."""
-    from cdda2img.metadata import files_order, read_file_tracks
-
-    order = files_order(read_file_tracks(batch)[0])
-    fingerprints = _fingerprint_files(trans_wavs, order, provenance)
-    folder, order = _folder_evidence(batch, trans_wavs, fingerprints)
-    metas, formats = _gather_tagged(batch, provenance)
-    ranked, incomplete = _rank_candidates(
-        folder, metas, formats, provenance, preferred_country
-    )
+    """Choose among the ranked candidates (§14.4) and lay out the files for it."""
     _note_contradicted(ranked, provenance)
     if not ranked.candidates:
         _record_nothing_found(ranked, provenance)
@@ -2502,6 +2542,114 @@ def _identify_files(
             provenance["barcode_source"] = "unanimous"
         return FileIdentity(meta, keep, fmt, group_only=True, fingerprint=fp)
     return FileIdentity(chosen.meta, keep, fmt, fingerprint=fp)
+
+
+def _not_identified(provenance: dict[str, str], why: str) -> RipAborted:
+    return RipAborted(
+        EXIT_INVESTIGATE,
+        "create: the album could not be identified; nothing was written",
+        [
+            why,
+            "Neither a release (from the tags, the fingerprints or a search) nor "
+            "the tags named the album and its artist.",
+        ],
+        context=dict(provenance),
+    )
+
+
+def _ask_album(
+    folder: file_match.FolderEvidence,
+    order: list[int],
+    provenance: dict[str, str],
+    *,
+    tui: bool,
+    preferred_country: Sequence[str],
+    whole: file_match.FolderEvidence,
+) -> FileIdentity:
+    """Interactive, at the end (kgr, 2026-11-28: *"ask the user at the end, ... not
+    at the beginning when the user may genuinely not ever know the answer"*): the
+    album and artist, which are then searched for; a release found is offered as
+    usual, else the user's words are the metadata. A blank album stops the run."""
+    from cdda2img.metadata_menu import _header, _prompt
+
+    _header("Album not identified")
+    print("  Neither the files' tags nor their fingerprints identified this album.")
+    print("  Enter the album and its artist: MusicBrainz will be searched for them,")
+    print("  and the release offered if your files match it. Leave the album blank")
+    print("  to stop; nothing will be written.")
+    print()
+    album = _prompt("  Album:  ").strip()
+    if not album:
+        raise _not_identified(provenance, "No album was entered.")
+    artist = _prompt("  Artist: ").strip()
+    asked = replace(folder, album=album, artist=artist or None)
+    g = _gather_candidates(asked, set(), preferred_country, search_only=True)
+    ranked = file_match.rank(asked, g.metas, preferred_country, whole)
+    ident = _settle_files(
+        ranked,
+        asked,
+        order,
+        g.formats,
+        provenance,
+        incomplete=g.errored or g.fetched < g.found,
+        interactive=True,
+        tui=tui,
+    )
+    if ident.meta is not None and ident.meta.album:
+        provenance["album_source"] = "release"
+        return ident
+    provenance["album_source"] = "user"
+    return ident._replace(album=album, artist=artist or None)
+
+
+def _identify_files(
+    batch: list[Path],
+    trans_wavs: list[Path],
+    provenance: dict[str, str],
+    *,
+    evidence: InputEvidence,
+    interactive: bool,
+    tui: bool,
+    preferred_country: Sequence[str] = (),
+) -> FileIdentity:
+    """``create``: identify the release a folder of files is (trust_model_design.md
+    §14), and which files, in which order, the archive is built from. When nothing
+    names the album and its artist, ``--auto`` aborts and an interactive run asks
+    at the end (kgr, 2026-11-28)."""
+    provenance["lookup_status_acoustid"] = evidence.acoustid_status
+    folder, order = _folder_evidence(batch, trans_wavs, evidence.fingerprints)
+    metas, formats = _gather_tagged(batch, provenance)
+    ranked, incomplete = _rank_candidates(
+        folder, metas, formats, provenance, preferred_country, evidence.whole
+    )
+    ident = _settle_files(
+        ranked,
+        folder,
+        order,
+        formats,
+        provenance,
+        incomplete=incomplete,
+        interactive=interactive,
+        tui=tui,
+    )
+    if ident.meta is not None and ident.meta.album and ident.meta.artist:
+        provenance["album_source"] = "release"
+        return ident
+    if evidence.album and evidence.artist:
+        provenance["album_source"] = "tags"
+        return ident._replace(album=evidence.album, artist=evidence.artist)
+    if not interactive:
+        raise _not_identified(
+            provenance, f"file_match_rejected={provenance.get('file_match_rejected')}"
+        )
+    return _ask_album(
+        folder,
+        order,
+        provenance,
+        tui=tui,
+        preferred_country=preferred_country,
+        whole=evidence.whole,
+    )
 
 
 def _r6_acoustid_corroborate_wavs(

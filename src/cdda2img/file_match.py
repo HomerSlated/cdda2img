@@ -41,6 +41,21 @@ RUNTIME_CONTRADICT_MS = 15_000
 
 TIERS = ("A", "B", "C")
 
+#: Formats with "CD" in the name that hold no CD audio.
+_NOT_CD_AUDIO = frozenset({"VCD", "SVCD", "CDV", "CD-ROM", "CD-i", "CDi", "Mini-CD"})
+
+
+def is_cd_or_digital(fmt: str) -> bool:
+    """kgr, 2026-11-28: *"CD and digital media releases only. Never include vinyl
+    or cassette."* A medium MusicBrainz records no format for is absent data, not a
+    contradiction, so it is kept. A hybrid SACD has a CD layer; an SACD alone has
+    none."""
+    if not fmt or fmt == "Digital Media":
+        return True
+    if fmt in _NOT_CD_AUDIO or fmt.startswith("SACD"):
+        return False
+    return "CD" in fmt
+
 
 @dataclass(frozen=True)
 class FileTrack:
@@ -265,21 +280,43 @@ def _country_rank(meta: DiscMeta, preferred: Sequence[str]) -> int:
     return preferred.index(c) if c in preferred else len(preferred)
 
 
+def _whole_release_present(
+    meta: DiscMeta, metas: Sequence[DiscMeta], whole: FolderEvidence | None
+) -> bool:
+    """kgr, 2026-11-28: a multi-disc release of which the input holds one disc's
+    tracks is not a match, as with missing tracks: the archive cannot be built
+    with missing files. Every OTHER medium of the release must be found, whole,
+    among all the input's files (*whole*; the batch matched *meta* itself)."""
+    others = [
+        m
+        for m in metas
+        if m.mb_release_id == meta.mb_release_id and m.disc_number != meta.disc_number
+    ]
+    if not others:
+        return True
+    if whole is None:
+        return False
+    return all(_assign(m, whole.files) is not None for m in others)
+
+
 def rank(
     folder: FolderEvidence,
     metas: Sequence[DiscMeta],
     preferred_country: Sequence[str] = (),
+    whole: FolderEvidence | None = None,
 ) -> Ranked:
     """Classify every candidate and order them: tier, fewest files left out (so a
     single holding two of the album's songs never outranks the album), most
     matching classes, then §10.3's ladder (preferred country, date, MBID). A
     release in another order is dropped while any release holds the tracks in the
-    files' order (§14.4). One row per release: its best medium."""
+    files' order (§14.4). One row per release: its best medium. A medium of a
+    multi-disc release counts only when *whole* (every file of the input) holds
+    the release's other discs too."""
     classified: list[Classified] = []
     rejected = 0
     for meta in metas:
         c = classify(folder, meta)
-        if c is None:
+        if c is None or not _whole_release_present(meta, metas, whole):
             rejected += 1
         else:
             classified.append(c)

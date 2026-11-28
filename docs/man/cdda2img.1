@@ -445,6 +445,13 @@ titles, ISRCs, barcode, label, catalogue number, country and dates come from
 MusicBrainz, never from the other tags.
 A release MusicBrainz calls \fIDigital Media\fR makes the menu's Discogs
 screen list the master's File versions instead of its CDs.
+Without a release in the tags, every file is fingerprinted and matched
+against MusicBrainz's CD and digital releases; a release that lists a track
+(or, for a multi-disc set, a disc) the input lacks is never offered, and
+files a release does not list are left out with a warning.
+Nothing is asked before identification: when neither a release nor the
+tags name the album and its artist, \fB\-\-auto\fR writes nothing and exits 3,
+and an interactive run asks for them at the end.
 .PP
 .BI "cdda2img create " "[options] INPUT_DIR"
 .TP

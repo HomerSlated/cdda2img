@@ -148,12 +148,25 @@ def _wire(
     monkeypatch.setattr(cli, "_fingerprint_files", lambda *a: {})
     monkeypatch.setattr(cli, "_gather_tagged", lambda b, p: (metas, formats or {}))
     monkeypatch.setattr(
-        cli, "_gather_candidates", lambda *a: cli.Gathered([], {}, 0, 0, False)
+        cli, "_gather_candidates", lambda *a, **k: cli.Gathered([], {}, 0, 0, False)
     )
 
 
-def _identify(prov: dict[str, str], *, interactive: bool = False) -> cli.FileIdentity:
-    return cli._identify_files([], [], prov, interactive=interactive, tui=False)
+def _evidence(album: str | None = "Night and Day", artist: str | None = "Joe Jackson"):
+    return cli.InputEvidence({}, "OK", album, artist, fm.FolderEvidence(()))
+
+
+def _identify(
+    prov: dict[str, str], *, interactive: bool = False, evidence=None
+) -> cli.FileIdentity:
+    return cli._identify_files(
+        [],
+        [],
+        prov,
+        evidence=evidence or _evidence(),
+        interactive=interactive,
+        tui=False,
+    )
 
 
 def test_the_tagged_release_in_tier_a_is_the_pressing(
@@ -249,9 +262,7 @@ def test_create_builds_the_disc_from_the_kept_files_in_order(
 
     monkeypatch.setattr(cli, "select_batches", lambda *a, **k: [paths])
     monkeypatch.setattr(cli, "_check_batch_limits", lambda *a, **k: None)
-    monkeypatch.setattr(
-        cli, "derive_album_info", lambda f: {"album": "A", "artist": "B"}
-    )
+    monkeypatch.setattr(cli, "_input_evidence", lambda f: _evidence("A", "B"))
     monkeypatch.setattr(cli, "transcode_audio", lambda src, dst: None)
     monkeypatch.setattr(
         cli,
@@ -417,11 +428,10 @@ def test_every_file_is_fingerprinted(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setattr("cdda2img.acoustid_lookup.is_available", lambda: True)
     monkeypatch.setattr("cdda2img.acoustid_lookup.fingerprint_recordings", fp)
-    prov: dict[str, str] = {}
-    out = cli._fingerprint_files([Path("a"), Path("b"), Path("c")], [2, 0, 1], prov)
-    assert calls == ["c", "a", "b"]  # every file, in the files' order
-    assert set(out) == {0, 2}
-    assert prov["lookup_status_acoustid"] == "down"
+    out, status = cli._fingerprint_files([Path("c"), Path("a"), Path("b")])
+    assert calls == ["c", "a", "b"]  # every file, in the order given
+    assert set(out) == {Path("a"), Path("c")}
+    assert status == "down"
 
 
 def test_the_release_browse_sets_the_user_agent_first(
@@ -452,40 +462,15 @@ def test_finding_nothing_is_recorded(monkeypatch: pytest.MonkeyPatch) -> None:
     assert prov["file_match_rejected"] == "no_candidates"
 
 
-def test_the_album_s_cd_pressings_are_fetched_first() -> None:
+def test_the_album_s_pressings_are_fetched_first() -> None:
     """Live, Night and Day: the cap took ids alphabetically and left out the
-    pressings the tags named; vinyl took their places."""
+    pressings the tags named."""
     pool = {
-        "0vinyl": {
-            "rg": "album",
-            "formats": ['12" Vinyl'],
-            "country": "US",
-            "fit": 9,
-            "hits": 2,
-        },
-        "1other": {
-            "rg": "2for1",
-            "formats": ["CD"],
-            "country": "ZA",
-            "fit": 9,
-            "hits": 2,
-        },
-        "9cd-gb": {
-            "rg": "album",
-            "formats": ["CD"],
-            "country": "GB",
-            "fit": 9,
-            "hits": 2,
-        },
-        "5cd-de": {
-            "rg": "album",
-            "formats": ["CD"],
-            "country": "DE",
-            "fit": 9,
-            "hits": 2,
-        },
+        "1other": {"rg": "2for1", "country": "ZA", "fit": 9, "hits": 2},
+        "9cd-gb": {"rg": "album", "country": "GB", "fit": 9, "hits": 2},
+        "5cd-de": {"rg": "album", "country": "DE", "fit": 9, "hits": 2},
     }
-    assert cli._order_pool(pool, ["GB"]) == ["9cd-gb", "5cd-de", "0vinyl", "1other"]
+    assert cli._order_pool(pool, ["GB"]) == ["9cd-gb", "5cd-de", "1other"]
 
 
 def _gathered(monkeypatch, g, metas):
@@ -569,3 +554,97 @@ def test_the_real_release_screen(monkeypatch: pytest.MonkeyPatch) -> None:
     chosen, selection, _ = run("s")
     assert selection == "accepted" and chosen.meta.mb_release_id == a.mb_release_id
     assert run("x") == (None, "rejected", ())
+
+
+# ── kgr's rulings of 2026-11-28 ────────────────────────────────────────────
+
+
+def test_nothing_named_aborts_unattended(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No release and no album/artist tags: --auto writes nothing (exit 3)."""
+    from cdda2img.rip_abort import EXIT_INVESTIGATE, RipAborted
+
+    _wire(monkeypatch, _folder(tagged=None), [0, 1, 2], [])
+    with pytest.raises(RipAborted) as e:
+        _identify({}, evidence=_evidence(None, None))
+    abort = e.value
+    assert isinstance(abort, RipAborted) and abort.code == EXIT_INVESTIGATE
+
+
+def test_the_tags_name_the_album_when_no_release_does(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The control: album and artist tags are a deduction; no abort, no question."""
+    _wire(monkeypatch, _folder(tagged=None), [0, 1, 2], [])
+    prov: dict[str, str] = {}
+    ident = _identify(prov, evidence=_evidence("Obscure", "Nobody"))
+    assert (ident.album, ident.artist) == ("Obscure", "Nobody")
+    assert prov["album_source"] == "tags"
+
+
+def test_interactive_asks_at_the_end_and_searches(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _wire(monkeypatch, _folder(tagged=None), [0, 1, 2], [])
+    searched: list[tuple] = []
+
+    def gather(folder, have, pc=(), *, search_only=False):
+        searched.append((folder.album, folder.artist, search_only))
+        found = [_release()] if search_only else []  # only the search finds it
+        return cli.Gathered(found, {}, len(found), len(found), False)
+
+    monkeypatch.setattr(cli, "_gather_candidates", gather)
+    with patch(
+        "cdda2img.metadata_menu._prompt", side_effect=["Night and Day", "Joe Jackson"]
+    ):
+        prov: dict[str, str] = {}
+        ident = _identify(prov, interactive=True, evidence=_evidence(None, None))
+    assert searched[-1] == ("Night and Day", "Joe Jackson", True)
+    assert ident.meta is not None and ident.meta.mb_release_id == RID
+    assert prov["album_source"] == "release"
+
+
+def test_interactive_keeps_the_users_words_when_nothing_is_found(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _wire(monkeypatch, _folder(tagged=None), [0, 1, 2], [])
+    with patch("cdda2img.metadata_menu._prompt", side_effect=["Home Tape", "Me"]):
+        prov: dict[str, str] = {}
+        ident = _identify(prov, interactive=True, evidence=_evidence(None, None))
+    assert (ident.meta, ident.album, ident.artist) == (None, "Home Tape", "Me")
+    assert prov["album_source"] == "user"
+
+
+def test_a_blank_album_stops_the_run(monkeypatch: pytest.MonkeyPatch) -> None:
+    from cdda2img.rip_abort import RipAborted
+
+    _wire(monkeypatch, _folder(tagged=None), [0, 1, 2], [])
+    with (
+        patch("cdda2img.metadata_menu._prompt", side_effect=[""]),
+        pytest.raises(RipAborted),
+    ):
+        _identify({}, interactive=True, evidence=_evidence(None, None))
+
+
+def test_a_tagged_vinyl_release_is_not_a_candidate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """kgr: CD and digital media releases only."""
+    tags = {"musicbrainz_albumid": [RID]}
+    paths = _stub_tags(monkeypatch, [tags, tags])
+    monkeypatch.setattr(
+        "cdda2img.mb_lookup.release_media", lambda r: ([_release()], ('12" Vinyl',))
+    )
+    prov: dict[str, str] = {}
+    assert cli._gather_tagged(paths, prov) == ([], {})
+    assert prov["file_tag_release_check"] == "not_cd_or_digital"
+
+
+def test_vinyl_never_enters_the_pool(monkeypatch: pytest.MonkeyPatch) -> None:
+    def rel(rid: str, fmt: str) -> dict:
+        return {"id": rid, "medium-list": [{"track-count": "3", "format": fmt}]}
+
+    monkeypatch.setattr(
+        "cdda2img.acoustid_lookup.releases_for_recording",
+        lambda r: [rel("lp", '12" Vinyl'), rel("cd", "CD"), rel("mc", "Cassette")],
+    )
+    assert cli._release_ids_by_recordings(_folder(tagged=None)) == ["cd"]
