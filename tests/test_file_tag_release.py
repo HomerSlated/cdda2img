@@ -811,3 +811,26 @@ def test_gathering_keeps_the_whole_set_over_compilations(
         for i in range(57)
     )
     assert cli._release_ids_by_recordings(fm.FolderEvidence(files)) == ["set", "comp"]
+
+
+@pytest.mark.parametrize(
+    ("album", "name"),
+    [
+        (
+            "The Best of David Bowie 1969/1974",
+            "The Best of David Bowie 1969-1974_disc1.rbi",
+        ),
+        ("AC\\DC", "AC-DC_disc1.rbi"),
+        ("..", "untitled_disc1.rbi"),
+        ("", "untitled_disc1.rbi"),
+    ],
+)
+def test_an_album_title_names_one_file(
+    album: str, name: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """kgr, 2026-11-28: "1969/1974" made the output a file in a directory that did
+    not exist, and the finished container could not be written."""
+    monkeypatch.chdir(tmp_path)
+    out = cli._resolve_output_path(None, album, "_disc1")
+    assert out == Path(name) and out.parent == Path()
+    assert cli._resolve_output_path(tmp_path, album, "_disc1") == tmp_path / name

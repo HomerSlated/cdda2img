@@ -816,6 +816,16 @@ def _unique_path(stem: str, ext: str, parent: Path | None = None) -> Path:
     raise RuntimeError(msg)
 
 
+def _file_name_stem(stem: str) -> str:
+    """*stem* made safe as ONE file name: a path separator (or NUL) in an album
+    title becomes "-", so "The Best of David Bowie 1969/1974" names a file
+    instead of a directory that does not exist (kgr, 2026-11-28: the container
+    could not be written). A stem that is empty, or only dots, names nothing
+    safely and becomes "untitled"."""
+    safe = re.sub(r"[/\\\x00]", "-", stem).strip()
+    return "untitled" if not safe or set(safe) == {"."} else safe
+
+
 def _resolve_output_path(output: Path | None, stem: str, disc_suffix: str = "") -> Path:
     """Resolve --output into a concrete file path.
 
@@ -827,6 +837,7 @@ def _resolve_output_path(output: Path | None, stem: str, disc_suffix: str = "") 
     `disc_suffix` (e.g. ``"_disc2"``) is appended to the derived stem only in
     the first two cases; an explicit user path is honoured verbatim.
     """
+    stem = _file_name_stem(stem)
     if output is None:
         return _unique_path(f"{stem}{disc_suffix}", "rbi")
     if output.is_dir():
