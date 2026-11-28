@@ -71,6 +71,10 @@ def _release_contributor(
     if "duration_match_release" in prov:
         # Came from text+duration fuzzy — lowest-confidence MB path
         return "mb_duration_match", 0.20
+    if prov.get("release_selection") == "mcn":
+        # The disc's burned-in MCN equals this pressing's barcode and no other's
+        # (kgr, 2026-11-28: "an exact match"): as determined as a unique hit.
+        return "mb_disc_id_mcn", 0.50
     if prov.get("release_selected_via"):
         # §10.3: the disc-ID fingerprint matched MB but several pressings
         # tied; the lexicographic rung picked one by preference/date. The
@@ -190,8 +194,9 @@ def final_match_distance(disc: RBIDisc, prov: dict[str, str]) -> MatchDistance:
         :func:`build_match_distance`. ``rejected`` no longer keeps the automatic
         pick: the rip records the album only (2026-11-26), which closes the gap
         this docstring used to flag (TODO N6).
-    ``auto_tiebreak`` / ``paired``
-        Fall through: the pressing was settled without a human.
+    ``auto_tiebreak`` / ``paired`` / ``mcn``
+        Fall through: the pressing was settled without a human (``mcn`` scores as
+        a unique disc-ID hit there).
     """
     if _user_confirmed(prov):
         return MatchDistance(

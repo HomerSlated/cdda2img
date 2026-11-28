@@ -5518,8 +5518,8 @@ def _year_gap(provenance: dict[str, str], candidates: list[DiscMeta]) -> str:
         stated.append(f"{years[None]} undated")
     return (
         f"No pressing was settled: {len(candidates)} pressings fit this disc and"
-        f" they state different years ({', '.join(stated)}), so its own year is"
-        " unknown."
+        f" they do not all state one year ({', '.join(stated)}), so its own year"
+        " is unknown."
     )
 
 

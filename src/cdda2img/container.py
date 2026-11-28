@@ -780,6 +780,13 @@ def extract_data(  # noqa: C901
         toc_text = re.sub(
             r'FILE "[^"]*"', f'FILE "{stem}.wav"', toc_data.decode("utf-8")
         )
+        if prov.get("mcn_source") == "barcode_derived":
+            # An MCN made from the barcode (containers before 2026-11-28) is not
+            # handed on: a TOC extracted here can be burned, mounted and re-ripped,
+            # and would then read as the disc's own MCN (kgr: only an MCN that
+            # really existed on the disc).
+            toc_text = re.sub(r'^CATALOG\s+"[^"]*"\s*\n?', "", toc_text, flags=re.M)
+            print("MCN left out of the TOC: it was made from the barcode, not read.")
         (raw_dir / f"{stem}.toc").write_text(toc_text, encoding="utf-8")
         print(f"TOC saved: {raw_dir / f'{stem}.toc'}")
 

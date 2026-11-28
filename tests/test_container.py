@@ -771,3 +771,32 @@ def test_release_intelligence_found_but_no_disc_year_is_unknown():
     assert _release_intelligence_line(prov) == (
         "Original:  Unknown, unknown release (unknown year)"
     )
+
+
+@pytest.mark.parametrize(
+    ("source", "kept"), [("barcode_derived", False), ("disc", True)]
+)
+def test_a_raw_extract_hands_on_only_an_mcn_read_from_the_disc(
+    tmp_path, source, kept
+) -> None:
+    """kgr, 2026-11-28: an extracted TOC can be burned, mounted and re-ripped, so
+    an MCN made from the barcode (older containers) is left out of it."""
+    from cdda2img.rbi_format import RBIDisc, RBITocEntry
+
+    disc = RBIDisc(
+        album="A",
+        artist="B",
+        catalog="0042282449924",
+        tracks=[RBITocEntry(1, "One", "B", start_frame=0, duration_frames=150)],
+    )
+    pcm = tmp_path / "all.pcm"
+    pcm.write_bytes(b"\x00" * (2352 * 150))
+    rbi = tmp_path / "x.rbi"
+    build_container(
+        pcm, generate_toc(disc), disc, rbi, prov_data={"mcn_source": source}, quiet=True
+    )
+    out = tmp_path / "out"
+    out.mkdir()
+    extract_data(rbi, ExtractOptions(raw=True), base_dir=out)
+    toc = (out / "x.toc").read_text()
+    assert ('CATALOG "0042282449924"' in toc) is kept

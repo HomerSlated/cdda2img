@@ -484,3 +484,19 @@ def test_create_s_file_match_is_named_as_such() -> None:
     assert md.score == 0.75
     # The control: a rip's unique disc-ID match keeps its name.
     assert "mb_disc_id" in build_match_distance(disc, {}).contributors
+
+
+def test_an_mcn_claim_scores_as_a_unique_hit() -> None:
+    """kgr, 2026-11-28: a unique exact MCN match is an exact match, not the
+    ladder's preference guess (control: the same disc without it)."""
+    from cdda2img.match_distance import _release_contributor
+    from cdda2img.rbi_format import RBIDisc
+
+    disc = RBIDisc(album="A", artist="B")
+    disc.mb_release_id = "m"
+    via = {"release_selected_via": "mcn"}
+    assert _release_contributor(disc, {**via, "release_selection": "mcn"}) == (
+        "mb_disc_id_mcn",
+        0.50,
+    )
+    assert _release_contributor(disc, via) == ("mb_disc_id_multi", 0.30)
