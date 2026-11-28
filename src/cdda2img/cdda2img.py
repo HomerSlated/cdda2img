@@ -764,50 +764,22 @@ def _add_release_provenance(provenance: dict, disc: RBIDisc) -> None:  # noqa: C
 def _finalize_identifiers(provenance: dict, disc: RBIDisc) -> None:
     """Settle the MCN/barcode pair at finalisation, just before TOC generation.
 
-    Two identifiers, two destinations (identifier_trust_model.md §1a):
-
-    - **barcode** (the service UPC/EAN, the disambiguation key) -> PROV only. Never
-      written to the TOC or the physical layer.
-    - **catalog** (the on-disc MCN) -> TOC CATALOG line, burned back to disc. When
-      the disc carries no MCN of its own, it is *synthesised* from the barcode: the
-      MCN field is defined to hold the UPC/EAN (Q-ch Mode 2 = 13 BCD digits), so a
-      normalised barcode is exactly its canonical content, not an alien value.
-
-    ``mcn_source`` records provenance of the MCN so a later reader distinguishes a
-    genuine disc reading (``disc``) from a reconstruction (``barcode_derived``).
-
-    The synthesis runs the barcode through ``normalize_barcode`` (burnable form,
-    check digit not required) rather than copying it raw: the MCN is burned to the
-    TOC ``CATALOG`` and cdrdao demands 13 numeric digits. MB/Discogs barcodes are
-    already normalised, but a manual/menu entry might not be — so this is the
-    chokepoint that guarantees a burnable result. A barcode that cannot yield 13
-    digits produces no synthesised MCN (catalog stays blank, no ``mcn_source``).
+    - **barcode** (the service UPC/EAN) -> PROV only. Never written to the TOC.
+    - **catalog** (the MCN) -> the TOC ``CATALOG`` line, burned back to disc, and
+      only when it was read from the source (``mcn_source=disc``). It is never
+      synthesised from the barcode (kgr, 2026-11-28, reversing 2026-06-29:
+      "Archival is descriptive rather than just a plain copy, but descriptions
+      should be corroborated and based on fact, not guessed, assumed and
+      fabricated"). Few releases burn an MCN, an MCN can differ from the barcode
+      entirely (*Automatic for the People*: 9362450550209 against 0093624505525),
+      and neither service records whether a release burned one. Containers
+      written before then may say ``mcn_source=barcode_derived``; ``burn`` drops
+      such an MCN.
     """
-    from cdda2img.barcode import normalize_barcode
-
     if disc.barcode:
         provenance["barcode"] = disc.barcode
     if disc.catalog:
         provenance["mcn_source"] = "disc"
-    elif (
-        disc.barcode
-        and provenance.get("barcode_source") not in ("adopted", "unanimous", "digital")
-        and provenance.get("media_override") != "digital_media"
-        and provenance.get("mode") != "create"
-    ):
-        # §13.7 (kgr, 2026-11-26): a barcode adopted from the partner release, or
-        # kept only because every candidate pressing states it, is not a confirmed
-        # pressing's own, and the TOC's MCN is burned to every copy. A digital
-        # release's barcode stays PROV-only too (kgr, 2026-11-28): no CD ever
-        # carried it as an MCN. `create` never synthesises (kgr, 2026-11-28): no
-        # disc was read, few releases burn an MCN at all, an MCN can differ from
-        # the barcode entirely (Automatic for the People: 9362450550209 against
-        # 0093624505525), and neither service records whether a release burned
-        # one, so an MCN made from the barcode would be invented.
-        synth = normalize_barcode(disc.barcode, require_check_digit=False)
-        if synth:
-            disc.catalog = synth  # synthesise a burnable archival MCN from the barcode
-            provenance["mcn_source"] = "barcode_derived"
 
 
 def _unique_path(stem: str, ext: str, parent: Path | None = None) -> Path:
@@ -5221,12 +5193,14 @@ def _pair_unattended(
 ) -> RBIDisc:
     """§13.5, unattended with several candidate pressings: exactly one
     MusicBrainz/Discogs pair (a pressing's own Discogs link, or a sufficient field
-    match against the master's versions) is taken; anything else records the
-    release group only (kgr: "we have no way of corroborating the truth").
+    match against the master's versions) is taken, unless exactly one pressing's
+    barcode equals the disc's burned-in MCN, which is claimed
+    (:func:`_claim_by_mcn`); anything else records the release group only (kgr: "we have no way of corroborating the truth").
     PROV ``release_pairs`` counts the pairs found (``+`` = the search was cut
     short, so a single pair is not unique)."""
     from cdda2img import discogs_lookup, query_log
     from cdda2img import release_match as rm
+    from cdda2img.barcode import MCN_EXACT, mcn_similarity
     from cdda2img.mb_lookup import (
         discogs_link_and_barcode,
         discogs_master_of_release_group,
@@ -5259,10 +5233,53 @@ def _pair_unattended(
         for a, b, c in rm.matching_pairs(left, right):
             pairs.setdefault((a.ident, int(b.ident)), c.describe())
     provenance["release_pairs"] = f"{len(pairs)}{'' if complete else '+'}"
+    exact = [
+        m
+        for m in metas.values()
+        if mcn_similarity(disc.catalog, m.barcode) == MCN_EXACT
+    ]
+    if len(exact) == 1:
+        return _claim_by_mcn(
+            disc, provenance, exact[0], pairs, complete=complete, master=master
+        )
     if len(pairs) == 1 and complete:
         (mbid, discogs_id), evidence = next(iter(pairs.items()))
         return _take_pair(disc, provenance, metas[mbid], discogs_id, evidence)
     return _release_group_only(disc, provenance, candidates, master=master)
+
+
+def _claim_by_mcn(
+    disc: RBIDisc,
+    provenance: dict[str, str],
+    meta: DiscMeta,
+    pairs: dict[tuple[str, int], str],
+    *,
+    complete: bool,
+    master: int | None,
+) -> RBIDisc:
+    """Unattended, exactly one candidate's barcode equals the burned-in MCN: the
+    pressing is claimed (kgr, 2026-11-28: "auto can claim it as an exact
+    match"). Its Discogs release is its one pair, when the search found exactly
+    one and was complete; else the master only (§12 D7).
+    PROV ``release_selection=mcn``."""
+    from cdda2img.resolver_adapter import apply_menu_selection
+
+    own = {k: v for k, v in pairs.items() if k[0] == meta.mb_release_id}
+    if len(own) == 1 and complete:
+        (_mbid, discogs_id), evidence = next(iter(own.items()))
+        disc = _take_pair(disc, provenance, meta, discogs_id, evidence)
+    else:
+        if meta.mb_release_id != disc.mb_release_id:
+            disc = apply_menu_selection(disc, meta, overwrite=True)
+        _describe_pressing(provenance, meta)
+        disc.discogs_release_id = None
+        disc.discogs_master_id = master
+        provenance["discogs_release"] = (
+            f"master_only:{master}" if master else "no_master"
+        )
+        provenance.pop("discogs_release_via", None)
+    provenance["release_selection"] = "mcn"
+    return disc
 
 
 def _take_pair(

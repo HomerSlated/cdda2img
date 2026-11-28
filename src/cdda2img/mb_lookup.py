@@ -1801,6 +1801,12 @@ def _select_release_lexicographic(
     lexicographic key chain (trust_model_design.md §10.3). *via* names the first
     key on which the candidates vary:
 
+      (m) ``mcn``               — the burned-in MCN's likeness to the release's
+                                  barcode (exact) or to its barcode or catalogue
+                                  number (a shared run of 9 digits); evidence
+                                  about the disc, so it ranks first (kgr,
+                                  2026-11-28, reversing §1a for this use). A
+                                  difference never counts against a release.
       (0) ``barcode_plurality`` — the most common normalised barcode wins
       (1) ``preferred_country`` — user config ranking (priority, NOT a filter)
       (2) ``date``              — earliest ``release_date``, a year since
@@ -1825,11 +1831,11 @@ def _select_release_lexicographic(
     this only chooses the *pressing*, never the album — pinning ``mb_release_id``
     here is legitimate (every candidate shares the disc-ID fingerprint).
 
-    The on-disc MCN plays no part (identifier_trust_model.md §1a): pressing
-    selection rests on the candidates' own service barcodes (``barcode_plurality``),
-    a same-namespace comparison, not the cross-namespace MCN.
+    The on-disc MCN was kept out of selection from 2026-06-29 (§1a) until kgr
+    ruled on 2026-11-28 that it may raise a candidate's rating: exact equality to
+    the barcode, or a shared run of digits, never a fuzzy match and never a veto.
     """
-    from cdda2img.barcode import normalize_barcode
+    from cdda2img.barcode import mcn_similarity, normalize_barcode
 
     if not candidates:
         return ReleaseSelection(None, None, None, ())
@@ -1845,18 +1851,21 @@ def _select_release_lexicographic(
 
     pref = [code.upper() for code in preferred_country]
 
-    def _key(c: DiscMeta, k_link: int = 0) -> tuple[int, int, str, int, str]:
+    def _key(c: DiscMeta, k_link: int = 0) -> tuple[int, int, int, str, int, str]:
+        # Evidence first: the burned-in MCN's likeness to this release's barcode
+        # or catalogue number (kgr, 2026-11-28). No MCN scores alike everywhere.
+        k_mcn = -mcn_similarity(disc.catalog, c.barcode, c.catalog_number)
         nb = _norm(c.barcode)
         k_plur = -(counts[nb] if nb else 0)  # more common -> smaller -> first
         country = (c.country or "").upper()
         k_country = pref.index(country) if country in pref else len(pref)
         k_date = c.release_date or "9999"  # missing date sorts last
         k_mbid = c.mb_release_id or "~"  # '~' (0x7e) sorts after digits/letters
-        return (k_plur, k_country, k_date, k_link, k_mbid)
+        return (k_mcn, k_plur, k_country, k_date, k_link, k_mbid)
 
     keys = [_key(c) for c in candidates]
     if has_discogs_link is not None:
-        for i in _still_tied(keys, 3):
+        for i in _still_tied(keys, 4):
             rid = candidates[i].mb_release_id
             linked = bool(rid) and has_discogs_link(rid)  # type: ignore[arg-type]
             keys[i] = _key(candidates[i], 0 if linked else 1)
@@ -1874,6 +1883,7 @@ def _select_release_lexicographic(
     # It is kept because containers and `match_distance` already read it;
     # `tied_after` below is the honest account.
     via_names = (
+        "mcn",
         "barcode_plurality",
         "preferred_country",
         "date",

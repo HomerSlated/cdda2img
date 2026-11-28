@@ -179,6 +179,54 @@ def test_brothers_in_arms_unattended_is_the_release_group_only(services) -> None
     assert disc.mb_release_group_id == _RG
 
 
+# ---- the burned-in MCN (kgr, 2026-11-28) ------------------------------------------
+
+
+def test_an_mcn_equal_to_one_pressing_s_barcode_claims_it(services) -> None:
+    """Unattended: the US pressing alone has barcode 075992526425, and the disc's
+    MCN is its GTIN-13. No Discogs release pairs with it, so the master only."""
+    disc = _disc()
+    disc.catalog = "0075992526425"
+    prov: dict[str, str] = {}
+    disc = app._pair_unattended(disc, prov, BIA, "CD")
+    assert prov["release_selection"] == "mcn"
+    assert disc.mb_release_id == "4c618c14"
+    assert disc.catalog_number == "9 25264-2"  # the claimed pressing's own
+    assert prov["discogs_release"] == f"master_only:{_MASTER}"
+    assert disc.discogs_release_id is None
+    assert disc.catalog == "0075992526425"  # the MCN read stays
+
+
+def test_an_mcn_claim_takes_the_pressing_s_one_discogs_pair(services) -> None:
+    services.links = {"4c618c14": 77}
+    services.details = {77: _details(77, country="US")}
+    disc = _disc()
+    disc.catalog = "0075992526425"
+    prov: dict[str, str] = {}
+    disc = app._pair_unattended(disc, prov, BIA, "CD")
+    assert prov["release_selection"] == "mcn"
+    assert disc.mb_release_id == "4c618c14"
+    assert disc.discogs_release_id == 77
+    assert prov["discogs_release"] == "77"
+
+
+@pytest.mark.parametrize(
+    "mcn",
+    [
+        "0042282449924",  # exact, but four pressings share that barcode
+        "9007599252642",  # shares 9 digits with the US barcode: scored, not proof
+        "5099749994027",  # unrelated: neither for nor against
+    ],
+)
+def test_an_mcn_that_is_not_one_exact_match_claims_nothing(services, mcn) -> None:
+    disc = _disc()
+    disc.catalog = mcn
+    prov: dict[str, str] = {}
+    disc = app._pair_unattended(disc, prov, BIA, "CD")
+    assert prov["release_selection"] == "release_group_only"
+    assert disc.mb_release_id is None
+
+
 def test_a_unique_pair_is_taken_and_fills_the_pressing(services) -> None:
     services.links = {}
     services.versions = [
@@ -271,13 +319,13 @@ def test_an_adopted_or_unanimous_barcode_never_becomes_the_mcn() -> None:
         app._finalize_identifiers(prov, disc)
         assert disc.catalog is None
         assert "mcn_source" not in prov
-    # Control: a confirmed pressing's barcode still makes one.
-    disc = RBIDisc(album="A", artist="B")
+    # Control: an MCN read from the disc is kept, whatever the barcode says.
+    disc = RBIDisc(album="A", artist="B", catalog="9362450550209")
     disc.barcode = "042282449924"
-    prov = {}
+    prov = {"barcode_source": "adopted"}
     app._finalize_identifiers(prov, disc)
-    assert disc.catalog == "0042282449924"
-    assert prov["mcn_source"] == "barcode_derived"
+    assert disc.catalog == "9362450550209"
+    assert prov["mcn_source"] == "disc"
 
 
 def test_an_on_disc_mcn_that_differs_from_the_barcode_is_kept() -> None:

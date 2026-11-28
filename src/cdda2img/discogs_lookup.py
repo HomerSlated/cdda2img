@@ -529,6 +529,9 @@ class ReleaseDetails:
     identifiers: tuple[tuple[str, str, str], ...]  # (type, value, description)
     notes: str
     labels: tuple[tuple[str, str], ...] = ()  # (name, catno) per label, in order
+    artists: tuple[str, ...] = ()  # the release's credited artists, as listed
+    track_count: int | None = None  # tracklist entries of type "track"
+    media: int | None = None  # how many physical items its formats add up to
 
     def catalogue_fields(self) -> dict[str, str]:
         """The pressing-level fields this release states, normalised to the
@@ -574,6 +577,36 @@ def _discogs_date(released: str) -> str | None:
     if not kept or len(kept[0]) != 4:
         return None
     return "-".join(kept[:3])
+
+
+def _track_count(tracklist: list) -> int | None:
+    """The tracks a Discogs tracklist lists: headings are not tracks, and an
+    index track counts as its sub-tracks."""
+    n = 0
+    for t in tracklist:
+        if not isinstance(t, dict):
+            continue
+        kind = t.get("type_") or "track"
+        if kind == "track":
+            n += 1
+        elif kind == "index":
+            n += sum(
+                1
+                for sub in t.get("sub_tracks") or []
+                if isinstance(sub, dict) and (sub.get("type_") or "track") == "track"
+            )
+    return n or None
+
+
+def _media(formats: list) -> int | None:
+    total = 0
+    for f in formats:
+        if isinstance(f, dict):
+            try:
+                total += int(f.get("qty") or 0)
+            except (TypeError, ValueError):
+                return None
+    return total or None
 
 
 def release_details(release_id: int) -> ReleaseDetails | None:
@@ -623,6 +656,13 @@ def release_details(release_id: int) -> ReleaseDetails | None:
             if (i.get("type") or "").lower() != "barcode"
         ),
         notes=(data.get("notes") or "").strip(),
+        artists=tuple(
+            str(a.get("name") or "")
+            for a in data.get("artists") or []
+            if isinstance(a, dict) and a.get("name")
+        ),
+        track_count=_track_count(data.get("tracklist") or []),
+        media=_media(data.get("formats") or []),
         labels=tuple((lab.get("name") or "", lab.get("catno") or "") for lab in labels),
     )
 

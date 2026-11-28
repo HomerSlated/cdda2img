@@ -1381,6 +1381,20 @@ aborts is OPEN (§13.9 Q2).
   now names the pressings and the years they state (`_year_gap`), instead of claiming
   that neither service gave a year.
 
+### 13.9a Ruled by kgr, 2026-11-28
+
+- **Title, artist, track count: contradictions only.** They can break a pair, never
+  make one (`release_match.CONTRADICTION_ONLY`), so they can only shrink the pair count.
+  Title: from the versions list and fetched releases; artist and track count only from a
+  fetched Discogs release (the versions list carries neither), and the track count only
+  when both sides are one medium (MusicBrainz counts the matched medium, Discogs the
+  release). A name contradicts only when neither side's words are a subset of the
+  other's, so an edition suffix or "Various" against "Various Artists" is silent.
+- **The burned-in MCN** scores the selection ladder (`mcn`, first rung) and, unattended,
+  a unique exact match to a candidate's barcode claims the pressing
+  (`release_selection=mcn`). See identifier_trust_model.md §1a.
+- **Dates are years** everywhere (`rbi_format.year_text`).
+
 ### 13.10 Build sequence
 
 1. `rbi_spec.md` rows for the new PROV keys (matched fields per pair, adopted fields and

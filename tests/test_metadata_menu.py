@@ -665,30 +665,18 @@ def test_finalize_identifiers_mcn_from_disc_keeps_catalog():
     assert prov["barcode"] == "5099749994027"
 
 
-def test_finalize_identifiers_synthesises_mcn_from_barcode():
-    """No on-disc MCN but a barcode: synthesise the archival MCN from it,
-    mcn_source=barcode_derived, barcode in PROV."""
+@pytest.mark.parametrize("barcode", ["5099749994027", "075992377423"])
+def test_finalize_identifiers_never_synthesises_an_mcn(barcode):
+    """kgr, 2026-11-28 (reversing 2026-06-29): no MCN is made from a barcode. The
+    barcode goes to PROV only; the TOC carries an MCN only when one was read."""
     from cdda2img.cdda2img import _finalize_identifiers
 
-    disc = RBIDisc(album="A", artist="B", catalog=None, barcode="5099749994027")
+    disc = RBIDisc(album="A", artist="B", catalog=None, barcode=barcode)
     prov: dict[str, str] = {}
     _finalize_identifiers(prov, disc)
-    assert disc.catalog == "5099749994027"  # synthesised
-    assert prov["mcn_source"] == "barcode_derived"
-    assert prov["barcode"] == "5099749994027"
-
-
-def test_finalize_identifiers_normalises_non_canonical_barcode_for_burn():
-    """A 12-digit UPC-A barcode synthesises to a burnable 13-digit GTIN (padded),
-    not copied raw — the MCN is burned to the TOC CATALOG and cdrdao needs 13
-    digits. The advisor's burn-safety invariant."""
-    from cdda2img.cdda2img import _finalize_identifiers
-
-    disc = RBIDisc(album="A", artist="B", catalog=None, barcode="075992377423")  # 12
-    prov: dict[str, str] = {}
-    _finalize_identifiers(prov, disc)
-    assert disc.catalog == "0075992377423"  # padded to 13, burnable
-    assert prov["mcn_source"] == "barcode_derived"
+    assert disc.catalog is None
+    assert "mcn_source" not in prov
+    assert prov["barcode"] == barcode
 
 
 def test_finalize_identifiers_no_identifiers_writes_nothing():

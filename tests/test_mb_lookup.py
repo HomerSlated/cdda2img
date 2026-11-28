@@ -2088,6 +2088,70 @@ def _cand(mbid, *, catalog=None, country=None, date=None, rg="rg"):
     )
 
 
+# ---- the MCN rung (kgr, 2026-11-28) ------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("mcn", "barcode", "catno", "score"),
+    [
+        ("0093624505525", "093624505525", None, 2),  # UPC-12 and its GTIN-13
+        ("9362450550209", "0093624505525", None, 1),  # 936245055 in common
+        ("9362450550209", None, "9362-45055-2", 1),  # ... with the catalogue no.
+        ("9362450550209", "0093624505000", None, 0),  # 8 in common: not enough
+        ("5099749994027", "0093624505525", "9362-45055-2", 0),  # unrelated
+        (None, "0093624505525", None, 0),  # no MCN
+        ("9362450550209", None, None, 0),  # nothing to compare
+    ],
+)
+def test_mcn_similarity(mcn, barcode, catno, score):
+    from cdda2img.barcode import mcn_similarity
+
+    assert mcn_similarity(mcn, barcode, catno) == score
+
+
+def test_rung_mcn_outranks_every_preference():
+    """Automatic for the People's MCN against a ZA pressing that config prefers
+    and two barcode-plurality pressings: the one whose barcode equals the MCN
+    wins, ahead of plurality and country."""
+    disc = RBIDisc(album="A", artist="B", catalog="0093624505525")
+    cands = [
+        _cand("za", catalog="6001491238020", country="ZA", date="1992"),
+        _cand("au1", catalog="0093624500000", country="AU"),
+        _cand("au2", catalog="0093624500000", country="AU"),
+        _cand("xe", catalog="0093624505525", country="XE", date="2000"),
+    ]
+    sel = _select_release_lexicographic(cands, disc, ["ZA"])
+    assert sel.winner is not None
+    assert sel.winner.mb_release_id == "xe"
+    assert sel.via == "mcn"
+    assert sel.tied_after == "mcn:1"
+
+
+def test_rung_a_similar_mcn_outranks_no_likeness():
+    disc = RBIDisc(album="A", artist="B", catalog="9362450550209")
+    za = _cand("za", catalog="6001491238020", country="ZA")
+    xe = _cand("xe", catalog="0093624505525", country="XE")
+    sel = _select_release_lexicographic([za, xe], disc, ["ZA"])
+    assert sel.winner is not None
+    assert sel.winner.mb_release_id == "xe"
+
+
+def test_rung_an_unrelated_mcn_changes_nothing():
+    """The second Tracy Chapman disc: an MCN unlike every barcode is neither for
+    nor against, so the ladder answers exactly as with no MCN."""
+    cands = [
+        _cand("de", catalog="0075596077427", country="DE"),
+        _cand("us", catalog="0075596077427", country="US", date="1988"),
+    ]
+    plain = _select_release_lexicographic(cands, RBIDisc(album="A", artist="B"), [])
+    other = _select_release_lexicographic(
+        cands, RBIDisc(album="A", artist="B", catalog="5099749994027"), []
+    )
+    assert plain.winner is not None and other.winner is not None
+    assert other.winner.mb_release_id == plain.winner.mb_release_id
+    assert (other.via, other.tied_after) == (plain.via, plain.tied_after)
+
+
 def test_rung_empty_returns_none():
     disc = RBIDisc(album="A", artist="B")
     sel = _select_release_lexicographic([], disc, [])

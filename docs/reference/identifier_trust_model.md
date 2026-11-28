@@ -46,6 +46,20 @@ and last-resort use, nothing more.
 
 ## 1a. RESOLVED 2026-06-29 — the final, decided shape
 
+> **Partly reversed by kgr, 2026-11-28.** (1) No MCN is ever synthesised from a
+> barcode, on any path: "Archival is descriptive rather than just a plain copy, but
+> descriptions should be corroborated and based on fact, not guessed, assumed and
+> fabricated." The TOC carries an MCN only when the source did (`mcn_source=disc`),
+> and `burn` drops an older container's `barcode_derived` one. (2) The burned-in MCN
+> scores release selection: exact equality to a candidate's normalised barcode, or a
+> shared run of 9 digits with its barcode or catalogue number, ranks it first (the
+> ladder's `mcn` rung); unattended, a unique exact match claims the pressing. kgr: the
+> MCN "is unreliable, and therefore should not be taken as absolute proof of a match,
+> but … can be used for scoring". A difference is never evidence against (the second
+> Tracy disc), so the Unit-G veto stays gone, and fuzzy matching stays refused. An
+> MCN read from a CD-R counts too: it may be the pressed disc's, faithfully copied.
+> The text below is the 2026-06-29 decision, kept as history.
+
 The §1 direction is adopted **and tightened**. Two refinements settle it:
 
 **(i) The MCN is archival-only, full stop — no disambiguation use *at all*.** Not a veto,

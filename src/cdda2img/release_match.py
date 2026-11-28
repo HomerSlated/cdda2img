@@ -36,6 +36,12 @@ class ReleaseRecord:
     labels: tuple[str, ...] = ()
     country: str | None = None  # MusicBrainz code, or Discogs' own name
     year: str | None = None
+    #: Contradiction-only evidence (kgr, 2026-11-28, §13.3): the album title, the
+    #: credited artist, and the track count with the number of media it spans.
+    title: str | None = None
+    artist: str | None = None
+    tracks: int | None = None
+    media: int | None = None
     extra: dict[str, str] = field(default_factory=dict, compare=False, hash=False)
 
 
@@ -259,6 +265,62 @@ def _cmp_year(a: ReleaseRecord, b: ReleaseRecord) -> Outcome:
     return "agree" if ya == yb else "contradict"
 
 
+_DISCOGS_SUFFIX = re.compile(r"\s*\(\d+\)$")  # "Genesis (2)": Discogs' own numbering
+
+
+def _words(value: str) -> frozenset[str]:
+    text = _DISCOGS_SUFFIX.sub("", value).casefold().replace("&", " and ")
+    return frozenset(re.sub(r"[^\w\s]", "", text).split())
+
+
+def _alternatives(value: str | None) -> list[frozenset[str]]:
+    """A name's word sets: Discogs joins a translation with " = ", and either
+    side is the name. Empty when nothing is stated."""
+    text = _present(value)
+    if text is None:
+        return []
+    return [w for w in (_words(part) for part in text.split(" = ")) if w]
+
+
+def _names_contradict(a: str | None, b: str | None) -> Outcome:
+    """Contradiction only: one name's words are a subset of the other's (an
+    edition suffix, "Various" against "Various Artists") is no contradiction,
+    and agreement proves nothing, since every pressing of an album shares it."""
+    wa, wb = _alternatives(a), _alternatives(b)
+    if not wa or not wb:
+        return "absent"
+    if any(x <= y or y <= x for x in wa for y in wb):
+        return "absent"
+    return "contradict"
+
+
+def _cmp_title(a: ReleaseRecord, b: ReleaseRecord) -> Outcome:
+    return _names_contradict(a.title, b.title)
+
+
+def _cmp_artist(a: ReleaseRecord, b: ReleaseRecord) -> Outcome:
+    return _names_contradict(a.artist, b.artist)
+
+
+def _cmp_tracks(a: ReleaseRecord, b: ReleaseRecord) -> Outcome:
+    """Compared only when both are known to be one medium: MusicBrainz's count
+    is the matched medium's, Discogs' is the whole release's."""
+    if a.media != 1 or b.media != 1 or not a.tracks or not b.tracks:
+        return "absent"
+    return "absent" if a.tracks == b.tracks else "contradict"
+
+
+#: Contradiction-only classes (kgr, 2026-11-28: "contradictions only"): they can
+#: break a match and never make one, so they only ever shrink the pair count.
+CONTRADICTION_ONLY: tuple[
+    tuple[str, Callable[[ReleaseRecord, ReleaseRecord], Outcome]], ...
+] = (
+    ("title", _cmp_title),
+    ("artist", _cmp_artist),
+    ("tracks", _cmp_tracks),
+)
+
+
 #: The evidence classes: (name, comparator, strong). A strong field can make a match
 #: on its own (§13.3); every field can break one. Add fallbacks here.
 FIELDS: tuple[
@@ -306,6 +368,7 @@ def compare(a: ReleaseRecord, b: ReleaseRecord) -> Comparison:
             agreed.append(name)
         elif outcome == "contradict":
             contradicted.append(name)
+    contradicted += [n for n, cmp in CONTRADICTION_ONLY if cmp(a, b) == "contradict"]
     return Comparison(tuple(agreed), tuple(contradicted))
 
 
@@ -368,8 +431,11 @@ def unanimous(
 
 def record_from_meta(meta) -> ReleaseRecord:
     """A MusicBrainz pressing (``DiscMeta`` from the disc-ID response). Never the
-    on-disc MCN: kgr holds a disc whose MCN differs from its barcode, and the MCN
-    is not a disambiguation key (identifier_trust_model.md §1a)."""
+    on-disc MCN: this compares one service's release with the other's, and the
+    MCN is the disc's (the selection ladder scores it, ``mb_lookup``)."""
+    tracks = len(getattr(meta, "tracks", None) or ()) or getattr(
+        meta, "track_count", None
+    )
     return ReleaseRecord(
         "mb",
         meta.mb_release_id or "",
@@ -378,6 +444,10 @@ def record_from_meta(meta) -> ReleaseRecord:
         labels=tuple(lab for lab in (meta.label,) if lab),
         country=meta.country,
         year=meta.release_date,
+        title=getattr(meta, "album", None),
+        artist=getattr(meta, "artist", None),
+        tracks=tracks,
+        media=getattr(meta, "disc_total", None),
     )
 
 
@@ -390,6 +460,7 @@ def record_from_version(v) -> ReleaseRecord:
         labels=tuple(lab for lab in (v.label,) if lab),
         country=v.country or None,
         year=v.year,
+        title=v.title or None,
     )
 
 
@@ -403,4 +474,8 @@ def record_from_details(d) -> ReleaseRecord:
         labels=tuple(n for n, _c in d.labels if n),
         country=d.country or None,
         year=d.released or None,
+        title=d.title or None,
+        artist=" / ".join(getattr(d, "artists", ()) or ()) or None,
+        tracks=getattr(d, "track_count", None),
+        media=getattr(d, "media", None),
     )

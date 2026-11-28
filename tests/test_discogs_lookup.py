@@ -362,3 +362,18 @@ def test_master_original_reads_title_and_year() -> None:
         assert discogs_lookup.master_original(23684) == ("Brothers In Arms", 1985)
         assert discogs_lookup.master_original(1) is None  # Discogs' 0 = no year
     assert client.urls[0] == "https://api.discogs.com/masters/23684"
+
+
+def test_track_count_and_media_from_a_release() -> None:
+    from cdda2img.discogs_lookup import _media, _track_count
+
+    tracklist = [
+        {"type_": "heading", "title": "Side A"},
+        {"type_": "track", "title": "One"},
+        {"type_": "index", "sub_tracks": [{"type_": "track"}, {"type_": "track"}]},
+        {"title": "untyped counts as a track"},
+    ]
+    assert _track_count(tracklist) == 4
+    assert _track_count([]) is None
+    assert _media([{"name": "CD", "qty": "2"}, {"name": "DVD", "qty": "1"}]) == 3
+    assert _media([{"name": "CD"}]) is None

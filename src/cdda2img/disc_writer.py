@@ -77,6 +77,14 @@ def _patch_toc_filenames(toc_text: str) -> str:
     return _FILE_NAME_RE.sub(r'\1"disc.pcm"', toc_text)
 
 
+_CATALOG_LINE_RE = re.compile(r'^CATALOG\s+"[^"]*"\s*\n?', re.MULTILINE)
+
+
+def drop_catalog(toc_text: str) -> str:
+    """*toc_text* without its ``CATALOG`` (MCN) line."""
+    return _CATALOG_LINE_RE.sub("", toc_text)
+
+
 def _sanitize_toc_for_burn(toc_text: str) -> str:
     """Strip TOC constructs that cdrdao write rejects but cdrdao read-cd tolerates.
 
@@ -263,6 +271,19 @@ def burn_disc(
         toc_bytes = f.read(toc_entry.length)
 
     toc_text = toc_bytes.decode("utf-8")
+    prov_entry = header.find_block(b"PROV")
+    if prov_entry is not None:
+        from cdda2img.container import _parse_provenance
+
+        with open(rbi_file, "rb") as f:
+            f.seek(prov_entry.offset)
+            prov = _parse_provenance(f.read(prov_entry.length))
+        if prov.get("mcn_source") == "barcode_derived":
+            # A container written before 2026-11-28 may hold an MCN synthesised
+            # from the barcode. Only an MCN read from the disc is burned (kgr:
+            # "descriptions should be corroborated and based on fact").
+            toc_text = drop_catalog(toc_text)
+            _ui_print(ui, "  MCN not burned: it was made from the barcode, not read.")
 
     from cdda2img.toc_parser import parse_toc
 

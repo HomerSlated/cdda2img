@@ -70,6 +70,41 @@ def _tiny_rbi(tmp_path: Path) -> Path:
     return rbi
 
 
+def _rbi_with_mcn(tmp_path: Path, mcn_source: str) -> Path:
+    disc = RBIDisc(
+        album="Album",
+        artist="Artist",
+        catalog="0042282449924",
+        tracks=[RBITocEntry(1, "One", "Artist", start_frame=0, duration_frames=150)],
+    )
+    pcm = tmp_path / "all.pcm"
+    pcm.write_bytes(b"\x00" * (2352 * 150))
+    rbi = tmp_path / "disc.rbi"
+    prov = {"mcn_source": mcn_source}
+    build_container(pcm, generate_toc(disc), disc, rbi, prov_data=prov, quiet=True)
+    return rbi
+
+
+@pytest.mark.parametrize(
+    ("source", "burned"), [("barcode_derived", False), ("disc", True)]
+)
+def test_only_an_mcn_read_from_the_disc_is_burned(
+    tmp_path, monkeypatch, source, burned
+):
+    """kgr, 2026-11-28: a container written before then may hold an MCN made
+    from the barcode; it is not burned. An MCN read from the disc is (control)."""
+    rbi = _rbi_with_mcn(tmp_path, source)
+    toc_seen: list[str] = []
+
+    def _fake(device, toc_path, bin_path, speed, **kwargs):
+        toc_seen.append(Path(toc_path).read_text())
+        return 0, "", "ok"
+
+    monkeypatch.setattr(accudisc_reader, "write_disc", _fake)
+    disc_writer.burn_disc(rbi, device="/dev/sr0", yes=True)
+    assert ('CATALOG "0042282449924"' in toc_seen[0]) is burned
+
+
 def _patch_write_disc(monkeypatch) -> dict:
     """Capture what `disc_writer` asks the seam to burn.
 

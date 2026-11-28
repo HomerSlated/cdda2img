@@ -347,10 +347,10 @@ class RBIDisc:
     artist: str
     disc_number: int = 1
     disc_total: int = 1
-    catalog: str | None = None  # on-disc MCN (Q-ch Mode 2); archival only — never
-    # a lookup/disambiguation key. May be synthesised from `barcode` at finalisation
-    # when the disc carries no MCN (PROV `mcn_source=barcode_derived`); burned to the
-    # TOC CATALOG line. See docs/reference/identifier_trust_model.md §1a.
+    catalog: str | None = None  # on-disc MCN (Q-ch Mode 2), only as read from the
+    # source; never synthesised (kgr, 2026-11-28). Burned to the TOC CATALOG line,
+    # and scored by the release-selection ladder (`mcn` rung). See
+    # docs/reference/identifier_trust_model.md §1a.
     barcode: str | None = None  # service UPC/EAN barcode (MB/Discogs); the
     # disambiguation key. Persisted to PROV only (never the TOC/physical layer).
     cdtext_catalog_ref: str | None = (

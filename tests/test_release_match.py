@@ -238,3 +238,81 @@ def test_a_label_difference_never_rejects() -> None:
     assert c.contradicted == ()
     assert c.agreed == ("catno",)
     assert c.sufficient
+
+
+# ---- contradiction-only evidence (kgr, 2026-11-28) -------------------------------------
+
+
+def _mbx(**kw) -> ReleaseRecord:
+    return ReleaseRecord("mb", "m", barcodes=("0093624505525",), **kw)
+
+
+def _dgx(**kw) -> ReleaseRecord:
+    return ReleaseRecord("discogs", "1", barcodes=("0093624505525",), **kw)
+
+
+@pytest.mark.parametrize(
+    ("a", "b", "contradicts"),
+    [
+        ("Automatic for the People", "Automatic For The People", False),
+        (
+            "Automatic for the People",
+            "Automatic For The People (25th Anniversary)",
+            False,
+        ),
+        (
+            "Automatic for the People",
+            "Automatic For The People = オートマチック",
+            False,
+        ),
+        ("Rock & Roll", "Rock and Roll", False),
+        ("Automatic for the People", "Out of Time", True),
+        (None, "Out of Time", False),  # absent is silent
+    ],
+)
+def test_a_title_only_ever_contradicts(a, b, contradicts) -> None:
+    c = rm.compare(_mbx(title=a), _dgx(title=b))
+    assert ("title" in c.contradicted) is contradicts
+    assert "title" not in c.agreed  # agreement never makes a match
+
+
+@pytest.mark.parametrize(
+    ("a", "b", "contradicts"),
+    [
+        ("R.E.M.", "R.E.M.", False),
+        ("Genesis", "Genesis (2)", False),  # Discogs' own numbering
+        ("Various Artists", "Various", False),
+        ("Simon & Garfunkel", "Simon / Garfunkel", False),
+        ("R.E.M.", "Dire Straits", True),
+    ],
+)
+def test_an_artist_only_ever_contradicts(a, b, contradicts) -> None:
+    c = rm.compare(_mbx(artist=a), _dgx(artist=b))
+    assert ("artist" in c.contradicted) is contradicts
+
+
+@pytest.mark.parametrize(
+    ("mb", "dg", "contradicts"),
+    [
+        ((12, 1), (12, 1), False),
+        ((12, 1), (13, 1), True),
+        ((12, 2), (24, 2), False),  # two media: MusicBrainz counts one of them
+        ((12, None), (13, 1), False),  # media unknown: not compared
+    ],
+)
+def test_a_track_count_contradicts_only_on_one_medium(mb, dg, contradicts) -> None:
+    c = rm.compare(_mbx(tracks=mb[0], media=mb[1]), _dgx(tracks=dg[0], media=dg[1]))
+    assert ("tracks" in c.contradicted) is contradicts
+
+
+def test_a_contradiction_only_field_breaks_a_sufficient_pair() -> None:
+    """The barcode agrees, so the pair was sufficient; a different album title
+    now breaks it. Control: the same pair without titles stays sufficient."""
+    assert rm.compare(_mbx(), _dgx()).sufficient
+    assert not rm.compare(_mbx(title="Out of Time"), _dgx(title="Monster")).sufficient
+
+
+def test_a_contradiction_only_field_never_makes_a_pair() -> None:
+    a = ReleaseRecord("mb", "m", title="X", artist="Y", tracks=10, media=1)
+    b = ReleaseRecord("discogs", "1", title="X", artist="Y", tracks=10, media=1)
+    assert not rm.compare(a, b).sufficient
