@@ -106,8 +106,9 @@ def norm_labels(values: Iterable[str | None]) -> frozenset[str]:
 
 
 def norm_year(value: str | None) -> str | None:
-    text = (_present(value) or "")[:4]
-    return text if len(text) == 4 and text.isdigit() and text != "0000" else None
+    from cdda2img.rbi_format import year_text
+
+    return year_text(_present(value))
 
 
 #: Countries a MusicBrainz "XE" (Europe) or a Discogs European region contains.

@@ -360,7 +360,7 @@ class RBIDisc:
         # (MCN) and `catalog_number` (the label's own alphanumeric number).
     )
     tracks: list[RBITocEntry] = field(default_factory=list)
-    release_date: str | None = None  # YYYY, YYYY-MM, or YYYY-MM-DD
+    release_date: str | None = None  # YYYY only (year_text, kgr 2026-11-28)
     catalog_number: str | None = None  # label's own catalogue number, e.g. "CID U2 6"
     label: str | None = None  # record label / imprint name
     country: str | None = None  # ISO-3166 alpha-2, or MB pseudo-code XE / XW
@@ -391,6 +391,12 @@ class RBIDisc:
     # parsers that don't propagate it). Used as a year upper-bound (≤ 1986)
     # in the original-release lookup.
     pre_emphasis: bool | None = None
+
+    def __post_init__(self) -> None:
+        # Year only, whatever the source (kgr, 2026-11-28). An assignment after
+        # construction is caught where the container is written (PROV).
+        self.release_date = year_text(self.release_date)
+        self.original_release_date = year_text(self.original_release_date)
 
     @property
     def total_frames(self) -> int:
@@ -426,6 +432,15 @@ def frames_from_timestamp(ts: str) -> int:
     """Parse a MM:SS:FF timestamp string to an absolute CD frame count."""
     mm, ss, ff = (int(x) for x in ts.split(":"))
     return mm * CD_FRAMES_PER_SECOND * 60 + ss * CD_FRAMES_PER_SECOND + ff
+
+
+def year_text(value: str | None) -> str | None:
+    """A release date as its year, ``YYYY``, or ``None`` (kgr, 2026-11-28: months
+    and days are dropped everywhere; no CD states its month of issue, and a month
+    is user-submitted research nothing corroborates). ``0000`` and anything not
+    starting with four digits is no year."""
+    text = str(value).strip()[:4] if value else ""
+    return text if len(text) == 4 and text.isdigit() and text != "0000" else None
 
 
 def year_of(date_str: str | None) -> int | None:

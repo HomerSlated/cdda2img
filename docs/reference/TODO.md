@@ -2,23 +2,64 @@
 
 ## Open
 
-### 📋 QUEUED — `create --strategy`: compilations, not archives (kgr, 2026-11-28)
+### 🧭 Release selection: rulings of 2026-11-28 (kgr) and the work they set
 
-Since §14.12 a release's media decide `create`'s discs, so `--strategy` batches only an
-input no release matched. kgr: keep it, but those containers "will not be authoritative
-archives, they'll just be proprietary creations", the user's own "bootleg" compilations,
-which makes formal identification pointless for them. To revisit in detail: what such a
-container records (and claims) instead, and whether identification is skipped for it.
+The order of work agreed on 2026-11-28. When these are settled, **a deep audit of the
+release-selection logic** (gaps, contradictions, unused paths) follows.
 
-### 🔨 NEXT — `create`: identify an album from loose files (kgr, 2026-11-27)
+- ✅ **Dates are years.** Every release date is normalised to `YYYY` at construction
+  (`rbi_format.year_text`; `DiscMeta`/`RBIDisc.__post_init__`, the PROV write, Discogs'
+  catalogue fields). kgr: no CD states its month of issue, a month is uncorroborated
+  user research, and two releases of one year that differ in nothing else are of no
+  archival significance. The ladder's `date` rung therefore compares years, and same-year
+  pressings fall through to `discogs_link`/`mbid` (before, `'1992'` sorted before
+  `'1992-10'` and a less precise date won: *Automatic for the People*).
+- ✅ **`create` never synthesises an MCN** from a barcode: no disc was read, few releases
+  burn one, an MCN can differ from the barcode entirely (*Automatic for the People*:
+  `9362450550209` against `0093624505525`), and neither service records whether a release
+  burned one (MusicBrainz holds a barcode only; Discogs has no MCN identifier type, checked
+  on 8433515 and 5222631), so there is no published MCN to record either.
+- ✅ **The group-only year abort stays** (§13.9 Q2 revisited), with an accurate message
+  (`_year_gap`, `52fcb447`).
+- 🔨 **§13 pair matching: album title, track count, artist** (kgr: "the logic is sound,
+  and in the worst case would not produce a worse outcome"). Direction to settle first:
+  as contradictions only (can only shrink the pair count) or as sufficiency fallbacks
+  (can make a "unique pair" from fields every pressing of the group shares). Discogs'
+  master-versions listing carries no track count, barcode or per-version artist, so
+  using those costs one release fetch per version (99 for *Automatic for the People*).
+- 🔨 **Rip: a burned-in MCN equal to a candidate's normalised barcode is evidence**
+  (reverses identifier_trust_model.md §1a for that case). An MCN that differs is neither
+  for nor against (the second Tracy disc). Open: `--cdr` copies (a burned RBI carries our
+  synthesised MCN), whether a unique match lets `--auto` claim the pressing, and the rip
+  path's own `barcode_derived` synthesis.
+- 🔨 **`create`: abort when the input holds more than one album.** No batching or
+  recursion across albums (kgr's earlier ruling: guarding a huge input against OOM is a
+  project of its own; beets is the template). Then **recursion for one multi-disc
+  release split into subdirectories** (`…/Disc 1/01 Foo.flac`, `…/Disc 2/…`): a depth
+  cap, symlink-cycle detection, a file-count cap. Design first.
+- 🔬 **§14.6: measure AcoustID's `meta=releases` completeness** against MusicBrainz's
+  paged browse, on files whose release is known from tags (2026-11-28).
+- 🗣 **OPT-4 (per-field trust): discuss in detail** (2026-11-28).
+- 🔬 **Live checks: *No Jacket Required*, interactive and `--auto`** (kgr's re-rips).
+- ⏸ **Deferred until more testing:** tier C on two contradictions instead of one
+  (§14, kgr leans that way); the §14.8 "irreconcilable" thresholds (`TITLE_MATCH`,
+  runtime limits).
+- ⏸ **`create --strategy`: compilations, not archives** (not high priority). Since §14.12
+  a release's media decide `create`'s discs, so `--strategy` batches only an input no
+  release matched. kgr: keep it, but those containers "will not be authoritative
+  archives, they'll just be proprietary creations", the user's own "bootleg"
+  compilations, which makes formal identification pointless for them. To revisit: what
+  such a container records (and claims) instead, and whether identification is skipped.
+- ❌ **Discogs as the primary source: rejected** (kgr, 2026-11-28). Its user submissions
+  are far sloppier than MusicBrainz's (bootlegs with fake barcodes, duplicate submissions
+  of one release with different descriptions, missing years and barcodes): corroboration
+  only, needing manual verification unless a single unique match turns up.
 
-Design: `trust_model_design.md` §14 (DECIDED, not built). Step 1 (the release the tags
-name) is BUILT; steps 2 (search by album, artist, titles and runtimes) and 3 (no tags:
-fingerprint every track, then match recordings by position) are the work, with the
-pressing settled by the rip's pressing screen interactively and the release group only
-under `--auto`. No TOC or disc ID is ever rebuilt from loose files (§14.1). Build sequence
-§14.9; open question §14.8 (tags contradicted by fingerprints). kgr's next test is a
-folder with no tags and meaningless file names.
+### ✅ DONE 2026-11-28 — `create`: identify an album from loose files (kgr)
+
+`trust_model_design.md` §14, built and tested by kgr on *Night and Day* (tagged),
+*Nevermind* (no tags, meaningless names; interactive and `--auto`), *Toca* (digital) and
+*The Platinum Collection* (three CDs, discs 20/18/19). As built: §14.10-§14.12.
 
 ### 📋 QUEUED — Replace musicbrainzngs with our own MusicBrainz JSON client (kgr, 2026-11-26)
 
@@ -63,7 +104,8 @@ on it (the research run sent 8 unthrottled requests while testing; do not repeat
 Built: `trust_model_design.md` §13, as-built notes §13.11. **Expect revisions** (kgr: "I'm
 sure we'll discover some discs that don't fit the formula"): the sufficiency rule may need
 fallbacks (album title, track count, artist), and `--auto` now aborts on most
-multi-pressing discs for want of the disc's own year. Ruled the same day: leaving the marked
+multi-pressing discs for want of the disc's own year (kept by kgr on 2026-11-28, with an
+accurate message). Ruled the same day: leaving the marked
 pressing in place is `accepted` (a yes, with "none of these" on offer), and "none of these"
 records the album only.
 

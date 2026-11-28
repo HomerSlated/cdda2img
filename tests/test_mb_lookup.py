@@ -357,7 +357,7 @@ def test_lookup_disc_id_single_match():
     r = results[0]
     assert r.album == "Pump Up the Jam - The Album"
     assert r.artist == "Technotronic"
-    assert r.release_date == "1989-10-31"
+    assert r.release_date == "1989"
     assert r.country == "BE"
     assert r.source == "musicbrainz"
     assert r.tracks[0].isrc == "BEXX89300001"
@@ -939,7 +939,7 @@ def test_prepopulate_multimatch_barcode_plurality_picks_pressing():
     ]
     with patch("cdda2img.mb_lookup.lookup_disc_id", return_value=matches):
         r = prepopulate_from_mb(disc, verbose=False)
-    assert r.disc.release_date == "1983-11-18"  # the barcoded pressing won
+    assert r.disc.release_date == "1983"  # the barcoded pressing won
     assert r.disc.mb_release_id == "de"
     assert r.release_selected_via == "barcode_plurality"
     assert r.isrc_disambiguated is False
@@ -948,8 +948,9 @@ def test_prepopulate_multimatch_barcode_plurality_picks_pressing():
 def test_prepopulate_multimatch_rung_pins_earliest_in_shared_barcode_rg():
     """§10.3 rung: two pressings share a barcode and a barcodeless sibling does not.
     The barcoded pair wins the plurality tier (so ``via`` is ``barcode_plurality``);
-    within that pair the earliest release_date pins the winner. The on-disc MCN is
-    not consulted (§1a) — selection rests on the candidates' own barcodes."""
+    within that pair the dates are one year, 1983 (months are dropped, kgr
+    2026-11-28: "1983" no longer sorts before "1983-11-18"), so the terminal mbid
+    sort pins 'de'. The on-disc MCN is not consulted (§1a)."""
     disc = _make_disc(tracks=[(1, 0, 18000)])
     matches = [
         DiscMeta(album="E", mb_release_id="us", mb_release_group_id="rg-e"),
@@ -970,9 +971,9 @@ def test_prepopulate_multimatch_rung_pins_earliest_in_shared_barcode_rg():
     ]
     with patch("cdda2img.mb_lookup.lookup_disc_id", return_value=matches):
         r = prepopulate_from_mb(disc, verbose=False)
-    assert r.disc.release_date == "1983"  # the pinned 'xe' pressing's own date
+    assert r.disc.release_date == "1983"
     assert r.disc.mb_release_group_id == "rg-e"
-    assert r.disc.mb_release_id == "xe"  # earliest date within the barcoded pair
+    assert r.disc.mb_release_id == "de"  # one year: the mbid sort decides
     # 'us' (no barcode) loses the plurality tier, so that is the deciding key.
     assert r.release_selected_via == "barcode_plurality"
     assert r.isrc_disambiguated is False
@@ -998,7 +999,7 @@ def test_prepopulate_multimatch_rung_pins_earliest_and_fills_shared_isrcs():
         ),
         DiscMeta(
             album="E",
-            release_date="1983-11-18",
+            release_date="1984-11-18",
             mb_release_id="de",
             mb_release_group_id="rg-e",
             tracks=shared_tracks,
@@ -1013,7 +1014,7 @@ def test_prepopulate_multimatch_rung_pins_earliest_and_fills_shared_isrcs():
     ]
     with patch("cdda2img.mb_lookup.lookup_disc_id", return_value=matches):
         r = prepopulate_from_mb(disc, verbose=False)
-    assert r.disc.release_date == "1983-03-23"  # pinned 'us' (earliest) pressing
+    assert r.disc.release_date == "1983"  # pinned 'us' (earliest) pressing
     assert r.disc.mb_release_group_id == "rg-e"
     assert r.disc.mb_release_id == "us"  # earliest date over the comp's 2008
     assert r.release_selected_via == "date"
@@ -1651,7 +1652,7 @@ def test_prepopulate_consistent_single_still_merges():
     )
     with patch("cdda2img.mb_lookup.lookup_disc_id", return_value=[match]):
         r = prepopulate_from_mb(disc, verbose=False)
-    assert r.disc.release_date == "1983-04-26"
+    assert r.disc.release_date == "1983"
     assert r.match_count == 1
     assert r.rejected_inconsistent == 0
 
@@ -1673,7 +1674,7 @@ def test_prepopulate_multimatch_resolves_via_release_group_plurality():
     s2 = DiscMeta(
         album="E",
         barcode="0093624877721",
-        release_date="1983-11-18",
+        release_date="1984-11-18",
         mb_release_id="b",
         mb_release_group_id="rg-e",
     )
@@ -1688,7 +1689,7 @@ def test_prepopulate_multimatch_resolves_via_release_group_plurality():
         r = prepopulate_from_mb(disc, verbose=False)
     assert r.rejected_inconsistent == 0  # MCN no longer vetoes 'bad'
     assert r.match_count == 3  # all three consistent now; rg-x excluded at selection
-    assert r.disc.release_date == "1983-04-26"  # pinned earliest survivor ('a')
+    assert r.disc.release_date == "1983"  # pinned earliest survivor ('a')
     assert r.disc.mb_release_group_id == "rg-e"
     assert r.disc.mb_release_id == "a"
     assert r.release_selected_via == "date"
@@ -1767,7 +1768,7 @@ def test_prepop_multimatch_barcode_plurality_excludes_blank_barcode_variant():
     assert r.disc.album == "American Idiot"  # plurality excluded the variant
     # The TOC-collision variant loses the plurality tier; among the two barcoded
     # originals the earliest date pins the winner.
-    assert r.disc.release_date == "2004-09-20"  # pinned 'o1' (earliest original)
+    assert r.disc.release_date == "2004"  # pinned 'o1' (earliest original)
     assert r.disc.mb_release_id == "o1"
     assert r.release_selected_via == "barcode_plurality"
 
@@ -2194,8 +2195,8 @@ def test_rung_preferred_country_only_within_barcode_tier():
 def test_rung_key3_earliest_date_wins():
     disc = RBIDisc(album="A", artist="B")
     cands = [
-        _cand("late", date="1987-06-01"),
-        _cand("early", date="1987-03-09"),
+        _cand("late", date="1988-01-01"),
+        _cand("early", date="1987-06-09"),
         _cand("nodate"),
     ]
     sel = _select_release_lexicographic(cands, disc, [])
@@ -2203,6 +2204,18 @@ def test_rung_key3_earliest_date_wins():
     assert sel.winner.mb_release_id == "early"
     assert sel.via == "date"
     assert sel.tied_after == "date:1"  # earliest date was unique
+
+
+def test_rung_key3_compares_years_only():
+    """kgr, 2026-11-28 (*Automatic for the People*): "1992" sorted before
+    "1992-10" as a string, so a less precise date won. One year is one tie."""
+    disc = RBIDisc(album="A", artist="B")
+    cands = [_cand("b-month", date="1992-10"), _cand("c-year", date="1992")]
+    sel = _select_release_lexicographic(cands, disc, [])
+    assert sel.winner is not None
+    assert sel.winner.mb_release_id == "b-month"  # the mbid sort, not the date
+    assert sel.tied_after == "none:2"
+    assert sel.winner.release_date == "1992"
 
 
 def test_rung_key4_mbid_terminal_deterministic():

@@ -19,6 +19,7 @@ from cdda2img.barcode import normalize_barcode
 from cdda2img.countries import discogs_country_code
 from cdda2img.lookup_result import DiscMeta, TrackMeta
 from cdda2img.net import NETWORK_TIMEOUT
+from cdda2img.rbi_format import year_text
 
 log = logging.getLogger(__name__)
 
@@ -538,7 +539,7 @@ class ReleaseDetails:
         ``label``/``catalog_number`` from the first label, ``country`` as an
         ISO code (``countries.discogs_country_code``: a region it cannot map is
         absent), ``barcode`` the first listed value that is a valid GTIN, and
-        ``release_date`` with Discogs' ``-00`` placeholders dropped.
+        ``release_date`` as its year (kgr, 2026-11-28).
         """
         out: dict[str, str] = {}
         name, catno = self.labels[0] if self.labels else ("", "")
@@ -554,7 +555,7 @@ class ReleaseDetails:
         )
         if barcode:
             out["barcode"] = barcode
-        date = _discogs_date(self.released)
+        date = year_text(_discogs_date(self.released))
         if date:
             out["release_date"] = date
         return out

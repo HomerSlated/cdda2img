@@ -754,6 +754,8 @@ def test_a_digital_release_s_barcode_never_becomes_the_mcn(
     [
         ({}, "5037300003931"),  # the control: a CD release's barcode synthesises
         ({"media_override": "digital_media"}, None),  # rip --digital-media
+        ({"mode": "create"}, None),  # create never invents one (kgr, 2026-11-28)
+        ({"mode": "rip"}, "5037300003931"),  # the rip path is unchanged
     ],
 )
 def test_mcn_synthesis_and_digital_media(prov: dict, mcn: str | None) -> None:

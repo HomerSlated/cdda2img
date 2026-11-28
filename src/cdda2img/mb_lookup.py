@@ -1803,7 +1803,8 @@ def _select_release_lexicographic(
 
       (0) ``barcode_plurality`` — the most common normalised barcode wins
       (1) ``preferred_country`` — user config ranking (priority, NOT a filter)
-      (2) ``date``              — earliest ``release_date``
+      (2) ``date``              — earliest ``release_date``, a year since
+                                  2026-11-28 (kgr): one year is one tie
       (3) ``discogs_link``      — a release MusicBrainz links to Discogs first
       (4) ``mbid``              — terminal, deterministic tiebreak
 

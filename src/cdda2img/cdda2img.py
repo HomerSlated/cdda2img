@@ -58,6 +58,7 @@ from cdda2img.rbi_format import (
     FLAG_MASTER_MODE,
     RBIDisc,
     format_original,
+    year_text,
 )
 from cdda2img.rip_abort import (
     EXIT_FIX_INVOCATION,
@@ -734,8 +735,8 @@ def _add_release_provenance(provenance: dict, disc: RBIDisc) -> None:  # noqa: C
             provenance["original_release_title"] = disc.original_release_title
         if disc.original_release_year is not None:
             provenance["original_release_year"] = str(disc.original_release_year)
-    if disc.release_date:
-        provenance["release_date"] = disc.release_date
+    if year := year_text(disc.release_date):
+        provenance["release_date"] = year
     if disc.catalog_number:
         provenance["catalog_number"] = disc.catalog_number
     if disc.label:
@@ -792,12 +793,17 @@ def _finalize_identifiers(provenance: dict, disc: RBIDisc) -> None:
         disc.barcode
         and provenance.get("barcode_source") not in ("adopted", "unanimous", "digital")
         and provenance.get("media_override") != "digital_media"
+        and provenance.get("mode") != "create"
     ):
         # §13.7 (kgr, 2026-11-26): a barcode adopted from the partner release, or
         # kept only because every candidate pressing states it, is not a confirmed
         # pressing's own, and the TOC's MCN is burned to every copy. A digital
         # release's barcode stays PROV-only too (kgr, 2026-11-28): no CD ever
-        # carried it as an MCN.
+        # carried it as an MCN. `create` never synthesises (kgr, 2026-11-28): no
+        # disc was read, few releases burn an MCN at all, an MCN can differ from
+        # the barcode entirely (Automatic for the People: 9362450550209 against
+        # 0093624505525), and neither service records whether a release burned
+        # one, so an MCN made from the barcode would be invented.
         synth = normalize_barcode(disc.barcode, require_check_digit=False)
         if synth:
             disc.catalog = synth  # synthesise a burnable archival MCN from the barcode

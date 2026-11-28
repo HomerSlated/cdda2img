@@ -323,7 +323,7 @@ def test_catalogue_fields_takes_what_discogs_states() -> None:
         "catalog_number": "CDV 2345",
         "country": "GB",
         "barcode": "5012981234522",
-        "release_date": "1985-03",
+        "release_date": "1985",  # the year only (kgr, 2026-11-28)
     }
 
 

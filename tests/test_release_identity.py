@@ -237,7 +237,7 @@ def test_a_pair_adopts_only_fields_the_pressing_lacks(services) -> None:
     prov: dict[str, str] = {}
     disc = app._pair_unattended(disc, prov, [pressing, other], "CD")
     assert disc.barcode == "0075992526425"  # GTIN-13
-    assert disc.release_date == "1985-05-15"
+    assert disc.release_date == "1985"
     assert disc.label == "Warner Bros. Records"  # stated by the pressing: kept
     assert prov["release_adopted"] == "barcode:discogs,release_date:discogs"
     assert prov["barcode_source"] == "adopted"
@@ -696,3 +696,40 @@ def test_the_settlement_routes_a_rejection_away_from_derivation() -> None:
 
     src = inspect.getsource(app._settle_identity_after_menu)
     assert src.index('== "rejected"') < src.index("_pair_after_pick(")
+
+
+# ---- dates are years (kgr, 2026-11-28) -------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("value", "year"),
+    [
+        ("1992-10-06", "1992"),
+        ("1992-10", "1992"),
+        ("1992", "1992"),
+        (" 1985-03-00", "1985"),
+        ("0000", None),
+        ("", None),
+        (None, None),
+        ("19x2", None),
+    ],
+)
+def test_year_text(value, year) -> None:
+    from cdda2img.rbi_format import year_text
+
+    assert year_text(value) == year
+
+
+def test_every_lookup_result_and_disc_holds_a_year() -> None:
+    meta = DiscMeta(release_date="1992-10-06", original_release_date="1992-10-05")
+    assert (meta.release_date, meta.original_release_date) == ("1992", "1992")
+    disc = RBIDisc(album="A", artist="B", release_date="2004-07-09")
+    assert disc.release_date == "2004"
+
+
+def test_a_date_assigned_after_construction_is_written_as_a_year() -> None:
+    disc = RBIDisc(album="A", artist="B")
+    disc.release_date = "1992-10"  # an assignment bypasses __post_init__
+    prov: dict[str, str] = {}
+    app._add_release_provenance(prov, disc)
+    assert prov["release_date"] == "1992"

@@ -38,7 +38,7 @@ class DiscMeta:
     mb_release_group_id: str | None = None  # MusicBrainz release group UUID
     discogs_release_id: int | None = None  # Discogs integer release ID
     discogs_master_id: int | None = None  # Discogs master (its own numbering)
-    release_date: str | None = None  # YYYY, YYYY-MM, or YYYY-MM-DD
+    release_date: str | None = None  # YYYY only (year_text, kgr 2026-11-28)
     original_release_date: str | None = None
     country: str | None = None
     label: str | None = None
@@ -75,3 +75,11 @@ class DiscMeta:
     disambiguation: str | None = None
     annotation: str | None = None  # raw MediaWiki-ish markup; strip before display
     tracks: list[TrackMeta] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        from cdda2img.rbi_format import year_text
+
+        # Year only, from every lookup service (kgr, 2026-11-28): the selection
+        # ladder's `date` rung, the menus and the matchers all compare years.
+        self.release_date = year_text(self.release_date)
+        self.original_release_date = year_text(self.original_release_date)
