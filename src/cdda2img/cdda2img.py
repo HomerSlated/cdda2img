@@ -5188,8 +5188,9 @@ def _settle_identity_after_menu(
     _settle_discogs_master(disc)
     _require_discogs_release(provenance, archival=archival)
     if archival:
-        disc = _settle_release_year(disc, provenance, ask=reopen is not None)
-        _require_identity_complete(disc, provenance)
+        gap = _year_gap(provenance, candidates)
+        disc = _settle_release_year(disc, provenance, ask=reopen is not None, gap=gap)
+        _require_identity_complete(disc, provenance, gap=gap, asked=reopen is not None)
     return disc
 
 
@@ -5465,11 +5466,46 @@ def _apply_pressing_under_discogs(
     )
 
 
+#: Why the disc's own year is missing, when no pressing-specific reason applies.
+_NO_YEAR = "Neither MusicBrainz nor Discogs gives this disc's own release year."
+
+
+def _year_gap(provenance: dict[str, str], candidates: list[DiscMeta]) -> str:
+    """Why the disc's own year is missing, said accurately. When only the release
+    group was recorded (no pressing settled), the services may well have given
+    years, just not one year: the pressings that fit state different ones, and a
+    group-only record keeps a pressing field only when all agree (§13.5). Saying
+    "neither service gives a year" then sends the reader looking for a lookup
+    failure that did not happen (kgr, 2026-11-28, *Automatic for the People*:
+    eight pressings, 1992 x5, 2000, 2004 and one undated)."""
+    from collections import Counter
+
+    from cdda2img import release_match as rm
+
+    if provenance.get("release_selection") != "release_group_only" or not candidates:
+        return _NO_YEAR
+    years = Counter(rm.norm_year(c.release_date) for c in candidates)
+    if not any(years):
+        return _NO_YEAR
+    stated = [
+        f"{y} x{n}" if n > 1 else y
+        for y, n in sorted((y, n) for y, n in years.items() if y)
+    ]
+    if years[None]:
+        stated.append(f"{years[None]} undated")
+    return (
+        f"No pressing was settled: {len(candidates)} pressings fit this disc and"
+        f" they state different years ({', '.join(stated)}), so its own year is"
+        " unknown."
+    )
+
+
 def _settle_release_year(
     disc: RBIDisc,
     provenance: dict[str, str],
     *,
     ask: bool,
+    gap: str = _NO_YEAR,
     input_fn: Callable[[str], str] = input,
 ) -> RBIDisc:
     """The disc's own release year, when neither service gave one: the user is
@@ -5482,7 +5518,7 @@ def _settle_release_year(
     if year_of(disc.release_date) is not None or not ask:
         return disc
     latest = datetime.date.today().year + 1
-    print("   Neither MusicBrainz nor Discogs gives this disc's own release year.")
+    print(f"   {gap}")
     while True:
         try:
             answer = input_fn(
@@ -5498,7 +5534,13 @@ def _settle_release_year(
         print(f"   A CD's year is between 1982 and {latest}.")
 
 
-def _require_identity_complete(disc: RBIDisc, provenance: dict[str, str]) -> None:
+def _require_identity_complete(
+    disc: RBIDisc,
+    provenance: dict[str, str],
+    *,
+    gap: str = _NO_YEAR,
+    asked: bool = False,
+) -> None:
     """A rip writes nothing without the disc's own year and a complete original
     release, title and year (kgr, 2026-11-26: "abort rather than have the
     'original' PROV blank or incomplete")."""
@@ -5508,10 +5550,16 @@ def _require_identity_complete(disc: RBIDisc, provenance: dict[str, str]) -> Non
     details = []
     year_missing = year_of(disc.release_date) is None
     if year_missing:
-        details.append(
-            "Neither MusicBrainz nor Discogs gives this disc's own release year, and"
-            " it was not entered (an unattended run cannot ask for it)."
-        )
+        if asked:
+            tail = " It was not entered."
+        elif gap != _NO_YEAR:
+            tail = (
+                " An unattended run cannot choose the pressing; run it"
+                " interactively and pick the pressing on the pressing screen."
+            )
+        else:
+            tail = " An unattended run cannot ask for it."
+        details.append(gap + tail)
     if not (
         disc.original_release_found
         and disc.original_release_title

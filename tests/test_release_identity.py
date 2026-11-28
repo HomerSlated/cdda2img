@@ -459,6 +459,76 @@ def test_an_original_release_lost_to_an_outage_is_retry_later() -> None:
     assert _aborted(exc).code == ra.EXIT_RETRY_LATER
 
 
+#: *Automatic for the People*'s eight pressings (kgr, 2026-11-28): one disc ID,
+#: and the years they state disagree, so a group-only record has no year.
+AFTP_DATES = (
+    "1992-10",
+    "1992-10-06",
+    "1992-10-06",
+    "1992",
+    "2004-07-09",
+    "1992",
+    "2000",
+    None,
+)
+AFTP = [_p(f"r{i}", date=d) for i, d in enumerate(AFTP_DATES)]
+GROUP_ONLY = {"release_selection": "release_group_only"}
+
+
+def test_a_group_only_gap_names_the_disagreeing_years() -> None:
+    gap = app._year_gap(GROUP_ONLY, AFTP)
+    assert "8 pressings fit this disc" in gap
+    assert "(1992 x5, 2000, 2004, 1 undated)" in gap
+    assert "Neither MusicBrainz nor Discogs" not in gap
+
+
+@pytest.mark.parametrize(
+    ("prov", "cands"),
+    [
+        ({"release_selection": "manual"}, AFTP),  # a pressing was settled
+        (GROUP_ONLY, []),  # nothing to report
+        (GROUP_ONLY, [_p("r0"), _p("r1")]),  # no pressing states a year at all
+    ],
+)
+def test_otherwise_the_gap_is_that_no_service_gave_a_year(prov, cands) -> None:
+    assert app._year_gap(prov, cands) == app._NO_YEAR
+
+
+def test_the_year_prompt_says_why_it_asks(capsys) -> None:
+    gap = app._year_gap(GROUP_ONLY, AFTP)
+    app._settle_release_year(_disc(), {}, ask=True, gap=gap, input_fn=lambda _p: "")
+    assert "(1992 x5, 2000, 2004, 1 undated)" in capsys.readouterr().out
+
+
+def test_an_unattended_group_only_abort_says_to_pick_the_pressing() -> None:
+    from cdda2img import query_log
+
+    query_log.start()
+    gap = app._year_gap(GROUP_ONLY, AFTP)
+    with pytest.raises(ra.RipAborted) as exc:
+        app._require_identity_complete(_complete(_disc()), GROUP_ONLY, gap=gap)
+    said = " ".join(_aborted(exc).details)
+    assert _aborted(exc).code == ra.EXIT_INVESTIGATE
+    assert "(1992 x5, 2000, 2004, 1 undated)" in said
+    assert "pick the pressing on the pressing screen" in said
+    assert "Neither MusicBrainz nor Discogs" not in said
+
+
+@pytest.mark.parametrize(
+    ("asked", "tail"),
+    [(True, "It was not entered."), (False, "An unattended run cannot ask for it.")],
+)
+def test_a_plain_missing_year_abort_says_who_could_not_supply_it(asked, tail) -> None:
+    from cdda2img import query_log
+
+    query_log.start()
+    with pytest.raises(ra.RipAborted) as exc:
+        app._require_identity_complete(_complete(_disc()), {}, asked=asked)
+    said = " ".join(_aborted(exc).details)
+    assert said.startswith(app._NO_YEAR)
+    assert said.endswith(tail)
+
+
 # ---- review follow-ups -----------------------------------------------------------------
 
 

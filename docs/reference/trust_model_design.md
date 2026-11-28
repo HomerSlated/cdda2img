@@ -1368,6 +1368,18 @@ aborts is OPEN (§13.9 Q2).
   after the release selection. Unattended there is nobody to ask, so the rip aborts
   (consistent with "abort rather than incomplete"). kgr: *"We can always revisit some of
   these decisions later after testing."*
+- **Q2, revisited 2026-11-28 (kgr): still abort.** *Automatic for the People* under
+  `--auto`: eight pressings of one disc ID, 120 MusicBrainz/Discogs pairs, so the release
+  group only (§13.5), whose pressing fields are kept only when every pressing states them
+  alike; the years are 1992 ×5, 2000, 2004 and one undated, so the year was dropped and
+  the rip aborted. The ladder's pin (§10.3) picked the pressing kgr then confirmed by
+  hand, but by preferences (barcode plurality, country, earliest date), not evidence
+  about the disc. kgr: *"the preselection is a statistically influenced guess, but that's
+  only useful as a hint for the user, not an automatic decision."* Offered instead: a
+  group-only record carries no pressing year. Declined: *"I would prefer to keep
+  aborting, but with a more accurate message."* The abort (and the interactive prompt)
+  now names the pressings and the years they state (`_year_gap`), instead of claiming
+  that neither service gave a year.
 
 ### 13.10 Build sequence
 
