@@ -1747,3 +1747,8 @@ silently capped at 25 (N3), and a short list reads exactly like a genuine miss.
    and others answered. (c) A digital release's barcode stays PROV-only, never the TOC's MCN
    (`barcode_source=digital`; `media_override=digital_media` on a rip), kgr: no CD ever
    carried it.
+7. **Runtime total scaled with the track count (kgr's testing, 2026-11-28).** *The Platinum
+   Collection* (tags: `de5a11c6`, three CDs): MusicBrainz holds whole-second lengths, every
+   file ran 0.6 to 2.9 s longer, each inside the 3 s per-track tolerance, and twenty summed
+   to 46.5 s against the fixed 15 s, so the tagged release was contradicted on `runtime`.
+   The total now contradicts beyond the larger of 15 s and 3 s per track.

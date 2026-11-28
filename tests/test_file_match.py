@@ -350,3 +350,31 @@ def test_without_track_number_tags_the_order_is_the_release_s() -> None:
     folder = replace(_files(), order_known=False)
     c = fm.classify(folder, swapped)
     assert c is not None and (c.tier, c.order) == ("A", "release")
+
+
+def test_a_steady_per_track_offset_is_not_a_contradiction() -> None:
+    """Live, The Platinum Collection: twenty files each ~2.3 s longer than
+    MusicBrainz's whole-second lengths summed to 46.5 s; each track agrees."""
+    n = 20
+    files = tuple(
+        fm.FileTrack(
+            position=i,
+            name=f"{i}.flac",
+            duration_ms=242_300,
+            fp_recordings=frozenset({_rec(i + 1)}),
+        )
+        for i in range(n)
+    )
+    meta = DiscMeta(
+        mb_release_id="r",
+        tracks=[
+            TrackMeta(number=k, duration_ms=240_000, recording_id=_rec(k))
+            for k in range(1, n + 1)
+        ],
+    )
+    c = fm.classify(fm.FolderEvidence(files), meta)
+    assert c is not None and c.evidence["runtime"] == "match"
+    # The control: one track off by a minute still contradicts the total.
+    long = (replace(files[0], duration_ms=302_300), *files[1:])
+    c = fm.classify(fm.FolderEvidence(long), meta)
+    assert c is not None and c.evidence["runtime"] == "contradict"

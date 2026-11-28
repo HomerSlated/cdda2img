@@ -34,9 +34,13 @@ TITLE_MATCH = 88  # rapidfuzz token_set_ratio, as the original-release search
 TITLES_AGREE = 80
 #: Per-track runtimes all within this agree (supporting only).
 RUNTIME_AGREE_MS = 3_000
-#: The matched tracks' total runtime off by more than this contradicts. A source
-#: trimmed before it reached us shortens tracks, so this is loose; to be tuned in
-#: kgr's tests (§14.8).
+#: The matched tracks' total runtime off by more than this, or by more than
+#: RUNTIME_AGREE_MS per track, whichever is larger, contradicts. Scaled with the
+#: track count (kgr's testing, 2026-11-28): on *The Platinum Collection* every file
+#: ran 0.6-2.9 s longer than MusicBrainz's whole-second lengths, each inside the
+#: per-track tolerance, and twenty of them summed to 46.5 s against a fixed 15 s.
+#: A systematic per-track offset grows with the count; a wrong release does not
+#: need the total to show it. To be tuned further in testing (§14.8).
 RUNTIME_CONTRADICT_MS = 15_000
 
 TIERS = ("A", "B", "C")
@@ -230,7 +234,7 @@ def _runtime(meta: DiscMeta, mapping: Sequence[int], files) -> str:
     if not pairs:
         return "absent"
     total = abs(sum(a for a, _ in pairs) - sum(b for _, b in pairs))
-    if total > RUNTIME_CONTRADICT_MS:
+    if total > max(RUNTIME_CONTRADICT_MS, RUNTIME_AGREE_MS * len(pairs)):
         return "contradict"
     if all(abs(a - b) <= RUNTIME_AGREE_MS for a, b in pairs):
         return "match"
