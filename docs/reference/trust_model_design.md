@@ -1738,3 +1738,12 @@ silently capped at 25 (N3), and a short list reads exactly like a genuine miss.
    table and §14.4's "a fingerprint against a tag, the year" as tier-C examples for the
    year and the pressing fields. Reasoning: files cannot prove a pressing, and the
    pressing-level tags are what a tagger most often copies from the wrong pressing.
+6. **From kgr's Toca test (2026-11-28), three fixes.** (a) The original-release lookup
+   re-checked the file-matched release with R3's sum-of-durations gate (about 5 s for 15
+   tracks) and refused it, so the original came from the text search instead; for
+   `create` the file match's runtime class has judged that release, so the gate is skipped
+   for it (`populate_original_release(runtimes_judged=True)`), the other R3 gates still
+   running. (b) `lookup_status_acoustid=partial` when some files' fingerprint lookups failed
+   and others answered. (c) A digital release's barcode stays PROV-only, never the TOC's MCN
+   (`barcode_source=digital`; `media_override=digital_media` on a rip), kgr: no CD ever
+   carried it.

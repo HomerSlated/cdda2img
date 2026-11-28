@@ -60,7 +60,7 @@ def test_a_rejection_is_recorded_and_discogs_supplies_the_original(monkeypatch) 
     monkeypatch.setattr(
         o, "_resolve_rg_original", lambda *_a, **_k: ("Brothers in Arms", 1985)
     )
-    monkeypatch.setattr(o, "_rg_path_reject_reason", lambda *_a: "title_fuzz")
+    monkeypatch.setattr(o, "_rg_path_reject_reason", lambda *_a, **_k: "title_fuzz")
     monkeypatch.setattr(
         o, "find_original_release_fuzzy", lambda _d: (False, None, None)
     )
@@ -85,7 +85,7 @@ def test_the_release_group_answer_records_its_source(monkeypatch) -> None:
     monkeypatch.setattr(
         o, "_resolve_rg_original", lambda *_a, **_k: ("Brothers in Arms", 1985)
     )
-    monkeypatch.setattr(o, "_rg_path_reject_reason", lambda *_a: None)
+    monkeypatch.setattr(o, "_rg_path_reject_reason", lambda *_a, **_k: None)
     disc, prov = _disc(), {}
     o.populate_original_release(disc, provenance=prov)
     assert prov == {"original_release_source": "mb_release_group"}

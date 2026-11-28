@@ -428,7 +428,8 @@ def test_every_file_is_fingerprinted(monkeypatch: pytest.MonkeyPatch) -> None:
     out, status = cli._fingerprint_files([Path("c"), Path("a"), Path("b")])
     assert calls == ["c", "a", "b"]  # every file, in the order given
     assert set(out) == {Path("a"), Path("c")}
-    assert status == "down"
+    # Some answered, one did not: neither an outage nor complete (Toca, live).
+    assert status == "partial"
 
 
 def test_the_release_browse_sets_the_user_agent_first(
@@ -664,3 +665,68 @@ def _retitled(meta: DiscMeta) -> DiscMeta:
         meta,
         tracks=[replace(t, title=f"Different Song {t.number}") for t in meta.tracks],
     )
+
+
+def test_every_fingerprint_failing_is_down(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The control for "partial"."""
+    monkeypatch.setattr("cdda2img.acoustid_lookup.is_available", lambda: True)
+    monkeypatch.setattr(
+        "cdda2img.acoustid_lookup.fingerprint_recordings", lambda w: None
+    )
+    assert cli._fingerprint_files([Path("a"), Path("b")]) == ({}, "down")
+
+
+def test_a_digital_release_s_barcode_never_becomes_the_mcn(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """kgr, 2026-11-28: digital barcodes are PROV-only (Toca wrote 5037300003931
+    as the disc's MCN)."""
+    digital = replace(_release(), barcode="5037300003931")
+    _wire(monkeypatch, _folder(), [0, 1, 2], [digital], {RID: ("Digital Media",)})
+    prov: dict[str, str] = {}
+    ident = _identify(prov)
+    assert prov["barcode_source"] == "digital"
+    assert ident.meta is not None
+    disc = cli.RBIDisc(album="A", artist="B", barcode=ident.meta.barcode)
+    cli._finalize_identifiers(prov, disc)
+    assert disc.catalog is None and "mcn_source" not in prov
+    assert prov["barcode"] == "5037300003931"  # kept, in PROV
+
+
+@pytest.mark.parametrize(
+    ("prov", "mcn"),
+    [
+        ({}, "5037300003931"),  # the control: a CD release's barcode synthesises
+        ({"media_override": "digital_media"}, None),  # rip --digital-media
+    ],
+)
+def test_mcn_synthesis_and_digital_media(prov: dict, mcn: str | None) -> None:
+    disc = cli.RBIDisc(album="A", artist="B", barcode="5037300003931")
+    cli._finalize_identifiers(prov, disc)
+    assert disc.catalog == mcn
+
+
+def test_the_file_match_s_release_skips_r3_s_duration_gate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Toca, live: the original-release lookup's own duration sum refused the
+    release the file match had accepted (its runtime class had judged them)."""
+    from cdda2img.original_release import _rg_path_reject_reason
+    from cdda2img.rbi_format import RBITocEntry
+
+    meta = replace(
+        _release(), tracks=[replace(t, duration_ms=200_000) for t in _release().tracks]
+    )
+    disc = cli.RBIDisc(album="A", artist="B", mb_release_id=RID)
+    disc.tracks = [
+        RBITocEntry(
+            track_number=k,
+            title=t,
+            performer="B",
+            start_frame=0,
+            duration_frames=18_000,
+        )
+        for k, t in enumerate(TITLES, start=1)
+    ]
+    assert _rg_path_reject_reason(disc, meta) == "durations"  # the control
+    assert _rg_path_reject_reason(disc, meta, runtimes_judged=True) is None

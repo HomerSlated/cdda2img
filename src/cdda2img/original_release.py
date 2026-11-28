@@ -241,7 +241,10 @@ def _verify_rg_path_for_disc(
 
 
 def _rg_path_reject_reason(
-    disc: RBIDisc, verify_meta: DiscMeta | None = None
+    disc: RBIDisc,
+    verify_meta: DiscMeta | None = None,
+    *,
+    runtimes_judged: bool = False,
 ) -> str | None:
     """R3 gate for the RG-primary path.
 
@@ -270,7 +273,11 @@ def _rg_path_reject_reason(
         meta = lookup_release(disc.mb_release_id, disc_number=disc.disc_number)
     if meta is None:
         return None
-    return _r3_reject_reason(meta, disc)
+    # *runtimes_judged*: create's file match chose this release with its own
+    # runtime class (per track, and measured before any silence trim), so R3's
+    # sum-of-durations gate re-judging the same release is redundant; on Toca it
+    # refused the release the match had accepted (kgr, 2026-11-28).
+    return _r3_reject_reason(meta, disc, check_durations=not runtimes_judged)
 
 
 def _fetch_release_group(rg_id: str):  # type: ignore[no-untyped-def]
@@ -375,7 +382,10 @@ def _find_original_release_via_rg(
 
 
 def _original_via_rg_explained(
-    disc: RBIDisc, verify_meta: DiscMeta | None = None
+    disc: RBIDisc,
+    verify_meta: DiscMeta | None = None,
+    *,
+    runtimes_judged: bool = False,
 ) -> tuple[bool, str | None, int | None, str | None]:
     """:func:`_find_original_release_via_rg`, plus why it gave no answer:
     ``no_release_group``, ``release_group`` (unusable: no date, R14, a failed
@@ -387,7 +397,7 @@ def _original_via_rg_explained(
     if resolved is None:
         return (False, None, None, "release_group")
     # R3: gate the RG identification against the disc tracklist.
-    why = _rg_path_reject_reason(disc, verify_meta)
+    why = _rg_path_reject_reason(disc, verify_meta, runtimes_judged=runtimes_judged)
     if why is not None:
         return (False, None, None, why)
     title, year = resolved
@@ -426,6 +436,8 @@ def populate_original_release(
     disc: RBIDisc,
     verify_meta: DiscMeta | None = None,
     provenance: dict[str, str] | None = None,
+    *,
+    runtimes_judged: bool = False,
 ) -> None:
     """Convenience wrapper: call :func:`find_original_release` and assign to disc.
 
@@ -438,7 +450,9 @@ def populate_original_release(
     """
     if disc.original_release_found:
         return
-    found, title, year, why = _original_via_rg_explained(disc, verify_meta)
+    found, title, year, why = _original_via_rg_explained(
+        disc, verify_meta, runtimes_judged=runtimes_judged
+    )
     source = "mb_release_group"
     if not found:
         found, title, year = find_original_release_fuzzy(disc)

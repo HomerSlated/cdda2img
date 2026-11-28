@@ -786,13 +786,16 @@ def _finalize_identifiers(provenance: dict, disc: RBIDisc) -> None:
         provenance["barcode"] = disc.barcode
     if disc.catalog:
         provenance["mcn_source"] = "disc"
-    elif disc.barcode and provenance.get("barcode_source") not in (
-        "adopted",
-        "unanimous",
+    elif (
+        disc.barcode
+        and provenance.get("barcode_source") not in ("adopted", "unanimous", "digital")
+        and provenance.get("media_override") != "digital_media"
     ):
         # §13.7 (kgr, 2026-11-26): a barcode adopted from the partner release, or
         # kept only because every candidate pressing states it, is not a confirmed
-        # pressing's own, and the TOC's MCN is burned to every copy.
+        # pressing's own, and the TOC's MCN is burned to every copy. A digital
+        # release's barcode stays PROV-only too (kgr, 2026-11-28): no CD ever
+        # carried it as an MCN.
         synth = normalize_barcode(disc.barcode, require_check_digit=False)
         if synth:
             disc.catalog = synth  # synthesise a burnable archival MCN from the barcode
@@ -960,7 +963,12 @@ def create_image(
             # sees "Original: <title> (<year>)" in the initial summary.
             from cdda2img.original_release import populate_original_release
 
-            populate_original_release(disc, verify_meta=tag_meta, provenance=provenance)
+            populate_original_release(
+                disc,
+                verify_meta=tag_meta,
+                provenance=provenance,
+                runtimes_judged=tag_meta is not None,
+            )
 
             import sys
 
@@ -2066,6 +2074,10 @@ def _fingerprint_files(
             continue
         out[path] = hits
     status = _r12_status(attempted=True, has_data=any(out.values()), errored=errored)
+    if errored and any(out.values()):
+        # Some files answered and some did not: neither an outage nor complete
+        # (kgr, 2026-11-28; Toca read "down" beside a full fingerprint match).
+        status = "partial"
     return out, status
 
 
@@ -2537,6 +2549,9 @@ def _settle_files(
     fmts = formats.get(rid, ())
     digital = bool(fmts) and all(f == "Digital Media" for f in fmts)
     fmt = "File" if digital else "CD"
+    if digital:
+        # A digital release's barcode is never the TOC's MCN (kgr, 2026-11-28).
+        provenance["barcode_source"] = "digital"
     fp = chosen.evidence.get("fingerprint", "absent")
     if selection == "release_group_only":
         meta = _group_only_meta(group, complete=not incomplete)
