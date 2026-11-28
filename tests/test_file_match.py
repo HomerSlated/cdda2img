@@ -291,3 +291,25 @@ def test_the_whole_set_in_the_input_is_a_match() -> None:
     whole = fm.FolderEvidence(_files().files + extra)
     ranked = fm.rank(_files(), _two_disc(), whole=whole)
     assert [(c.meta.disc_number, c.tier) for c in ranked.candidates] == [(1, "A")]
+
+
+def test_a_file_name_title_never_contradicts() -> None:
+    """Live, 2026-11-28: twelve files named 01..12 untagged; their names stood in
+    for titles and "contradicted" every release, so --auto found no tier A."""
+    files = tuple(
+        replace(f, title=f"{f.position + 1:02d} junk", title_from_tag=False)
+        for f in _files().files
+    )
+    c = fm.classify(fm.FolderEvidence(files), _release())
+    assert c is not None
+    assert (c.evidence["titles"], c.tier) == ("absent", "A")
+
+
+def test_a_title_tag_still_contradicts() -> None:
+    """The control: the same titles from tags do contradict."""
+    files = tuple(
+        replace(f, title=f"{f.position + 1:02d} junk") for f in _files().files
+    )
+    c = fm.classify(fm.FolderEvidence(files), _release())
+    assert c is not None
+    assert (c.evidence["titles"], c.tier) == ("contradict", "C")

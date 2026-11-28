@@ -172,6 +172,9 @@ class FileTags:
     tracknumber: int | None  # the track-number tag
     name_number: int | None  # the file name's leading number
     recording_id: str | None  # musicbrainz_trackid (the recording, despite the name)
+    #: The title is the file's title tag, not its name. A name may mean nothing
+    #: ("01.flac"), so a title from a name can support a match, never refute one.
+    title_from_tag: bool = True
 
 
 @dataclass(frozen=True)
@@ -225,15 +228,21 @@ def read_file_tracks(tracks: list[Path]) -> tuple[list[FileTags], AlbumTags]:
         m = LEADING_NUMBER.match(stem)
         name_number = int(m.group(1)) if m else None
         stem_title = (LEADING_NUMBER.sub("", stem).strip() if m else stem) or None
+        if stem.strip().isdigit():
+            # "01.flac": a number, not a title (live, 2026-11-28: twelve files
+            # named 01..12 had their "titles" contradict every release).
+            name_number, stem_title = int(stem), None
         rec = _first_tag(audio, "musicbrainz_trackid")
         rec = rec.lower() if rec and _MBID_RE.match(rec.lower()) else None
+        tag_title = _first_tag(audio, "title")
         files.append(
             FileTags(
                 path=track,
-                title=_first_tag(audio, "title") or stem_title,
+                title=tag_title or stem_title,
                 tracknumber=_disc_number(_first_tag(audio, "tracknumber")),
                 name_number=name_number,
                 recording_id=rec,
+                title_from_tag=tag_title is not None,
             )
         )
         for name, keys in _ALBUM_TAG_KEYS.items():

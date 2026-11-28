@@ -64,6 +64,9 @@ class FileTrack:
     position: int
     name: str
     title: str | None = None
+    #: False when the title is the file's name: it may then support a match but
+    #: never contradict one (a name can mean nothing: "01.flac").
+    title_from_tag: bool = True
     duration_ms: int | None = None
     tag_recording: str | None = None
     #: Recordings the fingerprint matched, and their titles (AcoustID's).
@@ -181,14 +184,22 @@ def _fingerprints(meta: DiscMeta, mapping: Sequence[int], files) -> str:
 
 
 def _titles(meta: DiscMeta, mapping: Sequence[int], files) -> str:
-    scores = [
-        r
+    """Titles agree on average, or contradict; only TAG titles can contradict. A
+    title taken from a file name is weak: absent when it disagrees (live,
+    2026-11-28: files named 01..12 "contradicted" every release of the album)."""
+    pairs = [
+        (r, files[p].title_from_tag)
         for t, p in zip(meta.tracks, mapping)
         if (r := _ratio(t.title, files[p].title)) is not None
     ]
-    if len(scores) < 2:
+    if len(pairs) < 2:
         return "absent"
-    return "match" if sum(scores) / len(scores) >= TITLES_AGREE else "contradict"
+    if sum(r for r, _ in pairs) / len(pairs) >= TITLES_AGREE:
+        return "match"
+    tagged = [r for r, from_tag in pairs if from_tag]
+    if len(tagged) >= 2 and sum(tagged) / len(tagged) < TITLES_AGREE:
+        return "contradict"
+    return "absent"
 
 
 def _runtime(meta: DiscMeta, mapping: Sequence[int], files) -> str:

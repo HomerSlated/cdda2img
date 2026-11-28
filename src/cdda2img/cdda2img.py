@@ -2081,6 +2081,7 @@ def _file_track(
         position=pos,
         name=path.name,
         title=tags.title,
+        title_from_tag=tags.title_from_tag,
         duration_ms=duration_ms,
         tag_recording=tags.recording_id,
         fp_recordings=frozenset(r for r, _ in hits),

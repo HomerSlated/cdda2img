@@ -1716,3 +1716,10 @@ silently capped at 25 (N3), and a short list reads exactly like a genuine miss.
    (`_ask_album`), searches MusicBrainz for the answer and offers any release the files
    match, else keeps the user's words. PROV `album_source=release|tags|user`. The output
    file is named after the album found, else the input directory.
+4. **Found by kgr's untagged test (2026-11-28): a file name is not a title.** Twelve
+   files named `01.flac`..`12.flac` (*Nevermind*) had their names stand in for titles, and
+   "01" against "Smells Like Teen Spirit" contradicted every release holding the files in
+   their order; `--auto` found no tier A and aborted, though the fingerprints matched. A
+   name that is only a number now gives no title, and a title taken from a file name can
+   support a match but never contradict one (`FileTrack.title_from_tag`): a meaningless
+   name is missing data, never evidence against (§14.1, principle 6).
