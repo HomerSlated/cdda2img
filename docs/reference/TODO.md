@@ -2,6 +2,14 @@
 
 ## Open
 
+### 📋 QUEUED — `create --strategy`: compilations, not archives (kgr, 2026-11-28)
+
+Since §14.12 a release's media decide `create`'s discs, so `--strategy` batches only an
+input no release matched. kgr: keep it, but those containers "will not be authoritative
+archives, they'll just be proprietary creations", the user's own "bootleg" compilations,
+which makes formal identification pointless for them. To revisit in detail: what such a
+container records (and claims) instead, and whether identification is skipped for it.
+
 ### 🔨 NEXT — `create`: identify an album from loose files (kgr, 2026-11-27)
 
 Design: `trust_model_design.md` §14 (DECIDED, not built). Step 1 (the release the tags

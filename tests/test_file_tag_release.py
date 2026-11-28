@@ -136,6 +136,9 @@ def _release(rid: str = RID, order: tuple[int, ...] = (1, 2, 3)) -> DiscMeta:
     )
 
 
+_CTX: dict = {}
+
+
 def _wire(
     monkeypatch: pytest.MonkeyPatch,
     folder: fm.FolderEvidence,
@@ -143,8 +146,8 @@ def _wire(
     metas: list[DiscMeta],
     formats: dict | None = None,
 ) -> None:
-    monkeypatch.setattr(cli, "_folder_evidence", lambda *a: (folder, order))
-    monkeypatch.setattr(cli, "_fingerprint_files", lambda *a: {})
+    """The whole input as *folder*, the tagged release's media as *metas*."""
+    _CTX["folder"], _CTX["order"] = folder, order
     monkeypatch.setattr(cli, "_gather_tagged", lambda b, p: (metas, formats or {}))
     monkeypatch.setattr(
         cli, "_gather_candidates", lambda *a, **k: cli.Gathered([], {}, 0, 0, False)
@@ -152,14 +155,20 @@ def _wire(
 
 
 def _evidence(album: str | None = "Night and Day", artist: str | None = "Joe Jackson"):
-    return cli.InputEvidence({}, "OK", album, artist, fm.FolderEvidence(()))
+    return cli.InputEvidence(
+        {},
+        "OK",
+        album,
+        artist,
+        _CTX.get("folder", fm.FolderEvidence(())),
+        _CTX.get("order", []),
+    )
 
 
 def _identify(
     prov: dict[str, str], *, interactive: bool = False, evidence=None
 ) -> cli.FileIdentity:
     return cli._identify_files(
-        [],
         [],
         prov,
         evidence=evidence or _evidence(),
@@ -238,45 +247,92 @@ def test_a_digital_release_lists_file_versions(monkeypatch: pytest.MonkeyPatch) 
     assert _identify({}).discogs_fmt == "File"
 
 
-def test_create_builds_the_disc_from_the_kept_files_in_order(
+def test_create_batches_by_the_release_s_discs(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """The restructure: concat, durations and the TOC see only the kept files, in
-    the chosen release's order."""
-    names = ["01 a.flac", "02 b.flac", "03 c.flac"]
+    """kgr, 2026-11-28, option 2: identify the whole input first; the chosen
+    release's media are the discs. Five files, a two-disc release of 2 + 2
+    tracks in another order, one file on neither disc."""
+    names = [f"{n:02d}.flac" for n in range(1, 6)]
     for n in names:
         (tmp_path / n).write_bytes(b"x")
-    paths = [tmp_path / n for n in names]
-    seen: dict[str, list[str]] = {}
+    disc1 = DiscMeta(mb_release_id=RID, album="A", artist="B", disc_number=1)
+    disc2 = DiscMeta(mb_release_id=RID, album="A", artist="B", disc_number=2)
+    ident = cli.FileIdentity(
+        disc1,
+        [3, 0, 1, 2],
+        discs=(((3, 0), disc1), ((1, 2), disc2)),
+    )
+    seen: dict = {}
 
     class Stop(Exception):
         pass
 
-    def concat(wavs, _out):
-        seen["concat"] = [w.name for w in wavs]
-
-    def toc_entries(batch, _durations, _disc):
-        seen["toc"] = [p.name for p in batch]
+    def limits(batches, capacity_minutes):
+        seen["batches"] = [[p.name for p in b] for b in batches]
         raise Stop
 
-    monkeypatch.setattr(cli, "select_batches", lambda *a, **k: [paths])
-    monkeypatch.setattr(cli, "_check_batch_limits", lambda *a, **k: None)
+    monkeypatch.setattr(cli, "get_audio_duration_minutes", lambda f: 4.0)
     monkeypatch.setattr(cli, "_input_evidence", lambda f: _evidence("A", "B"))
-    monkeypatch.setattr(cli, "transcode_audio", lambda src, dst: None)
-    monkeypatch.setattr(
-        cli,
-        "_identify_files",
-        lambda *a, **k: cli.FileIdentity(None, [2, 0]),
-    )
-    monkeypatch.setattr(cli, "concat_wav", concat)
-    monkeypatch.setattr(cli, "wav_to_raw_pcm", lambda *a: None)
-    monkeypatch.setattr(cli, "track_frame_durations", lambda w: ([1] * len(w), len(w)))
-    monkeypatch.setattr(cli, "pad_pcm_to_declared_frames", lambda *a: None)
-    monkeypatch.setattr(cli, "build_toc_entries", toc_entries)
+    monkeypatch.setattr(cli, "_identify_files", lambda *a, **k: ident)
+    monkeypatch.setattr(cli, "_check_batch_limits", limits)
     with pytest.raises(Stop):
         cli.create_image(tmp_path, silence_mode="notrim")
-    assert seen["toc"] == ["03 c.flac", "01 a.flac"]
-    assert seen["concat"] == ["temp_track_3_trans.wav", "temp_track_1_trans.wav"]
+    # Disc 1: files 4 and 1, in the release's order; disc 2: files 2 and 3;
+    # 05.flac is on neither disc and in no batch.
+    assert seen["batches"] == [["04.flac", "01.flac"], ["02.flac", "03.flac"]]
+
+
+def test_without_a_release_the_strategy_batches(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ident = cli.FileIdentity(None, [1, 0], album="A", artist="B")
+    paths = [Path("a.flac"), Path("b.flac")]
+    monkeypatch.setattr(
+        cli, "select_batches", lambda files, s, capacity_minutes: [list(files)]
+    )
+    batches, metas, layout = cli._create_batches(paths, ident, "aatc", 80)
+    assert [[p.name for p in b] for b in batches] == [["b.flac", "a.flac"]]
+    assert (metas, layout) == ([None], "strategy:aatc")
+
+
+def test_a_three_disc_release_lays_out_three_discs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The Platinum Collection shape: media of 20, 18 and 19 tracks against the
+    57 files of the input give three discs of exactly those sizes, in order."""
+    sizes = (20, 18, 19)
+    files = tuple(
+        fm.FileTrack(position=i, name=f"{i:02d}.ogg", tag_recording=_rec(i + 1))
+        for i in range(sum(sizes))
+    )
+    media, n = [], 0
+    for d, size in enumerate(sizes, start=1):
+        media.append(
+            DiscMeta(
+                mb_release_id=RID,
+                mb_release_group_id=RG,
+                album="The Platinum Collection",
+                artist="David Bowie",
+                disc_number=d,
+                disc_total=3,
+                tracks=[
+                    TrackMeta(number=k, title=f"T{n + k}", recording_id=_rec(n + k))
+                    for k in range(1, size + 1)
+                ],
+            )
+        )
+        n += size
+    _wire(
+        monkeypatch,
+        fm.FolderEvidence(files, tagged_release=RID),
+        list(range(57)),
+        media,
+    )
+    ident = _identify({})
+    assert [len(idx) for idx, _ in ident.discs] == [20, 18, 19]
+    assert [m.disc_number for _, m in ident.discs] == [1, 2, 3]
+    assert ident.discs[1][0][0] == 20  # disc 2 starts at the 21st file
 
 
 def test_leaving_a_screen_of_contradicted_releases_chooses_nothing(
@@ -730,3 +786,28 @@ def test_the_file_match_s_release_skips_r3_s_duration_gate(
     ]
     assert _rg_path_reject_reason(disc, meta) == "durations"  # the control
     assert _rg_path_reject_reason(disc, meta, runtimes_judged=True) is None
+
+
+def test_gathering_keeps_the_whole_set_over_compilations(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A release is a candidate only when ALL its tracks fit in the input: a
+    20-track compilation holding a sampled song fits 57 files too, but the
+    3-CD set (57) is the closest fit and comes first; a 4-CD box never fits."""
+
+    def rel(rid: str, *counts: int) -> dict:
+        return {
+            "id": rid,
+            "release-group": {"id": "g"},
+            "medium-list": [{"track-count": str(c), "format": "CD"} for c in counts],
+        }
+
+    monkeypatch.setattr(
+        "cdda2img.acoustid_lookup.releases_for_recording",
+        lambda r: [rel("comp", 20), rel("set", 20, 18, 19), rel("box", 20, 20, 20, 20)],
+    )
+    files = tuple(
+        fm.FileTrack(position=i, name=f"{i}.ogg", tag_recording=_rec(i + 1))
+        for i in range(57)
+    )
+    assert cli._release_ids_by_recordings(fm.FolderEvidence(files)) == ["set", "comp"]

@@ -324,6 +324,7 @@ remains valid (the stale-message guard only fires when `COMMIT_MSG` matches
 All source lives under `src/cdda2img/`. The pipeline is fully wired end-to-end.
 
 ### Create pipeline (`create` subcommand)
+**Since 2026-11-28 (kgr, §14.12) identification runs FIRST, on the whole input, before steps 1-5:** the chosen release's media are the discs (`_create_batches`, PROV `disc_layout=release`); `select_batches` (step 1) runs only when no release was chosen (`disc_layout=strategy:<name>`). Only audio files are fingerprinted (a `cover.jpg` once made AcoustID read `partial`).
 1. `input_selector.py:select_batches()` — groups audio files into CD-sized batches (≤99 tracks, ≤80 min)
 2. `transcode.py:transcode_audio()` — converts each track to 16-bit stereo 44.1 kHz PCM WAV via PyAV
 3. `silence.py:trim_silence_cd_da()` — `--silence trim` mode only: trims leading/trailing silence (threshold from `Config.silence_threshold`, default −55 dBFS) and appends 2-second inter-track gap

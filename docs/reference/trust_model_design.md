@@ -1752,3 +1752,33 @@ silently capped at 25 (N3), and a short list reads exactly like a genuine miss.
    file ran 0.6 to 2.9 s longer, each inside the 3 s per-track tolerance, and twenty summed
    to 46.5 s against the fixed 15 s, so the tagged release was contradicted on `runtime`.
    The total now contradicts beyond the larger of 15 s and 3 s per track.
+
+### 14.12 Identify the whole input, then lay out the discs (kgr, 2026-11-28, "option 2", BUILT)
+
+*The Platinum Collection* (three CDs, tagged `de5a11c6`, 20/18/19 tracks) came out as three
+containers with no release, release group or original release. kgr: *"We need to start
+by asking why we can't find the release group or original release for a release that is
+known for a fact to exist."* Every cause was ours: (1) the files were batched by playing
+time (`aatc`: 20/20/17) before anything was identified, so two batches straddled the
+release's discs and could never match; (2) the runtime total's fixed 15 s limit (fixed,
+§14.11 item 7); (3) `cover.jpg` was fingerprinted as a track, its lookup failed, and
+AcoustID read `partial`.
+
+Now `create` identifies ONCE, on the whole input, before any batching or transcoding
+(`_input_evidence`: tags, source-file lengths, fingerprints of the audio files only;
+`_identify_files`): the candidate is the whole release, every medium (`file_match.
+classify_release`; the input must hold every track of every disc, which replaces the
+per-batch `_whole_release_present` check), and the chosen release's media ARE the discs
+(`_create_batches`, PROV `disc_layout=release`): disc *k* holds exactly the files matched
+to medium *k*, in its order, labelled from that medium's own metadata. Track numbers
+restarting on each disc give a known order (`files_order` keys on disc and track number).
+Gathering keeps a release only when its TOTAL track count fits the input. With no release,
+the files are batched by `--strategy` (`disc_layout=strategy:<name>`), and the album and
+artist come from the tags or the user. A release disc over 80 minutes or 99 tracks is
+refused by `_check_batch_limits` rather than split. Live: Platinum identified as
+`de5a11c6`, tier A, discs 20/18/19.
+
+**Known regression:** a folder holding two different albums is no longer identified album
+by album (per-batch identification is gone). **`--strategy` (kgr, same night):** kept, but
+with no release its containers are the user's own compilations, not archives of a release,
+so formal identification there is pointless; to be redesigned (TODO).

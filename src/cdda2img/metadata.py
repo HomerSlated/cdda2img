@@ -180,6 +180,8 @@ class FileTags:
     recording_id: str | None  # musicbrainz_trackid (the recording, despite the name)
     name_number: int | None = None  # the file name's leading number
     name_title: str | None = None  # the file name without its leading number
+    discnumber: int | None = None  # the disc-number tag
+    duration_ms: int | None = None  # the source file's length (before any trim)
 
 
 @dataclass(frozen=True)
@@ -235,6 +237,7 @@ def read_file_tracks(tracks: list[Path]) -> tuple[list[FileTags], AlbumTags]:
         name_title = (stem[m.end() :] if m else stem).strip() or None
         rec = _first_tag(audio, "musicbrainz_trackid")
         rec = rec.lower() if rec and _MBID_RE.match(rec.lower()) else None
+        length = getattr(getattr(audio, "info", None), "length", None)
         files.append(
             FileTags(
                 path=track,
@@ -243,6 +246,8 @@ def read_file_tracks(tracks: list[Path]) -> tuple[list[FileTags], AlbumTags]:
                 recording_id=rec,
                 name_number=name_number,
                 name_title=name_title,
+                discnumber=_disc_number(_first_tag(audio, "discnumber")),
+                duration_ms=round(length * 1000) if length else None,
             )
         )
         for name, keys in _ALBUM_TAG_KEYS.items():
@@ -257,12 +262,15 @@ def read_file_tracks(tracks: list[Path]) -> tuple[list[FileTags], AlbumTags]:
 
 def files_order(files: list[FileTags]) -> tuple[list[int], bool]:
     """The files' own order, as indices into *files*, and whether it is KNOWN
-    (trust_model_design.md §14.4): their track-number tags when every file has a
-    distinct one. Never their names (kgr, 2026-11-28: names are corroboration
-    only, after everything else) and never the batch position. Without the tags
-    the order is unknown: the indices are the order given, and the archive takes
-    the chosen release's order."""
-    numbers = [f.tracknumber for f in files]
-    if all(n is not None for n in numbers) and len(set(numbers)) == len(numbers):
-        return sorted(range(len(files)), key=lambda i: numbers[i] or 0), True
+    (trust_model_design.md §14.4): their (disc-number, track-number) tags when
+    every file has a track number and no two share the pair (track numbers
+    usually restart on each disc of a set). Never their names (kgr, 2026-11-28:
+    names are corroboration only, after everything else) and never the batch
+    position. Without the tags the order is unknown: the indices are the order
+    given, and the archive takes the chosen release's order."""
+    keys = [(f.discnumber or 0, f.tracknumber) for f in files]
+    if all(t is not None for _, t in keys) and len(set(keys)) == len(keys):
+        return sorted(
+            range(len(files)), key=lambda i: (keys[i][0], keys[i][1] or 0)
+        ), True
     return list(range(len(files))), False

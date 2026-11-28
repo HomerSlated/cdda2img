@@ -23,7 +23,7 @@ Pure: no network, no I/O. The caller gathers candidates and fingerprints.
 from __future__ import annotations
 
 from collections.abc import Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 from cdda2img import release_match as rm
 from cdda2img.lookup_result import DiscMeta
@@ -98,7 +98,12 @@ class FolderEvidence:
 
 @dataclass
 class Classified:
-    """One candidate release (one medium) against the folder."""
+    """One candidate release, ALL its media, against the whole input (kgr,
+    2026-11-28: a multi-disc release is a match only when the input holds every
+    disc). *meta* is the release with every medium's tracks in order, numbered
+    1..N; *media* keeps each medium's own ``DiscMeta`` (numbered from 1), and
+    *split* how many of *mapping*'s entries belong to each, so each disc is laid
+    out and labelled from its own medium."""
 
     meta: DiscMeta
     tier: str
@@ -107,6 +112,8 @@ class Classified:
     excluded: tuple[str, ...]
     order: str  # "files" | "release"
     evidence: dict[str, str] = field(default_factory=dict)
+    media: tuple[DiscMeta, ...] = ()
+    split: tuple[int, ...] = ()
 
     @property
     def contradicted(self) -> tuple[str, ...]:
@@ -203,18 +210,23 @@ def _titles(meta: DiscMeta, mapping: Sequence[int], files) -> str:
     return "match" if sum(scores) / len(scores) >= TITLES_AGREE else "contradict"
 
 
-def _names(meta: DiscMeta, mapping: Sequence[int], files) -> str:
+def _names(
+    meta: DiscMeta, mapping: Sequence[int], files, split: Sequence[int] = ()
+) -> str:
     """The file names, checked last (kgr, 2026-11-28): corroboration only. Their
-    numbers all equal the release's positions, or their text matches the titles:
-    ``match``; anything else is ``absent``, never a contradiction, since a name
-    can mean nothing ("01.flac" against *Smells Like Teen Spirit*, live)."""
-    numbered = [
-        (k, files[p].name_number)
-        for k, p in enumerate(mapping, start=1)
-        if files[p].name_number is not None
-    ]
-    if len(numbered) >= 2 and all(k == n for k, n in numbered):
-        return "match"
+    numbers all equal the release's positions (across the release, or within each
+    medium), or their text matches the titles: ``match``; anything else is
+    ``absent``, never a contradiction, since a name can mean nothing ("01.flac"
+    against *Smells Like Teen Spirit*, live)."""
+    in_medium = [k for n in (split or [len(mapping)]) for k in range(1, n + 1)]
+    for positions in (range(1, len(mapping) + 1), in_medium):
+        numbered = [
+            (k, files[p].name_number)
+            for k, p in zip(positions, mapping)
+            if files[p].name_number is not None
+        ]
+        if len(numbered) >= 2 and all(k == n for k, n in numbered):
+            return "match"
     scores = [
         r
         for t, p in zip(meta.tracks, mapping)
@@ -261,9 +273,43 @@ def _year(meta: DiscMeta, tag_year: str | None) -> str:
 _FIELD_RESULT = {"agree": "match", "contradict": "differ", "absent": "absent"}
 
 
+def combine(media: Sequence[DiscMeta]) -> DiscMeta:
+    """A release's media as one ``DiscMeta``: every track in medium order,
+    numbered 1..N. A single medium is returned as it is."""
+    if len(media) == 1:
+        return media[0]
+    tracks = [t for m in media for t in m.tracks]
+    return replace(
+        media[0],
+        tracks=[replace(t, number=k) for k, t in enumerate(tracks, start=1)],
+        album=media[0].set_title or media[0].album,
+        set_title=None,
+        disc_number=None,
+        disc_total=len(media),
+    )
+
+
+def classify_release(
+    folder: FolderEvidence, media: Sequence[DiscMeta]
+) -> Classified | None:
+    """A whole release, every medium, against the whole input; ``None`` when it
+    lists a track the input lacks (§14.4, §14.11: a missing disc is missing
+    tracks)."""
+    ordered = sorted(media, key=lambda m: m.disc_number or 0)
+    c = classify(folder, combine(ordered))
+    if c is None:
+        return None
+    c.media = tuple(ordered)
+    c.split = tuple(len(m.tracks) for m in ordered)
+    c.evidence["names"] = _names(
+        c.meta, c.mapping, {f.position: f for f in folder.files}, c.split
+    )
+    return c
+
+
 def classify(folder: FolderEvidence, meta: DiscMeta) -> Classified | None:
-    """*meta* (one medium) against the folder; ``None`` when the release lists a
-    track the folder lacks (§14.4: rejected, never shown)."""
+    """*meta* (one medium, or a release combined) against the folder; ``None``
+    when it lists a track the folder lacks (§14.4: rejected, never shown)."""
     files = folder.files
     if not meta.tracks:
         return None
@@ -321,43 +367,25 @@ def _country_rank(meta: DiscMeta, preferred: Sequence[str]) -> int:
     return preferred.index(c) if c in preferred else len(preferred)
 
 
-def _whole_release_present(
-    meta: DiscMeta, metas: Sequence[DiscMeta], whole: FolderEvidence | None
-) -> bool:
-    """kgr, 2026-11-28: a multi-disc release of which the input holds one disc's
-    tracks is not a match, as with missing tracks: the archive cannot be built
-    with missing files. Every OTHER medium of the release must be found, whole,
-    among all the input's files (*whole*; the batch matched *meta* itself)."""
-    others = [
-        m
-        for m in metas
-        if m.mb_release_id == meta.mb_release_id and m.disc_number != meta.disc_number
-    ]
-    if not others:
-        return True
-    if whole is None:
-        return False
-    return all(_assign(m, whole.files) is not None for m in others)
-
-
 def rank(
     folder: FolderEvidence,
     metas: Sequence[DiscMeta],
     preferred_country: Sequence[str] = (),
-    whole: FolderEvidence | None = None,
 ) -> Ranked:
     """Classify every candidate and order them: tier, fewest files left out (so a
     single holding two of the album's songs never outranks the album), most
     matching classes, then §10.3's ladder (preferred country, date, MBID). A
     release in another order is dropped while any release holds the tracks in the
-    files' order (§14.4). One row per release: its best medium. A medium of a
-    multi-disc release counts only when *whole* (every file of the input) holds
-    the release's other discs too."""
+    files' order (§14.4). One row per release, every medium of it: the input must
+    hold the whole release (§14.11)."""
+    releases: dict[str, list[DiscMeta]] = {}
+    for meta in metas:
+        releases.setdefault(meta.mb_release_id or f"#{id(meta)}", []).append(meta)
     classified: list[Classified] = []
     rejected = 0
-    for meta in metas:
-        c = classify(folder, meta)
-        if c is None or not _whole_release_present(meta, metas, whole):
+    for media in releases.values():
+        c = classify_release(folder, media)
+        if c is None:
             rejected += 1
         else:
             classified.append(c)

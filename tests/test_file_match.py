@@ -293,15 +293,16 @@ def _two_disc(rid: str = "set") -> list[DiscMeta]:
 
 def test_one_disc_of_a_two_disc_set_is_not_a_match() -> None:
     """kgr, 2026-11-28: the archive cannot be built with missing files."""
-    ranked = fm.rank(_files(), _two_disc(), whole=_files())
-    assert ranked.candidates == [] and ranked.rejected == 2
+    ranked = fm.rank(_files(), _two_disc())
+    assert ranked.candidates == [] and ranked.rejected == 1
 
 
 def test_the_whole_set_in_the_input_is_a_match() -> None:
-    """The control: disc 2's tracks are elsewhere in the input (another batch)."""
+    """The control: the input holds disc 2's tracks too; the release is one
+    candidate, laid out disc by disc."""
     extra = tuple(
         fm.FileTrack(
-            position=10 + k,
+            position=4 + k,
             name=f"2-{k}.flac",
             title=f"Disc Two {k}",
             fp_recordings=frozenset({_rec(50 + k)}),
@@ -309,8 +310,11 @@ def test_the_whole_set_in_the_input_is_a_match() -> None:
         for k in (1, 2)
     )
     whole = fm.FolderEvidence(_files().files + extra)
-    ranked = fm.rank(_files(), _two_disc(), whole=whole)
-    assert [(c.meta.disc_number, c.tier) for c in ranked.candidates] == [(1, "A")]
+    ranked = fm.rank(whole, _two_disc())
+    (c,) = ranked.candidates
+    assert (c.tier, c.split) == ("A", (4, 2))
+    assert [m.disc_number for m in c.media] == [1, 2]
+    assert c.mapping == (0, 1, 2, 3, 5, 6)  # positions: disc 2's files are 5 and 6
 
 
 def _named(numbers, titles):
@@ -378,3 +382,13 @@ def test_a_steady_per_track_offset_is_not_a_contradiction() -> None:
     long = (replace(files[0], duration_ms=302_300), *files[1:])
     c = fm.classify(fm.FolderEvidence(long), meta)
     assert c is not None and c.evidence["runtime"] == "contradict"
+
+
+def test_track_numbers_restarting_on_each_disc_give_a_known_order() -> None:
+    """beets numbers per disc: (1,1) (1,2) (2,1) (2,2) is an order, not a clash."""
+
+    def ft(name, disc, track):
+        return FileTags(Path(name), None, track, None, discnumber=disc)
+
+    files = [ft("d2t1", 2, 1), ft("d1t2", 1, 2), ft("d1t1", 1, 1), ft("d2t2", 2, 2)]
+    assert files_order(files) == ([2, 1, 0, 3], True)
