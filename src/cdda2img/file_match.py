@@ -240,16 +240,21 @@ def _runtime(meta: DiscMeta, mapping: Sequence[int], files) -> str:
 def _year(meta: DiscMeta, tag_year: str | None) -> str:
     """The tag year against the release's date AND its group's first release: a
     tagger may write either (beets puts the release date in ``date``; many put the
-    original year there), so only a mismatch with both contradicts."""
+    original year there), so only a mismatch with both differs. A single value:
+    ``differ``, never a contradiction (kgr, 2026-11-28)."""
     ty = rm.norm_year(tag_year)
     years = {rm.norm_year(meta.release_date), rm.norm_year(meta.original_release_date)}
     years.discard(None)
     if ty is None or not years:
         return "absent"
-    return "match" if ty in years else "contradict"
+    return "match" if ty in years else "differ"
 
 
-_FIELD_RESULT = {"agree": "match", "contradict": "contradict", "absent": "absent"}
+#: The album-level tags are single data points: kgr, 2026-11-28, "Same goes for
+#: any other single data point" (as file names: corroboration only). One that
+#: disagrees is recorded as ``differ``, never held against the release; only
+#: evidence spanning the tracks (fingerprints, titles, runtimes) contradicts.
+_FIELD_RESULT = {"agree": "match", "contradict": "differ", "absent": "absent"}
 
 
 def classify(folder: FolderEvidence, meta: DiscMeta) -> Classified | None:

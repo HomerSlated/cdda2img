@@ -15,7 +15,6 @@ from mutagen.flac import FLAC
 from cdda2img import cdda2img as cli
 from cdda2img import file_match as fm
 from cdda2img import metadata
-from cdda2img import release_match as rm
 from cdda2img.lookup_result import DiscMeta, TrackMeta
 from cdda2img.metadata import read_file_tag_release
 
@@ -284,9 +283,8 @@ def test_leaving_a_screen_of_contradicted_releases_chooses_nothing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Nothing is marked from tier C, so leaving accepts nothing (§14.4)."""
-    tags = rm.ReleaseRecord("tags", "", barcodes=("082839490627",))
-    contradicted = replace(_release(), barcode="0075021490628")
-    folder = replace(_folder(), tags=tags)
+    contradicted = _retitled(_release())
+    folder = _folder()
     ranked = fm.rank(folder, [contradicted])
     assert [c.tier for c in ranked.candidates] == ["C"]
     seen = {}
@@ -405,9 +403,8 @@ def test_a_contradicted_tagged_release_looks_further(
 ) -> None:
     """The control: the tags name a release the files contradict, so the search
     goes on, and the release it finds is taken."""
-    tags = rm.ReleaseRecord("tags", "", barcodes=("082839490627",))
-    folder = replace(_folder(), tags=tags)
-    bad = replace(_release(), barcode="0075021490628")
+    folder = _folder()
+    bad = _retitled(_release())  # the folder's title tags contradict it
     good = _release("6000d000-0000-4000-8000-000000000000")
     _wire(monkeypatch, folder, [0, 1, 2], [bad])
     monkeypatch.setattr(
@@ -659,4 +656,11 @@ def test_a_bare_number_is_a_name_number_not_a_title(
         None,
         1,
         None,
+    )
+
+
+def _retitled(meta: DiscMeta) -> DiscMeta:
+    return replace(
+        meta,
+        tracks=[replace(t, title=f"Different Song {t.number}") for t in meta.tracks],
     )

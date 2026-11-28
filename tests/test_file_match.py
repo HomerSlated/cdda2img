@@ -99,8 +99,8 @@ def test_another_order_is_offered_only_without_a_files_order_release() -> None:
         ("swapped", "B", "release")
     ]
     # A files'-order release, even a contradicted one, suppresses it (kgr).
-    contradicted = _release(rid="files-order", date="1990", first="1990")
-    folder = fm.FolderEvidence(_files().files, tag_year="1985")
+    contradicted = _retitled(_release(rid="files-order"))
+    folder = _files()
     both = fm.rank(folder, [swapped, contradicted])
     assert [c.meta.mb_release_id for c in both.candidates] == ["files-order"]
     assert both.candidates[0].tier == "C"
@@ -136,7 +136,7 @@ def test_a_fingerprint_of_another_song_contradicts() -> None:
 
 @pytest.mark.parametrize(
     ("tag_year", "result"),
-    [("1985", "match"), ("1982", "match"), ("1990", "contradict"), (None, "absent")],
+    [("1985", "match"), ("1982", "match"), ("1990", "differ"), (None, "absent")],
 )
 def test_the_tag_year_against_both_dates(tag_year: str | None, result: str) -> None:
     """beets writes the release date, many taggers the original year: a 1982 tag on
@@ -146,14 +146,32 @@ def test_the_tag_year_against_both_dates(tag_year: str | None, result: str) -> N
     assert c is not None and c.evidence["year"] == result
 
 
-def test_a_tag_barcode_against_the_release() -> None:
+def test_a_tag_barcode_corroborates_and_never_contradicts() -> None:
+    """kgr, 2026-11-28: a single data point is corroboration only. A barcode tag
+    that differs is recorded, and the release stays a match."""
     tags = rm.ReleaseRecord("tags", "", barcodes=("082839490627",))
     folder = fm.FolderEvidence(_files().files, tags=tags)
     same = fm.classify(folder, _release(barcode="0082839490627"))
     other = fm.classify(folder, _release(barcode="0075021490628"))
     assert same is not None and same.evidence["barcode"] == "match"
-    assert other is not None and other.evidence["barcode"] == "contradict"
-    assert other.tier == "C"
+    assert other is not None and other.evidence["barcode"] == "differ"
+    assert other.tier == "A"
+    assert same.score > other.score  # it still ranks the agreeing release first
+
+
+def test_titles_across_the_tracks_still_contradict() -> None:
+    """The control: evidence spanning the tracks can rule a release out."""
+    c = fm.classify(_files(), _retitled(_release()))
+    assert c is not None and c.evidence["titles"] == "contradict" and c.tier == "C"
+
+
+def _retitled(meta: DiscMeta) -> DiscMeta:
+    """The same recordings under other titles: found by fingerprint, and the
+    folder's title tags contradict them."""
+    return replace(
+        meta,
+        tracks=[replace(t, title=f"Different Song {t.number}") for t in meta.tracks],
+    )
 
 
 def test_titles_alone_find_the_tracks() -> None:

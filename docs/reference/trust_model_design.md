@@ -1727,5 +1727,14 @@ silently capped at 25 (N3), and a short list reads exactly like a genuine miss.
    tags only, the files' order is known only from track-number tags (`files_order` returns
    whether it is; without it the archive takes the release's order and order is no
    evidence), and the name's number and text are checked last as the `names` class, which
-   can be `match` and never `contradict`. *"Same goes for any other single data point"*:
-   asked of kgr what that covers before building it.
+   can be `match` and never `contradict`.
+5. **Any other single data point is corroboration only (kgr, 2026-11-28, option 1 of
+   three offered; he leaned to "two independent contradictions before tier C" and chose
+   this to try first, to revisit after testing).** The album-level tags, year, barcode,
+   catalogue number, label and country, can `match` and never `contradict`: one that
+   disagrees is recorded as `differ` and still ranks the release lower (fewer matches),
+   but never sends it to tier C. Only evidence spanning the tracks contradicts: the
+   fingerprints, the titles across the tracks, the runtimes. This supersedes §14.3's
+   table and §14.4's "a fingerprint against a tag, the year" as tier-C examples for the
+   year and the pressing fields. Reasoning: files cannot prove a pressing, and the
+   pressing-level tags are what a tagger most often copies from the wrong pressing.
